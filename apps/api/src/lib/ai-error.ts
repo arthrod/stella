@@ -8,28 +8,58 @@
  */
 import { APICallError, RetryError } from "ai";
 
-import { HandlerError } from "@/api/lib/errors/tagged-errors";
+import {
+  ChatLoopDetectedError,
+  HandlerError,
+} from "@/api/lib/errors/tagged-errors";
 import type { HandlerErrorStatusCode } from "@/api/lib/errors/tagged-errors";
 
 export const AI_ERROR_KINDS = [
   "quota_exhausted",
-  "insufficient_credits",
+  "provider_billing",
+  "model_unavailable",
   "provider_unavailable",
+  "loop_detected",
   "unknown",
 ] as const;
 
 export type AIErrorKind = (typeof AI_ERROR_KINDS)[number];
 
+// The AI SDK throws `NoSuchModelError` (name "AI_NoSuchModelError")
+// when a provider rejects an unknown model id without an HTTP call;
+// matched structurally so we don't depend on the symbol being exported.
+const isNoSuchModelError = (error: unknown): boolean =>
+  error !== null &&
+  typeof error === "object" &&
+  "name" in error &&
+  error.name === "AI_NoSuchModelError";
+
 export const classifyAIError = (error: unknown): AIErrorKind => {
   if (RetryError.isInstance(error)) {
     return classifyAIError(error.lastError);
+  }
+  if (ChatLoopDetectedError.is(error)) {
+    return "loop_detected";
+  }
+  if (isNoSuchModelError(error)) {
+    return "model_unavailable";
   }
   if (APICallError.isInstance(error)) {
     if (error.statusCode === 429) {
       return "quota_exhausted";
     }
+    // A provider 402 is the upstream account's billing/credit problem,
+    // distinct from Stella's own usage preflight, which returns a
+    // structured 402 before the model call and never reaches this
+    // classifier.
     if (error.statusCode === 402) {
-      return "insufficient_credits";
+      return "provider_billing";
+    }
+    // A 404 on a generate/stream call means the provider no longer
+    // serves the configured model (retired or renamed upstream) — a
+    // config problem, not a transient outage, so retrying won't help.
+    if (error.statusCode === 404) {
+      return "model_unavailable";
     }
     if (error.statusCode !== undefined && error.statusCode >= 500) {
       return "provider_unavailable";
@@ -59,7 +89,7 @@ type AIHandlerErrorFallback = {
 /**
  * Build a `HandlerError` for an AI provider failure.
  *
- * For known AI failure modes (quota, credits, transient
+ * For known AI failure modes (quota, usage limits, transient
  * upstream outage) returns a typed error with an actionable
  * status + message. For everything else, returns the caller's
  * fallback so unrelated bugs aren't masked as "AI unavailable".
@@ -74,14 +104,21 @@ export const aiHandlerError = (
       return new HandlerError({
         status: 429,
         message:
-          "The AI provider's quota is exhausted. Try again shortly, or contact your workspace admin to upgrade the plan.",
+          "The AI provider's quota is exhausted. Try again shortly, or contact your workspace admin.",
         cause: error,
       });
-    case "insufficient_credits":
+    case "provider_billing":
       return new HandlerError({
         status: 402,
         message:
-          "The AI provider needs more credits. Contact your workspace admin to top up the account.",
+          "The AI provider reported a billing or credit problem. An administrator should check the provider account.",
+        cause: error,
+      });
+    case "model_unavailable":
+      return new HandlerError({
+        status: 502,
+        message:
+          "The configured AI model is no longer available from the provider. An administrator should update the model in organization settings.",
         cause: error,
       });
     case "provider_unavailable":
@@ -89,6 +126,13 @@ export const aiHandlerError = (
         status: 502,
         message:
           "The AI provider is temporarily unavailable. Please try again in a moment.",
+        cause: error,
+      });
+    case "loop_detected":
+      return new HandlerError({
+        status: 502,
+        message:
+          "The AI model repeated the same work and could not recover. Please try again with a narrower request.",
         cause: error,
       });
     case "unknown":

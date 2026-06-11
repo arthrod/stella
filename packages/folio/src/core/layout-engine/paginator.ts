@@ -5,15 +5,25 @@
  * Creates new pages when content doesn't fit.
  */
 
-import type { Page, PageMargins, Fragment, ColumnLayout } from "./types";
+import { panic } from "better-result";
+
+import type {
+  Page,
+  PageMargins,
+  Fragment,
+  ColumnLayout,
+  PageHeaderFooterRefs,
+} from "./types";
+import { FOOTNOTE_SEPARATOR_HEIGHT } from "./types";
 
 /**
- * Height of the footnote separator (a 0.5 px divider line + 6 px top
- * + 6 px bottom margin = 12.5 px, rounded up). Reserved once per
- * footnote-bearing page above the fn content. Must match the painter
- * (`renderFootnoteArea`).
+ * Re-export the canonical footnote separator height so engine call sites can
+ * continue importing it from the paginator. The single source of truth lives
+ * in `layout-engine/types.ts` and is shared with the bridge (footnote stack
+ * height calc) and the painter (separator margins). Mirrors
+ * eigenpal/docx-editor#485.
  */
-export const FOOTNOTE_SEPARATOR_HEIGHT = 13;
+export { FOOTNOTE_SEPARATOR_HEIGHT };
 
 /**
  * Current state of a page being laid out.
@@ -60,6 +70,8 @@ export type PaginatorOptions = {
   columns?: ColumnLayout;
   /** Per-page footnote reserved heights (pageNumber → height in pixels). */
   footnoteReservedHeights?: Map<number, number>;
+  /** Header/footer refs by section index. */
+  sectionHeaderFooterRefs?: PageHeaderFooterRefs[];
   /** Callback when a new page is created. */
   onNewPage?: (state: PageState) => void;
 };
@@ -109,6 +121,8 @@ export function createPaginator(options: PaginatorOptions) {
   let columns: ColumnLayout = options.columns ?? { count: 1, gap: 0 };
   let pendingPageSize: { w: number; h: number } | undefined;
   let pendingMargins: PageMargins | undefined;
+  let currentSectionIndex = 0;
+  let currentSectionPageNumber = 0;
 
   const pages: Page[] = [];
   const states: PageState[] = [];
@@ -136,7 +150,7 @@ export function createPaginator(options: PaginatorOptions) {
   }
 
   if (getContentHeight() <= 0) {
-    throw new Error("Paginator: page size and margins yield no content area");
+    panic("Paginator: page size and margins yield no content area");
   }
 
   // Calculate column width
@@ -182,6 +196,7 @@ export function createPaginator(options: PaginatorOptions) {
     }
 
     const pageNumber = pages.length + 1;
+    currentSectionPageNumber += 1;
     // Page 1 of the document may use first-page margins (extended top to
     // clear an overflowing first-page header on a titlePg section) while
     // pages 2+ use the regular section margins. Without this distinction
@@ -213,6 +228,7 @@ export function createPaginator(options: PaginatorOptions) {
       // Set initial columns; may be overwritten by updateColumns() for continuous section breaks
       ...(columns.count > 1 ? { columns: { ...columns } } : {}),
     };
+    applySectionMetadata(page);
 
     const state: PageState = {
       page,
@@ -416,6 +432,10 @@ export function createPaginator(options: PaginatorOptions) {
       current.cursorY === current.topMargin &&
       currentPageUsesActiveLayout(current)
     ) {
+      if (current.page.sectionIndex !== currentSectionIndex) {
+        currentSectionPageNumber = 1;
+        applySectionMetadata(current.page);
+      }
       return current;
     }
     return createNewPage();
@@ -479,9 +499,7 @@ export function createPaginator(options: PaginatorOptions) {
       margins = { ...newMargins };
     }
     if (getContentHeight() <= 0) {
-      throw new Error(
-        "Paginator: section page size and margins yield no content area",
-      );
+      panic("Paginator: section page size and margins yield no content area");
     }
     columnWidth = calculateColumnWidth(
       pageSize.w,
@@ -491,6 +509,22 @@ export function createPaginator(options: PaginatorOptions) {
     );
     pendingPageSize = undefined;
     pendingMargins = undefined;
+  }
+
+  function startSection(sectionIndex: number): void {
+    currentSectionIndex = sectionIndex;
+    currentSectionPageNumber = 0;
+  }
+
+  function applySectionMetadata(page: Page): void {
+    page.sectionIndex = currentSectionIndex;
+    page.sectionPageNumber = currentSectionPageNumber;
+    const refs = options.sectionHeaderFooterRefs?.[currentSectionIndex];
+    if (refs) {
+      page.headerFooterRefs = refs;
+    } else {
+      delete page.headerFooterRefs;
+    }
   }
 
   return {
@@ -510,6 +544,8 @@ export function createPaginator(options: PaginatorOptions) {
     getCurrentState,
     /** Get available height in current column. */
     getAvailableHeight: () => getAvailableHeight(getCurrentState()),
+    /** Full content height of a fresh page in the active section. */
+    getContentHeight,
     /** Get content width for the active section. */
     getContentWidth,
     /** Check if height fits in current column. */
@@ -530,6 +566,8 @@ export function createPaginator(options: PaginatorOptions) {
     updateColumns,
     /** Update page size/margins for subsequent pages. */
     updatePageLayout,
+    /** Mark the next created page as the first page of a new section. */
+    startSection,
   };
 }
 

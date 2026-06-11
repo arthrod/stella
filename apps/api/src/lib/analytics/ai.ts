@@ -4,12 +4,24 @@ import type {
   OnToolCallFinishEvent,
   StreamTextOnErrorCallback,
 } from "ai";
+import { Result } from "better-result";
 
+import type { SafeDb } from "@/api/db";
+import type { UsageActionType, UsageServiceTier } from "@/api/db/schema";
 import { env } from "@/api/env";
 import type { ModelRole, OrgAIConfig } from "@/api/lib/ai-models";
-import { getModelInfoForRole } from "@/api/lib/ai-models";
+import {
+  SERVICE_TIER_PROVIDER_METADATA_KEY,
+  STELLA_PROVIDER_METADATA_KEY,
+  getModelInfoForRole,
+  resolveEffectiveServiceTierForProvider,
+} from "@/api/lib/ai-models";
+import { captureError as captureTelemetryError } from "@/api/lib/analytics";
+import type { SafeId } from "@/api/lib/branded-types";
 import { errorTag } from "@/api/lib/errors/utils";
 import { logger } from "@/api/lib/observability/logger";
+import { recordUsageEvent } from "@/api/lib/usage";
+import { usageUnitsFromTokens } from "@/api/lib/usage/unit-model";
 
 import { getAnalytics } from "./client";
 import { SERVER_ANALYTICS_EVENTS } from "./types";
@@ -34,6 +46,15 @@ type AnalyticsStepState = {
   startedAt: number;
 };
 
+export type AIUsageMetering = {
+  actionType: UsageActionType;
+  organizationId: SafeId<"organization">;
+  safeDb: SafeDb;
+  serviceTier: UsageServiceTier;
+  userId: SafeId<"user">;
+  workspaceId: SafeId<"workspace"> | null;
+};
+
 type AIAnalyticsProps = {
   feature: string;
   traceId: string;
@@ -45,6 +66,7 @@ type AIAnalyticsProps = {
   forceEnabled?: boolean;
   modelRole?: ModelRole;
   orgAIConfig?: OrgAIConfig | null;
+  usageMetering?: AIUsageMetering;
 };
 
 const MAX_STRING_LENGTH = 2000;
@@ -138,6 +160,27 @@ const bucketCount = (count: number): CountBucket => {
     return "2_3";
   }
   return "4_plus";
+};
+
+const getUsageInputTokens = (usage: OnStepFinishEvent["usage"]): number => {
+  if (usage.inputTokens !== undefined) {
+    return usage.inputTokens;
+  }
+
+  // oxlint-disable-next-line typescript/no-unnecessary-condition -- AI SDK providers may omit this at runtime despite the type.
+  const noCacheTokens = usage.inputTokenDetails?.noCacheTokens ?? 0;
+  // oxlint-disable-next-line typescript/no-unnecessary-condition -- AI SDK providers may omit this at runtime despite the type.
+  const cacheReadTokens = usage.inputTokenDetails?.cacheReadTokens ?? 0;
+  return noCacheTokens + cacheReadTokens;
+};
+
+const getUsageCacheReadTokens = (
+  usage: OnStepFinishEvent["usage"],
+  inputTokens: number,
+): number => {
+  // oxlint-disable-next-line typescript/no-unnecessary-condition -- AI SDK providers may omit this at runtime despite the type.
+  const cacheReadTokens = usage.inputTokenDetails?.cacheReadTokens ?? 0;
+  return Math.min(cacheReadTokens, inputTokens);
 };
 
 const getErrorStatusCode = (error: unknown): number | undefined => {
@@ -517,6 +560,107 @@ const buildBaseProperties = ({
   ...config.properties,
 });
 
+type RecordStepConsumptionInput = {
+  cacheReadTokens: number;
+  config: AIAnalyticsProps;
+  inputTokens: number;
+  modelId: string;
+  outputTokens: number;
+  providerMetadata: OnStepFinishEvent["providerMetadata"];
+};
+
+const isUsageServiceTier = (value: unknown): value is UsageServiceTier =>
+  value === "standard" || value === "flex" || value === "batch";
+
+const resolveMeteredServiceTier = ({
+  providerMetadata,
+  requestedServiceTier,
+}: {
+  providerMetadata: OnStepFinishEvent["providerMetadata"];
+  requestedServiceTier: UsageServiceTier;
+}): UsageServiceTier => {
+  const metadataServiceTier =
+    providerMetadata?.[STELLA_PROVIDER_METADATA_KEY]?.[
+      SERVICE_TIER_PROVIDER_METADATA_KEY
+    ];
+
+  return isUsageServiceTier(metadataServiceTier)
+    ? metadataServiceTier
+    : requestedServiceTier;
+};
+
+const recordStepConsumption = ({
+  cacheReadTokens,
+  config,
+  inputTokens,
+  modelId,
+  outputTokens,
+  providerMetadata,
+}: RecordStepConsumptionInput): void => {
+  const metering = config.usageMetering;
+  if (!metering) {
+    return;
+  }
+
+  const modelRole = config.modelRole ?? "chat";
+  const modelInfo = getModelInfoForRole(modelRole, config.orgAIConfig);
+  const isByok = modelInfo.keySource === "byok";
+  const meteredServiceTier = resolveMeteredServiceTier({
+    providerMetadata,
+    requestedServiceTier: metering.serviceTier,
+  });
+  const effectiveServiceTier = resolveEffectiveServiceTierForProvider({
+    provider: modelInfo.provider,
+    region: modelInfo.region,
+    serviceTier: meteredServiceTier,
+  });
+  const { unitsConsumed, rawUsageMicroUnits } = usageUnitsFromTokens({
+    actionType: metering.actionType,
+    cacheReadTokens,
+    inputTokens,
+    isByok,
+    modelId,
+    outputTokens,
+    serviceTier: effectiveServiceTier,
+  });
+
+  const consumption = metering.safeDb(
+    async (tx) =>
+      await recordUsageEvent({
+        tx,
+        actionType: metering.actionType,
+        unitsConsumed,
+        isByok,
+        modelRole,
+        organizationId: metering.organizationId,
+        rawUsageMicroUnits,
+        serviceTier: effectiveServiceTier,
+        traceId: config.traceId,
+        userId: metering.userId,
+        workspaceId: metering.workspaceId,
+      }),
+  );
+
+  void consumption
+    .then((result) => {
+      if (Result.isError(result)) {
+        captureTelemetryError(result.error, {
+          organization_id: metering.organizationId,
+          source: "usage.ai_step_event",
+          trace_id: config.traceId,
+        });
+      }
+      return undefined;
+    })
+    .catch((error: unknown) => {
+      captureTelemetryError(error, {
+        organization_id: metering.organizationId,
+        source: "usage.ai_step_event.unhandled",
+        trace_id: config.traceId,
+      });
+    });
+};
+
 type AIAnalyticsStepCallbacks = {
   experimental_onStepStart?: (event: OnStepStartEvent) => void;
   onStepFinish?: (event: OnStepFinishEvent) => void;
@@ -561,6 +705,7 @@ export const createAIAnalyticsCallbacks = ({
 
   const onStepFinish: NonNullable<AIAnalyticsStepCallbacks["onStepFinish"]> = ({
     model,
+    providerMetadata,
     response,
     stepNumber,
     toolCalls,
@@ -578,6 +723,23 @@ export const createAIAnalyticsCallbacks = ({
 
     const latencySeconds =
       (performance.now() - currentStep.startedAt) / ONE_SECOND_MS;
+    // The provider type marks `inputTokenDetails` non-optional, but
+    // SDK test fixtures and some providers leave it undefined at
+    // runtime. Read defensively to avoid a TypeError in analytics.
+    // oxlint-disable-next-line typescript/no-unnecessary-condition -- runtime undefined diverges from type
+    const cacheReadTokens = usage.inputTokenDetails?.cacheReadTokens;
+    const inputTokens = getUsageInputTokens(usage);
+    const outputTokens = usage.outputTokens ?? 0;
+    const meteredCacheReadTokens = getUsageCacheReadTokens(usage, inputTokens);
+
+    recordStepConsumption({
+      cacheReadTokens: meteredCacheReadTokens,
+      config,
+      inputTokens,
+      modelId: response.modelId || currentStep.modelId,
+      outputTokens,
+      providerMetadata,
+    });
 
     if (!debugEnabled) {
       analytics.capture({
@@ -597,6 +759,11 @@ export const createAIAnalyticsCallbacks = ({
             : {}),
           tool_count_bucket: bucketCount(toolCalls.length),
           total_tokens_bucket: bucketTokenCount(usage.totalTokens),
+          ...(cacheReadTokens !== undefined
+            ? {
+                cached_input_tokens_bucket: bucketTokenCount(cacheReadTokens),
+              }
+            : {}),
         },
       });
 
@@ -615,6 +782,9 @@ export const createAIAnalyticsCallbacks = ({
         }),
         $ai_input_tokens: usage.inputTokens,
         $ai_output_tokens: usage.outputTokens,
+        ...(cacheReadTokens !== undefined
+          ? { $ai_cached_input_tokens: cacheReadTokens }
+          : {}),
         $ai_latency: latencySeconds,
         $ai_model: currentStep.modelId,
         $ai_provider: currentStep.provider,

@@ -23,6 +23,20 @@ import type { TestDatabase } from "@/api/tests/security/test-utils";
 
 let testDb: TestDatabase;
 
+type TablePrivilege = {
+  table_name: string;
+  privilege: string;
+};
+
+const privilegesForTable = (
+  tablePrivileges: readonly TablePrivilege[],
+  table: string,
+) =>
+  tablePrivileges
+    .filter((p) => p.table_name === table)
+    .map((p) => p.privilege)
+    .sort();
+
 beforeAll(async () => {
   const fixture = await getRlsFixture();
   testDb = fixture.testDb;
@@ -52,6 +66,13 @@ describe("policy coverage", () => {
     // pair until that lands.
     "anonymization_allowlist_entries",
     "anonymization_blacklist_entries",
+    // Usage governance rows are scoped at the organization level even
+    // when an event optionally records a workspace_id for attribution.
+    // The table-specific test below asserts the stricter app-role
+    // write boundaries for these system-owned ledger tables.
+    "usage_entitlements",
+    "usage_allocations",
+    "usage_events",
   ]);
   const APPEND_ONLY = new Set(["audit_logs"]);
   const GLOBAL_CASE_LAW_TABLES = [
@@ -59,14 +80,27 @@ describe("policy coverage", () => {
     "case_law_court_weights",
     "case_law_decisions",
     "case_law_fts_configs",
+    "case_law_index_jobs",
     "case_law_ingestion_events",
     "case_law_ingestion_failures",
     "case_law_polarity_rules",
     "case_law_search_documents",
     "case_law_sources",
+    "legislation_sources",
+    "legislation_documents",
+    "legislation_search_documents",
+    "legislation_index_jobs",
   ];
+  // *_sources are config (column-restricted writes); *_index_jobs are
+  // append-only audit trails (SELECT + INSERT).
+  const CONFIG_OR_APPEND_ONLY = new Set([
+    "case_law_sources",
+    "case_law_index_jobs",
+    "legislation_sources",
+    "legislation_index_jobs",
+  ]);
   const INGESTION_MUTABLE_CASE_LAW_TABLES = GLOBAL_CASE_LAW_TABLES.filter(
-    (table) => table !== "case_law_sources",
+    (table) => !CONFIG_OR_APPEND_ONLY.has(table),
   );
 
   test("every table with workspace_id has workspace policies", async () => {
@@ -191,6 +225,97 @@ describe("policy coverage", () => {
     }
   });
 
+  test("usage governance tables expose only intended app-role access", async () => {
+    const policies = await fetchStellaPolicies(testDb);
+    const tablePrivileges = await fetchStellaTablePrivileges(testDb);
+
+    for (const table of [
+      "usage_policies",
+      "usage_entitlements",
+      "usage_allocations",
+      "usage_events",
+      "usage_provider_webhook_events",
+    ]) {
+      expect(privilegesForTable(tablePrivileges, table)).toEqual([
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE",
+      ]);
+    }
+
+    const policyConfig = policies.find(
+      (p) =>
+        p.table_name === "usage_policies" &&
+        p.policy_name === "usage_policies_select",
+    );
+    expect(policyConfig?.command).toBe("r");
+    expect(policyConfig?.using_expr).toBe("true");
+    expect(policyConfig?.check_expr).toBeNull();
+
+    for (const table of ["usage_entitlements", "usage_allocations"]) {
+      const selectPolicy = policies.find(
+        (p) => p.table_name === table && p.policy_name === `${table}_select`,
+      );
+      expect(selectPolicy?.command).toBe("r");
+      expect(selectPolicy?.using_expr).toContain("organization_id");
+      expect(selectPolicy?.using_expr).toContain(SETTING_ORGANIZATION_ID);
+
+      for (const [suffix, command, exprKey] of [
+        ["no_insert", "a", "check_expr"],
+        ["no_update", "w", "using_expr"],
+        ["no_delete", "d", "using_expr"],
+      ] as const) {
+        const denyPolicy = policies.find(
+          (p) =>
+            p.table_name === table && p.policy_name === `${table}_${suffix}`,
+        );
+        expect(denyPolicy?.command).toBe(command);
+        expect(denyPolicy?.permissive).toBe(false);
+        expect(denyPolicy?.[exprKey]).toBe("false");
+      }
+    }
+
+    const usageEventSelect = policies.find(
+      (p) =>
+        p.table_name === "usage_events" &&
+        p.policy_name === "usage_events_select",
+    );
+    expect(usageEventSelect?.command).toBe("r");
+    expect(usageEventSelect?.using_expr).toContain("organization_id");
+    expect(usageEventSelect?.using_expr).toContain(SETTING_ORGANIZATION_ID);
+
+    const usageEventInsert = policies.find(
+      (p) =>
+        p.table_name === "usage_events" &&
+        p.policy_name === "usage_events_insert",
+    );
+    expect(usageEventInsert?.command).toBe("a");
+    expect(usageEventInsert?.check_expr).toContain("organization_id");
+    expect(usageEventInsert?.check_expr).toContain(SETTING_ORGANIZATION_ID);
+
+    for (const [policyName, command] of [
+      ["usage_events_no_update", "w"],
+      ["usage_events_no_delete", "d"],
+    ] as const) {
+      const denyPolicy = policies.find(
+        (p) => p.table_name === "usage_events" && p.policy_name === policyName,
+      );
+      expect(denyPolicy?.command).toBe(command);
+      expect(denyPolicy?.permissive).toBe(false);
+      expect(denyPolicy?.using_expr).toBe("false");
+    }
+
+    const webhookPolicy = policies.find(
+      (p) =>
+        p.table_name === "usage_provider_webhook_events" &&
+        p.policy_name === "usage_provider_webhook_events_no_stella_access",
+    );
+    expect(webhookPolicy?.command).toBe("*");
+    expect(webhookPolicy?.using_expr).toBe("false");
+    expect(webhookPolicy?.check_expr).toBe("false");
+  });
+
   test("auth and global case-law tables have explicit stella policy boundaries", async () => {
     const policies = await fetchStellaPolicies(testDb);
     const commandsFor = (table: string) =>
@@ -234,13 +359,8 @@ describe("policy coverage", () => {
     const tablePrivileges = await fetchStellaTablePrivileges(testDb);
     const userColumnPrivileges =
       await fetchStellaUserSelectColumnPrivileges(testDb);
-    const privilegesFor = (table: string) =>
-      tablePrivileges
-        .filter((p) => p.table_name === table)
-        .map((p) => p.privilege)
-        .sort();
 
-    expect(privilegesFor("user")).toEqual([]);
+    expect(privilegesForTable(tablePrivileges, "user")).toEqual([]);
     expect(
       userColumnPrivileges
         .filter((p) => p.table_name === "user" && p.privilege === "SELECT")
@@ -256,7 +376,7 @@ describe("policy coverage", () => {
       expect(globalPolicy?.command).toBe("r");
       expect(globalPolicy?.using_expr).toBe("true");
       expect(globalPolicy?.check_expr).toBeNull();
-      expect(privilegesFor(table)).toEqual(["SELECT"]);
+      expect(privilegesForTable(tablePrivileges, table)).toEqual(["SELECT"]);
     }
   });
 
@@ -264,11 +384,6 @@ describe("policy coverage", () => {
     const policies = await fetchStellaIngestionPolicies(testDb);
     const tablePrivileges = await fetchStellaIngestionTablePrivileges(testDb);
     const columnPrivileges = await fetchStellaIngestionColumnPrivileges(testDb);
-    const privilegesFor = (table: string) =>
-      tablePrivileges
-        .filter((p) => p.table_name === table)
-        .map((p) => p.privilege)
-        .sort();
 
     for (const table of GLOBAL_CASE_LAW_TABLES) {
       const ingestionPolicy = policies.find(
@@ -282,7 +397,7 @@ describe("policy coverage", () => {
     }
 
     for (const table of INGESTION_MUTABLE_CASE_LAW_TABLES) {
-      expect(privilegesFor(table)).toEqual([
+      expect(privilegesForTable(tablePrivileges, table)).toEqual([
         "DELETE",
         "INSERT",
         "SELECT",
@@ -290,12 +405,36 @@ describe("policy coverage", () => {
       ]);
     }
 
-    expect(privilegesFor("case_law_sources")).toEqual(["SELECT"]);
+    expect(privilegesForTable(tablePrivileges, "case_law_sources")).toEqual([
+      "SELECT",
+    ]);
     expect(
       columnPrivileges
         .filter((p) => p.table_name === "case_law_sources")
         .map((p) => p.column_name)
         .sort(),
     ).toEqual(["last_sync_at", "sync_cursor", "updated_at"]);
+
+    // Append-only audit trail: ingestion may read and append, never
+    // mutate or delete prior rows.
+    expect(privilegesForTable(tablePrivileges, "case_law_index_jobs")).toEqual([
+      "INSERT",
+      "SELECT",
+    ]);
+
+    // Legislation mirrors case law: config source (column writes only) +
+    // append-only audit trail.
+    expect(privilegesForTable(tablePrivileges, "legislation_sources")).toEqual([
+      "SELECT",
+    ]);
+    expect(
+      columnPrivileges
+        .filter((p) => p.table_name === "legislation_sources")
+        .map((p) => p.column_name)
+        .sort(),
+    ).toEqual(["last_sync_at", "sync_cursor", "updated_at"]);
+    expect(
+      privilegesForTable(tablePrivileges, "legislation_index_jobs"),
+    ).toEqual(["INSERT", "SELECT"]);
   });
 });

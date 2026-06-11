@@ -1,5 +1,12 @@
 import { defineConfig } from "oxlint";
 
+import {
+  libraryIgnorePatterns,
+  libraryOverrides,
+  libraryRules,
+  stellaLowercasePluginSpecifier,
+} from "@stll/oxlint-config";
+
 import core from "./node_modules/ultracite/config/oxlint/core/index.mjs";
 import react from "./node_modules/ultracite/config/oxlint/react/index.mjs";
 
@@ -10,6 +17,7 @@ import react from "./node_modules/ultracite/config/oxlint/react/index.mjs";
 export default defineConfig({
   extends: [core, react],
   rules: {
+    ...libraryRules,
     // Override ultracite defaults for Stella
     "no-console": "error",
     "no-shadow": "error",
@@ -46,8 +54,43 @@ export default defineConfig({
     "logical-assignment-operators": "off",
 
     "react/rules-of-hooks": "error",
+    "react/style-prop-object": "error",
+    "react/jsx-no-comment-textnodes": "error",
+    "react/iframe-missing-sandbox": "error",
+    "react/jsx-no-script-url": "error",
+    "react/button-has-type": "error",
+    "react/no-object-type-as-default-prop": "error",
+    // Allow component creation in prop position: i18n rich-text render
+    // callbacks (`t.rich({ link: (chunks) => <a/> })`) and IIFE-as-prop
+    // element builders are idiomatic here and are not remounted components.
+    "react/no-unstable-nested-components": ["error", { allowAsProps: true }],
+    // Off: the Result.gen handler generators (`async function*` with
+    // `yield* Result.await(...)`) have no meaningful user-facing yield type
+    // to document, and the codebase's JSDoc style uses bare tags.
+    "jsdoc/require-yields-type": "off",
+    "promise/always-return": "error",
+    "promise/no-return-in-finally": "error",
+    "no-useless-assignment": "error",
 
+    // Keep `import/no-cycle` despite its ~20% share of lint time: the
+    // Module Side Effects section in CLAUDE.md documents the TDZ class
+    // of bugs that circular imports cause with module-level singletons.
+    // The rule has 0 current hits, but its job is regression protection.
     "import/no-cycle": "error",
+
+    // Disabled: `verbatimModuleSyntax` is on in the shared tsconfig, so
+    // the TypeScript compiler already enforces the type-import semantic.
+    // The lint rule only checks the stylistic placement of the `type`
+    // keyword inside the import (`import { type X }` vs `import type
+    // { X }`) — pure formatting, ~11% of lint time, no bug-catching value.
+    "import/consistent-type-specifier-style": "off",
+
+    // Disabled: rule visits ~33k AST nodes to enforce adjacency between
+    // get/set accessors for the same property. The codebase models state
+    // through plain objects, hooks, and Drizzle queries — class
+    // get/set pairs are essentially absent — so the rule fires on
+    // nothing while taking ~10% of lint time.
+    "eslint/grouped-accessor-pairs": "off",
     "no-restricted-imports": [
       "error",
       {
@@ -59,7 +102,19 @@ export default defineConfig({
         ],
       },
     ],
+    "no-bare-error/no-bare-error": "error",
+    "ai-output-strict-schema/ai-output-strict-schema": "error",
     "no-nanoid/no-nanoid": "error",
+    "no-raw-date-input/no-raw-date-input": "error",
+    "stella-lowercase/stella-lowercase": "error",
+    "must-use-result/must-use-result": "error",
+    "no-any-casts/no-any-casts": "error",
+    "no-dangerous-type-assertions/no-dangerous-type-assertions": "error",
+    "no-prompt-boundary-casts/no-prompt-boundary-casts": "error",
+    "no-public-law-browser-globals/no-public-law-browser-globals": "off",
+    "no-raw-public-law-seo/no-raw-public-law-seo": "off",
+    "public-case-law-db-boundary/public-case-law-db-boundary": "off",
+    "require-contained-handler/require-contained-handler": "error",
     "no-void": ["error", { allowAsStatement: true }],
 
     "sonarjs/array-callback-without-return": "error",
@@ -76,6 +131,8 @@ export default defineConfig({
     "sonarjs/no-empty-collection": "error",
     "sonarjs/no-exclusive-tests": "error",
     "sonarjs/no-identical-conditions": "error",
+    "sonarjs/no-identical-functions": "error",
+    "sonarjs/no-inverted-boolean-check": "error",
     "sonarjs/no-unthrown-error": "error",
     "sonarjs/no-useless-increment": "error",
     "sonarjs/non-existent-operator": "error",
@@ -200,14 +257,26 @@ export default defineConfig({
     "typescript/return-await": ["error", "error-handling-correctness-only"],
     "typescript/non-nullable-type-assertion-style": "off",
   },
-  ignorePatterns: ["**/routeTree.gen.ts", "**/*.config.js"],
+  ignorePatterns: [
+    ...libraryIgnorePatterns,
+    "**/routeTree.gen.ts",
+    "**/*.config.js",
+    // Module-augmentation files must use `interface` for declaration
+    // merging; oxlint's --fix would rewrite it to `type` and break it.
+    "types/**/*.d.ts",
+    // Static browser assets (e.g. the CSP-strict dark-mode bootstrap) are
+    // untyped JS; type-aware rules flag their DOM globals as `error`.
+    "apps/web/public/**",
+  ],
 
   jsPlugins: [
+    stellaLowercasePluginSpecifier,
     "@tanstack/eslint-plugin-query",
     "@tanstack/eslint-plugin-router",
     "eslint-plugin-drizzle",
     "eslint-plugin-sonarjs",
-    "./.oxlint-plugins/no-raw-colors.ts",
+    "@stll/oxlint-config/no-raw-colors",
+    "./.oxlint-plugins/no-raw-date-input.ts",
     "./.oxlint-plugins/no-raw-foreground-opacity.ts",
     "./.oxlint-plugins/no-inline-style-colors.ts",
     "./.oxlint-plugins/no-physical-properties.ts",
@@ -217,6 +286,7 @@ export default defineConfig({
     "./.oxlint-plugins/no-nanoid.ts",
     "./.oxlint-plugins/no-crypto-random-uuid.ts",
     "./.oxlint-plugins/require-router-select.ts",
+    "./.oxlint-plugins/require-matter-affordance.ts",
     "./.oxlint-plugins/no-raw-route-query-client.ts",
     "./.oxlint-plugins/require-safe-route-handlers.ts",
     "./.oxlint-plugins/security-guards.ts",
@@ -226,12 +296,28 @@ export default defineConfig({
     "./.oxlint-plugins/mcp-security.ts",
     "./.oxlint-plugins/auth-lifecycle.ts",
     "./.oxlint-plugins/stella-toast.ts",
+    "./.oxlint-plugins/no-untranslated-jsx-literal.ts",
+    "./.oxlint-plugins/forbid-process-env-outside-env-ts.ts",
     "./.oxlint-plugins/no-secret-in-log-sink.ts",
     "./.oxlint-plugins/no-raw-api-url.ts",
+    "./.oxlint-plugins/require-fetch-timeout.ts",
+    "./.oxlint-plugins/no-bare-error.ts",
+    "./.oxlint-plugins/ai-output-strict-schema.ts",
+    "./.oxlint-plugins/require-audit-on-mutation.ts",
+    "./.oxlint-plugins/must-use-result.ts",
+    "./.oxlint-plugins/no-any-casts.ts",
+    "./.oxlint-plugins/no-dangerous-type-assertions.ts",
+    "./.oxlint-plugins/no-prompt-boundary-casts.ts",
+    "./.oxlint-plugins/no-public-law-browser-globals.ts",
+    "./.oxlint-plugins/no-raw-public-law-seo.ts",
+    "./.oxlint-plugins/public-case-law-db-boundary.ts",
+    "./.oxlint-plugins/folio-layer-boundaries.ts",
+    "./.oxlint-plugins/require-contained-handler.ts",
   ],
 
   overrides: [
     ...(core.overrides ?? []),
+    ...libraryOverrides,
     {
       // Custom oxlint plugin rules traverse AST nodes that the runtime
       // delivers as untyped (effectively `any`). Strict any-flow rules
@@ -244,6 +330,8 @@ export default defineConfig({
         "typescript/no-unsafe-return": "off",
         "typescript/no-unsafe-argument": "off",
         "typescript/strict-boolean-expressions": "off",
+        "require-unicode-regexp": "off",
+        "no-nested-ternary": "off",
       },
     },
     {
@@ -268,10 +356,7 @@ export default defineConfig({
     {
       // Astro's content config wires virtual loader/schema helpers that
       // oxlint's type-aware pass sees as error-typed outside Astro's checker.
-      files: [
-        "apps/docs/src/content.config.ts",
-        "apps/landing/src/content.config.ts",
-      ],
+      files: ["apps/landing/src/content.config.ts"],
       rules: {
         "typescript/no-unsafe-assignment": "off",
         "typescript/no-unsafe-call": "off",
@@ -286,11 +371,56 @@ export default defineConfig({
       rules: { "no-console": "off" },
     },
     {
+      // `.claude/mcp/**` is local Claude tooling, not shipped product
+      // code. It uses standard Node-style `throw new Error(...)` because
+      // it doesn't depend on better-result.
+      files: [".claude/mcp/**/*.ts"],
+      rules: { "no-bare-error/no-bare-error": "off" },
+    },
+    {
+      // Test-only adapter helper consumed exclusively from
+      // `**/*.test.ts`. Not part of any production code path.
+      files: [
+        "apps/api/src/handlers/case-law/ingestion/adapters/test-utils.ts",
+      ],
+      rules: { "no-bare-error/no-bare-error": "off" },
+    },
+    {
+      // Playwright end-to-end tests. They run outside the app process
+      // (no env module, no `panic()` plumbing) and talk to a live HTTP
+      // API where bare `throw new Error(...)` is the right signal.
+      files: ["apps/web/e2e/**/*.ts"],
+      rules: {
+        "no-console": "off",
+        "no-bare-error/no-bare-error": "off",
+        "no-non-null-assertion": "off",
+        "no-any-casts/no-any-casts": "off",
+        "typescript/no-unsafe-type-assertion": "off",
+        "forbid-process-env-outside-env-ts/forbid-process-env-outside-env-ts":
+          "off",
+      },
+    },
+    {
       // Legacy DOCX/editor code has parser and layout state machines that need
       // dedicated extraction passes. Keep the rule visible without blocking
       // this guardrail rollout on a broad folio rewrite.
       files: ["packages/folio/src/**/*.{ts,tsx}"],
       rules: { "sonarjs/cognitive-complexity": ["error", 200] },
+    },
+    {
+      // Folio render-pipeline layer boundaries. The painter is downstream of
+      // the engine and bridge and must not import upstream concerns; the
+      // bridge and engine must not pull from the painter. See
+      // `.oxlint-plugins/folio-layer-boundaries.ts` and the matching test at
+      // `packages/folio/src/core/__tests__/layer-boundaries.test.ts`.
+      files: [
+        "packages/folio/src/core/layout-bridge/**/*.{ts,tsx}",
+        "packages/folio/src/core/layout-engine/**/*.{ts,tsx}",
+        "packages/folio/src/core/layout-painter/**/*.{ts,tsx}",
+      ],
+      rules: {
+        "folio-layer-boundaries/no-upstream-import": "error",
+      },
     },
     {
       // Drizzle schema files are guarded by check-migrations.sh, which
@@ -366,7 +496,7 @@ export default defineConfig({
               {
                 group: ["@stll/*", "@stll/*/**", "!@stll/ui", "!@stll/ui/**"],
                 message:
-                  "@stll/ui must stay workspace-pure; do not import other Stella workspaces from UI source.",
+                  "@stll/ui must stay workspace-pure; do not import other stella workspaces from UI source.",
               },
             ],
           },
@@ -405,8 +535,6 @@ export default defineConfig({
                 group: [
                   "@stll/desktop",
                   "@stll/desktop/**",
-                  "@stll/docs",
-                  "@stll/docs/**",
                   "@stll/landing",
                   "@stll/landing/**",
                 ],
@@ -422,11 +550,27 @@ export default defineConfig({
           },
         ],
         "no-raw-api-url/no-raw-api-url": "error",
+        // Initial i18n ratchet: catch new raw JSX copy in files that
+        // already participate in use-intl. Remove `requireTranslationUsage`
+        // once legacy product UI literals have been migrated.
+        "no-untranslated-jsx-literal/no-untranslated-jsx-literal": [
+          "error",
+          { requireTranslationUsage: true },
+        ],
         "require-router-select/require-router-select": "error",
+        "require-matter-affordance/require-matter-affordance": "error",
         "security-guards/no-unsanitized-href": "error",
         "sonarjs/jsx-no-leaked-render": "error",
         "sonarjs/no-hook-setter-in-body": "error",
         "stella-toast/stella-toast": "error",
+      },
+    },
+    {
+      files: [
+        ".oxlint-plugins/__fixtures__/require-matter-affordance.fixture.tsx",
+      ],
+      rules: {
+        "require-matter-affordance/require-matter-affordance": "error",
       },
     },
     {
@@ -439,6 +583,134 @@ export default defineConfig({
               {
                 name: "zod",
                 message: "Use 'valibot' instead of 'zod'.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      files: [
+        "apps/web/src/routes/law/**/*.{ts,tsx}",
+        "apps/web/src/features/case-law/**/*.{ts,tsx}",
+      ],
+      rules: {
+        "no-public-law-browser-globals/no-public-law-browser-globals": "error",
+        "no-restricted-imports": [
+          "error",
+          {
+            paths: [
+              {
+                name: "zod",
+                message: "Use 'valibot' instead of 'zod'.",
+              },
+            ],
+            patterns: [
+              {
+                group: [
+                  "@/routes/_protected",
+                  "@/routes/_protected/**",
+                  "@/routes/_protected.*",
+                  "@/routes/_protected.*/**",
+                ],
+                message:
+                  "Public law routes and shared case-law modules must not import protected route code. Move public-safe code to '@/features/case-law' instead.",
+              },
+              {
+                group: ["@/api/*", "@/api/**/*"],
+                message: "Use '@stll/api/types' instead of '@/api/'.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      files: ["apps/web/src/routes/law/**/*.{ts,tsx}"],
+      rules: {
+        "no-raw-public-law-seo/no-raw-public-law-seo": "error",
+        "no-restricted-imports": [
+          "error",
+          {
+            paths: [
+              {
+                name: "zod",
+                message: "Use 'valibot' instead of 'zod'.",
+              },
+              {
+                name: "@/lib/api",
+                importNames: ["api"],
+                message:
+                  "Public law route files must use approved public case-law query modules instead of importing the Eden API client directly.",
+              },
+            ],
+            patterns: [
+              {
+                group: [
+                  "@/routes/_protected",
+                  "@/routes/_protected/**",
+                  "@/routes/_protected.*",
+                  "@/routes/_protected.*/**",
+                ],
+                message:
+                  "Public law routes and shared case-law modules must not import protected route code. Move public-safe code to '@/features/case-law' instead.",
+              },
+              {
+                group: ["@/api/*", "@/api/**/*"],
+                message: "Use '@stll/api/types' instead of '@/api/'.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      files: [
+        "apps/web/src/routes/robots[.]txt.ts",
+        "apps/web/src/routes/sitemap[.]xml.ts",
+        "apps/web/src/routes/sitemaps/**/*.{ts,tsx}",
+        "apps/web/src/lib/public-law-sitemap.ts",
+      ],
+      rules: {
+        "no-restricted-imports": [
+          "error",
+          {
+            paths: [
+              {
+                name: "zod",
+                message: "Use 'valibot' instead of 'zod'.",
+              },
+              {
+                name: "@/routes/-auth-context",
+                message:
+                  "Public SEO endpoints must not load auth/session context.",
+              },
+              {
+                name: "@/routes/-queries",
+                importNames: ["sessionOptions", "roleOptions"],
+                message:
+                  "Public SEO endpoints must not import authenticated query options.",
+              },
+              {
+                name: "@/lib/auth",
+                message: "Public SEO endpoints must not import auth clients.",
+              },
+            ],
+            patterns: [
+              {
+                group: [
+                  "@/routes/_protected",
+                  "@/routes/_protected/**",
+                  "@/routes/_protected.*",
+                  "@/routes/_protected.*/**",
+                ],
+                message:
+                  "Public SEO endpoints must not import protected route code.",
+              },
+              {
+                group: ["@/api/*", "@/api/**/*"],
+                message:
+                  "Public SEO endpoints must use the public case-law API response, not web-local API internals.",
               },
             ],
           },
@@ -539,6 +811,67 @@ export default defineConfig({
         "sonarjs/no-identical-expressions": "error",
         "sonarjs/no-ignored-return": "error",
         "sonarjs/no-use-of-empty-return-value": "error",
+        "require-fetch-timeout/require-fetch-timeout": "error",
+      },
+    },
+    {
+      files: ["apps/**/*.{ts,tsx}", "packages/**/*.{ts,tsx}"],
+      rules: {
+        "forbid-process-env-outside-env-ts/forbid-process-env-outside-env-ts": [
+          "error",
+          {
+            allowedFiles: [
+              "apps/api/src/db-url.ts",
+              "apps/api/src/handlers/case-law/ingestion/adapters/sk-us.ts",
+              "apps/api/src/handlers/case-law/ingestion/adapters/utils.ts",
+              "apps/api/src/handlers/health/routes.ts",
+              "apps/api/src/index.ts",
+              "apps/api/src/lib/analytics/posthog.ts",
+              // dispatch.ts is imported transitively by the chat tool
+              // catalogue from contexts that do not run full env
+              // validation (workers, scripts, tests). Reading
+              // EDGAR_USER_AGENT and COMPANIES_HOUSE_API_KEY directly
+              // from process.env keeps the module side-effect-free at
+              // import time; the env schema in apps/api/src/env.ts
+              // still declares the variables so the API server
+              // validates them on boot.
+              "apps/api/src/lib/business-registries/dispatch.ts",
+              "apps/api/src/lib/db/assert-migrations-applied.ts",
+              "apps/api/src/lib/runtime-worker-path.ts",
+              "apps/api/src/lib/s3.ts",
+              "apps/api/src/lib/scheduler/runner.ts",
+              "apps/api/src/lib/subprocess.ts",
+              "apps/web/e2e/helpers/api.ts",
+              "apps/web/e2e/staging/global-setup.ts",
+            ],
+          },
+        ],
+      },
+    },
+    {
+      // fetch() without a timeout is allowed in throwaway / non-runtime
+      // surfaces: sandbox playground, load tests, build configs, unit
+      // tests. Product runtime code (apps/api, apps/web, apps/collab,
+      // apps/desktop, packages/*) keeps the guard on.
+      files: [
+        "apps/playground/**/*.{ts,tsx}",
+        "apps/api/src/tests/**/*.ts",
+        "**/scripts/**",
+        "**/*.test.{ts,tsx}",
+        "**/*.config.{ts,tsx}",
+      ],
+      rules: { "require-fetch-timeout/require-fetch-timeout": "off" },
+    },
+    {
+      // Every workspace mutation must leave an audit trail (SOC 2 /
+      // ISO 27001). Scope to handler files — DB writes elsewhere
+      // (auth lifecycle hooks, job framework internals, RLS session
+      // setup) have different audit semantics and would generate
+      // false positives.
+      files: ["apps/api/src/handlers/**/*.ts"],
+      excludeFiles: ["apps/api/src/handlers/**/*.test.ts"],
+      rules: {
+        "require-audit-on-mutation/require-audit-on-mutation": "error",
       },
     },
     {
@@ -634,6 +967,7 @@ export default defineConfig({
 
         "eslint/no-eq-null": "off",
         "eslint/eqeqeq": "off",
+        "no-useless-assignment": "off",
         "typescript/consistent-return": "off",
       },
     },
@@ -660,6 +994,7 @@ export default defineConfig({
 
         "eslint/no-eq-null": "off",
         "eslint/eqeqeq": "off",
+        "no-useless-assignment": "off",
         "typescript/consistent-return": "off",
 
         "typescript/no-unsafe-return": "off",
@@ -682,6 +1017,8 @@ export default defineConfig({
         "packages/folio/src/core/layout-painter/**/*.tsx",
         "packages/folio/src/core/layout-engine/**/*.ts",
         "packages/folio/src/core/layout-engine/**/*.tsx",
+        "packages/folio/src/core/__tests__/**/*.ts",
+        "packages/folio/src/core/__tests__/**/*.tsx",
         "packages/folio/src/core/prosemirror/conversion/**/*.ts",
         "packages/folio/src/core/prosemirror/conversion/**/*.tsx",
         "packages/folio/src/core/prosemirror/commands/**/*.ts",
@@ -711,6 +1048,7 @@ export default defineConfig({
 
         "eslint/no-eq-null": "off",
         "eslint/eqeqeq": "off",
+        "no-useless-assignment": "off",
         "typescript/consistent-return": "off",
 
         "typescript/no-unsafe-return": "off",
@@ -741,6 +1079,7 @@ export default defineConfig({
         "typescript/prefer-nullish-coalescing": "off",
         "eslint/no-eq-null": "off",
         "eslint/eqeqeq": "off",
+        "no-useless-assignment": "off",
 
         "typescript/promise-function-async": "off",
 
@@ -774,10 +1113,13 @@ export default defineConfig({
       },
     },
     {
-      // @stll/ares types resolve as error in type-aware linting
-      // because the workspace package dist isn't always available
-      // during local lint runs.
-      files: ["apps/api/src/handlers/contacts/ares-lookup.ts"],
+      // @stll/business-registries subpath types resolve as error in
+      // type-aware linting because the workspace package dist isn't
+      // always available during local lint runs.
+      files: [
+        "apps/api/src/handlers/contacts/business-registries-lookup.ts",
+        "apps/api/src/handlers/chat/tools/ares-tools.ts",
+      ],
       rules: {
         "typescript/no-unsafe-assignment": "off",
         "typescript/no-unsafe-member-access": "off",
@@ -898,6 +1240,55 @@ export default defineConfig({
       },
     },
     {
+      files: ["apps/api/src/handlers/**/public-routes.ts"],
+      rules: {
+        "no-restricted-imports": [
+          "error",
+          {
+            paths: [
+              {
+                name: "zod",
+                message: "Use 'valibot' instead of 'zod'.",
+              },
+              {
+                name: "@/api/lib/api-handlers",
+                importNames: ["createSafeHandler", "createSafeRootHandler"],
+                message:
+                  "Public route files must use createSafePublicHandler and must not receive authenticated handler context.",
+              },
+              {
+                name: "@/api/lib/auth",
+                message:
+                  "Public route files must not import auth macros or permission helpers.",
+              },
+              {
+                name: "@/api/db",
+                message:
+                  "Public route files must not import DB primitives. Use a narrow public-read helper.",
+              },
+              {
+                name: "@/api/db/root",
+                message:
+                  "Public route files must not import root DB. Use a narrow public-read helper.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
+      files: [
+        "apps/api/src/handlers/case-law/decisions/list.ts",
+        "apps/api/src/handlers/case-law/decisions/read-by-id.ts",
+        "apps/api/src/handlers/case-law/decisions/search.ts",
+        "apps/api/src/handlers/case-law/decisions/sitemap.ts",
+        "apps/api/src/lib/case-law-public-read-db.ts",
+      ],
+      rules: {
+        "public-case-law-db-boundary/public-case-law-db-boundary": "error",
+      },
+    },
+    {
       // Explicit route-boundary exceptions: public/protocol/auth/dev/SSE
       // surfaces do not fit the normal safe-handler endpoint shape.
       files: [
@@ -909,6 +1300,9 @@ export default defineConfig({
         "apps/api/src/handlers/folio-collab/routes.ts",
         "apps/api/src/handlers/health/routes.ts",
         "apps/api/src/handlers/mcp/routes.ts",
+        "apps/api/src/handlers/mcp-connectors/oauth-client-metadata-route.ts",
+        "apps/api/src/handlers/hosted-usage-webhook/routes.ts",
+        "apps/api/src/handlers/smoke/routes.ts",
         "apps/api/src/handlers/verify/routes.ts",
         "apps/api/src/handlers/workspaces/events.ts",
       ],
@@ -947,6 +1341,7 @@ export default defineConfig({
         "require-await": "off",
         "require-yield": "off",
         "typescript/unbound-method": "off",
+        "no-bare-error/no-bare-error": "off",
         "no-body-ownership-ids/no-body-ownership-ids": "off",
         "no-raw-user-id-schema/no-raw-user-id-schema": "off",
         "no-untyped-updates/no-untyped-updates": "off",
@@ -956,6 +1351,8 @@ export default defineConfig({
         "no-physical-properties/no-physical-properties": "off",
         "require-safe-route-handlers/require-safe-route-handlers": "off",
         "security-guards/no-raw-filename-write": "off",
+        // Fixture builders legitimately construct partial objects.
+        "no-dangerous-type-assertions/no-dangerous-type-assertions": "off",
         "security-guards/no-unsanitized-href": "off",
         "security-guards/no-unscoped-user-query": "off",
         "vitest/prefer-importing-vitest-globals": "off",

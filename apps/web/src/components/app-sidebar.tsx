@@ -11,16 +11,14 @@ import {
   useHotkey,
   useKeyHold,
 } from "@tanstack/react-hotkeys";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, useMatch } from "@tanstack/react-router";
 import {
-  BookOpenIcon,
   ChevronsUpDownIcon,
   EllipsisVerticalIcon,
   GlobeIcon,
   LayersIcon,
   LogOutIcon,
-  MessageSquareIcon,
   MonitorIcon,
   MoonIcon,
   PanelLeftIcon,
@@ -34,6 +32,7 @@ import {
 } from "lucide-react";
 import { useDebouncedCallback } from "use-debounce";
 import { useTranslations } from "use-intl";
+import { useShallow } from "zustand/react/shallow";
 
 import {
   Avatar,
@@ -80,8 +79,14 @@ import {
 } from "@/components/sidebar";
 import { StellaWordmark } from "@/components/stella-wordmark";
 import { PALETTES, THEMES, useTheme } from "@/components/theme-provider";
+import Tooltip from "@/components/tooltip";
+import {
+  getWorkspacePrimaryNavItems,
+  type WorkspacePrimaryNavId,
+} from "@/components/workspace-primary-nav";
 import { useInlineRename } from "@/hooks/use-inline-rename";
 import { usePermissions } from "@/hooks/use-permissions";
+import { usePublicLawPreviewEnabled } from "@/hooks/use-public-law-preview";
 import { useSignOut } from "@/hooks/use-sign-out";
 import {
   LANG_ENDONYMS,
@@ -97,17 +102,12 @@ import { formatFullTimestamp, formatRelativeTime } from "@/lib/relative-time";
 import { knowledgeSections } from "@/routes/_protected.knowledge/index";
 import { organizationOptions } from "@/routes/_protected.organization/-queries";
 import {
-  AddMemberDialog,
+  MatterMenuHeader,
   MatterMenuItems,
+  useMatterActions,
 } from "@/routes/_protected.workspaces/-components/matter-context-menu";
-import {
-  useDeleteWorkspace,
-  useUpdateWorkspace,
-} from "@/routes/_protected.workspaces/-mutations";
-import {
-  workspacesKeys,
-  workspacesNavigationOptions,
-} from "@/routes/_protected.workspaces/-queries";
+import { useUpdateWorkspace } from "@/routes/_protected.workspaces/-mutations";
+import { workspacesNavigationOptions } from "@/routes/_protected.workspaces/-queries";
 import { useCreateMatterStore } from "@/routes/_protected.workspaces/-store/create-matter-store";
 
 const isDev = import.meta.env.DEV;
@@ -245,7 +245,9 @@ type MatterItemProps = {
   };
   isPinned?: boolean;
   onTogglePin: (id: string) => void;
-  onDelete: (id: string) => void;
+  /** Navigate-away (or other cleanup) after the matter is deleted; the
+   *  delete itself is owned by the shared menu via useMatterActions. */
+  onDeleted: (id: string) => void;
   onReorder?: (draggedId: string, targetId: string) => void;
   navBadge?: number | undefined;
 };
@@ -256,7 +258,7 @@ const MatterItem = ({
   workspace: ws,
   isPinned: _isPinnedProp,
   onTogglePin,
-  onDelete,
+  onDeleted,
   onReorder,
   navBadge,
 }: MatterItemProps) => {
@@ -268,7 +270,6 @@ const MatterItem = ({
   const lang = useI18nStore((s) => s.lang);
   const { state, setOpen, isMobile } = useSidebar();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [ctxAnchor, setCtxAnchor] = useState<{
     getBoundingClientRect: () => DOMRect;
   } | null>(null);
@@ -349,6 +350,16 @@ const MatterItem = ({
 
     rename.startEditing();
   };
+
+  const { callbacks, dialogs } = useMatterActions(
+    {
+      id: ws.id,
+      name: ws.name,
+      color: ws.color,
+      client: ws.client ?? null,
+    },
+    { onRename: startRename, onDeleted: () => onDeleted(ws.id) },
+  );
 
   if (rename.state.mode === "edit") {
     return (
@@ -466,64 +477,21 @@ const MatterItem = ({
                 side="right"
                 sideOffset={4}
               >
-                <div
-                  className="max-w-48 border-s-2 px-2 py-1.5"
-                  style={{
-                    borderColor: resolveMatterColor(ws.id, ws.color),
-                  }}
-                >
-                  <div className="truncate text-xs font-medium">{ws.name}</div>
-                  <div className="text-muted-foreground truncate text-xs">
-                    {ws.client
-                      ? ws.client.displayName
-                      : t("workspaces.parties.personalLabel")}
-                  </div>
-                </div>
-                <MenuSeparator />
-                <MatterMenuItems
-                  isArchived={false}
-                  isPersonal={!ws.client}
-                  isPinned={isPinned}
-                  onAddMember={() => setAddMemberOpen(true)}
-                  onCopyLink={() => {
-                    void (async () => {
-                      try {
-                        const url = `${window.location.origin}/workspaces/${ws.id}`;
-                        await navigator.clipboard.writeText(url);
-                        stellaToast.add({
-                          title: t("common.copied"),
-                          type: "success",
-                        });
-                      } catch {
-                        stellaToast.add({
-                          title: t("errors.actionFailed"),
-                          type: "error",
-                        });
-                      }
-                    })();
-                  }}
-                  onDelete={() => onDelete(ws.id)}
-                  onOpenInNewTab={() => {
-                    void window.open(`/workspaces/${ws.id}`, "_blank");
-                  }}
-                  onRename={() => {
-                    startRename();
-                  }}
-                  onTogglePin={() => onTogglePin(ws.id)}
+                <MatterMenuHeader
+                  clientName={ws.client?.displayName ?? null}
+                  color={ws.color}
+                  id={ws.id}
+                  name={ws.name}
                 />
+                <MenuSeparator />
+                <MatterMenuItems {...callbacks} />
               </MenuPopup>
             </Menu>
           </div>
         )}
       </SidebarMenuItem>
 
-      {addMemberOpen && (
-        <AddMemberDialog
-          onOpenChange={setAddMemberOpen}
-          open={addMemberOpen}
-          workspaceId={ws.id}
-        />
-      )}
+      {dialogs}
     </>
   );
 };
@@ -588,13 +556,15 @@ const routeApi = getRouteApi("/_protected");
 export function AppSidebar(props: AppSidebarProps) {
   const signOut = useSignOut();
   const t = useTranslations();
-  const queryClient = useQueryClient();
   const navigate = routeApi.useNavigate();
-  const deleteWorkspace = useDeleteWorkspace();
   const canCreateMatter = usePermissions({ workspace: ["create"] });
   const openCreateMatter = useCreateMatterStore((s) => s.openDialog);
   const { state, toggleSidebar, isMobile } = useSidebar();
   const isCollapsed = state === "collapsed" && !isMobile;
+  const publicLawPreviewEnabled = usePublicLawPreviewEnabled();
+  const primaryNavItems = getWorkspacePrimaryNavItems({
+    includePublicLaw: publicLawPreviewEnabled,
+  });
   const { theme, setTheme, palette, setPalette } = useTheme();
   const lang = useI18nStore((s) => s.lang);
   const setLang = useI18nStore((s) => s.setLang);
@@ -603,10 +573,14 @@ export function AppSidebar(props: AppSidebarProps) {
   });
 
   const [searchOpen, setSearchOpen] = useState(false);
-  const pinnedOrder = usePinnedStore((s) => s.pinnedOrder);
-  const pinnedIds = usePinnedStore((s) => s.pinnedIds);
-  const togglePin = usePinnedStore((s) => s.togglePin);
-  const reorderPinned = usePinnedStore((s) => s.reorder);
+  const { pinnedOrder, pinnedIds, togglePin, reorderPinned } = usePinnedStore(
+    useShallow((s) => ({
+      pinnedOrder: s.pinnedOrder,
+      pinnedIds: s.pinnedIds,
+      togglePin: s.togglePin,
+      reorderPinned: s.reorder,
+    })),
+  );
   const { data: workspacesData } = useQuery(
     workspacesNavigationOptions(user.activeOrganizationId),
   );
@@ -639,42 +613,13 @@ export function AppSidebar(props: AppSidebarProps) {
     openCreateMatter();
   };
 
-  const handleDeleteWorkspace = (workspaceId: string) => {
-    if (deleteWorkspace.isPending) {
-      return;
+  // The delete + toast + cache invalidation are owned by the shared
+  // matter menu (useMatterActions). The sidebar only needs to leave the
+  // matter route when the matter the user is viewing is the one deleted.
+  const handleMatterDeleted = (workspaceId: string) => {
+    if (workspaceMatch?.params.workspaceId === workspaceId) {
+      void navigate({ to: "/workspaces" });
     }
-
-    const toastId = stellaToast.add({
-      title: t("workspaces.deletingWorkspace"),
-      type: "loading",
-      timeout: Number.POSITIVE_INFINITY,
-    });
-
-    deleteWorkspace.mutate(
-      { workspaceId },
-      {
-        onSuccess: () => {
-          stellaToast.update(toastId, {
-            title: t("success.workspaceDeletedSuccessfully"),
-            type: "success",
-          });
-          void (async () => {
-            await queryClient.invalidateQueries({
-              queryKey: workspacesKeys.all,
-            });
-            if (workspaceMatch?.params.workspaceId === workspaceId) {
-              await navigate({ to: "/workspaces" });
-            }
-          })();
-        },
-        onError: () => {
-          stellaToast.update(toastId, {
-            title: t("errors.failedToDeleteWorkspace"),
-            type: "error",
-          });
-        },
-      },
-    );
   };
 
   useHotkey(HOTKEYS.SEARCH, () => {
@@ -752,14 +697,8 @@ export function AppSidebar(props: AppSidebarProps) {
     void navigate({ to: "/chat" });
   };
 
-  const fixedNavTargets: [
-    /* 1: search */ FixedNavTarget,
-    /* 2: chat */ FixedNavTarget,
-    /* 3: workspaces */ FixedNavTarget,
-    /* 4: knowledge */ FixedNavTarget,
-    /* 5: contacts */ FixedNavTarget,
-  ] = [
-    {
+  const fixedNavTargetsById = {
+    search: {
       action: () => setSearchOpen(true),
       contextMenu: {
         primaryAction: {
@@ -769,7 +708,7 @@ export function AppSidebar(props: AppSidebarProps) {
         },
       },
     },
-    {
+    chat: {
       action: openChat,
       contextMenu: {
         primaryAction: {
@@ -779,7 +718,7 @@ export function AppSidebar(props: AppSidebarProps) {
         },
       },
     },
-    {
+    matters: {
       action: () => {
         void navigate({ to: "/workspaces" });
       },
@@ -792,7 +731,13 @@ export function AppSidebar(props: AppSidebarProps) {
         recents: recents.slice(0, 3).map(recentMatterAction),
       },
     },
-    {
+    caseLaw: {
+      action: () => {
+        void navigate({ to: "/law/cases" });
+      },
+      contextMenu: {},
+    },
+    knowledge: {
       action: () => {
         void navigate({ to: "/knowledge" });
       },
@@ -816,7 +761,7 @@ export function AppSidebar(props: AppSidebarProps) {
         }),
       },
     },
-    {
+    contacts: {
       action: () => {
         void navigate({ to: "/contacts" });
       },
@@ -830,7 +775,11 @@ export function AppSidebar(props: AppSidebarProps) {
         },
       },
     },
-  ];
+  } satisfies Record<WorkspacePrimaryNavId, FixedNavTarget>;
+
+  const fixedNavTargets = primaryNavItems.map(
+    (item) => fixedNavTargetsById[item.id],
+  );
 
   const navTargets: NavTarget[] = [
     ...fixedNavTargets,
@@ -901,15 +850,28 @@ export function AppSidebar(props: AppSidebarProps) {
           }
         >
           {!isCollapsed && <StellaWordmark className="h-5 w-auto" />}
-          <Button
-            className={cn("text-muted-foreground", SIDE_RAIL_ICON_BUTTON_SIZE)}
-            onClick={toggleSidebar}
-            size="icon"
-            variant="ghost"
+          <Tooltip
+            content={
+              isCollapsed ? t("inspector.showPane") : t("inspector.hidePane")
+            }
+            render={
+              <Button
+                className={cn(
+                  "text-muted-foreground",
+                  SIDE_RAIL_ICON_BUTTON_SIZE,
+                )}
+                onClick={toggleSidebar}
+                size="icon"
+                variant="ghost"
+              />
+            }
+            side="right"
           >
             <PanelLeftIcon className="size-4" />
-            <span className="sr-only">{t("navigation.toggleSidebar")}</span>
-          </Button>
+            <span className="sr-only">
+              {isCollapsed ? t("inspector.showPane") : t("inspector.hidePane")}
+            </span>
+          </Tooltip>
         </div>
       </SidebarHeader>
 
@@ -917,86 +879,64 @@ export function AppSidebar(props: AppSidebarProps) {
         {/* Top navigation */}
         <SidebarGroup>
           <SidebarMenu>
-            <NavContextMenu config={fixedNavTargets[0].contextMenu}>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  onClick={() => setSearchOpen(true)}
-                  tooltip={t("navigation.search")}
-                >
-                  <SearchIcon />
-                  <span>{t("navigation.search")}</span>
-                </SidebarMenuButton>
-                {showNavBadges ? (
-                  <NavBadge digit={1} />
-                ) : (
-                  <SidebarMenuBadge>
-                    <kbd className="text-muted-foreground text-[0.625rem]">
-                      {formatForDisplay(HOTKEYS.SEARCH)}
-                    </kbd>
-                  </SidebarMenuBadge>
-                )}
-              </SidebarMenuItem>
-            </NavContextMenu>
-            <NavContextMenu config={fixedNavTargets[1].contextMenu}>
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild tooltip={t("navigation.chat")}>
-                  <Link activeProps={{ "data-active": true }} to="/chat">
-                    <MessageSquareIcon />
-                    <span>{t("navigation.chat")}</span>
-                  </Link>
-                </SidebarMenuButton>
-                {showNavBadges && <NavBadge digit={2} />}
-              </SidebarMenuItem>
-            </NavContextMenu>
-            <NavContextMenu config={fixedNavTargets[2].contextMenu}>
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild tooltip={t("common.matters")}>
-                  <Link activeProps={{ "data-active": true }} to="/workspaces">
-                    <LayersIcon />
-                    <span>{t("common.matters")}</span>
-                  </Link>
-                </SidebarMenuButton>
-                {(() => {
-                  if (showNavBadges) {
-                    return <NavBadge digit={3} />;
-                  }
-                  if (canCreateMatter) {
-                    return (
-                      <SidebarMenuAction
-                        onClick={handleCreateWorkspace}
-                        showOnHover
-                        title={t("navigation.newMatter")}
+            {primaryNavItems.map((item, index) => {
+              const Icon = item.icon;
+              const label = t(item.labelKey);
+              const navTarget = fixedNavTargetsById[item.id];
+              const digit = index + 1;
+
+              return (
+                <NavContextMenu config={navTarget.contextMenu} key={item.id}>
+                  <SidebarMenuItem>
+                    {item.kind === "action" ? (
+                      <SidebarMenuButton
+                        onClick={navTarget.action}
+                        tooltip={label}
                       >
-                        <PlusIcon />
-                      </SidebarMenuAction>
-                    );
-                  }
-                  return null;
-                })()}
-              </SidebarMenuItem>
-            </NavContextMenu>
-            <NavContextMenu config={fixedNavTargets[3].contextMenu}>
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild tooltip={t("navigation.knowledge")}>
-                  <Link activeProps={{ "data-active": true }} to="/knowledge">
-                    <BookOpenIcon />
-                    <span>{t("navigation.knowledge")}</span>
-                  </Link>
-                </SidebarMenuButton>
-                {showNavBadges && <NavBadge digit={4} />}
-              </SidebarMenuItem>
-            </NavContextMenu>
-            <NavContextMenu config={fixedNavTargets[4].contextMenu}>
-              <SidebarMenuItem>
-                <SidebarMenuButton asChild tooltip={t("navigation.contacts")}>
-                  <Link activeProps={{ "data-active": true }} to="/contacts">
-                    <UsersIcon />
-                    <span>{t("navigation.contacts")}</span>
-                  </Link>
-                </SidebarMenuButton>
-                {showNavBadges && <NavBadge digit={5} />}
-              </SidebarMenuItem>
-            </NavContextMenu>
+                        <Icon />
+                        <span>{label}</span>
+                      </SidebarMenuButton>
+                    ) : (
+                      <SidebarMenuButton asChild tooltip={label}>
+                        <Link
+                          activeProps={{ "data-active": true }}
+                          to={item.to}
+                        >
+                          <Icon />
+                          <span>{label}</span>
+                        </Link>
+                      </SidebarMenuButton>
+                    )}
+                    {(() => {
+                      if (showNavBadges) {
+                        return <NavBadge digit={digit} />;
+                      }
+                      if (item.id === "search") {
+                        return (
+                          <SidebarMenuBadge>
+                            <kbd className="text-muted-foreground text-[0.625rem]">
+                              {formatForDisplay(HOTKEYS.SEARCH)}
+                            </kbd>
+                          </SidebarMenuBadge>
+                        );
+                      }
+                      if (item.id === "matters" && canCreateMatter) {
+                        return (
+                          <SidebarMenuAction
+                            onClick={handleCreateWorkspace}
+                            showOnHover
+                            title={t("navigation.newMatter")}
+                          >
+                            <PlusIcon />
+                          </SidebarMenuAction>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </SidebarMenuItem>
+                </NavContextMenu>
+              );
+            })}
           </SidebarMenu>
         </SidebarGroup>
 
@@ -1017,8 +957,12 @@ export function AppSidebar(props: AppSidebarProps) {
                     <MatterItem
                       isPinned
                       key={ws.id}
-                      navBadge={showNavBadges && i < 3 ? 6 + i : undefined}
-                      onDelete={handleDeleteWorkspace}
+                      navBadge={
+                        showNavBadges && i < 3
+                          ? primaryNavItems.length + 1 + i
+                          : undefined
+                      }
+                      onDeleted={handleMatterDeleted}
                       onReorder={reorderPinned}
                       onTogglePin={togglePin}
                       workspace={ws}
@@ -1038,7 +982,7 @@ export function AppSidebar(props: AppSidebarProps) {
                   {recents.map((ws) => (
                     <MatterItem
                       key={ws.id}
-                      onDelete={handleDeleteWorkspace}
+                      onDeleted={handleMatterDeleted}
                       onTogglePin={togglePin}
                       workspace={ws}
                     />
@@ -1056,12 +1000,17 @@ export function AppSidebar(props: AppSidebarProps) {
           <FeedbackDialog userEmail={user.email} />
           <SidebarMenuItem>
             <Menu>
-              <MenuTrigger
-                className={cn(
-                  "hover:bg-sidebar-accent data-popup-open:bg-sidebar-accent flex w-full items-center overflow-hidden rounded-md p-2 text-start text-sm outline-hidden",
-                  isCollapsed ? "justify-center" : "gap-2",
-                )}
-                title={isCollapsed ? displayName : undefined}
+              <Tooltip
+                content={isCollapsed ? displayName : null}
+                render={
+                  <MenuTrigger
+                    className={cn(
+                      "hover:bg-sidebar-accent data-popup-open:bg-sidebar-accent flex w-full items-center overflow-hidden rounded-md p-2 text-start text-sm outline-hidden",
+                      isCollapsed ? "justify-center" : "gap-2",
+                    )}
+                  />
+                }
+                side="right"
               >
                 <Avatar className="size-7 rounded-full">
                   {user.image && <AvatarImage src={user.image} />}
@@ -1092,7 +1041,7 @@ export function AppSidebar(props: AppSidebarProps) {
                     <ChevronsUpDownIcon className="ms-auto size-4 opacity-50" />
                   </>
                 )}
-              </MenuTrigger>
+              </Tooltip>
               <MenuPopup align="end" className="w-56" side="top" sideOffset={8}>
                 {orgName && (
                   <>
@@ -1112,7 +1061,7 @@ export function AppSidebar(props: AppSidebarProps) {
                   }}
                 >
                   <Settings2Icon />
-                  {t("settings.title")}
+                  {t("common.settings")}
                 </MenuItem>
                 <MenuSeparator />
                 <MenuSub>

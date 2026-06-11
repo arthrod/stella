@@ -1,13 +1,17 @@
 import { queryOptions } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
-import { APIError, toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors";
 import type { QueryOptionsInput } from "@/lib/react-query";
+import {
+  fetchStorageArrayBuffer,
+  type StorageFetchPurpose,
+} from "@/routes/_protected.workspaces/$workspaceId/-components/files/storage-fetch";
 
 type FileByFieldIdKey = {
   workspaceId: string;
   fieldId: string;
-  purpose?: "display" | "native-display";
+  purpose?: StorageFetchPurpose;
 };
 
 type FileData = {
@@ -19,6 +23,22 @@ type FileData = {
 };
 
 type FileMetadata = Omit<FileData, "buffer">;
+
+type EmailHtmlPreviewData = {
+  fileId: string;
+  fileName: string;
+  html: string;
+  mimeType: string;
+  originalMimeType: string;
+};
+
+type TextFileData = {
+  fileId: string;
+  fileName: string;
+  mimeType: string;
+  originalMimeType: string;
+  text: string;
+};
 
 export const filesKeys = {
   all: () => ["files"],
@@ -34,6 +54,18 @@ export const filesKeys = {
     key.workspaceId,
     key.fieldId,
     key.purpose ?? "display",
+  ],
+  emailHtmlByFieldId: (key: FileByFieldIdKey) => [
+    ...filesKeys.all(),
+    "email-html",
+    key.workspaceId,
+    key.fieldId,
+  ],
+  textByFieldId: (key: FileByFieldIdKey) => [
+    ...filesKeys.all(),
+    "text",
+    key.workspaceId,
+    key.fieldId,
   ],
 };
 
@@ -80,21 +112,71 @@ export const fileOptions = (props: FileOptionsProps) =>
         throw toAPIError(response.error);
       }
 
-      const file = await fetch(response.data.presignedUrl);
-
-      if (!file.ok) {
-        throw new APIError({
-          status: file.status,
-          message: "Failed to fetch file from storage",
-        });
-      }
+      const buffer = await fetchStorageArrayBuffer(response.data.presignedUrl, {
+        signal,
+        purpose: props.purpose ?? "display",
+      });
 
       return {
         fileId: response.data.fileId,
         fileName: response.data.fileName,
         mimeType: response.data.mimeType,
         originalMimeType: response.data.originalMimeType,
-        buffer: await file.arrayBuffer(),
+        buffer,
       } satisfies FileData;
+    },
+  });
+
+export const emailHtmlPreviewOptions = (props: FileOptionsProps) =>
+  queryOptions({
+    queryKey: filesKeys.emailHtmlByFieldId(props),
+    queryFn: async ({ signal }) => {
+      const response = await api
+        .files({ workspaceId: props.workspaceId })
+        ["email-html"]({ fieldId: props.fieldId })
+        .get({ fetch: { signal } });
+
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+
+      return {
+        fileId: response.data.fileId,
+        fileName: response.data.fileName,
+        html: response.data.html,
+        mimeType: response.data.mimeType,
+        originalMimeType: response.data.originalMimeType,
+      } satisfies EmailHtmlPreviewData;
+    },
+  });
+
+export const textFileOptions = (props: FileOptionsProps) =>
+  queryOptions({
+    queryKey: filesKeys.textByFieldId(props),
+    queryFn: async ({ signal }) => {
+      const response = await api
+        .files({ workspaceId: props.workspaceId })
+        .url({ fieldId: props.fieldId })
+        .get({
+          query: { purpose: "download" },
+          fetch: { signal },
+        });
+
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+
+      const buffer = await fetchStorageArrayBuffer(response.data.presignedUrl, {
+        signal,
+        purpose: "download",
+      });
+
+      return {
+        fileId: response.data.fileId,
+        fileName: response.data.fileName,
+        mimeType: response.data.mimeType,
+        originalMimeType: response.data.originalMimeType,
+        text: new TextDecoder().decode(buffer),
+      } satisfies TextFileData;
     },
   });

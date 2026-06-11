@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Result } from "better-result";
 import {
@@ -16,7 +17,9 @@ import {
   Maximize2Icon,
   MessageSquareIcon,
   PencilIcon,
+  RefreshCwIcon,
   Trash2Icon,
+  UploadIcon,
 } from "lucide-react";
 import { useTranslations } from "use-intl";
 
@@ -56,17 +59,26 @@ import { ClientOperationError, isUnauthorizedError } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
 import type { WorkspaceCellMetadata, WorkspaceEntity } from "@/lib/types";
 import { isFileDisplayable } from "@/lib/types";
-import { CellMetadataMenuSection } from "@/routes/_protected.workspaces/$workspaceId/-components/cell-metadata-flags";
+import {
+  CellLockMenuItem,
+  CellMetadataMenuSection,
+} from "@/routes/_protected.workspaces/$workspaceId/-components/cell-metadata-flags";
 import { CopyToMatterDialog } from "@/routes/_protected.workspaces/$workspaceId/-components/copy-to-matter-dialog";
+import type { CopyToMatterEntity } from "@/routes/_protected.workspaces/$workspaceId/-components/copy-to-matter-dialog.logic";
+import { getExtension } from "@/routes/_protected.workspaces/$workspaceId/-components/file-extension";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
 import { getPdfDownloadFileName } from "@/routes/_protected.workspaces/$workspaceId/-components/row-actions.logic";
+import type { TableTreeNode } from "@/routes/_protected.workspaces/$workspaceId/-components/table/types";
 import { downloadFile } from "@/routes/_protected.workspaces/$workspaceId/-components/utils";
 import { useEntitiesCountLimit } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-limits";
+import { useRetryCell } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-retry-cell";
+import { useUploadVersion } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-upload-version";
 import {
   useCreateEntities,
   useDeleteEntities,
 } from "@/routes/_protected.workspaces/$workspaceId/-mutations/entities";
 import { entitiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
+import { propertiesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/properties";
 import { useIsWorkflowRunning } from "@/routes/_protected.workspaces/$workspaceId/-queries/workspace";
 import { useWorkspaceStore } from "@/routes/_protected.workspaces/$workspaceId/-store";
 import {
@@ -116,12 +128,21 @@ export const RowActions = ({
   const t = useTranslations();
   const navigate = useNavigate();
   const deleteEntities = useDeleteEntities();
+  const uploadVersion = useUploadVersion();
   const requestChatAbout = useRequestChatAbout(workspaceId);
+  const retryCell = useRetryCell(workspaceId);
   const [copyToMatterOpen, setCopyToMatterOpen] = useState(false);
+  const [copyToMatterEntities, setCopyToMatterEntities] = useState<
+    CopyToMatterEntity[]
+  >([]);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const { data: properties } = useQuery(propertiesOptions(workspaceId));
+  const uploadVersionInputRef = useRef<HTMLInputElement>(null);
   const file = getFirstFile(entity);
   const name = getEntityName(entity);
   const isFolder = entity.kind === "folder";
   const isBulk = selectedEntities !== undefined && selectedEntities.length > 1;
+  const bulkTargets = isBulk ? selectedEntities : [entity];
   const isCellContext =
     !isBulk && cellMetadataTarget !== null && cellMetadataTarget !== undefined;
   const isDocx = !isBulk && file?.mimeType === DOCX_MIME;
@@ -131,6 +152,16 @@ export const RowActions = ({
     isDocx && entity.activeEditBy !== null && !entity.activeEditBy.isMe;
   // Show "Edit in Desktop" when: DOCX + (not locked OR locked by me)
   const canOpenInDesktop = isDocx && !isLockedByOther;
+  const openCopyToMatterDialog = () => {
+    setCopyToMatterEntities(toCopyToMatterEntities(bulkTargets));
+    setCopyToMatterOpen(true);
+  };
+  const handleCopyToMatterOpenChange = (nextOpen: boolean) => {
+    setCopyToMatterOpen(nextOpen);
+    if (!nextOpen) {
+      setCopyToMatterEntities([]);
+    }
+  };
 
   const openVersionHistory = file
     ? () => {
@@ -157,7 +188,11 @@ export const RowActions = ({
     (() => {
       if (entity.kind === "task") {
         return () =>
-          useInspectorStore.getState().openTask(entity.entityId, name);
+          useInspectorStore.getState().openTask({
+            taskId: entity.entityId,
+            workspaceId,
+            label: name,
+          });
       }
       if (file && isFileDisplayable(file)) {
         return () =>
@@ -165,6 +200,7 @@ export const RowActions = ({
             id: file.fieldId,
             entityId: file.entityId,
             label: name,
+            fileName: file.fileName,
             mimeType: file.mimeType,
             pdfFileId: file.pdfFileId,
             propertyId: file.propertyId,
@@ -341,9 +377,39 @@ export const RowActions = ({
     }
   };
 
+  const cellProperty =
+    cellMetadataTarget && properties
+      ? properties.find((p) => p.id === cellMetadataTarget.propertyId)
+      : undefined;
+  const cellField = cellMetadataTarget
+    ? entity.fields[cellMetadataTarget.propertyId]
+    : undefined;
+  const canRetryCell =
+    cellProperty?.tool.type === "ai-model" &&
+    cellProperty.content.type !== "file";
+  const retryDisabled =
+    isRetrying ||
+    entity.readOnly ||
+    cellMetadataTarget?.metadata?.locked === true ||
+    cellField?.content.type === "pending";
+
+  const handleRetryCell = async () => {
+    if (!cellMetadataTarget || isRetrying) {
+      return;
+    }
+    setIsRetrying(true);
+    try {
+      await retryCell({
+        entityId: entity.entityId,
+        propertyId: cellMetadataTarget.propertyId,
+      });
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
   const handleChatAbout = () => {
-    const targets = isBulk ? selectedEntities : [entity];
-    const mentions = targets.map((e) => {
+    const mentions = bulkTargets.map((e) => {
       const f = getFirstFile(e);
       return {
         id: e.entityId,
@@ -357,11 +423,10 @@ export const RowActions = ({
   };
 
   const handleDuplicate = async () => {
-    const allTargets = isBulk ? selectedEntities : [entity];
     // Folders cannot be duplicated server-side; silently skip them so a
     // mixed selection (folders + files) does not surface as a generic
     // failure to the user.
-    const targets = allTargets.filter((e) => e.kind !== "folder");
+    const targets = bulkTargets.filter((e) => e.kind !== "folder");
 
     if (targets.length === 0) {
       stellaToast.add({
@@ -431,6 +496,29 @@ export const RowActions = ({
     );
   };
 
+  const handleUploadVersionSelect = () => {
+    uploadVersionInputRef.current?.click();
+  };
+
+  const handleUploadVersionChange = (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const uploadedFile = event.target.files?.[0];
+    if (!uploadedFile || !file) {
+      return;
+    }
+
+    uploadVersion.mutate({
+      workspaceId,
+      entityId: entity.entityId,
+      entityFileName: file.fileName,
+      file: uploadedFile,
+    });
+
+    // Reset input to allow uploading the same file again
+    event.target.value = "";
+  };
+
   // Whether any selected entity has a downloadable file.
   const hasAnyFile = isBulk
     ? selectedEntities.some((e) => getFirstFile(e) !== null)
@@ -438,6 +526,18 @@ export const RowActions = ({
   const hasAnyFolder = isBulk
     ? selectedEntities.some((e) => e.kind === "folder")
     : isFolder;
+
+  // Show "Upload new version" for non-folder, non-bulk entities with a file
+  const canUploadVersion =
+    !isBulk && !isFolder && !entity.readOnly && file !== null;
+  // Extension-based filter for the OS file picker. Browser-reported MIME
+  // strings vary across platforms for the same extension; matching by
+  // extension is consistent across Chrome, Safari, Firefox, and Edge.
+  // Falls back to `*/*` for extensionless files (e.g. `Dockerfile`).
+  const versionAcceptExtension = file ? getExtension(file.fileName) : null;
+  const versionAccept = versionAcceptExtension
+    ? `.${versionAcceptExtension}`
+    : "*/*";
 
   return (
     <Menu onOpenChange={onOpenChange} open={open}>
@@ -472,8 +572,32 @@ export const RowActions = ({
             {t("common.rename")}
           </MenuItem>
         )}
+        {!isCellContext && canUploadVersion && (
+          <MenuItem
+            disabled={uploadVersion.isPending}
+            onClick={handleUploadVersionSelect}
+          >
+            <UploadIcon />
+            {t("fileDetail.uploadNewVersion")}
+          </MenuItem>
+        )}
         {!isBulk && cellMetadataTarget && (
           <>
+            {canRetryCell && (
+              <MenuItem
+                disabled={retryDisabled}
+                onClick={() => void handleRetryCell()}
+              >
+                <RefreshCwIcon />
+                {t("common.retry")}
+              </MenuItem>
+            )}
+            <CellLockMenuItem
+              entityId={entity.entityId}
+              metadata={cellMetadataTarget.metadata}
+              propertyId={cellMetadataTarget.propertyId}
+              workspaceId={workspaceId}
+            />
             <MenuSeparator />
             <CellMetadataMenuSection
               entityId={entity.entityId}
@@ -589,16 +713,14 @@ export const RowActions = ({
               <CopyIcon />
               {t("common.duplicate")}
             </MenuItem>
-            {!isBulk && (
-              <MenuItem
-                onClick={() => {
-                  setCopyToMatterOpen(true);
-                }}
-              >
-                <FolderSyncIcon />
-                {t("workspaces.copyToMatter.menuItem")}
-              </MenuItem>
-            )}
+            <MenuItem
+              onClick={() => {
+                openCopyToMatterDialog();
+              }}
+            >
+              <FolderSyncIcon />
+              {t("workspaces.copyToMatter.menuItem")}
+            </MenuItem>
 
             <MenuSeparator />
 
@@ -646,13 +768,20 @@ export const RowActions = ({
           </>
         )}
       </MenuPopup>
-      {!isBulk && (
-        <CopyToMatterDialog
-          entityId={entity.entityId}
-          entityName={name}
-          onOpenChange={setCopyToMatterOpen}
-          open={copyToMatterOpen}
-          sourceWorkspaceId={workspaceId}
+      <CopyToMatterDialog
+        entities={copyToMatterEntities}
+        onOpenChange={handleCopyToMatterOpenChange}
+        open={copyToMatterOpen}
+        sourceWorkspaceId={workspaceId}
+      />
+      {/* Hidden file input for upload new version */}
+      {canUploadVersion && (
+        <input
+          accept={versionAccept}
+          className="hidden"
+          onChange={handleUploadVersionChange}
+          ref={uploadVersionInputRef}
+          type="file"
         />
       )}
     </Menu>
@@ -719,6 +848,21 @@ const CreateSubfolderMenuItem = ({
 
 // -- Helpers (avoid duplicating logic between single/bulk) --
 
+const toCopyToMatterEntities = (
+  targets: readonly (WorkspaceEntity | TableTreeNode)[],
+): CopyToMatterEntity[] => targets.map(toCopyToMatterEntity);
+
+const toCopyToMatterEntity = (
+  entity: WorkspaceEntity | TableTreeNode,
+): CopyToMatterEntity => ({
+  children:
+    "children" in entity ? entity.children.map(toCopyToMatterEntity) : [],
+  entityId: entity.entityId,
+  entityName: getEntityName(entity),
+  kind: entity.kind,
+  parentId: entity.parentId,
+});
+
 type FileRef = { fieldId: string; fileName: string; mimeType: string | null };
 type Msg = { downloading: string; failed: string };
 
@@ -737,6 +881,7 @@ const downloadEntityAsZip = async (
     async () =>
       await fetch(apiUrl(`/entities/${workspaceId}/zip/${entity.entityId}`), {
         credentials: "include",
+        signal: AbortSignal.timeout(60_000),
       }),
   );
 
@@ -780,7 +925,9 @@ const downloadSingleFile = async (
   }
 
   const blobResult = await Result.tryPromise(async () => {
-    const s3Response = await fetch(response.data.presignedUrl);
+    const s3Response = await fetch(response.data.presignedUrl, {
+      signal: AbortSignal.timeout(60_000),
+    });
     if (!s3Response.ok) {
       throw new ClientOperationError({
         action: "downloadSingleFile",

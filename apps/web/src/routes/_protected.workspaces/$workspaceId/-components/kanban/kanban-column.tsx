@@ -11,11 +11,6 @@ import {
   draggable,
   dropTargetForElements,
 } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
-import { dropTargetForExternal } from "@atlaskit/pragmatic-drag-and-drop/external/adapter";
-import {
-  containsFiles,
-  getFiles,
-} from "@atlaskit/pragmatic-drag-and-drop/external/file";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   EllipsisVerticalIcon,
@@ -59,6 +54,7 @@ import {
 } from "@stll/ui/components/popover";
 import { cn } from "@stll/ui/lib/utils";
 
+import { useExternalFileDrop } from "@/hooks/use-external-file-drop";
 import type {
   EntityKind,
   WorkspaceEntity,
@@ -152,7 +148,6 @@ export const KanbanColumn = ({
     });
     setCtxOpen(true);
   };
-  const [isFileDragOver, setIsFileDragOver] = useState(false);
   const [isEntityDragOver, setIsEntityDragOver] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [closestColumnEdge, setClosestColumnEdge] = useState<Edge | null>(null);
@@ -181,8 +176,13 @@ export const KanbanColumn = ({
   // Store callbacks in refs to keep effect deps stable.
   const onDropRef = useRef(onDrop);
   onDropRef.current = onDrop;
-  const onFileUploadRef = useRef(onFileUpload);
-  onFileUploadRef.current = onFileUpload;
+
+  const { isDropTarget, isInnerActive } = useExternalFileDrop({
+    externalRef: columnRef,
+    enabled: !!onFileUpload,
+    onDrop: (files) => onFileUpload?.(files),
+  });
+  const isFileDragOver = isDropTarget && !isInnerActive;
 
   useEffect(() => {
     const el = columnRef.current;
@@ -254,25 +254,6 @@ export const KanbanColumn = ({
         },
       }),
     ];
-
-    // External file drop target
-    if (onFileUploadRef.current) {
-      cleanups.push(
-        dropTargetForExternal({
-          element: el,
-          canDrop: containsFiles,
-          onDragEnter: () => setIsFileDragOver(true),
-          onDragLeave: () => setIsFileDragOver(false),
-          onDrop: ({ source }) => {
-            setIsFileDragOver(false);
-            const files = getFiles({ source });
-            if (files.length > 0) {
-              onFileUploadRef.current?.(files);
-            }
-          },
-        }),
-      );
-    }
 
     // Column draggable: entire column is the element,
     // grip icon is the drag handle (Trello-style).

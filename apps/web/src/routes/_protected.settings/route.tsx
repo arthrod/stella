@@ -1,6 +1,7 @@
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
 import {
+  GaugeIcon,
   HashIcon,
   MonitorIcon,
   ShieldIcon,
@@ -20,7 +21,7 @@ import { managementRoles } from "@/routes/_protected.organization/-consts";
 
 export const Route = createFileRoute("/_protected/settings")({
   head: () => ({
-    meta: [{ title: pageTitle("settings.title") }],
+    meta: [{ title: pageTitle("common.settings") }],
   }),
   component: SettingsLayout,
 });
@@ -31,7 +32,8 @@ type NavTo =
   | "/settings/organization/members"
   | "/settings/organization/matter-numbering"
   | "/settings/organization/ai"
-  | "/settings/organization/anonymization";
+  | "/settings/organization/anonymization"
+  | "/settings/organization/usage";
 
 type NavItem = {
   readonly to: NavTo;
@@ -64,7 +66,7 @@ const ACCOUNT_SECTION = {
 
 const ORGANIZATION_SECTION = {
   id: "organization",
-  labelKey: "settings.organization.title",
+  labelKey: "common.organization",
   items: [
     {
       to: "/settings/organization/members",
@@ -86,6 +88,11 @@ const ORGANIZATION_SECTION = {
       labelKey: "settings.organization.anonymization.title",
       icon: ShieldIcon,
     },
+    {
+      to: "/settings/organization/usage",
+      labelKey: "settings.organization.usage",
+      icon: GaugeIcon,
+    },
   ],
 } as const satisfies Section;
 
@@ -101,7 +108,7 @@ function SettingsLayout() {
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden border-t">
       <nav
-        aria-label={t("settings.title")}
+        aria-label={t("common.settings")}
         className="bg-muted/30 flex w-60 shrink-0 flex-col gap-4 overflow-y-auto border-e p-3"
       >
         {sections.map((section) => (

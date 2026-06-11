@@ -12,18 +12,35 @@ import { createStarterKit } from "../extensions/StarterKit";
 
 // Re-export type interfaces (used by toProseDoc, fromProseDoc, and other modules)
 export type {
+  HardBreakAttrs,
   ParagraphAttrs,
+  FieldAttrs,
   ImageAttrs,
   ImagePositionAttrs,
+  MathAttrs,
+  SdtAttrs,
+  BlockSdtAttrs,
+  ShapeAttrs,
   TableAttrs,
   TableRowAttrs,
   TableCellAttrs,
+  TextBoxAttrs,
 } from "./nodes";
 export type {
   TextColorAttrs,
   UnderlineAttrs,
+  StrikeAttrs,
   FontSizeAttrs,
   FontFamilyAttrs,
+  HighlightAttrs,
+  CharacterSpacingAttrs,
+  EmphasisMarkAttrs,
+  TextEffectAttrs,
+  FootnoteRefAttrs,
+  CommentAttrs,
+  TrackedChangeMarkAttrs,
+  RunFormattingOverrideAttrs,
+  RunShadingAttrs,
   HyperlinkAttrs,
 } from "./marks";
 

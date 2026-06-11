@@ -6,7 +6,6 @@
  * until the analysis is ready.
  */
 
-import { valibotSchema } from "@ai-sdk/valibot";
 import { Output, streamText } from "ai";
 import { and, eq, isNull } from "drizzle-orm";
 
@@ -15,16 +14,16 @@ import type {
   AnalysisInProgress,
   DecisionAnalysis,
   PersistedDecisionAnalysis,
-} from "@stll/case-law/analysis";
+} from "@stll/legal-ast/analysis";
 import {
   analysisHeadingSchema,
   isAnalysisInProgress,
   isAnalysisGenerating,
   isDecisionAnalysis,
   parsePersistedDecisionAnalysis,
-} from "@stll/case-law/analysis";
-import type { DocumentAst } from "@stll/case-law/document-ast";
-import { hasUsableAst } from "@stll/case-law/document-ast";
+} from "@stll/legal-ast/analysis";
+import type { DocumentAst } from "@stll/legal-ast/document-ast";
+import { hasUsableAst } from "@stll/legal-ast/document-ast";
 
 import type { ScopedDb } from "@/api/db";
 // SAFETY: rootDb is used only inside runGeneration, which runs in
@@ -33,12 +32,9 @@ import type { ScopedDb } from "@/api/db";
 // eslint-disable-next-line no-restricted-imports
 import { rootDb } from "@/api/db/root";
 import { caseLawDecisions } from "@/api/db/schema";
-import {
-  getModelForRole,
-  getModelInfoForRole,
-  getTemperatureForRole,
-} from "@/api/lib/ai-models";
+import { getModelForRole, getModelInfoForRole } from "@/api/lib/ai-models";
 import type { OrgAIConfig } from "@/api/lib/ai-models";
+import { strictOutputSchema } from "@/api/lib/ai-output-schema";
 import { captureError } from "@/api/lib/analytics";
 import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
 import type { SafeId } from "@/api/lib/branded-types";
@@ -96,8 +92,11 @@ const runGeneration = async (
     language: string;
     decisionType: string | null;
   },
+  organizationId: SafeId<"organization">,
   orgAIConfig: OrgAIConfig | null,
+  promptCachingEnabled: boolean,
 ) => {
+  // audit: skip — background AI analysis output
   const systemPrompt = getSystemPrompt(decision.language);
   const decisionText = formatDecisionForPrompt(ast.blocks);
 
@@ -107,7 +106,12 @@ Type: ${decision.decisionType ?? "unknown"}
 
 ${decisionText}`;
 
-  const model = getModelForRole("fast", orgAIConfig);
+  const model = getModelForRole("fast", orgAIConfig, {
+    promptCachingEnabled,
+    scopeKey: decisionId,
+    organizationId,
+    serviceTier: "flex",
+  });
   const { modelId } = getModelInfoForRole("fast", orgAIConfig);
   const aiAnalytics = createAIAnalyticsCallbacks({
     feature: "case-law.analysis",
@@ -123,9 +127,8 @@ ${decisionText}`;
   try {
     const result = streamText({
       model,
-      temperature: getTemperatureForRole("fast"),
       output: Output.array({
-        element: valibotSchema(analysisHeadingSchema),
+        element: strictOutputSchema(analysisHeadingSchema),
       }),
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
@@ -140,6 +143,7 @@ ${decisionText}`;
     const headings: AnalysisHeading[] = [];
 
     const persistPartial = async () => {
+      // audit: skip — background AI analysis output
       const partial: AnalysisInProgress = {
         version: 1,
         generatedAt: new Date().toISOString(),
@@ -198,12 +202,15 @@ ${decisionText}`;
 export const generateAnalysis = async (
   decisionId: SafeId<"caseLawDecision">,
   scopedDb: ScopedDb,
+  organizationId: SafeId<"organization">,
   orgAIConfig: OrgAIConfig | null,
+  promptCachingEnabled: boolean,
 ): Promise<{
   status: "done" | "error" | "generating";
   analysis?: PersistedDecisionAnalysis;
   error?: string;
 }> => {
+  // audit: skip — background AI analysis output
   const decision = await scopedDb((tx) =>
     tx.query.caseLawDecisions.findFirst({
       where: { id: { eq: decisionId } },
@@ -274,7 +281,14 @@ export const generateAnalysis = async (
   }
 
   // Fire-and-forget generation
-  void runGeneration(decisionId, ast, decision, orgAIConfig);
+  void runGeneration(
+    decisionId,
+    ast,
+    decision,
+    organizationId,
+    orgAIConfig,
+    promptCachingEnabled,
+  );
 
   return { status: "generating" };
 };

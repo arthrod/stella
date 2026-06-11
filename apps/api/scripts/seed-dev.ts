@@ -21,7 +21,10 @@
  *   - Test user seeded (bun run db:seed-test-user)
  */
 
+import { panic } from "better-result";
 import { sql } from "drizzle-orm";
+
+import { deriveBlockId } from "@stll/folio/server";
 
 import { rootDb } from "@/api/db/root";
 import {
@@ -2943,7 +2946,11 @@ const buildExportReviewJustificationContent = ({
               text: citationSeed.statement,
               citations: [
                 {
-                  blockId: `b-${String(metadata.pageNumber).padStart(4, "0")}`,
+                  blockId: deriveBlockId({
+                    paraId: null,
+                    index: metadata.pageNumber,
+                    taken: new Set(),
+                  }),
                   text: citationSeed.quote,
                 },
               ],
@@ -3768,7 +3775,7 @@ export async function seed(organizationId?: string, userId?: string) {
   const seedUserRates = buildSeedUserRates(seedUserIds);
 
   if (process.env.NODE_ENV === "production") {
-    throw new Error("Refusing to run in production.");
+    panic("Refusing to run in production.");
   }
 
   // Ensure referenced users exist in the target org before

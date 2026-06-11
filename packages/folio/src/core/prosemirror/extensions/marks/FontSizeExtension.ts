@@ -2,6 +2,9 @@
  * Font Size Mark Extension
  */
 
+import { panic } from "better-result";
+
+import { expectFontSizeMarkAttrs } from "../../attrs";
 import { createMarkExtension } from "../create";
 import type { ExtensionContext, ExtensionRuntime } from "../types";
 import { setMark, removeMark } from "./markUtils";
@@ -36,8 +39,7 @@ export const FontSizeExtension = createMarkExtension({
       },
     ],
     toDOM(mark) {
-      // SAFETY: mark.attrs.size is always a number per the attrs spec above
-      const size = Number(mark.attrs["size"]);
+      const { size } = expectFontSizeMarkAttrs(mark);
       const pt = size / 2;
       const lineHeight = (pt * 1.15).toFixed(2);
       return [
@@ -50,7 +52,7 @@ export const FontSizeExtension = createMarkExtension({
   onSchemaReady(ctx: ExtensionContext): ExtensionRuntime {
     const fontSizeType = ctx.schema.marks["fontSize"];
     if (!fontSizeType) {
-      throw new Error("Missing mark type: fontSize");
+      panic("Missing mark type: fontSize");
     }
     return {
       commands: {

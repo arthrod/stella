@@ -26,7 +26,7 @@ export const supportedLanguages = [
 ] as const;
 
 export type SupportedLanguage = (typeof supportedLanguages)[number];
-type LocaleMessages = LocalizedMessages<Messages>;
+export type LocaleMessages = LocalizedMessages<Messages>;
 type MessageLoader = () => LocaleMessages | Promise<LocaleMessages>;
 
 const supportedLanguageSet: ReadonlySet<string> = new Set(supportedLanguages);
@@ -61,12 +61,15 @@ export const LANG_ENDONYMS = {
   sk: "Slovenčina",
 } as const satisfies Record<SupportedLanguage, string>;
 
-const isSupportedLanguage = (value: string): value is SupportedLanguage =>
-  supportedLanguageSet.has(value);
+export const isSupportedLanguage = (
+  value: string,
+): value is SupportedLanguage => supportedLanguageSet.has(value);
 
 const normalizeLocale = (value: string): string => value.replace("_", "-");
 
-const resolveSupportedLanguage = (value: string): SupportedLanguage | null => {
+export const resolveSupportedLanguage = (
+  value: string,
+): SupportedLanguage | null => {
   const normalized = normalizeLocale(value);
   if (isSupportedLanguage(normalized)) {
     return normalized;
@@ -107,6 +110,10 @@ const detectLang = (): SupportedLanguage => {
 const defaultLanguage = detectLang();
 const defaultMessages = en;
 
+export const loadLocaleMessages = async (
+  lang: SupportedLanguage,
+): Promise<LocaleMessages> => await messageLoaders[lang]();
+
 let translator = createTranslator({
   locale: "en",
   messages: defaultMessages,
@@ -119,6 +126,10 @@ type State = {
   messages: LocaleMessages;
   loadedLang: SupportedLanguage;
   isLoaded: boolean;
+  // True once the first locale has loaded. Latches on and never resets, so a
+  // later language switch (which flips isLoaded false while the new locale
+  // streams in) cannot send the app back to the boot spinner and unmount it.
+  hasLoadedOnce: boolean;
 };
 
 type Actions = {
@@ -153,11 +164,17 @@ export const useI18nStore = create<State & Actions>()(
       messages: defaultMessages,
       loadedLang: "en",
       isLoaded: defaultLanguage === "en",
+      // No locale has finished loading at construction, so the latch starts off
+      // regardless of the browser default. loadMessages turns it on once a
+      // bundle resolves (synchronously for English, after the async import
+      // otherwise), which keeps the boot-spinner gate honest: a persisted
+      // non-English locale cannot skip the spinner before its bundle arrives.
+      hasLoadedOnce: false,
 
       loadMessages: async (lang) => {
         const state = get();
         if (state.loadedLang === lang && state.isLoaded) {
-          set({ lang });
+          set({ lang, hasLoadedOnce: true });
           setDocumentLanguage(lang);
           return;
         }
@@ -175,7 +192,11 @@ export const useI18nStore = create<State & Actions>()(
 
           const fallback = get();
           applyMessages(fallback.loadedLang, fallback.messages);
-          set({ lang: fallback.loadedLang, isLoaded: true });
+          set({
+            lang: fallback.loadedLang,
+            isLoaded: true,
+            hasLoadedOnce: true,
+          });
           return;
         }
 
@@ -184,7 +205,13 @@ export const useI18nStore = create<State & Actions>()(
         }
 
         applyMessages(lang, messages);
-        set({ lang, messages, loadedLang: lang, isLoaded: true });
+        set({
+          lang,
+          messages,
+          loadedLang: lang,
+          isLoaded: true,
+          hasLoadedOnce: true,
+        });
       },
 
       setLang: async (lang) => {

@@ -11,6 +11,7 @@ import {
   AvatarFallback,
   AvatarImage,
 } from "@stll/ui/components/avatar";
+import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 import { cn } from "@stll/ui/lib/utils";
 
 import { useInlineRename } from "@/hooks/use-inline-rename";
@@ -123,9 +124,10 @@ export const KanbanCard = ({
             if (!inner) {
               return;
             }
-            // SAFETY: cloneNode of HTMLElement returns HTMLElement
-            // eslint-disable-next-line typescript/no-unsafe-type-assertion
-            const clone = inner.cloneNode(true) as HTMLElement;
+            const clone = inner.cloneNode(true);
+            if (!(clone instanceof HTMLElement)) {
+              return;
+            }
             const rect = inner.getBoundingClientRect();
             clone.style.width = `${rect.width}px`;
             container.append(clone);
@@ -142,6 +144,7 @@ export const KanbanCard = ({
   const icon = (
     <EntityKindIcon
       className="size-4 shrink-0"
+      fileName={file?.fileName}
       kind={entity.kind}
       mimeType={file?.mimeType}
       status={entity.status}
@@ -276,12 +279,20 @@ export const KanbanCard = ({
             "bg-card relative block w-full cursor-pointer rounded-lg border p-3 text-start shadow-xs transition-shadow hover:shadow-md",
             isActiveTask && "ring-primary/30 ring-2",
           )}
-          onClick={() =>
-            useInspectorStore.getState().openTask(entity.entityId, name)
-          }
+          onClick={containedHandler(cardRef, () =>
+            useInspectorStore.getState().openTask({
+              taskId: entity.entityId,
+              workspaceId,
+              label: name,
+            }),
+          )}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
-              useInspectorStore.getState().openTask(entity.entityId, name);
+              useInspectorStore.getState().openTask({
+                taskId: entity.entityId,
+                workspaceId,
+                label: name,
+              });
             }
           }}
           ref={cardRef}
@@ -303,23 +314,25 @@ export const KanbanCard = ({
             "bg-card relative block w-full cursor-pointer rounded-lg border p-3 text-start shadow-xs transition-shadow hover:shadow-md",
             isActivePeek && "ring-primary/30 ring-2",
           )}
-          onClick={() =>
+          onClick={containedHandler(cardRef, () =>
             useInspectorStore.getState().openFile({
               id: file.fieldId,
               entityId: file.entityId,
               label: name,
+              fileName: file.fileName,
               mimeType: file.mimeType,
               pdfFileId: file.pdfFileId,
               propertyId: file.propertyId,
               workspaceId,
-            })
-          }
+            }),
+          )}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               useInspectorStore.getState().openFile({
                 id: file.fieldId,
                 entityId: file.entityId,
                 label: name,
+                fileName: file.fileName,
                 mimeType: file.mimeType,
                 pdfFileId: file.pdfFileId,
                 propertyId: file.propertyId,

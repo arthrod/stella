@@ -22,7 +22,9 @@ import type {
 } from "../../../types/document";
 import { paragraphToStyle } from "../../../utils/formatToStyle";
 import { collectHeadings } from "../../../utils/headingCollector";
+import { expectParagraphAttrs } from "../../attrs";
 import type { ParagraphAttrs } from "../../schema/nodes";
+import { paragraphAttrsFromResolvedStyle } from "../../styles/resolvedStyleAttrs";
 import { createNodeExtension } from "../create";
 import type { ExtensionContext, ExtensionRuntime } from "../types";
 
@@ -340,6 +342,10 @@ const paragraphNodeSpec: NodeSpec = {
     listMarkerHidden: { default: null },
     listMarkerFontFamily: { default: null },
     listMarkerFontSize: { default: null },
+    listMarkerSuffix: { default: null },
+    listMarkerAllCaps: { default: null },
+    listImplicitChildLevelAdvances: { default: null },
+    listMarkerSecondSlotOffsetTwips: { default: null },
     listLevelNumFmts: { default: null },
     listAbstractNumId: { default: null },
     listStartOverride: { default: null },
@@ -358,9 +364,11 @@ const paragraphNodeSpec: NodeSpec = {
     bidi: { default: null },
     outlineLevel: { default: null },
     bookmarks: { default: null },
+    _emptyHyperlinks: { default: null },
     _originalFormatting: { default: null },
     _sectionProperties: { default: null },
     _propertyChanges: { default: null },
+    pPrMark: { default: null },
   },
   parseDOM: [
     {
@@ -420,7 +428,7 @@ const paragraphNodeSpec: NodeSpec = {
     })),
   ],
   toDOM(node) {
-    const attrs = node.attrs as ParagraphAttrs;
+    const attrs = expectParagraphAttrs(node);
     const style = paragraphAttrsToDOMStyle(attrs);
     const listClass = getListClass(
       attrs.numPr,
@@ -700,22 +708,15 @@ function makeApplyStyle(schema: Schema) {
             // When applying a style, explicitly reset all style-controlled
             // paragraph attrs to the new style's values (or null to clear).
             // This prevents old style properties (e.g. heading line spacing)
-            // from persisting when switching to a different style.
-            const ppr = resolvedAttrs.paragraphFormatting;
-            newAttrs["alignment"] = ppr?.alignment ?? null;
-            newAttrs["spaceBefore"] = ppr?.spaceBefore ?? null;
-            newAttrs["spaceAfter"] = ppr?.spaceAfter ?? null;
-            newAttrs["lineSpacing"] = ppr?.lineSpacing ?? null;
-            newAttrs["lineSpacingRule"] = ppr?.lineSpacingRule ?? null;
-            newAttrs["indentLeft"] = ppr?.indentLeft ?? null;
-            newAttrs["indentRight"] = ppr?.indentRight ?? null;
-            newAttrs["indentFirstLine"] = ppr?.indentFirstLine ?? null;
-            newAttrs["hangingIndent"] = ppr?.hangingIndent ?? null;
-            newAttrs["contextualSpacing"] = ppr?.contextualSpacing ?? null;
-            newAttrs["keepNext"] = ppr?.keepNext ?? null;
-            newAttrs["keepLines"] = ppr?.keepLines ?? null;
-            newAttrs["pageBreakBefore"] = ppr?.pageBreakBefore ?? null;
-            newAttrs["outlineLevel"] = ppr?.outlineLevel ?? null;
+            // from persisting when switching to a different style. The same
+            // projection drives the Enter handler's next-style switch, so
+            // both paths produce identical paragraph attrs — and the resulting
+            // `defaultTextFormatting` lets EmptyParagraphFormatExtension keep
+            // typed text styled after the style picker steals focus.
+            Object.assign(
+              newAttrs,
+              paragraphAttrsFromResolvedStyle(resolvedAttrs),
+            );
           }
 
           tr = tr.setNodeMarkup(pos, undefined, newAttrs);
@@ -915,6 +916,40 @@ export const ParagraphExtension = createNodeExtension({
             );
 
             // TOC entries with hyperlinks
+            // Right tab with a dot leader so each entry's page number aligns at
+            // the section's content width (page width minus left/right margins,
+            // in twips). Read from the document's section properties; fall back
+            // to US Letter with 1in margins when none are present.
+            const DEFAULT_MARGIN_TWIPS = 1440;
+            let tocTabStopTwips = 12_240 - 2 * DEFAULT_MARGIN_TWIPS; // 9360
+            let tabStopResolved = false;
+            state.doc.descendants((node) => {
+              if (tabStopResolved || node.type.name !== "paragraph") {
+                return undefined;
+              }
+              const sp = node.attrs["_sectionProperties"] as {
+                pageWidth?: number;
+                marginLeft?: number;
+                marginRight?: number;
+              } | null;
+              if (sp && typeof sp.pageWidth === "number" && sp.pageWidth > 0) {
+                const left =
+                  typeof sp.marginLeft === "number"
+                    ? sp.marginLeft
+                    : DEFAULT_MARGIN_TWIPS;
+                const right =
+                  typeof sp.marginRight === "number"
+                    ? sp.marginRight
+                    : DEFAULT_MARGIN_TWIPS;
+                tocTabStopTwips = sp.pageWidth - left - right;
+                tabStopResolved = true;
+              }
+              return undefined;
+            });
+            // Each entry ends with a PAGEREF to the heading's bookmark, which
+            // resolves to the heading's live page number at paint.
+            const canPageNumber = Boolean(s.nodes["field"] && s.nodes["tab"]);
+
             for (const entry of bookmarkEntries) {
               const indent = entry.level * 720; // 0.5 inch per level in twips
               const tocStyleId = `TOC${entry.level + 1}`; // TOC1, TOC2, etc.
@@ -925,14 +960,40 @@ export const ParagraphExtension = createNodeExtension({
                 href: `#${entry.name}`,
               });
 
+              const content = [s.text(entry.text, [linkMark])];
+              if (canPageNumber) {
+                content.push(
+                  s.node("tab"),
+                  s.node("field", {
+                    fieldType: "PAGEREF",
+                    instruction: `PAGEREF ${entry.name} \\h`,
+                    displayText: "1",
+                    fieldKind: "complex",
+                    fldLock: false,
+                    dirty: true,
+                  }),
+                );
+              }
+
               tocNodes.push(
                 s.node(
                   "paragraph",
                   {
                     styleId: tocStyleId,
                     indentLeft: indent > 0 ? indent : null,
+                    ...(canPageNumber
+                      ? {
+                          tabs: [
+                            {
+                              position: tocTabStopTwips,
+                              alignment: "right",
+                              leader: "dot",
+                            },
+                          ],
+                        }
+                      : {}),
                   },
-                  [s.text(entry.text, [linkMark])],
+                  content,
                 ),
               );
             }

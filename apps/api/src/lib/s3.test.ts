@@ -1,9 +1,21 @@
 import { describe, expect, test } from "bun:test";
 
-import { getS3, isS3Stale, resolveS3Credentials } from "@/api/lib/s3";
+import {
+  credentialsFromEnvValues,
+  getS3,
+  isS3Stale,
+  resolveS3Credentials,
+} from "@/api/lib/s3";
 
 const jsonResponse = (body: unknown): Response =>
   new Response(JSON.stringify(body), { status: 200 });
+
+const ecsCredentialsResponse = (): Response =>
+  jsonResponse({
+    AccessKeyId: "ecs-access-key",
+    SecretAccessKey: "ecs-secret-key",
+    Token: "ecs-session-token",
+  });
 
 const notFoundResponse = (): Response => new Response(null, { status: 404 });
 
@@ -19,6 +31,14 @@ const requestUrl = (input: string | URL | Request): string => {
   return input.url;
 };
 
+const createTrackedEcsCredentialsFetch =
+  (requestedUrls: string[]) =>
+  async (url: string | URL | Request): Promise<Response> => {
+    requestedUrls.push(requestUrl(url));
+
+    return ecsCredentialsResponse();
+  };
+
 describe("resolveS3Credentials", () => {
   test("treats a lazily built fallback client as stale", () => {
     getS3();
@@ -28,17 +48,7 @@ describe("resolveS3Credentials", () => {
 
   test("prefers ECS task credentials over static credentials for AWS S3 endpoints", async () => {
     const requestedUrls: string[] = [];
-    const fetchImpl = async (
-      url: string | URL | Request,
-    ): Promise<Response> => {
-      requestedUrls.push(requestUrl(url));
-
-      return jsonResponse({
-        AccessKeyId: "ecs-access-key",
-        SecretAccessKey: "ecs-secret-key",
-        Token: "ecs-session-token",
-      });
-    };
+    const fetchImpl = createTrackedEcsCredentialsFetch(requestedUrls);
 
     const credentials = await resolveS3Credentials({
       endpoint: "https://s3.eu-central-1.amazonaws.com",
@@ -62,17 +72,7 @@ describe("resolveS3Credentials", () => {
 
   test("prefers static credentials for S3-compatible endpoints in auto mode", async () => {
     const requestedUrls: string[] = [];
-    const fetchImpl = async (
-      url: string | URL | Request,
-    ): Promise<Response> => {
-      requestedUrls.push(requestUrl(url));
-
-      return jsonResponse({
-        AccessKeyId: "ecs-access-key",
-        SecretAccessKey: "ecs-secret-key",
-        Token: "ecs-session-token",
-      });
-    };
+    const fetchImpl = createTrackedEcsCredentialsFetch(requestedUrls);
 
     const credentials = await resolveS3Credentials({
       endpoint: "https://s3.example.com",
@@ -94,12 +94,7 @@ describe("resolveS3Credentials", () => {
   });
 
   test("supports explicit AWS runtime credentials for S3-compatible endpoints", async () => {
-    const fetchImpl = async (): Promise<Response> =>
-      jsonResponse({
-        AccessKeyId: "ecs-access-key",
-        SecretAccessKey: "ecs-secret-key",
-        Token: "ecs-session-token",
-      });
+    const fetchImpl = async (): Promise<Response> => ecsCredentialsResponse();
 
     const credentials = await resolveS3Credentials({
       endpoint: "https://s3.example.com",
@@ -167,5 +162,43 @@ describe("resolveS3Credentials", () => {
       secretAccessKey: "static-secret-key",
     });
     expect(requestedUrls).toEqual(["http://169.254.169.254/latest/api/token"]);
+  });
+});
+
+describe("credentialsFromEnvValues", () => {
+  test("returns null when both env vars are unset", () => {
+    expect(credentialsFromEnvValues(undefined, undefined)).toBeNull();
+  });
+
+  test("returns null when only access key is set", () => {
+    expect(credentialsFromEnvValues("real-key", undefined)).toBeNull();
+  });
+
+  test("returns the configured credentials when both are real values", () => {
+    expect(credentialsFromEnvValues("AKIA-real", "real-secret")).toEqual({
+      accessKeyId: "AKIA-real",
+      secretAccessKey: "real-secret",
+    });
+  });
+
+  test("rejects the use-iam-role placeholder so we fall through to runtime resolution", () => {
+    expect(credentialsFromEnvValues("use-iam-role", "use-iam-role")).toBeNull();
+  });
+
+  test("rejects when either side is the placeholder", () => {
+    expect(credentialsFromEnvValues("AKIA-real", "use-iam-role")).toBeNull();
+    expect(credentialsFromEnvValues("use-iam-role", "real-secret")).toBeNull();
+  });
+
+  test("treats an empty string as unset (defensive)", () => {
+    expect(credentialsFromEnvValues("", "")).toBeNull();
+  });
+
+  test("rejects placeholder regardless of casing or surrounding whitespace", () => {
+    expect(credentialsFromEnvValues("USE-IAM-ROLE", "use-iam-role")).toBeNull();
+    expect(
+      credentialsFromEnvValues("  use-iam-role  ", "  use-iam-role  "),
+    ).toBeNull();
+    expect(credentialsFromEnvValues("Use-Iam-Role", "use-iam-role")).toBeNull();
   });
 });

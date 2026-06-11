@@ -3,7 +3,14 @@ import type { ComponentProps } from "react";
 
 import { isToolUIPart } from "ai";
 import type { FileUIPart } from "ai";
-import { CopyIcon, FileTextIcon, RotateCcwIcon } from "lucide-react";
+import {
+  ClockIcon,
+  CopyIcon,
+  FileTextIcon,
+  PaperclipIcon,
+  RotateCcwIcon,
+  XIcon,
+} from "lucide-react";
 import type { PluggableList } from "unified";
 import { useTranslations } from "use-intl";
 
@@ -34,8 +41,13 @@ import { SourceChips } from "@/components/chat/source-chips";
 import { StreamdownMentionLink } from "@/components/chat/streamdown-mention-link";
 import { ToolApprovalCard } from "@/components/chat/tool-approval-card";
 import { ToolCallCard } from "@/components/chat/tool-call-card";
+import { WebSearchSources } from "@/components/chat/web-search-sources";
 import type { TranslationKey } from "@/i18n/types";
-import { getUserFileContentUrl } from "@/lib/user-files";
+import {
+  getUserFileContentUrl,
+  getUserFileThumbnailUrl,
+} from "@/lib/user-files";
+import type { QueuedChatMessage } from "@/routes/_protected.chat/-hooks/use-chat-session";
 
 const USER_STREAMDOWN_COMPONENTS = {
   a: (props: ComponentProps<"a">) => (
@@ -177,13 +189,32 @@ const UserAttachments = ({ parts }: { parts: readonly FileUIPart[] }) => {
         const contentUrl = getUserFileContentUrl(part.url) ?? part.url;
         const fallbackLabel = t("chat.attachment");
         if (IMAGE_MEDIA_TYPES.has(part.mediaType)) {
+          // The backend sets `placeholder` (a blur data URL) only when a
+          // thumbnail was generated, so its presence doubles as "serve the
+          // smaller thumbnail instead of the full original."
+          const placeholder =
+            "placeholder" in part && typeof part.placeholder === "string"
+              ? part.placeholder
+              : undefined;
+          const imageSrc = placeholder
+            ? (getUserFileThumbnailUrl(part.url) ?? contentUrl)
+            : contentUrl;
           return (
             <a href={contentUrl} key={key} rel="noreferrer" target="_blank">
               <img
                 alt={part.filename ?? t("chat.attachedImage")}
                 className="max-h-32 rounded-md object-cover"
                 height={128}
-                src={contentUrl}
+                src={imageSrc}
+                style={
+                  placeholder
+                    ? {
+                        backgroundImage: `url("${placeholder}")`,
+                        backgroundSize: "cover",
+                        backgroundPosition: "center",
+                      }
+                    : undefined
+                }
                 width={128}
               />
             </a>
@@ -233,7 +264,9 @@ const ThinkingIndicator = () => {
 // the error message; anything else falls through to the generic
 // copy.
 const CHAT_ERROR_TRANSLATION_KEYS = {
-  insufficient_credits: "chat.sendErrorInsufficientCredits",
+  provider_billing: "chat.sendErrorProviderBilling",
+  loop_detected: "chat.sendErrorLoopDetected",
+  model_unavailable: "chat.sendErrorModelUnavailable",
   provider_unavailable: "chat.sendErrorProviderUnavailable",
   quota_exhausted: "chat.sendErrorQuotaExhausted",
 } as const satisfies Record<string, TranslationKey>;
@@ -443,6 +476,15 @@ type ChatThreadMessagesProps = {
     toolCallId: string,
     output: AskUserOutput,
   ) => void | PromiseLike<void>;
+  /**
+   * Re-run callback for answered ask-user cards. When omitted,
+   * the edit affordance stays hidden — useful for surfaces that
+   * shouldn't allow branching the conversation (read-only views,
+   * mid-stream, etc.).
+   */
+  onAskUserEditAndRerun?:
+    | ((toolCallId: string, output: AskUserOutput) => void | PromiseLike<void>)
+    | undefined;
   onCreateDocumentResolve: (
     toolCallId: string,
     matterId: string,
@@ -457,6 +499,13 @@ type ChatThreadMessagesProps = {
   showThinkingIndicator?: boolean | undefined;
   showToolCallDetails?: boolean | undefined;
   showToolCalls?: boolean | undefined;
+  /**
+   * Messages the user composed while a response was streaming.
+   * Rendered as dimmed "pending" bubbles below the transcript;
+   * `useChatSession` dispatches them once the turn finishes.
+   */
+  queuedMessages?: readonly QueuedChatMessage[] | undefined;
+  onRemoveQueuedMessage?: ((id: string) => void) | undefined;
   streamdownComponents: {
     a: (props: ComponentProps<"a">) => React.ReactNode;
     "stll-anon"?: (
@@ -478,11 +527,14 @@ export const ChatThreadMessages = ({
   onResend,
   onSendWithoutAnonymization,
   onAskUserSubmit,
+  onAskUserEditAndRerun,
   onCreateDocumentResolve,
   onOpenCreatedDocument,
   showThinkingIndicator = false,
   showToolCallDetails,
   showToolCalls,
+  queuedMessages,
+  onRemoveQueuedMessage,
   streamdownComponents,
   workspaceId,
 }: ChatThreadMessagesProps) => {
@@ -511,7 +563,11 @@ export const ChatThreadMessages = ({
               <>
                 <AssistantMessageParts
                   activeOrganizationId={activeOrganizationId}
+                  isLatestAssistantMessage={
+                    message.id === retryableAssistantMessageId
+                  }
                   message={message}
+                  onAskUserEditAndRerun={onAskUserEditAndRerun}
                   onAskUserSubmit={onAskUserSubmit}
                   onCreateDocumentResolve={onCreateDocumentResolve}
                   onOpenCreatedDocument={onOpenCreatedDocument}
@@ -574,12 +630,82 @@ export const ChatThreadMessages = ({
       {showThinkingIndicator &&
         isGenerating &&
         !hasVisibleContent(messages) && <ThinkingIndicator />}
+      {onRemoveQueuedMessage &&
+        queuedMessages !== undefined &&
+        queuedMessages.length > 0 && (
+          <QueuedUserMessages
+            messages={queuedMessages}
+            onRemove={onRemoveQueuedMessage}
+          />
+        )}
     </>
+  );
+};
+
+type QueuedUserMessagesProps = {
+  messages: readonly QueuedChatMessage[];
+  onRemove: (id: string) => void;
+};
+
+/**
+ * Pending user messages — composed mid-stream and waiting their
+ * turn. Rendered below the live transcript as dimmed bubbles so the
+ * user can see what is queued and cancel any of it before it sends.
+ */
+const QueuedUserMessages = ({
+  messages,
+  onRemove,
+}: QueuedUserMessagesProps) => {
+  const t = useTranslations();
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-muted-foreground ms-auto flex items-center gap-1 text-xs">
+        <ClockIcon aria-hidden="true" className="size-3" />
+        {t("chat.queuedNotice")}
+      </p>
+      {messages.map((queued) => {
+        const text = queued.text.trim()
+          ? normalizeUserMessageTextForDisplay(queued.text)
+          : "";
+        return (
+          <Message from="user" key={queued.id}>
+            <div className="ms-auto flex max-w-full items-start gap-1">
+              <Button
+                aria-label={t("chat.cancelQueuedMessage")}
+                className="mt-0.5 shrink-0"
+                onClick={() => onRemove(queued.id)}
+                size="icon-xs"
+                variant="ghost"
+              >
+                <XIcon className="size-3.5" />
+              </Button>
+              <MessageContent className="opacity-60">
+                {text.length > 0 && (
+                  <UserMessageText
+                    restorationPairs={EMPTY_RESTORATION_PAIRS}
+                    text={text}
+                  />
+                )}
+                {queued.fileCount > 0 && (
+                  <span className="text-muted-foreground flex items-center gap-1 text-xs">
+                    <PaperclipIcon aria-hidden="true" className="size-3" />
+                    {t("chat.queuedAttachmentCount", {
+                      count: queued.fileCount,
+                    })}
+                  </span>
+                )}
+              </MessageContent>
+            </div>
+          </Message>
+        );
+      })}
+    </div>
   );
 };
 
 type AssistantMessagePartsProps = Pick<
   ChatThreadMessagesProps,
+  | "onAskUserEditAndRerun"
   | "onAskUserSubmit"
   | "onCreateDocumentResolve"
   | "onOpenCreatedDocument"
@@ -587,6 +713,7 @@ type AssistantMessagePartsProps = Pick<
   | "workspaceId"
 > & {
   activeOrganizationId: string;
+  isLatestAssistantMessage: boolean;
   message: PersistedChatMessage;
   shouldShowToolCalls: boolean;
 };
@@ -601,7 +728,9 @@ type AssistantMessagePartsProps = Pick<
  */
 const AssistantMessageParts = ({
   activeOrganizationId,
+  isLatestAssistantMessage,
   message,
+  onAskUserEditAndRerun,
   onAskUserSubmit,
   onCreateDocumentResolve,
   onOpenCreatedDocument,
@@ -627,7 +756,13 @@ const AssistantMessageParts = ({
         if (part.type === "tool-ask-user") {
           return (
             <AskUserCard
+              discardsDownstream={!isLatestAssistantMessage}
               key={part.toolCallId}
+              {...(onAskUserEditAndRerun && {
+                onEditAndRerun: (toolCallId, output) => {
+                  void onAskUserEditAndRerun(toolCallId, output);
+                },
+              })}
               onSubmit={(toolCallId, output) => {
                 void onAskUserSubmit(toolCallId, output);
               }}
@@ -647,6 +782,18 @@ const AssistantMessageParts = ({
               part={part}
             />
           );
+        }
+
+        if (
+          (part.type === "tool-web_search" || part.type === "tool-fetch_url") &&
+          "state" in part &&
+          part.state === "output-available"
+        ) {
+          // Completed searches are rendered as a single dedup'd row by
+          // <WebSearchSources> below; skipping here avoids the duplicate.
+          // Other states (approval-requested, input-*) still need to fall
+          // through to the approval/tool-call cards.
+          return null;
         }
 
         if (isApprovalPart(part)) {
@@ -672,6 +819,7 @@ const AssistantMessageParts = ({
 
         return null;
       })}
+      <WebSearchSources parts={message.parts} />
     </>
   );
 };

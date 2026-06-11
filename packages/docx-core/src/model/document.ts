@@ -94,6 +94,7 @@ export type {
   ImagePosition,
   ImageTransform,
   ImagePadding,
+  ImageCrop,
   Image,
   ShapeType,
   ShapeFill,
@@ -125,6 +126,7 @@ export type {
   TablePropertyChange,
   TableRowPropertyChange,
   TableCellPropertyChange,
+  SectionPropertyChange,
   TableStructuralChangeInfo,
   SdtType,
   SdtProperties,
@@ -132,10 +134,14 @@ export type {
   BlockSdt,
   ParagraphContent,
   Paragraph,
+  ParagraphMarkChange,
   HeaderFooterType,
   HeaderReference,
   FooterReference,
   HeaderFooter,
+  Watermark,
+  TextWatermark,
+  PictureWatermark,
   FootnotePosition,
   EndnotePosition,
   NoteNumberRestart,
@@ -177,11 +183,32 @@ export type {
 // ============================================================================
 
 /**
+ * Document-wide settings parsed from `word/settings.xml`.
+ * Extend as more settings.xml fields enter the layout pipeline.
+ */
+export type DocumentSettings = {
+  /**
+   * `w:defaultTabStop` (§17.6.13) — interval in twips between default
+   * tab stops applied when a paragraph has no custom `w:tabs`. Word
+   * defaults to 720 twips (½ inch) when absent.
+   */
+  defaultTabStop: number;
+  /**
+   * `w:evenAndOddHeaders` (§17.10.1) — when true, even pages use a distinct
+   * even header/footer. Word stores this in `settings.xml` (not `sectPr`), so
+   * it is a document-wide flag; absent means odd/even share one header.
+   */
+  evenAndOddHeaders?: boolean;
+};
+
+/**
  * Complete DOCX package structure
  */
 export type DocxPackage = {
   /** Document body */
   document: DocumentBody;
+  /** Document-wide settings (`word/settings.xml`). */
+  settings?: DocumentSettings;
   /** Style definitions */
   styles?: StyleDefinitions;
   /** Theme */

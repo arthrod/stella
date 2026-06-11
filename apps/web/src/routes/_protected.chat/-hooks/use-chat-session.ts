@@ -3,15 +3,16 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { ComponentProps } from "react";
 
 import { useChat } from "@ai-sdk/react";
 import type { Chat } from "@ai-sdk/react";
-import { useQuery } from "@tanstack/react-query";
-import { useNavigate, useRouteContext } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { isToolUIPart } from "ai";
+import { v7 as uuidv7 } from "uuid";
 
 import type { ChatSendMode } from "@stll/anonymize-chat";
 
@@ -36,10 +37,11 @@ import { openEntityInInspector } from "@/components/chat/entity-open";
 import type { NeedsMatterMatter } from "@/components/chat/needs-matter-card";
 import { StreamdownMentionLink } from "@/components/chat/streamdown-mention-link";
 import { api } from "@/lib/api";
-import { toChatThreadId } from "@/lib/chat-thread-ref";
+import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { toAPIError } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
 import { mcpConnectorsOptions } from "@/routes/_protected.knowledge/-queries";
+import { fileOptions } from "@/routes/_protected.workspaces/$workspaceId/-components/files/queries";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
 import { entitiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
 import { workspacesNavigationOptions } from "@/routes/_protected.workspaces/-queries";
@@ -51,6 +53,7 @@ type CreateDocumentSuccess = Extract<CreateDocumentOutput, { success: true }>;
 type UseChatSessionOptions = {
   chat: Chat<PersistedChatMessage>;
   conversationId: string;
+  getSendMode?: (() => ChatSendMode) | undefined;
   workspaceId?: string | undefined;
 };
 
@@ -67,16 +70,58 @@ export type ResendLatestMessageOptions = {
 const EMPTY_MCP_CONNECTOR_IDENTITIES: readonly McpConnectorApprovalIdentity[] =
   [];
 
+/**
+ * Payload shape accepted by the AI SDK's `sendMessage`. Surfaces
+ * only ever pass `{ text }`, `{ files }`, or `{ text, files }`, but
+ * the queue keeps the SDK's full union so it can hold whatever a
+ * caller hands `sendMessage`.
+ */
+type ChatSendMessageInput = NonNullable<
+  Parameters<Chat<PersistedChatMessage>["sendMessage"]>[0]
+>;
+type ChatSendMessageOptions = Parameters<
+  Chat<PersistedChatMessage>["sendMessage"]
+>[1];
+
+/**
+ * A user message composed while a response was still streaming.
+ * `useChatSession` holds these in a queue and dispatches them —
+ * oldest first — once the turn finishes. `text` is the raw editor
+ * HTML (rendered like any sent user message); `fileCount` lets the
+ * pending bubble show an attachment hint without the view ever
+ * touching the file payloads.
+ */
+export type QueuedChatMessage = {
+  id: string;
+  text: string;
+  fileCount: number;
+};
+
+type QueuedChatEntry = QueuedChatMessage & {
+  /** Fully-built payload handed to the AI SDK on dispatch. */
+  message: ChatSendMessageInput;
+  options: ChatSendMessageOptions;
+};
+
+/**
+ * Pull a display preview out of an outgoing chat payload. The SDK
+ * union has no discriminator, so the `text`/`files` shapes our
+ * surfaces send are told apart structurally with `in`.
+ */
+const describeQueuedMessage = (
+  message: ChatSendMessageInput,
+): Pick<QueuedChatMessage, "fileCount" | "text"> => ({
+  text: "text" in message ? message.text : "",
+  fileCount: "files" in message ? message.files.length : 0,
+});
+
 export const useChatSession = ({
   chat,
   conversationId,
+  getSendMode,
   workspaceId,
 }: UseChatSessionOptions) => {
-  const navigate = useNavigate();
-  const organizationId = useRouteContext({
-    from: "/_protected",
-    select: (ctx) => ctx.user.activeOrganizationId,
-  });
+  const organizationId = useAuthenticatedUser().activeOrganizationId;
   const { data: mcpCatalog } = useQuery(mcpConnectorsOptions(organizationId));
   const mcpConnectorIdentities =
     mcpCatalog?.connectors ?? EMPTY_MCP_CONNECTOR_IDENTITIES;
@@ -92,17 +137,112 @@ export const useChatSession = ({
     messages,
     regenerate,
     sendMessage: sendChatMessage,
+    setMessages,
     stop,
     status,
     addToolApprovalResponse,
     addToolOutput,
   } = useChat({ chat });
 
-  const sendMessage = useCallback(
-    async (message: Parameters<typeof sendChatMessage>[0]) => {
-      await sendChatMessage(message);
+  // Mirror `isGenerating` (computed below) and the live queue into
+  // refs so the stable `sendMessage` callback can branch on the
+  // latest committed values. The refs are updated in effects or
+  // queue-event helpers (not during render) so a concurrent re-render
+  // that bails out can't strand them ahead of committed state.
+  const isGeneratingRef = useRef(false);
+  const queueRef = useRef<QueuedChatEntry[]>([]);
+  const wasGeneratingRef = useRef(false);
+  const conversationIdRef = useRef(conversationId);
+  const [queuedMessages, setQueuedMessages] = useState<QueuedChatEntry[]>([]);
+
+  const replaceQueuedMessages = useCallback((next: QueuedChatEntry[]) => {
+    queueRef.current = next;
+    setQueuedMessages(next);
+  }, []);
+
+  const withSendModeSnapshot = useCallback(
+    (options: ChatSendMessageOptions): ChatSendMessageOptions => {
+      const sendMode = getSendMode?.();
+      if (sendMode === undefined) {
+        return options;
+      }
+      return {
+        ...options,
+        body: {
+          sendMode,
+          ...options?.body,
+        },
+      };
     },
-    [sendChatMessage],
+    [getSendMode],
+  );
+
+  const enqueueMessage = useCallback(
+    (message: ChatSendMessageInput, options: ChatSendMessageOptions) => {
+      replaceQueuedMessages([
+        ...queueRef.current,
+        { id: uuidv7(), message, options, ...describeQueuedMessage(message) },
+      ]);
+    },
+    [replaceQueuedMessages],
+  );
+
+  const takeOldestQueuedMessage = useCallback(() => {
+    const next = queueRef.current.at(0);
+    if (!next) {
+      return null;
+    }
+    replaceQueuedMessages(queueRef.current.slice(1));
+    return next;
+  }, [replaceQueuedMessages]);
+
+  const sendMessage = useCallback(
+    async (message: ChatSendMessageInput, options?: ChatSendMessageOptions) => {
+      if (conversationIdRef.current !== conversationId) {
+        conversationIdRef.current = conversationId;
+        isGeneratingRef.current = false;
+        wasGeneratingRef.current = false;
+        replaceQueuedMessages([]);
+      }
+
+      const requestOptions = withSendModeSnapshot(options);
+      if (isGeneratingRef.current) {
+        enqueueMessage(message, requestOptions);
+        return;
+      }
+
+      // When the queue is gated after an errored turn, a manual send
+      // should resume the queue without reordering the transcript:
+      // append the new prompt, then dispatch the oldest waiting one.
+      if (queueRef.current.length > 0) {
+        enqueueMessage(message, requestOptions);
+        const next = takeOldestQueuedMessage();
+        if (next) {
+          isGeneratingRef.current = true;
+          await sendChatMessage(next.message, next.options);
+        }
+        return;
+      }
+
+      await sendChatMessage(message, requestOptions);
+    },
+    [
+      conversationId,
+      enqueueMessage,
+      replaceQueuedMessages,
+      sendChatMessage,
+      takeOldestQueuedMessage,
+      withSendModeSnapshot,
+    ],
+  );
+
+  const removeQueuedMessage = useCallback(
+    (id: string) => {
+      replaceQueuedMessages(
+        queueRef.current.filter((entry) => entry.id !== id),
+      );
+    },
+    [replaceQueuedMessages],
   );
 
   const resendLatestMessage = useCallback(
@@ -186,6 +326,98 @@ export const useChatSession = ({
     [addToolOutput],
   );
 
+  /**
+   * Edit an already-answered ask-user card and replay the model
+   * from that point. We don't have a "rewind to message" primitive
+   * in the AI SDK, so this is a truncate-and-replay:
+   *
+   *   1. Find the assistant message that owns the ask-user part.
+   *   2. Drop every message after it locally; the backend receives
+   *      the same truncation target for persisted history.
+   *   3. Reset the ask-user part itself to `input-available` so
+   *      `addToolOutput` writes a fresh output and the
+   *      `sendAutomaticallyWhen` predicate (which fires when the
+   *      latest assistant message has a complete tool call) drives
+   *      the next turn.
+   *
+   * The replay request also carries `truncateAfterMessageId`, so the
+   * backend drops persisted downstream turns before preparing the next
+   * model context.
+   */
+  const handleAskUserEditAndRerun = useCallback(
+    async (toolCallId: string, output: AskUserOutput) => {
+      let targetIndex = -1;
+      for (let i = 0; i < messages.length; i += 1) {
+        const candidate = messages[i];
+        if (!candidate || candidate.role !== "assistant") {
+          continue;
+        }
+        const hasPart = candidate.parts.some(
+          (part) =>
+            part.type === "tool-ask-user" && part.toolCallId === toolCallId,
+        );
+        if (hasPart) {
+          targetIndex = i;
+          break;
+        }
+      }
+      if (targetIndex === -1) {
+        return;
+      }
+      const targetMessage = messages[targetIndex];
+      if (!targetMessage || targetMessage.role !== "assistant") {
+        return;
+      }
+
+      // SAFETY: spreading inside `.map` is flagged by no-map-spread,
+      // but slice's elements are shared refs with the original
+      // `messages` array — mutating in place would corrupt the
+      // SDK's history. The spread builds a new message object that
+      // owns the rewritten parts array.
+      const truncated = messages
+        .slice(0, targetIndex + 1)
+        // eslint-disable-next-line oxc/no-map-spread
+        .map((message) => {
+          if (message.role !== "assistant") {
+            return message;
+          }
+          // Reset the matching ask-user part so `addToolOutput` can
+          // overwrite its output without the SDK no-op'ing because
+          // the state is already `output-available`. Using the
+          // `input-available` shape keeps the input visible so the
+          // card body stays consistent during the brief frame
+          // between truncation and the next `addToolOutput` call.
+          const nextParts = message.parts.map((part) => {
+            if (
+              part.type === "tool-ask-user" &&
+              part.toolCallId === toolCallId &&
+              part.state === "output-available"
+            ) {
+              return {
+                type: "tool-ask-user" as const,
+                toolCallId: part.toolCallId,
+                state: "input-available" as const,
+                input: part.input,
+              };
+            }
+            return part;
+          });
+          return { ...message, parts: nextParts };
+        });
+      setMessages(truncated);
+      const replayOptions = withSendModeSnapshot({
+        body: { truncateAfterMessageId: targetMessage.id },
+      });
+      await addToolOutput({
+        tool: "ask-user",
+        toolCallId,
+        output,
+        ...(replayOptions === undefined ? {} : { options: replayOptions }),
+      });
+    },
+    [addToolOutput, messages, setMessages, withSendModeSnapshot],
+  );
+
   const { data: workspacesNavigation, isPending: isLoadingMatters } = useQuery(
     workspacesNavigationOptions(organizationId),
   );
@@ -202,6 +434,7 @@ export const useChatSession = ({
     [workspacesNavigation],
   );
 
+  const queryClient = useQueryClient();
   const handleCreateDocumentResolve = useCallback(
     async (
       toolCallId: string,
@@ -230,50 +463,53 @@ export const useChatSession = ({
         return;
       }
 
+      // Prime the file-bytes cache the moment the server returns —
+      // there's typically a multi-second gap before the user clicks
+      // "Open in editor", and the docx editor's biggest mount cost
+      // is the presigned URL roundtrip + S3 download. We kick this
+      // off as a fire-and-forget; failures are silent because the
+      // editor will retry the same query on mount.
+      if (typeof response.data.fieldId === "string") {
+        void queryClient.prefetchQuery(
+          fileOptions({
+            workspaceId: matterId,
+            fieldId: response.data.fieldId,
+            purpose: "native-display",
+          }),
+        );
+      }
+
       await addToolOutput({
         tool: "create-document",
         toolCallId,
         output: response.data,
       });
     },
-    [addToolOutput],
+    [addToolOutput, queryClient],
   );
 
   const handleOpenCreatedDocument = useCallback(
     async (output: CreateDocumentSuccess) => {
       // Old chat threads predate `entityId`/`workspaceId` on the
-      // tool output. Without them we can't construct a route, so
-      // skip the navigation — the card surfaces this by hiding the
-      // open affordance.
+      // tool output. Without them we can't open the file, so bail —
+      // the card surfaces this by hiding the open affordance.
       if (!output.entityId || !output.workspaceId) {
         return;
       }
       // Pin this chat thread in the workspace inspector. Inherit
-      // the thread's existing scope (`workspaceId` arg from the
-      // session, may be undefined for a global thread) — claiming
-      // the destination matter as the thread's owner triggers a
-      // server-side scope-mismatch error in fetchThreadMessages.
-      // Seed the chat's matter context so the AI keeps the picked
-      // matter in scope without forcing thread ownership.
-      const inspector = useInspectorStore.getState();
-      inspector.openChat({
-        id: toChatThreadId(conversationId),
-        ...(workspaceId !== undefined && { workspaceId }),
-        contextMatterIds: [output.workspaceId],
-      });
-      // Navigate to the workspace shell (not the fullscreen document
-      // route) so the inspector is the surface that hosts the file —
-      // the user wanted to land with the chat tucked into the right
-      // panel, not on the dedicated document page.
-      await navigate({
-        to: "/workspaces/$workspaceId/$viewId",
-        params: { workspaceId: output.workspaceId, viewId: "all" },
-      });
-      // Open the entity in the inspector, then ask the panel to
-      // start folio edit mode for whichever PDF tab carries the
-      // entity. `openEntityInInspector` resolves the file field
-      // and synchronously calls `openFile`, so the tab is in the
-      // store by the time we read it.
+      // Keep the user on the chat surface and let the global
+      // InspectorPanel (mounted on every protected route) host the
+      // file. Tabs carry their own `workspaceId`, so a doc that
+      // lives in workspace B while the chat is bound to workspace A
+      // (or to no workspace at all) still renders correctly without
+      // a route change. Skip pinning the chat as a separate inspector
+      // tab — the user is already in this chat as the main surface,
+      // so a duplicate chat tab in the side panel reads as confusing
+      // ("the doc AND the same chat I am in"). `openEntityInInspector`
+      // resolves the file field and synchronously calls `openFile`,
+      // so the tab is in the store by the time we read it; we then
+      // ask the panel to start folio edit mode for whichever PDF tab
+      // carries the entity.
       await openEntityInInspector(
         output.entityId,
         output.fileName,
@@ -289,7 +525,7 @@ export const useChatSession = ({
         useInspectorStore.getState().requestDocxEdit(tab.id);
       }
     },
-    [conversationId, navigate, workspaceId],
+    [],
   );
   const streamdownComponents = useMemo(
     () => ({
@@ -316,6 +552,55 @@ export const useChatSession = ({
   );
   const isGenerating =
     status === "submitted" || status === "streaming" || hasRunningToolCall;
+  useEffect(() => {
+    isGeneratingRef.current = isGenerating;
+  }, [isGenerating]);
+  useEffect(() => {
+    queueRef.current = queuedMessages;
+  }, [queuedMessages]);
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+    isGeneratingRef.current = false;
+    replaceQueuedMessages([]);
+    wasGeneratingRef.current = false;
+  }, [conversationId, replaceQueuedMessages]);
+
+  // Drain the queue one message per turn. When the response
+  // finishes (`isGenerating` falls back to false) the oldest queued
+  // message is dispatched; sending it flips the status straight
+  // back, so the next queued message waits for that turn to end
+  // too — queued messages never overlap a stream. We hold the
+  // queue if the turn ended in error: firing every queued message
+  // into a failing provider just burns quota and spams the user
+  // with repeats of the same error. The next manual send (or a
+  // successful `regenerate`) lifts the gate.
+  useEffect(() => {
+    const finishedTurn = wasGeneratingRef.current && !isGenerating;
+    wasGeneratingRef.current = isGenerating;
+    if (!finishedTurn || status === "error") {
+      return;
+    }
+    const next = queuedMessages.at(0);
+    if (!next) {
+      return;
+    }
+    replaceQueuedMessages(queuedMessages.slice(1));
+    isGeneratingRef.current = true;
+    // Preserve the request options the message was queued with —
+    // notably `body.sendMode` (anonymized / raw) snapshotted by
+    // withSendModeSnapshot at queue time. The manual drain path
+    // already passes them; the automatic drain must too, otherwise
+    // toggling the mode between queueing and draining sends the
+    // queued turn with the wrong mode.
+    void sendChatMessage(next.message, next.options);
+  }, [
+    isGenerating,
+    queuedMessages,
+    replaceQueuedMessages,
+    sendChatMessage,
+    status,
+  ]);
 
   useEffect(() => {
     setConversationApprovedTools(readConversationApprovedTools(conversationId));
@@ -375,6 +660,8 @@ export const useChatSession = ({
     messages,
     resendLatestMessage,
     sendMessage,
+    queuedMessages,
+    removeQueuedMessage,
     stop,
     isGenerating,
     alwaysApprovedTools,
@@ -383,6 +670,7 @@ export const useChatSession = ({
     handleAllowInConversation,
     handleDeny,
     handleAskUserSubmit,
+    handleAskUserEditAndRerun,
     handleAlwaysAllow,
     handleCreateDocumentResolve,
     handleOpenCreatedDocument,

@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 
+import { panic } from "better-result";
 import { AlertTriangleIcon, EyeIcon, PlusIcon, TrashIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
@@ -527,6 +528,9 @@ const coerceValue = (field: ResolvedField, value: unknown): unknown => {
   return value;
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 const setNestedValue = (
   obj: Record<string, unknown>,
   path: string,
@@ -541,11 +545,8 @@ const setNestedValue = (
 
   for (const part of parts.slice(0, -1)) {
     const next = current[part];
-    if (typeof next === "object" && next !== null && !Array.isArray(next)) {
-      // SAFETY: a plain object value is structurally compatible with
-      // Record<string, unknown>; we guarded against arrays/null above.
-      // eslint-disable-next-line typescript/no-unsafe-type-assertion
-      current = next as Record<string, unknown>;
+    if (isRecord(next)) {
+      current = next;
       continue;
     }
     const child: Record<string, unknown> = {};
@@ -833,7 +834,7 @@ export const TemplateForm = ({
             .fill.post({ values: valuesJson }, { query: { format } });
         }
         if (!file) {
-          throw new Error(
+          panic(
             "TemplateForm: transient fill requires a file when templateId is absent",
           );
         }
@@ -908,9 +909,7 @@ export const TemplateForm = ({
     (e: React.SubmitEvent<HTMLFormElement>) => {
       e.preventDefault();
       // Errors are surfaced as toasts inside handleDownload
-      // TODO: fix this
-      // oxlint-disable-next-line no-empty-function
-      handleDownload("docx").catch(() => {});
+      handleDownload("docx").catch(() => undefined);
     },
     [handleDownload],
   );
@@ -991,9 +990,9 @@ export const TemplateForm = ({
         </div>
 
         {structureErrors.length > 0 && (
-          <div className="mb-6 flex items-start gap-2 rounded-lg border border-yellow-500/30 bg-yellow-50 p-3 dark:bg-yellow-900/10">
-            <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-yellow-600 dark:text-yellow-500" />
-            <span className="text-sm text-yellow-800 dark:text-yellow-200">
+          <div className="border-warning/30 bg-warning/10 dark:bg-warning/10 mb-6 flex items-start gap-2 rounded-lg border p-3">
+            <AlertTriangleIcon className="text-warning-foreground mt-0.5 size-4 shrink-0" />
+            <span className="text-warning-foreground text-sm">
               {t("templates.structureWarnings", {
                 count: structureErrors.length,
               })}
@@ -1054,7 +1053,7 @@ export const TemplateForm = ({
                 <EyeIcon />
                 {preview.kind === "loading"
                   ? t("templates.previewFillLoading")
-                  : t("templates.previewFill")}
+                  : t("common.preview")}
               </Button>
             )}
             <Button
@@ -1092,9 +1091,9 @@ export const TemplateForm = ({
               {preview.kind === "ready" && (
                 <>
                   {preview.unmatchedPlaceholders.length > 0 && (
-                    <div className="mb-3 flex items-start gap-2 rounded-lg border border-yellow-500/30 bg-yellow-50 p-2.5 dark:bg-yellow-900/10">
-                      <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0 text-yellow-600 dark:text-yellow-500" />
-                      <p className="text-xs text-yellow-800 dark:text-yellow-200">
+                    <div className="border-warning/30 bg-warning/10 dark:bg-warning/10 mb-3 flex items-start gap-2 rounded-lg border p-2.5">
+                      <AlertTriangleIcon className="text-warning-foreground mt-0.5 size-3.5 shrink-0" />
+                      <p className="text-warning-foreground text-xs">
                         {t("templates.unmatchedPlaceholders", {
                           list: preview.unmatchedPlaceholders.join(", "),
                         })}
@@ -1102,9 +1101,9 @@ export const TemplateForm = ({
                     </div>
                   )}
                   {preview.unusedValues.length > 0 && (
-                    <div className="mb-3 flex items-start gap-2 rounded-lg border border-blue-500/30 bg-blue-50 p-2.5 dark:bg-blue-900/10">
-                      <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0 text-blue-600 dark:text-blue-500" />
-                      <p className="text-xs text-blue-800 dark:text-blue-200">
+                    <div className="border-foreground/30 bg-accent dark:bg-accent/30 mb-3 flex items-start gap-2 rounded-lg border p-2.5">
+                      <AlertTriangleIcon className="text-foreground mt-0.5 size-3.5 shrink-0" />
+                      <p className="text-foreground text-xs">
                         {t("templates.unusedValues", {
                           list: preview.unusedValues.join(", "),
                         })}

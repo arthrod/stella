@@ -1,10 +1,12 @@
-import { Result } from "better-result";
+import { panic, Result } from "better-result";
 import { and, eq } from "drizzle-orm";
 import { t } from "elysia";
 import type { Static } from "elysia";
 
 import type { SafeDb } from "@/api/db";
 import { clauseCategories } from "@/api/db/schema";
+import type { AuditRecorder, FieldDiffs } from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tDefaultVarchar, tSafeId } from "@/api/lib/custom-schema";
@@ -69,12 +71,14 @@ type CreateCategoryProps = {
   safeDb: SafeDb;
   organizationId: SafeId<"organization">;
   body: CreateCategoryBody;
+  recordAuditEvent: AuditRecorder;
 };
 
 export const createCategoryHandler = async function* ({
   safeDb,
   organizationId,
   body,
+  recordAuditEvent,
 }: CreateCategoryProps) {
   const existingCount = yield* Result.await(
     safeDb((tx) =>
@@ -114,9 +118,9 @@ export const createCategoryHandler = async function* ({
     }
   }
 
-  const [inserted] = yield* Result.await(
-    safeDb((tx) =>
-      tx
+  const inserted = yield* Result.await(
+    safeDb(async (tx) => {
+      const [row] = await tx
         .insert(clauseCategories)
         .values({
           id: createSafeId<"clauseCategory">(),
@@ -132,9 +136,33 @@ export const createCategoryHandler = async function* ({
           description: clauseCategories.description,
           sortOrder: clauseCategories.sortOrder,
           createdAt: clauseCategories.createdAt,
-        }),
-    ),
+        });
+
+      if (row) {
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.CREATE,
+          resourceType: AUDIT_RESOURCE_TYPE.CLAUSE_CATEGORY,
+          resourceId: row.id,
+          changes: {
+            created: {
+              old: null,
+              new: {
+                name: row.name,
+                parentId: row.parentId,
+                description: row.description,
+              },
+            },
+          },
+        });
+      }
+
+      return row;
+    }),
   );
+
+  if (!inserted) {
+    panic("Failed to create clause category");
+  }
 
   return Result.ok(inserted);
 };
@@ -146,6 +174,7 @@ type UpdateCategoryProps = {
   organizationId: SafeId<"organization">;
   categoryId: SafeId<"clauseCategory">;
   body: UpdateCategoryBody;
+  recordAuditEvent: AuditRecorder;
 };
 
 export const updateCategoryHandler = async function* ({
@@ -153,6 +182,7 @@ export const updateCategoryHandler = async function* ({
   organizationId,
   categoryId,
   body,
+  recordAuditEvent,
 }: UpdateCategoryProps) {
   const existing = yield* Result.await(
     safeDb((tx) =>
@@ -161,7 +191,13 @@ export const updateCategoryHandler = async function* ({
           id: { eq: categoryId },
           organizationId: { eq: organizationId },
         },
-        columns: { id: true },
+        columns: {
+          id: true,
+          name: true,
+          description: true,
+          parentId: true,
+          sortOrder: true,
+        },
       }),
     ),
   );
@@ -210,9 +246,9 @@ export const updateCategoryHandler = async function* ({
     updatedAt: new Date(),
   };
 
-  const [updated] = yield* Result.await(
-    safeDb((tx) =>
-      tx
+  const updated = yield* Result.await(
+    safeDb(async (tx) => {
+      const [row] = await tx
         .update(clauseCategories)
         .set(updates)
         .where(
@@ -228,9 +264,33 @@ export const updateCategoryHandler = async function* ({
           description: clauseCategories.description,
           sortOrder: clauseCategories.sortOrder,
           updatedAt: clauseCategories.updatedAt,
-        }),
-    ),
+        });
+
+      const changes: FieldDiffs = {};
+      for (const [key, newValue] of Object.entries(updates)) {
+        if (key === "updatedAt") {
+          continue;
+        }
+        const oldValue = (existing as Record<string, unknown>)[key];
+        if (oldValue !== newValue) {
+          changes[key] = { old: oldValue ?? null, new: newValue };
+        }
+      }
+
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.UPDATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CLAUSE_CATEGORY,
+        resourceId: categoryId,
+        changes,
+      });
+
+      return row;
+    }),
   );
+
+  if (!updated) {
+    panic("Failed to update clause category");
+  }
 
   return Result.ok(updated);
 };
@@ -241,12 +301,14 @@ type DeleteCategoryProps = {
   safeDb: SafeDb;
   organizationId: SafeId<"organization">;
   categoryId: SafeId<"clauseCategory">;
+  recordAuditEvent: AuditRecorder;
 };
 
 export const deleteCategoryHandler = async function* ({
   safeDb,
   organizationId,
   categoryId,
+  recordAuditEvent,
 }: DeleteCategoryProps) {
   const existing = yield* Result.await(
     safeDb((tx) =>
@@ -255,7 +317,7 @@ export const deleteCategoryHandler = async function* ({
           id: { eq: categoryId },
           organizationId: { eq: organizationId },
         },
-        columns: { id: true, parentId: true },
+        columns: { id: true, name: true, parentId: true },
       }),
     ),
   );
@@ -292,8 +354,21 @@ export const deleteCategoryHandler = async function* ({
             eq(clauseCategories.organizationId, organizationId),
           ),
         );
+
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.DELETE,
+        resourceType: AUDIT_RESOURCE_TYPE.CLAUSE_CATEGORY,
+        resourceId: categoryId,
+        changes: {
+          deleted: {
+            old: { name: existing.name, parentId: existing.parentId },
+            new: null,
+          },
+        },
+        metadata: { reparentedChildrenTo: existing.parentId ?? null },
+      });
     }),
   );
 
-  return Result.ok(undefined);
+  return Result.ok({});
 };

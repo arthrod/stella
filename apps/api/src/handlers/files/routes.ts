@@ -3,6 +3,7 @@ import Elysia, { t } from "elysia";
 
 import {
   printPdfHandler,
+  readEmailHtmlPreviewHandler,
   readFileHandler,
   stampedDownloadHandler,
 } from "@/api/handlers/files/read-by-id";
@@ -25,6 +26,7 @@ const readFileEndpoint = createSafeHandler(
     scopedDb,
     session,
     workspaceId,
+    recordAuditEvent,
   }) {
     const response = yield* Result.await(
       Result.tryPromise(
@@ -34,6 +36,29 @@ const readFileEndpoint = createSafeHandler(
             organizationId: session.activeOrganizationId,
             workspaceId,
             purpose,
+            scopedDb,
+            recordAuditEvent,
+          }),
+      ),
+    );
+
+    return Result.ok(response);
+  },
+);
+
+const readEmailHtmlPreviewEndpoint = createSafeHandler(
+  {
+    permissions: { workspace: ["read"] },
+    params: workspaceParams({ fieldId: tSafeId("field") }),
+  } satisfies HandlerConfig,
+  async function* ({ params: { fieldId }, scopedDb, session, workspaceId }) {
+    const response = yield* Result.await(
+      Result.tryPromise(
+        async () =>
+          await readEmailHtmlPreviewHandler({
+            fieldId,
+            organizationId: session.activeOrganizationId,
+            workspaceId,
             scopedDb,
           }),
       ),
@@ -99,6 +124,10 @@ export const filesRoute = new Elysia({
     params: readFileEndpoint.config.params,
     permissions: readFileEndpoint.config.permissions,
     query: readFileEndpoint.config.query,
+  })
+  .get("/email-html/:fieldId", readEmailHtmlPreviewEndpoint.handler, {
+    params: readEmailHtmlPreviewEndpoint.config.params,
+    permissions: readEmailHtmlPreviewEndpoint.config.permissions,
   })
   .get("/print-pdf/:fieldId", printPdfEndpoint.handler, {
     params: printPdfEndpoint.config.params,

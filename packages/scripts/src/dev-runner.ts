@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { panic } from "better-result";
 import {
   copyFileSync,
   existsSync,
@@ -35,7 +36,7 @@ const DEFAULT_PORTS = {
   web: 3000,
 } as const;
 const DEFAULT_HTTP_PROBE_TIMEOUT_MS = 1500;
-const DEFAULT_HTTP_READY_TIMEOUT_MS = 30_000;
+const DEFAULT_HTTP_READY_TIMEOUT_MS = 120_000;
 const DEFAULT_OPEN_BROWSER_TIMEOUT_MS = 5000;
 const DEFAULT_INFRA_PORTS = {
   gotenberg: 3003,
@@ -58,7 +59,11 @@ const MAX_INFRA_OFFSET =
   MAX_PORT - Math.max(...Object.values(DEFAULT_INFRA_PORTS));
 const MAX_PORT_OFFSET = MAX_PORT - Math.max(...Object.values(DEFAULT_PORTS));
 const PORT_SEARCH_LIMIT = 2000;
-const WEB_HTML_MARKER = 'id="app"';
+// The web app renders via TanStack Start SSR (root document from __root.tsx),
+// which mounts into <body> directly — there is no `<div id="app">` SPA mount.
+// Match the shell's stable dark-mode-init script, not the user-facing <title>
+// (which can change with branding), so readiness reflects a real rendered shell.
+const WEB_HTML_MARKER = 'src="/dark-mode-init.js"';
 
 export type DevMode = (typeof DEV_MODES)[number];
 
@@ -184,7 +189,7 @@ const resolveMaybeRelativePath = (cwd: string, value: string) =>
 
 const validateOffset = (offset: number, source: string) => {
   if (!Number.isInteger(offset) || offset < 0 || offset > MAX_PORT_OFFSET) {
-    throw new Error(
+    panic(
       `${source} must be an integer between 0 and ${String(MAX_PORT_OFFSET)}`,
     );
   }
@@ -234,7 +239,7 @@ export const parseArgs = (args: readonly string[]): ParsedArgs => {
     if (arg === "--port-offset") {
       const value = args[i + 1];
       if (!value) {
-        throw new Error("--port-offset requires a value");
+        panic("--port-offset requires a value");
       }
       portOffset = Number.parseInt(value, 10);
       i++;
@@ -244,7 +249,7 @@ export const parseArgs = (args: readonly string[]): ParsedArgs => {
     if (arg === "--dev-instance") {
       const value = args[i + 1];
       if (!value) {
-        throw new Error("--dev-instance requires a value");
+        panic("--dev-instance requires a value");
       }
       devInstance = value;
       i++;
@@ -254,14 +259,14 @@ export const parseArgs = (args: readonly string[]): ParsedArgs => {
     if (arg === "--infra-offset") {
       const value = args[i + 1];
       if (!value) {
-        throw new Error("--infra-offset requires a value");
+        panic("--infra-offset requires a value");
       }
       infraOffset = Number.parseInt(value, 10);
       i++;
       continue;
     }
 
-    throw new Error(`Unknown argument: ${arg}`);
+    panic(`Unknown argument: ${arg}`);
   }
 
   return {
@@ -776,7 +781,7 @@ const waitForSharedDockerServices = async ({
     await Bun.sleep(DOCKER_SERVICES_POLL_INTERVAL_MS);
   }
 
-  throw new Error(
+  panic(
     `Timed out after ${String(DOCKER_SERVICES_READY_TIMEOUT_MS / 1000)}s waiting for shared Docker services (${SHARED_DOCKER_SERVICE_NAMES}) to become ready: ${lastFailure}.`,
   );
 };
@@ -802,8 +807,8 @@ const ensureDockerServices = async ({
           `  - host port ${String(hostPort)}: ${containerName} (project ${composeProject || "<none>"})`,
       )
       .join("\n");
-    throw new Error(
-      `Shared Docker ports are held by containers from another Compose project:\n${detail}\nStop the conflicting stack, or use --infra-offset to shift Stella's infra ports.`,
+    panic(
+      `Shared Docker ports are held by containers from another Compose project:\n${detail}\nStop the conflicting stack, or use --infra-offset to shift stella's infra ports.`,
     );
   }
 
@@ -824,8 +829,8 @@ const ensureDockerServices = async ({
       `==> Shared Docker services are running but setup is incomplete (${currentFailure}); reconciling Compose project...`,
     );
   } else if (!(await areSharedDockerPortsFree(infraPorts))) {
-    throw new Error(
-      `Shared Docker ports (${sharedInfraPortList(infraPorts).join(", ")}) are already allocated, but the shared dev services did not pass health checks. Stop the conflicting stack, or use --infra-offset to shift Stella's infra ports.`,
+    panic(
+      `Shared Docker ports (${sharedInfraPortList(infraPorts).join(", ")}) are already allocated, but the shared dev services did not pass health checks. Stop the conflicting stack, or use --infra-offset to shift stella's infra ports.`,
     );
   }
 
@@ -885,7 +890,7 @@ export const findFirstAvailableOffset = async ({
     }
   }
 
-  throw new Error(
+  return panic(
     `Could not find a free port offset for ${mode} after ${String(PORT_SEARCH_LIMIT)} attempts.`,
   );
 };
@@ -918,7 +923,11 @@ export const ensureWorktreeEnvLinks = ({
     const mainEnvPath = pathResolve(mainRoot, spec.path);
     if (isWorktree && existsSync(mainEnvPath)) {
       mkdirSync(dirname(targetPath), { recursive: true });
-      symlinkSync(mainEnvPath, targetPath);
+      try {
+        symlinkSync(mainEnvPath, targetPath);
+      } catch {
+        copyFileSync(mainEnvPath, targetPath);
+      }
       preparedFiles++;
       continue;
     }
@@ -936,7 +945,7 @@ export const ensureWorktreeEnvLinks = ({
   return preparedFiles;
 };
 
-const apiUrlForPort = (port: number) => `http://localhost:${String(port)}`;
+const apiUrlForPort = (port: number) => `http://127.0.0.1:${String(port)}`;
 const webUrlForPort = (port: number) => `http://localhost:${String(port)}`;
 const desktopBridgeUrlForPort = (port: number) =>
   `http://127.0.0.1:${String(port)}`;
@@ -957,8 +966,8 @@ export const createApiEnv = ({
   ...baseEnv,
   AI_SDK_DEVTOOLS_PORT: String(ports.aiSdkDevtools),
   BETTER_AUTH_COOKIE_PREFIX: `stella-dev-${String(ports.api)}`,
-  BETTER_AUTH_URL: apiUrlForPort(ports.api),
-  FRONTEND_URL: webUrlForPort(ports.web),
+  BETTER_AUTH_URL: `http://localhost:${String(ports.api)}`,
+  FRONTEND_URL: `http://localhost:${String(ports.web)}`,
   NODE_ENV: "development",
   STELLA_API_PORT: String(ports.api),
   STELLA_WEB_PORT: String(ports.web),
@@ -984,7 +993,7 @@ export const createWebEnv = ({
   STELLA_WEB_PORT: String(ports.web),
   VITE_AI_DEVTOOLS_ENABLED: aiDevtoolsEnabled ? "true" : "false",
   VITE_AI_SDK_DEVTOOLS_PORT: String(ports.aiSdkDevtools),
-  VITE_API_URL: apiUrlForPort(ports.api),
+  VITE_API_URL: `http://localhost:${String(ports.api)}`,
   VITE_DESKTOP_BRIDGE_PORT: String(ports.desktopBridge),
 });
 
@@ -1024,7 +1033,37 @@ const TRUTHY_ENV_VALUES: ReadonlySet<string> = new Set([
   "on",
 ]);
 
-const readEnvFlag = ({
+const stripEnvValueCommentsAndQuotes = (rawValue: string) => {
+  const value = rawValue.trimStart();
+  let quoteChar: '"' | "'" | undefined;
+  if (value.startsWith('"')) {
+    quoteChar = '"';
+  }
+  if (value.startsWith("'")) {
+    quoteChar = "'";
+  }
+  let endIndex = value.length;
+
+  if (quoteChar) {
+    const closingQuote = value.indexOf(quoteChar, 1);
+    if (closingQuote !== -1) {
+      endIndex = closingQuote + 1;
+    }
+  } else {
+    const hashIndex = value.indexOf("#");
+    if (hashIndex !== -1) {
+      endIndex = hashIndex;
+    }
+  }
+
+  const trimmedValue = value.slice(0, endIndex).trim();
+  if (quoteChar && trimmedValue.endsWith(quoteChar)) {
+    return trimmedValue.slice(1, -1);
+  }
+  return trimmedValue;
+};
+
+export const readEnvFlag = ({
   envFilePath,
   key,
   processEnv,
@@ -1036,7 +1075,7 @@ const readEnvFlag = ({
   const raw = processEnv[key];
   if (raw !== undefined) {
     return TRUTHY_ENV_VALUES.has(
-      raw.trim().toLowerCase().replace(/^"|"$/gu, ""),
+      stripEnvValueCommentsAndQuotes(raw).toLowerCase(),
     );
   }
   if (!existsSync(envFilePath)) {
@@ -1057,28 +1096,9 @@ const readEnvFlag = ({
     if (withoutExport.slice(0, eqIndex).trim() !== key) {
       continue;
     }
-    const rawValue = withoutExport.slice(eqIndex + 1).trimStart();
-    // Strip trailing comments. A `#` inside double quotes is part of
-    // the value, so only honor `#` once the opening quote has closed
-    // (or when no quotes were used at all).
-    const isQuoted = rawValue.startsWith('"');
-    let endIndex = rawValue.length;
-    if (isQuoted) {
-      const closingQuote = rawValue.indexOf('"', 1);
-      if (closingQuote !== -1) {
-        endIndex = closingQuote + 1;
-      }
-    } else {
-      const hashIndex = rawValue.indexOf("#");
-      if (hashIndex !== -1) {
-        endIndex = hashIndex;
-      }
-    }
-    const value = rawValue
-      .slice(0, endIndex)
-      .trim()
-      .replace(/^"|"$/gu, "")
-      .toLowerCase();
+    const value = stripEnvValueCommentsAndQuotes(
+      withoutExport.slice(eqIndex + 1),
+    ).toLowerCase();
     return TRUTHY_ENV_VALUES.has(value);
   }
   return false;
@@ -1126,6 +1146,97 @@ const stripAppEnvKeys = ({
   );
 };
 
+export const loadEnvFile = (envFilePath: string): Record<string, string> => {
+  if (!existsSync(envFilePath)) {
+    return {};
+  }
+  const env: Record<string, string> = {};
+  const envFile = readFileSync(envFilePath, "utf-8");
+  for (const line of envFile.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) {
+      continue;
+    }
+    const withoutExport = trimmed.startsWith("export ")
+      ? trimmed.slice("export ".length)
+      : trimmed;
+    const eqIndex = withoutExport.indexOf("=");
+    if (eqIndex === -1) {
+      continue;
+    }
+    const key = withoutExport.slice(0, eqIndex).trim();
+    const rawValue = withoutExport.slice(eqIndex + 1).trimStart();
+    let quoteChar: string | null = null;
+    if (rawValue.startsWith('"')) {
+      quoteChar = '"';
+    } else if (rawValue.startsWith("'")) {
+      quoteChar = "'";
+    }
+    let endIndex = rawValue.length;
+    if (quoteChar !== null) {
+      const closingQuote = rawValue.indexOf(quoteChar, 1);
+      if (closingQuote !== -1) {
+        endIndex = closingQuote + 1;
+      }
+    } else {
+      const hashIndex = rawValue.indexOf("#");
+      if (hashIndex !== -1) {
+        endIndex = hashIndex;
+      }
+    }
+    let value = rawValue.slice(0, endIndex).trim();
+    if (
+      quoteChar !== null &&
+      value.startsWith(quoteChar) &&
+      value.endsWith(quoteChar)
+    ) {
+      value = value.slice(1, -1);
+    }
+    env[key] = value;
+  }
+
+  return env;
+};
+
+export const expandEnvMap = (
+  env: Record<string, string>,
+): Record<string, string> => {
+  const expanded = { ...env };
+  const cache: Record<string, string> = {};
+  const visiting = new Set<string>();
+
+  const resolveKey = (key: string): string => {
+    if (cache[key] !== undefined) {
+      return cache[key];
+    }
+    const rawVal = expanded[key] ?? process.env[key];
+    if (rawVal === undefined) {
+      return "";
+    }
+    if (visiting.has(key)) {
+      return rawVal;
+    }
+    visiting.add(key);
+    const resolved = rawVal
+      .replace(
+        /(?<!\\)\$(?:\{([^}]+)\}|([a-zA-Z_][a-zA-Z0-9_]*))/gu,
+        (_, p1, p2) => {
+          const varName = p1 || p2;
+          return resolveKey(varName);
+        },
+      )
+      .replace(/\\(\$)/gu, "$1");
+    visiting.delete(key);
+    cache[key] = resolved;
+    return resolved;
+  };
+
+  for (const key of Object.keys(expanded)) {
+    expanded[key] = resolveKey(key);
+  }
+  return expanded;
+};
+
 const runCommandText = ({
   cmd,
   cwd,
@@ -1144,7 +1255,7 @@ const runCommandText = ({
 
   if (!result.success) {
     const stderr = decodeOutput(result.stderr);
-    throw new Error(stderr || `Command failed: ${cmd.join(" ")}`);
+    panic(stderr || `Command failed: ${cmd.join(" ")}`);
   }
 
   return decodeOutput(result.stdout);
@@ -1160,9 +1271,7 @@ const runStep = (step: Step) => {
   });
 
   if (!result.success) {
-    throw new Error(
-      `${step.label} failed with exit code ${String(result.exitCode)}.`,
-    );
+    panic(`${step.label} failed with exit code ${String(result.exitCode)}.`);
   }
 };
 
@@ -1237,7 +1346,7 @@ const waitForHttpReadiness = async ({
     await Bun.sleep(300);
   }
 
-  throw new Error(`Timed out waiting for ${label}: ${lastFailure}.`);
+  panic(`Timed out waiting for ${label}: ${lastFailure}.`);
 };
 
 const spawnPersistentStep = (step: Step): RunningStep => {
@@ -1322,12 +1431,15 @@ export const buildPreparationSteps = ({
     steps.push({
       cmd: [resolveCommandPath("bun"), "run", "db:migrate"],
       cwd: pathResolve(rootDir, "apps/api"),
-      env: createApiEnv({
-        baseEnv: apiBaseEnv,
-        infraOffset,
-        infraPorts,
-        ports,
-      }),
+      env: {
+        ...expandEnvMap(loadEnvFile(pathResolve(rootDir, "apps/api/.env"))),
+        ...createApiEnv({
+          baseEnv: apiBaseEnv,
+          infraOffset,
+          infraPorts,
+          ports,
+        }),
+      },
       label: "Applying database migrations",
     });
   }
@@ -1362,27 +1474,42 @@ const buildPersistentSteps = ({
     baseEnv: process.env,
     envFilePath: pathResolve(rootDir, "apps/desktop/.env"),
   });
-  const apiEnv = createApiEnv({
-    baseEnv: apiBaseEnv,
-    infraOffset,
-    infraPorts,
-    ports,
-  });
-  const webEnv = createWebEnv({
-    aiDevtoolsEnabled,
-    baseEnv: webBaseEnv,
-    ports,
-  });
-  const desktopEnv = createDesktopEnv({
-    baseEnv: desktopBaseEnv,
-    ports,
-  });
+  const apiEnv = {
+    ...expandEnvMap(loadEnvFile(pathResolve(rootDir, "apps/api/.env"))),
+    ...createApiEnv({
+      baseEnv: apiBaseEnv,
+      infraOffset,
+      infraPorts,
+      ports,
+    }),
+  };
+  const webEnv = {
+    ...expandEnvMap(loadEnvFile(pathResolve(rootDir, "apps/web/.env"))),
+    ...createWebEnv({
+      aiDevtoolsEnabled,
+      baseEnv: webBaseEnv,
+      ports,
+    }),
+  };
+  const desktopEnv = {
+    ...expandEnvMap(loadEnvFile(pathResolve(rootDir, "apps/desktop/.env"))),
+    ...createDesktopEnv({
+      baseEnv: desktopBaseEnv,
+      ports,
+    }),
+  };
   const primary: Step[] = [];
   const secondary: Step[] = [];
 
   if (modeIncludesApi(mode)) {
     primary.push({
-      cmd: [resolveCommandPath("bun"), "--watch", "src/index.ts"],
+      cmd: [
+        resolveCommandPath("bun"),
+        "--preload",
+        "./src/dev/register-mock-ai.ts",
+        "--watch",
+        "src/index.ts",
+      ],
       cwd: pathResolve(rootDir, "apps/api"),
       env: apiEnv,
       label: "API server",
@@ -1411,6 +1538,8 @@ const buildPersistentSteps = ({
         "--",
         "--port",
         String(ports.web),
+        "--host",
+        "localhost",
         "--strictPort",
       ],
       cwd: pathResolve(rootDir, "apps/web"),
@@ -1655,7 +1784,7 @@ const main = async () => {
     infraOffset < 0 ||
     infraOffset > MAX_INFRA_OFFSET
   ) {
-    throw new Error(
+    panic(
       `STELLA_INFRA_OFFSET must be an integer between 0 and ${String(MAX_INFRA_OFFSET)}`,
     );
   }

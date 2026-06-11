@@ -1,5 +1,5 @@
 import { Result, panic } from "better-result";
-import { eq } from "drizzle-orm";
+import { and, eq, like, sql } from "drizzle-orm";
 
 import type { ScopedDb } from "@/api/db";
 import {
@@ -8,10 +8,17 @@ import {
   caseLawIngestionFailures,
   caseLawSources,
 } from "@/api/db/schema";
+import { envBase } from "@/api/env-base";
 import {
   ADAPTER_TIMEOUT,
   MAX_SYNC_PAGES,
 } from "@/api/handlers/case-law/consts";
+import { writeCorpusDocument } from "@/api/handlers/case-law/corpus-storage";
+import {
+  createAvailableCaseLawDecisionSlug,
+  createCaseLawDecisionSlug,
+  createCaseLawDecisionSlugCollisionScanPrefix,
+} from "@/api/handlers/case-law/decisions/slug";
 import { isDocumentAst } from "@/api/handlers/case-law/document-ast";
 import type { IngestionResult } from "@/api/handlers/case-law/ingestion/adapter";
 import { EMPTY_AST } from "@/api/handlers/case-law/ingestion/adapter";
@@ -30,6 +37,7 @@ import { segmentDecision } from "@/api/handlers/case-law/ingestion/segmenter";
 import { captureError } from "@/api/lib/analytics";
 import type { SafeId } from "@/api/lib/branded-types";
 import { errorTag } from "@/api/lib/errors/utils";
+import { LIMITS } from "@/api/lib/limits";
 import { logger } from "@/api/lib/observability/logger";
 import { getS3 } from "@/api/lib/s3";
 import { isRecord } from "@/api/lib/type-guards";
@@ -224,6 +232,53 @@ const uploadSourceRaw = async (
   return key;
 };
 
+type PreserveCorpusWriteRetryInput = {
+  decisionId: SafeId<"caseLawDecision">;
+  previousSourceHash: string | null;
+  /** The sourceHash this run persisted; the reset only applies while the row still carries it. */
+  expectedSourceHash: string | null;
+  scopedDb: ScopedDb;
+};
+
+const preserveCorpusWriteRetry = async ({
+  decisionId,
+  previousSourceHash,
+  expectedSourceHash,
+  scopedDb,
+}: PreserveCorpusWriteRetryInput): Promise<void> => {
+  // If the corpus write fails after the DB text update, do not leave the
+  // source hash at the incoming value. A matching source hash would make the
+  // next ingestion pass skip this decision before it can retry object storage.
+  // Clear corpus keys too so reads fall back to the fresh Postgres columns
+  // instead of serving an older object payload.
+  // eslint-disable-next-line arrow-body-style -- block body holds the audit-skip directive
+  await scopedDb((tx) => {
+    // audit: skip — background corpus storage retry bookkeeping; derived state
+    return (
+      tx
+        .update(caseLawDecisions)
+        .set({
+          sourceHash: previousSourceHash,
+          textS3Key: null,
+          normalizedS3Key: null,
+          astS3Key: null,
+          contentHash: null,
+          indexedHash: null,
+          indexedGeneration: null,
+          indexedAt: null,
+        })
+        // Only undo this run's own write: a concurrent newer refresh owns
+        // the row once it has advanced sourceHash.
+        .where(
+          and(
+            eq(caseLawDecisions.id, decisionId),
+            sql`${caseLawDecisions.sourceHash} IS NOT DISTINCT FROM ${expectedSourceHash}`,
+          ),
+        )
+    );
+  });
+};
+
 /**
  * Insert a single decision and its citations into the database.
  * Skips duplicates based on sourceHash.
@@ -321,7 +376,8 @@ export const processDecision = async (
 
   const languageGroupKey = result.ecli || `${sourceId}:${result.caseNumber}`;
 
-  await scopedDb(async (tx) => {
+  const decisionId = await scopedDb(async (tx) => {
+    // audit: skip — background case-law ingestion pipeline; public case-law data, not user actions
     if (existing) {
       await tx
         .update(caseLawDecisions)
@@ -347,6 +403,10 @@ export const processDecision = async (
           // next ingestion cycle sees a hash mismatch and retries
           // the upload instead of permanently skipping the decision.
           sourceHash: s3UploadFailed ? existing.sourceHash : result.rawHash,
+          // Clear indexedHash so the corpus indexer re-picks this row even
+          // when only metadata changed (its staleness check compares
+          // indexedHash to contentHash, which only tracks the payload).
+          indexedHash: null,
           updatedAt: new Date(),
         })
         .where(eq(caseLawDecisions.id, existing.id));
@@ -365,14 +425,30 @@ export const processDecision = async (
         );
       }
 
-      return;
+      return existing.id;
     }
+
+    const baseSlug = createCaseLawDecisionSlug(result.caseNumber);
+    const slugScanPrefix = createCaseLawDecisionSlugCollisionScanPrefix({
+      baseSlug,
+      maxSuffix: LIMITS.caseLawSlugCollisionScanLimit + 1,
+    });
+    const existingSlugRows = await tx
+      .select({ slug: caseLawDecisions.slug })
+      .from(caseLawDecisions)
+      .where(like(caseLawDecisions.slug, `${slugScanPrefix}%`))
+      .limit(LIMITS.caseLawSlugCollisionScanLimit);
+    const slug = createAvailableCaseLawDecisionSlug(
+      baseSlug,
+      existingSlugRows.map((row) => row.slug),
+    );
 
     const [decisionRow] = await tx
       .insert(caseLawDecisions)
       .values({
         sourceId,
         caseNumber: result.caseNumber,
+        slug,
         ecli: result.ecli,
         court: result.court,
         country: result.country,
@@ -407,7 +483,59 @@ export const processDecision = async (
         })),
       );
     }
+
+    return decisionRow.id;
   });
+
+  // Persist canonical text/sections/AST to object storage when enabled, then
+  // record the keys + content hash. Done outside the DB transaction (S3 I/O
+  // must not hold a transaction open). A failure leaves the row fully readable
+  // from its Postgres columns and preserves the source-hash mismatch so normal
+  // ingestion can retry the corpus write.
+  if (envBase.CORPUS_STORAGE_ENABLED) {
+    // The sourceHash this call just persisted: corpus-key and retry
+    // updates below only apply while the row still carries it, so a
+    // slower run cannot overwrite a concurrent newer refresh.
+    const persistedSourceHash = s3UploadFailed
+      ? (existing?.sourceHash ?? null)
+      : result.rawHash;
+    try {
+      const written = await writeCorpusDocument({
+        documentId: decisionId,
+        jurisdiction: result.country,
+        text: result.fulltext ?? null,
+        sections: sections.length > 0 ? sections : null,
+        ast: result.documentAst,
+      });
+      // eslint-disable-next-line arrow-body-style -- block body holds the audit-skip directive
+      await scopedDb((tx) => {
+        // audit: skip — background corpus storage; derived state, not user actions
+        return tx
+          .update(caseLawDecisions)
+          .set({
+            textS3Key: written.textKey,
+            normalizedS3Key: written.sectionsKey,
+            astS3Key: written.astKey,
+            contentHash: written.contentHash,
+          })
+          .where(
+            and(
+              eq(caseLawDecisions.id, decisionId),
+              sql`${caseLawDecisions.sourceHash} IS NOT DISTINCT FROM ${persistedSourceHash}`,
+            ),
+          );
+      });
+    } catch (error) {
+      s3UploadFailed = true;
+      captureError(error, { decisionId, step: "processDecision.corpusWrite" });
+      await preserveCorpusWriteRetry({
+        decisionId,
+        previousSourceHash: existing?.sourceHash ?? null,
+        expectedSourceHash: persistedSourceHash,
+        scopedDb,
+      });
+    }
+  }
 
   // Search indexing (tsvector) is handled by a background
   // backfill loop so the slow to_tsvector + unaccent computation
@@ -516,6 +644,7 @@ export const runIngestionPipeline = async ({
     const pageT0 = performance.now();
     const insertedBefore = inserted;
     const skippedBefore = skipped;
+    const s3FailuresBefore = s3UploadFailures;
     try {
       for (const result of page.decisions) {
         try {
@@ -544,6 +673,10 @@ export const runIngestionPipeline = async ({
             caseNumber: result.caseNumber,
             cursor: cursor ?? "",
             "error.type": tag,
+            // "message" is stripped by the logger sanitizer; use
+            // "error.detail" so the SQL/HTTP/SDK reason reaches
+            // CloudWatch. Case-law data is public, no PII concern.
+            "error.detail": message.slice(0, 512),
             consecutiveFailures,
           });
           captureError(error, {
@@ -582,6 +715,14 @@ export const runIngestionPipeline = async ({
 
       const pageInserted = inserted - insertedBefore;
       const pageSkipped = skipped - skippedBefore;
+      const pageS3Failures = s3UploadFailures - s3FailuresBefore;
+      if (pageS3Failures > 0 && haltReason === null) {
+        // Hold the cursor on a page with failed corpus writes: cursor
+        // sources do not re-emit consumed pages, so advancing would leave
+        // the preserved source-hash retry unreachable until the source
+        // changes again.
+        haltReason = `${pageS3Failures} corpus write failure(s); cursor held for retry`;
+      }
       logger.info("case_law.ingestion.pipeline_page_done", {
         adapterKey: adapter.key,
         cursor: cursor ?? "",
@@ -626,12 +767,14 @@ export const runIngestionPipeline = async ({
   }
 
   // Persist sync cursor and timestamp
-  await scopedDb((tx) =>
-    tx
+  // eslint-disable-next-line arrow-body-style -- block body holds the audit-skip directive that the require-audit-on-mutation rule scans for inside this arrow's body range
+  await scopedDb((tx) => {
+    // audit: skip — background case-law ingestion pipeline; public case-law data, not user actions
+    return tx
       .update(caseLawSources)
       .set({ syncCursor: cursor, lastSyncAt: new Date() })
-      .where(eq(caseLawSources.id, source.id)),
-  );
+      .where(eq(caseLawSources.id, source.id));
+  });
 
   return {
     inserted,
@@ -648,5 +791,10 @@ const logIngestionFailure = async (
   scopedDb: ScopedDb,
   failure: typeof caseLawIngestionFailures.$inferInsert,
 ) => {
-  await scopedDb((tx) => tx.insert(caseLawIngestionFailures).values(failure));
+  // audit: skip — background case-law ingestion pipeline; public case-law data, not user actions
+  // eslint-disable-next-line arrow-body-style -- block body holds the audit-skip directive that the require-audit-on-mutation rule scans for inside this arrow's body range
+  await scopedDb((tx) => {
+    // audit: skip — background case-law ingestion pipeline; public case-law data, not user actions
+    return tx.insert(caseLawIngestionFailures).values(failure);
+  });
 };

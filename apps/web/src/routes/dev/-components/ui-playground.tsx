@@ -201,6 +201,13 @@ import type { PersistedChatMessage } from "@/components/chat/chat-ui-tools";
 import { DatePickerPopover } from "@/components/date-picker-popover";
 import { AIKeyRequiredDialog } from "@/components/require-ai-key";
 
+const renderPlaygroundAnchor = ({
+  children,
+  ...props
+}: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+  <a {...props}>{children}</a>
+);
+
 type ComboboxOption = {
   id: string;
   label: string;
@@ -1334,7 +1341,7 @@ function SharedChatRendererSample() {
             }}
             showToolCalls={false}
             streamdownComponents={{
-              a: ({ children, ...props }) => <a {...props}>{children}</a>,
+              a: renderPlaygroundAnchor,
             }}
           />
         </ChatApprovalContext>
@@ -1587,7 +1594,7 @@ function ToolCallMock() {
 const CHAT_ERROR_VARIANTS = [
   { label: "Generic", message: "unknown" },
   { label: "Quota exhausted", message: "quota_exhausted" },
-  { label: "Insufficient credits", message: "insufficient_credits" },
+  { label: "Provider billing", message: "provider_billing" },
   { label: "Provider unavailable", message: "provider_unavailable" },
 ] as const;
 

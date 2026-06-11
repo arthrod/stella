@@ -6,6 +6,13 @@
  * Supports inline and floating positioning.
  */
 
+import type { ImageWrap } from "../../../types/document";
+import {
+  IMAGE_WRAP_TYPE_VALUES,
+  type OutlineStyleAttr,
+} from "../../../types/documentEnumValues";
+import { expectTextBoxAttrs } from "../../attrs";
+import type { ImagePositionAttrs } from "../../schema/nodes";
 import { createNodeExtension } from "../create";
 
 export type TextBoxAttrs = {
@@ -21,8 +28,8 @@ export type TextBoxAttrs = {
   outlineWidth?: number;
   /** Outline color as CSS color */
   outlineColor?: string;
-  /** Outline style */
-  outlineStyle?: string;
+  /** Outline dash style, or `"none"` for an explicit no-outline. */
+  outlineStyle?: OutlineStyleAttr;
   /** Internal margin top in pixels */
   marginTop?: number;
   /** Internal margin bottom in pixels */
@@ -38,8 +45,52 @@ export type TextBoxAttrs = {
   /** CSS float direction */
   cssFloat?: "left" | "right" | "none";
   /** Wrap type */
-  wrapType?: string;
+  wrapType?: ImageWrap["type"];
+  /** OOXML wrapText direction for anchored text boxes (eigenpal #474). */
+  wrapText?: "bothSides" | "left" | "right" | "largest";
+  /** Wrap distance from top edge, in pixels (OOXML distT, EMU-converted). */
+  distTop?: number;
+  /** Wrap distance from bottom edge, in pixels. */
+  distBottom?: number;
+  /** Wrap distance from left edge, in pixels. */
+  distLeft?: number;
+  /** Wrap distance from right edge, in pixels. */
+  distRight?: number;
+  /** Position for floating/anchored text boxes. */
+  position?: ImagePositionAttrs;
+  /** Original DOCX placement hint for save-path reconstruction. */
+  _docxPlacement?: "standalone" | "inlineWithPrevious";
+  /** Original DOCX paragraph group for standalone text-box reconstruction. */
+  _docxGroupId?: string;
 };
+
+function parseTextBoxPosition(
+  raw: string | undefined,
+): ImagePositionAttrs | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return undefined;
+    }
+    return parsed as ImagePositionAttrs;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseTextBoxWrapType(
+  raw: string | undefined,
+): ImageWrap["type"] | undefined {
+  for (const value of IMAGE_WRAP_TYPE_VALUES) {
+    if (value === raw) {
+      return value;
+    }
+  }
+  return undefined;
+}
 
 export const TextBoxExtension = createNodeExtension({
   name: "textBox",
@@ -65,6 +116,14 @@ export const TextBoxExtension = createNodeExtension({
       displayMode: { default: "inline" },
       cssFloat: { default: null },
       wrapType: { default: "inline" },
+      wrapText: { default: null },
+      distTop: { default: null },
+      distBottom: { default: null },
+      distLeft: { default: null },
+      distRight: { default: null },
+      position: { default: null },
+      _docxPlacement: { default: null },
+      _docxGroupId: { default: null },
     },
     parseDOM: [
       {
@@ -75,6 +134,8 @@ export const TextBoxExtension = createNodeExtension({
           }
           const el = dom;
           const d = el.dataset;
+          const position = parseTextBoxPosition(d["position"]);
+          const wrapType = parseTextBoxWrapType(d["wrapType"]);
           return {
             ...(d["width"] ? { width: Number(d["width"]) } : {}),
             ...(d["height"] ? { height: Number(d["height"]) } : {}),
@@ -84,7 +145,13 @@ export const TextBoxExtension = createNodeExtension({
               ? { outlineWidth: Number(d["outlineWidth"]) }
               : {}),
             ...(d["outlineColor"] ? { outlineColor: d["outlineColor"] } : {}),
-            ...(d["outlineStyle"] ? { outlineStyle: d["outlineStyle"] } : {}),
+            ...(d["outlineStyle"]
+              ? {
+                  outlineStyle: d["outlineStyle"] as NonNullable<
+                    TextBoxAttrs["outlineStyle"]
+                  >,
+                }
+              : {}),
             ...(d["marginTop"] ? { marginTop: Number(d["marginTop"]) } : {}),
             ...(d["marginBottom"]
               ? { marginBottom: Number(d["marginBottom"]) }
@@ -110,13 +177,25 @@ export const TextBoxExtension = createNodeExtension({
                   >,
                 }
               : {}),
-            ...(d["wrapType"] ? { wrapType: d["wrapType"] } : {}),
+            ...(wrapType ? { wrapType } : {}),
+            ...(d["wrapText"]
+              ? {
+                  wrapText: d["wrapText"] as NonNullable<
+                    TextBoxAttrs["wrapText"]
+                  >,
+                }
+              : {}),
+            ...(d["distTop"] ? { distTop: Number(d["distTop"]) } : {}),
+            ...(d["distBottom"] ? { distBottom: Number(d["distBottom"]) } : {}),
+            ...(d["distLeft"] ? { distLeft: Number(d["distLeft"]) } : {}),
+            ...(d["distRight"] ? { distRight: Number(d["distRight"]) } : {}),
+            ...(position ? { position } : {}),
           };
         },
       },
     ],
     toDOM(node) {
-      const attrs = node.attrs as TextBoxAttrs;
+      const attrs = expectTextBoxAttrs(node);
       const domAttrs: Record<string, string> = {
         class: "docx-textbox",
       };
@@ -167,6 +246,24 @@ export const TextBoxExtension = createNodeExtension({
       if (attrs.wrapType) {
         domAttrs["data-wrap-type"] = attrs.wrapType;
       }
+      if (attrs.wrapText) {
+        domAttrs["data-wrap-text"] = attrs.wrapText;
+      }
+      if (typeof attrs.distTop === "number") {
+        domAttrs["data-dist-top"] = String(attrs.distTop);
+      }
+      if (typeof attrs.distBottom === "number") {
+        domAttrs["data-dist-bottom"] = String(attrs.distBottom);
+      }
+      if (typeof attrs.distLeft === "number") {
+        domAttrs["data-dist-left"] = String(attrs.distLeft);
+      }
+      if (typeof attrs.distRight === "number") {
+        domAttrs["data-dist-right"] = String(attrs.distRight);
+      }
+      if (attrs.position) {
+        domAttrs["data-position"] = JSON.stringify(attrs.position);
+      }
 
       // Build inline styles
       const styles: string[] = [];
@@ -183,12 +280,14 @@ export const TextBoxExtension = createNodeExtension({
         styles.push(`background-color: ${attrs.fillColor}`);
       }
 
-      // Border/outline
+      // Border/outline. `outlineStyle === "none"` is the explicit no-outline
+      // sentinel: skip even the default editor border so it stays border-free
+      // like its export.
       if (attrs.outlineWidth && attrs.outlineWidth > 0) {
         const style = attrs.outlineStyle || "solid";
         const color = attrs.outlineColor || "#000000";
         styles.push(`border: ${attrs.outlineWidth}px ${style} ${color}`);
-      } else {
+      } else if (attrs.outlineStyle !== "none") {
         // Default thin border for text boxes
         styles.push("border: 1px solid var(--doc-border, #d1d5db)");
       }

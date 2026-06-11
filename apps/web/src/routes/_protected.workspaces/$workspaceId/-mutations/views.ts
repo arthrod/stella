@@ -4,13 +4,20 @@ import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { toAPIError } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
-import type { ViewLayout, ViewLayoutType, WorkspaceView } from "@/lib/types";
+import type {
+  ViewLayout,
+  ViewLayoutType,
+  ViewTemplateProperty,
+  WorkspaceView,
+} from "@/lib/types";
+import { propertiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/properties";
 import { viewsKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/views";
 
 type CreateViewVars = {
   id: string;
   name: string;
   layout: ViewLayout;
+  templateProperties?: ViewTemplateProperty[];
 };
 
 export const useCreateView = (workspaceId: string) => {
@@ -27,11 +34,27 @@ export const useCreateView = (workspaceId: string) => {
       }
       return response.data;
     },
-    onSuccess: () => {
-      // eslint-disable-next-line typescript/no-floating-promises
-      queryClient.invalidateQueries({
-        queryKey: viewsKeys.all(workspaceId),
-      });
+    onSuccess: async (_data, variables) => {
+      const invalidations = [
+        queryClient.invalidateQueries({
+          queryKey: viewsKeys.all(workspaceId),
+        }),
+      ];
+      // Applying a template can create properties in this matter.
+      // Without invalidating, the table renders with a stale property
+      // list and TanStack silently strips the new column IDs from the
+      // newly-created view's columnOrder on the next layout update.
+      if (
+        variables.templateProperties &&
+        variables.templateProperties.length > 0
+      ) {
+        invalidations.push(
+          queryClient.invalidateQueries({
+            queryKey: propertiesKeys.all(workspaceId),
+          }),
+        );
+      }
+      await Promise.all(invalidations);
     },
     onError: (error) => {
       analytics.captureError(error);
@@ -91,9 +114,8 @@ export const useUpdateView = (workspaceId: string) => {
       }
       analytics.captureError(error);
     },
-    onSettled: () => {
-      // eslint-disable-next-line typescript/no-floating-promises
-      queryClient.invalidateQueries({ queryKey });
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey });
     },
   });
 };
@@ -118,9 +140,8 @@ export const useConvertView = (workspaceId: string) => {
       }
       return response.data;
     },
-    onSuccess: () => {
-      // eslint-disable-next-line typescript/no-floating-promises
-      queryClient.invalidateQueries({
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
         queryKey: viewsKeys.all(workspaceId),
       });
     },
@@ -150,9 +171,8 @@ export const useReorderViews = (workspaceId: string) => {
       }
       return response.data;
     },
-    onSuccess: () => {
-      // eslint-disable-next-line typescript/no-floating-promises
-      queryClient.invalidateQueries({
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
         queryKey: viewsKeys.all(workspaceId),
       });
     },
@@ -181,9 +201,8 @@ export const useDeleteView = (workspaceId: string) => {
       }
       return response.data;
     },
-    onSuccess: () => {
-      // eslint-disable-next-line typescript/no-floating-promises
-      queryClient.invalidateQueries({
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
         queryKey: viewsKeys.all(workspaceId),
       });
     },

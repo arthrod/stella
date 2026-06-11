@@ -18,6 +18,8 @@
  * 11. Assemble final Document
  */
 
+import { TaggedError } from "better-result";
+
 import type {
   Document,
   DocxPackage,
@@ -38,18 +40,32 @@ import {
   isTiffMimeType,
 } from "../utils/tiffConverter";
 import { parseComments } from "./commentParser";
+import { normalizeCommentReferences } from "./commentReferenceNormalization";
 import {
   parseDocumentBody,
   extractAllTemplateVariables,
 } from "./documentParser";
 import { parseFootnotes, parseEndnotes } from "./footnoteParser";
 import { parseHeader, parseFooter } from "./headerFooterParser";
+import { normalizeHeaderFooterReferences } from "./headerFooterReferenceNormalization";
+import {
+  DocxModelValidationError,
+  formatDocumentModelIssues,
+  validateFolioDocumentModel,
+} from "./modelValidation";
 import { parseNumbering } from "./numberingParser";
 import type { NumberingMap } from "./numberingParser";
-import { parseRelationships, RELATIONSHIP_TYPES } from "./relsParser";
-import { parseStyles, parseStyleDefinitions } from "./styleParser";
+import { normalizeNumberingReferences } from "./numberingReferenceNormalization";
+import {
+  parseRelationships,
+  RELATIONSHIP_TYPES,
+  resolveRelativePath,
+} from "./relsParser";
+import { parseSettings } from "./settingsParser";
+import { parseStylesPackage } from "./styleParser";
 import type { StyleMap } from "./styleParser";
 import { parseTheme } from "./themeParser";
+import { normalizeTrackedMoveRanges } from "./trackedMoveRangeNormalization";
 import { unzipDocx, getMediaMimeType, mediaToDataUrl } from "./unzip";
 import type { DocxUnzipLimits, RawDocxContent } from "./unzip";
 
@@ -92,7 +108,7 @@ export type ParseOptions = {
  * @param input - DOCX file as ArrayBuffer, Uint8Array, Blob, or File
  * @param options - Parsing options
  * @returns Promise resolving to Document
- * @throws Error if parsing fails
+ * @throws {Error} if parsing fails
  */
 export async function parseDocx(
   input: DocxInput,
@@ -134,6 +150,7 @@ export async function parseDocx(
     const raw = await timeStageAsync("unzip", () =>
       unzipDocx(buffer, unzipLimits),
     );
+    warnings.push(...raw.warnings);
     onProgress("Extracted DOCX", 10);
 
     // ========================================================================
@@ -161,8 +178,9 @@ export async function parseDocx(
 
     timeStage("styles", () => {
       if (raw.stylesXml) {
-        styles = parseStyles(raw.stylesXml, theme);
-        styleDefinitions = parseStyleDefinitions(raw.stylesXml, theme);
+        const parsedStyles = parseStylesPackage(raw.stylesXml, theme);
+        styles = parsedStyles.styles;
+        styleDefinitions = parsedStyles.styleDefinitions;
       }
     });
     onProgress("Parsed styles", 30);
@@ -176,11 +194,18 @@ export async function parseDocx(
     );
     onProgress("Parsed numbering", 35);
 
+    // Settings (`word/settings.xml`) — currently only used for
+    // `w:defaultTabStop`, but staged here so future settings flow through
+    // the same point. Cheap; no separate progress band.
+    const settings = timeStage("settings", () =>
+      parseSettings(raw.settingsXml),
+    );
+
     // ========================================================================
     // STAGE 6: Build media file map (35-40%)
     // ========================================================================
     onProgress("Processing media files...", 35);
-    const media = timeStage("media", () => buildMediaMap(raw, rels));
+    const media = await timeStageAsync("media", () => buildMediaMap(raw, rels));
     onProgress("Processed media", 40);
 
     // ========================================================================
@@ -259,6 +284,68 @@ export async function parseDocx(
     if (comments.length > 0) {
       documentBody.comments = comments;
     }
+    const commentReferenceNormalization = normalizeCommentReferences({
+      documentBody,
+      comments,
+      ...(headers !== undefined ? { headers } : {}),
+      ...(footers !== undefined ? { footers } : {}),
+      ...(footnotes !== undefined ? { footnotes } : {}),
+      ...(endnotes !== undefined ? { endnotes } : {}),
+    });
+    if (commentReferenceNormalization.removedDanglingReferences > 0) {
+      warnings.push(
+        `Removed ${commentReferenceNormalization.removedDanglingReferences} dangling comment reference marker(s) whose comments.xml entries are missing.`,
+      );
+    }
+    if (commentReferenceNormalization.reanchoredUnbalancedRanges > 0) {
+      warnings.push(
+        `Re-anchored ${commentReferenceNormalization.reanchoredUnbalancedRanges} unbalanced comment range marker(s) as point comments.`,
+      );
+    }
+    const headerFooterReferenceNormalization = normalizeHeaderFooterReferences({
+      documentBody,
+      ...(headers !== undefined ? { headers } : {}),
+      ...(footers !== undefined ? { footers } : {}),
+    });
+    if (
+      headerFooterReferenceNormalization.removedDanglingHeaderReferences > 0
+    ) {
+      warnings.push(
+        `Removed ${headerFooterReferenceNormalization.removedDanglingHeaderReferences} dangling header reference(s) whose header parts are missing.`,
+      );
+    }
+    if (
+      headerFooterReferenceNormalization.removedDanglingFooterReferences > 0
+    ) {
+      warnings.push(
+        `Removed ${headerFooterReferenceNormalization.removedDanglingFooterReferences} dangling footer reference(s) whose footer parts are missing.`,
+      );
+    }
+    const numberingReferenceNormalization = normalizeNumberingReferences({
+      documentBody,
+      numbering,
+      ...(headers !== undefined ? { headers } : {}),
+      ...(footers !== undefined ? { footers } : {}),
+      ...(footnotes !== undefined ? { footnotes } : {}),
+      ...(endnotes !== undefined ? { endnotes } : {}),
+    });
+    if (numberingReferenceNormalization.removedMissingNumberingReferences > 0) {
+      warnings.push(
+        `Removed ${numberingReferenceNormalization.removedMissingNumberingReferences} numbering reference(s) whose numbering definitions are missing.`,
+      );
+    }
+    const trackedMoveRangeNormalization = normalizeTrackedMoveRanges({
+      documentBody,
+      ...(headers !== undefined ? { headers } : {}),
+      ...(footers !== undefined ? { footers } : {}),
+      ...(footnotes !== undefined ? { footnotes } : {}),
+      ...(endnotes !== undefined ? { endnotes } : {}),
+    });
+    if (trackedMoveRangeNormalization.removedUnbalancedMoveRangeMarkers > 0) {
+      warnings.push(
+        `Removed ${trackedMoveRangeNormalization.removedUnbalancedMoveRangeMarkers} unbalanced tracked move range marker(s).`,
+      );
+    }
 
     // ========================================================================
     // STAGE 10: Detect template variables (77-80%)
@@ -299,6 +386,7 @@ export async function parseDocx(
 
     const pkg: DocxPackage = {
       document: documentBody,
+      settings,
       ...(styleDefinitions !== undefined ? { styles: styleDefinitions } : {}),
       theme,
       numbering: numbering.definitions,
@@ -312,19 +400,41 @@ export async function parseDocx(
 
     const document: Document = {
       package: pkg,
-      originalBuffer: buffer,
+      originalBuffer: raw.originalBuffer,
       ...(templateVariables !== undefined ? { templateVariables } : {}),
       ...(requiredFonts.length > 0 ? { requiredFonts } : {}),
-      ...(warnings.length > 0 ? { warnings } : {}),
     };
+
+    const validation = validateFolioDocumentModel(document);
+    const parsedCompleteModel = parseHeadersFooters && parseNotes;
+    if (!validation.valid && parsedCompleteModel) {
+      throw new DocxModelValidationError(
+        "Parsed DOCX produced an invalid document model",
+        validation.issues,
+      );
+    }
+    warnings.push(...formatDocumentModelIssues(validation.issues));
+    if (warnings.length > 0) {
+      document.warnings = warnings;
+    }
 
     onProgress("Complete", 100);
     return document;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to parse DOCX: ${message}`, { cause: error });
+    throw new DocxParseError({
+      message: `Failed to parse DOCX: ${message}`,
+      cause: error,
+    });
   }
 }
+
+/** DOCX parsing failure: malformed package, unsupported feature, or
+ *  upstream parser exception. Wraps the original cause for diagnostics. */
+export class DocxParseError extends TaggedError("DocxParseError")<{
+  message: string;
+  cause?: unknown;
+}>() {}
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -333,10 +443,10 @@ export async function parseDocx(
 /**
  * Build media file map from raw content and relationships
  */
-function buildMediaMap(
+async function buildMediaMap(
   raw: RawDocxContent,
   _rels: RelationshipMap,
-): Map<string, MediaFile> {
+): Promise<Map<string, MediaFile>> {
   const media = new Map<string, MediaFile>();
 
   // Process each media file
@@ -352,7 +462,7 @@ function buildMediaMap(
     // with the original TIFF data — the round-trip survives even if the
     // in-browser preview is broken.
     if (isTiffMimeType(mimeType)) {
-      const converted = convertTiffToPngDataUrl(data);
+      const converted = await convertTiffToPngDataUrl(data);
       if (converted) {
         const mediaFile: MediaFile = {
           path,
@@ -423,6 +533,31 @@ function getMapCaseInsensitive<T>(
   return undefined;
 }
 
+const DOCUMENT_RELATIONSHIPS_PATH = "word/_rels/document.xml.rels";
+
+function getRelationshipPartPath(target: string): string {
+  return resolveRelativePath(DOCUMENT_RELATIONSHIPS_PATH, target);
+}
+
+function getRelationshipsPathForPart(partPath: string): string {
+  const lastSlash = partPath.lastIndexOf("/");
+  const directory = lastSlash === -1 ? "" : partPath.slice(0, lastSlash);
+  const filename = lastSlash === -1 ? partPath : partPath.slice(lastSlash + 1);
+  return `${directory ? `${directory}/` : ""}_rels/${filename}.rels`;
+}
+
+function getHeaderFooterXml(
+  raw: RawDocxContent,
+  partPath: string,
+  indexedParts: Map<string, string>,
+): string | undefined {
+  const filename = partPath.split("/").pop() ?? partPath;
+  return (
+    getMapCaseInsensitive(raw.allXml, partPath) ??
+    getMapCaseInsensitive(indexedParts, filename)
+  );
+}
+
 function parseHeadersAndFooters(
   raw: RawDocxContent,
   styles: StyleMap | null,
@@ -442,12 +577,12 @@ function parseHeadersAndFooters(
     if (rel.type === RELATIONSHIP_TYPES.header && rel.target) {
       // Get the header XML for this relationship
       // Use case-insensitive lookup since ZIP files may have inconsistent casing
-      const filename = rel.target.split("/").pop() || rel.target;
-      const headerXml = getMapCaseInsensitive(raw.headers, filename);
+      const partPath = getRelationshipPartPath(rel.target);
+      const headerXml = getHeaderFooterXml(raw, partPath, raw.headers);
 
       if (headerXml) {
         // Get header-specific relationships (e.g., word/_rels/header1.xml.rels)
-        const headerRelsPath = `word/_rels/${filename}.rels`;
+        const headerRelsPath = getRelationshipsPathForPart(partPath);
         const headerRelsXml = getMapCaseInsensitive(raw.allXml, headerRelsPath);
         const headerRels = headerRelsXml
           ? parseRelationships(headerRelsXml)
@@ -462,16 +597,36 @@ function parseHeadersAndFooters(
           headerRels,
           media,
         );
+        // Anchor a picture watermark to the package-absolute media path so
+        // cross-header propagation can rebind it against a stable target (the
+        // per-header imageRId repeats across parts). Resolved here because this
+        // is where the header part's own rels path is known.
+        const watermark = header.watermark;
+        if (watermark?.kind === "picture") {
+          const imageRel = headerRels.get(watermark.imageRId);
+          if (imageRel?.type === RELATIONSHIP_TYPES.image && imageRel.target) {
+            if (imageRel.targetMode === "External") {
+              // Linked image: anchor the URL as-is (not a package path).
+              watermark.imageTarget = imageRel.target;
+              watermark.imageTargetExternal = true;
+            } else {
+              watermark.imageTarget = resolveRelativePath(
+                headerRelsPath,
+                imageRel.target,
+              );
+            }
+          }
+        }
         headers.set(rId, header);
       }
     } else if (rel.type === RELATIONSHIP_TYPES.footer && rel.target) {
       // Use case-insensitive lookup since ZIP files may have inconsistent casing
-      const filename = rel.target.split("/").pop() || rel.target;
-      const footerXml = getMapCaseInsensitive(raw.footers, filename);
+      const partPath = getRelationshipPartPath(rel.target);
+      const footerXml = getHeaderFooterXml(raw, partPath, raw.footers);
 
       if (footerXml) {
         // Get footer-specific relationships (e.g., word/_rels/footer1.xml.rels)
-        const footerRelsPath = `word/_rels/${filename}.rels`;
+        const footerRelsPath = getRelationshipsPathForPart(partPath);
         const footerRelsXml = getMapCaseInsensitive(raw.allXml, footerRelsPath);
         const footerRels = footerRelsXml
           ? parseRelationships(footerRelsXml)

@@ -14,6 +14,7 @@ import { resetAuthorColors } from "../../core/utils/authorColors";
 import type { DocxInput } from "../../core/utils/docxInput";
 import { loadFontsWithMapping } from "../../core/utils/fontLoader";
 import type { UseHistoryReturn } from "../../hooks/useHistory";
+import { getDocumentLoadSource } from "./documentLoaderBehavior";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -119,7 +120,10 @@ export const useDocumentLoader = ({
       try {
         // Skip blocking font preload during parsing; fonts are loaded
         // asynchronously by loadParsedDocument after the first render
-        const doc = await parseDocx(buffer, { preloadFonts: false });
+        const doc = await parseDocx(buffer, {
+          detectVariables: false,
+          preloadFonts: false,
+        });
         // Discard result if a newer load was started while we were parsing
         if (loadGenerationRef.current !== generation) {
           return;
@@ -138,21 +142,27 @@ export const useDocumentLoader = ({
     [history.state, loadParsedDocument, onError, setDocumentLoadState],
   );
 
+  const loaderRef = useRef({ loadBuffer, loadParsedDocument });
+  loaderRef.current = { loadBuffer, loadParsedDocument };
+
   // -------------------------------------------------------------------
   // Effects
   // -------------------------------------------------------------------
 
   // React to document/documentBuffer prop changes
   useEffect(() => {
-    if (!documentBuffer) {
-      if (initialDocument) {
-        loadParsedDocument(initialDocument);
-      }
+    const source = getDocumentLoadSource({ documentBuffer, initialDocument });
+    if (source.type === "none") {
       return;
     }
 
-    void loadBuffer(documentBuffer);
-  }, [documentBuffer, initialDocument]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (source.type === "parsed-document") {
+      loaderRef.current.loadParsedDocument(source.document);
+      return;
+    }
+
+    void loaderRef.current.loadBuffer(source.buffer);
+  }, [documentBuffer, initialDocument]);
 
   // Keep original buffer for save/export
   useEffect(() => {

@@ -43,13 +43,14 @@ jobs:
         env:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.repository }}
+          HAS_RUN_CI_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'run-ci') }}
         run: |
           # Same-repo PRs are trusted: the author has write access
           # to push branches. Fork PRs need a maintainer to add
           # the "run-ci" label after reviewing the code.
           if [[ "$HEAD_REPO" == "$BASE_REPO" ]]; then
             echo "trusted=true" >> "$GITHUB_OUTPUT"
-          elif [[ '${{ contains(github.event.pull_request.labels.*.name, 'run-ci') }}' == 'true' ]]; then
+          elif [[ "$HAS_RUN_CI_LABEL" == "true" ]]; then
             echo "trusted=true" >> "$GITHUB_OUTPUT"
           else
             echo "trusted=false" >> "$GITHUB_OUTPUT"
@@ -71,16 +72,21 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
+          submodules: true
 
       - name: Check changed file scope
         id: changed-files
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             echo "package_checks_required=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          base_ref="origin/${{ github.base_ref || 'main' }}"
+          base_ref="origin/$BASE_REF"
           mapfile -t changed_files < <(git diff --name-only "$base_ref"...HEAD)
 
           if (( ${#changed_files[@]} == 0 )); then
@@ -108,6 +114,10 @@ jobs:
             echo "::notice::Only workflow/provenance files changed; skipping package CI checks."
           fi
 
+      - name: Check AI prompt sync
+        if: steps.changed-files.outputs.package_checks_required == 'true'
+        run: bash scripts/sync-ai-skills.sh --check
+
       - name: Setup Bun
         if: steps.changed-files.outputs.package_checks_required == 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -116,11 +126,11 @@ jobs:
 
       - name: Turbo remote cache
         if: steps.changed-files.outputs.package_checks_required == 'true'
-        uses: rharkor/caching-for-turbo@564b6d155a4aec5ada97411ba7f7956e4bac890a # v2.4.0
+        uses: rharkor/caching-for-turbo@5d14fba18e450c09393333cfd4242e8b3cb455a6 # v2.4.2
 
       - name: Install dependencies
         if: steps.changed-files.outputs.package_checks_required == 'true'
-        run: bun ci --ignore-scripts
+        run: bash scripts/bun-ci-retry.sh --ignore-scripts
         env:
           # .npmrc references NPM_TOKEN, but PR installs must not expose
           # the real npm token to dependency lifecycle scripts.
@@ -149,12 +159,15 @@ jobs:
       - name: Compute affected flag
         if: steps.changed-files.outputs.package_checks_required == 'true'
         id: affected
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             echo "flag=" >> "$GITHUB_OUTPUT"
           else
             echo "flag=--affected" >> "$GITHUB_OUTPUT"
-            echo "TURBO_SCM_BASE=origin/${{ github.base_ref || 'main' }}" >> "$GITHUB_ENV"
+            echo "TURBO_SCM_BASE=origin/$BASE_REF" >> "$GITHUB_ENV"
           fi
 
       - name: Check i18n sync
@@ -163,11 +176,18 @@ jobs:
 
       - name: Release changelog guard
         if: github.event_name == 'pull_request'
-        run: bash scripts/check-release-changelog.sh --base "origin/${{ github.base_ref || 'main' }}"
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: bash scripts/check-release-changelog.sh --base "origin/$BASE_REF"
 
       - name: Lint
         if: steps.changed-files.outputs.package_checks_required == 'true'
-        run: bun run lint -- ${{ steps.affected.outputs.flag }}
+        env:
+          AFFECTED_FLAG: ${{ steps.affected.outputs.flag }}
+        run: |
+          args=()
+          [[ -z "$AFFECTED_FLAG" ]] || args+=("$AFFECTED_FLAG")
+          bun run lint -- "${args[@]}"
 
       - name: Format
         if: steps.changed-files.outputs.package_checks_required == 'true'
@@ -175,7 +195,12 @@ jobs:
         # contains `-- --check`, so appending `--affected` via
         # `bun run` would land it after turbo's `--` and forward it
         # to oxfmt instead of filtering packages.
-        run: bun --bun turbo run format ${{ steps.affected.outputs.flag }} -- --check
+        env:
+          AFFECTED_FLAG: ${{ steps.affected.outputs.flag }}
+        run: |
+          args=()
+          [[ -z "$AFFECTED_FLAG" ]] || args+=("$AFFECTED_FLAG")
+          bun --bun turbo run format "${args[@]}" -- --check
 
       - name: Rust format
         if: steps.changed-files.outputs.package_checks_required == 'true'
@@ -183,11 +208,36 @@ jobs:
 
       - name: Typecheck
         if: steps.changed-files.outputs.package_checks_required == 'true'
-        run: bun run typecheck -- ${{ steps.affected.outputs.flag }}
+        env:
+          AFFECTED_FLAG: ${{ steps.affected.outputs.flag }}
+        run: |
+          args=()
+          [[ -z "$AFFECTED_FLAG" ]] || args+=("$AFFECTED_FLAG")
+          bun run typecheck -- "${args[@]}"
+
+      - name: Knip production dependency checks
+        if: steps.changed-files.outputs.package_checks_required == 'true'
+        # Static gate paired with the image compile/boot smokes
+        # (api-image-deps): knip --strict verifies production code imports
+        # only `dependencies` (never a devDependency) and flags transitively
+        # resolved (phantom) packages a `turbo prune` would drop. Scoped to
+        # the apps that ship a pruned runtime; each declares its real
+        # production entry (a `!` entry, a start script, or the SSR server
+        # entry). New runtimes are enrolled here deliberately, alongside a
+        # boot/compile smoke.
+        run: |
+          for workspace in apps/api apps/legal-atlas-runner apps/web; do
+            bun run knip --production --strict --no-progress --include unlisted,unresolved --workspace "$workspace"
+          done
 
       - name: Test
         if: steps.changed-files.outputs.package_checks_required == 'true'
-        run: bun run test -- --concurrency=2 ${{ steps.affected.outputs.flag }}
+        env:
+          AFFECTED_FLAG: ${{ steps.affected.outputs.flag }}
+        run: |
+          args=()
+          [[ -z "$AFFECTED_FLAG" ]] || args+=("$AFFECTED_FLAG")
+          bun run test -- --concurrency=2 "${args[@]}"
 
       # Self-test the bridge-version guard so a regression in the
       # script itself is caught immediately, not on the next desktop
@@ -203,6 +253,9 @@ jobs:
       # key). A bug here makes them silently disagree.
       - name: Test release-channel script
         run: bash scripts/release-channel.test.sh
+
+      - name: Test bun ci retry script
+        run: bash scripts/bun-ci-retry.test.sh
 
       # Fail PRs that change the desktop bridge surface without
       # bumping BRIDGE_VERSION in apps/desktop/src-tauri/src/types.rs.
@@ -232,15 +285,19 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check whether web-affecting paths changed
         id: changed
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          base_ref="origin/${{ github.base_ref || 'main' }}"
+          base_ref="origin/$BASE_REF"
           mapfile -t changed_files < <(git diff --name-only "$base_ref"...HEAD)
           run=false
           for file in "${changed_files[@]}"; do
@@ -264,7 +321,7 @@ jobs:
 
       - name: Install dependencies
         if: steps.changed.outputs.run == 'true'
-        run: bun ci --ignore-scripts
+        run: bash scripts/bun-ci-retry.sh --ignore-scripts
         env:
           # .npmrc references NPM_TOKEN, but PR installs must not expose
           # the secret to install-time lifecycle scripts. The token is
@@ -281,6 +338,43 @@ jobs:
       - name: Build web
         if: steps.changed.outputs.run == 'true'
         run: bun --filter @stll/web build
+
+      - name: Prod-deps web boot smoke
+        if: steps.changed.outputs.run == 'true'
+        # apps/web/Dockerfile's runner installs --production (deps-prod stage).
+        # Reproduce that clean production tree and boot start-runtime.js: a
+        # devDependency reached by the SSR server bundle (dist/server/server.js)
+        # fails to resolve here rather than at deploy time. /health is served by
+        # the runtime wrapper, so a clean boot proves the production module graph
+        # resolves.
+        env:
+          NPM_TOKEN: ""
+        run: |
+          set -euo pipefail
+          # Reproduce apps/web/Dockerfile's deps-prod stage exactly. Wipe
+          # node_modules first (a plain --production reinstall only skips ADDING
+          # devDeps; it does not prune ones the build install already placed),
+          # and scope to @stll/web — an unfiltered install pulls other apps' deps
+          # and could mask a package the web runtime reaches but @stll/web never
+          # declared. dist/ and .env are untouched.
+          rm -rf node_modules
+          bun install --filter @stll/web --production --frozen-lockfile --ignore-scripts
+          cd apps/web
+          PORT=3199 HOST=127.0.0.1 bun start-runtime.js &
+          server_pid=$!
+          ready=
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3199/health >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          kill "$server_pid" 2>/dev/null || true
+          if [[ "$ready" != "1" ]]; then
+            echo "web SSR runtime failed to boot under --production deps" >&2
+            exit 1
+          fi
 
   # Astro landing build. The existing ci-checks job runs lint,
   # typecheck, and test, but no `astro build`, so plugin/runtime
@@ -302,15 +396,19 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check whether landing-affecting paths changed
         id: changed
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          base_ref="origin/${{ github.base_ref || 'main' }}"
+          base_ref="origin/$BASE_REF"
           mapfile -t changed_files < <(git diff --name-only "$base_ref"...HEAD)
           run=false
           for file in "${changed_files[@]}"; do
@@ -334,7 +432,7 @@ jobs:
 
       - name: Install dependencies
         if: steps.changed.outputs.run == 'true'
-        run: bun ci --ignore-scripts
+        run: bash scripts/bun-ci-retry.sh --ignore-scripts
         env:
           # .npmrc references NPM_TOKEN, but PR installs must not expose
           # the real npm token to dependency lifecycle scripts.
@@ -343,6 +441,406 @@ jobs:
       - name: Build landing
         if: steps.changed.outputs.run == 'true'
         run: bun --filter @stll/landing build
+
+  # Playwright end-to-end suite. Boots the full local stack
+  # (Postgres, MinIO, Valkey, Gotenberg) plus the API and web
+  # dev server, then runs the E2E specs under
+  # apps/web/e2e/. Catches integration regressions that
+  # lint/typecheck/unit tests miss (auth, routing, upload flow,
+  # document rendering).
+  e2e:
+    needs: trust-check
+    if: >-
+      needs.trust-check.outputs.trusted == 'true'
+      || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check whether E2E-affecting paths changed
+        id: changed
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base_ref="origin/$BASE_REF"
+          mapfile -t changed_files < <(git diff --name-only "$base_ref"...HEAD)
+          run=false
+          for file in "${changed_files[@]}"; do
+            case "$file" in
+              apps/web/*|apps/api/*|packages/*|docker-compose.yml|bun.lock|package.json|.github/workflows/ci.yml)
+                run=true
+                break
+                ;;
+            esac
+          done
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [[ "$run" != "true" ]]; then
+            echo "::notice::No E2E-affecting paths changed; skipping E2E."
+          fi
+
+      - name: Setup Bun
+        if: steps.changed.outputs.run == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: "package.json"
+
+      - name: Install dependencies
+        if: steps.changed.outputs.run == 'true'
+        run: bash scripts/bun-ci-retry.sh --ignore-scripts
+        env:
+          NPM_TOKEN: ""
+
+      - name: Prepare environment
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          cd ./apps/api
+          mv .env.example .env
+          cd ../web
+          mv .env.example .env
+
+      - name: Start docker stack
+        if: steps.changed.outputs.run == 'true'
+        # `--wait` only on long-running services; `minio-setup` is a one-shot
+        # bucket-creator container that exits 0, which `--wait` treats as
+        # "not running" and fails the whole command. Run it separately in
+        # the foreground so we still block on its success.
+        run: |
+          docker compose --profile dev up -d --wait postgres minio valkey gotenberg
+          docker compose --profile dev up minio-setup
+
+      - name: Run database migrations
+        if: steps.changed.outputs.run == 'true'
+        # `db:migrate` (not `db:push`) so role bootstrap migrations such as
+        # `20260516000000_case_law_ingestion_role` actually execute. `db:push`
+        # only diffs the declarative schema, which references `stella_ingestion`
+        # as `existing()` and then fails when later policy creates target it.
+        run: bun --filter @stll/api db:migrate
+
+      - name: Seed test user
+        if: steps.changed.outputs.run == 'true'
+        run: bun --filter @stll/api db:seed-test-user
+
+      - name: Start API server
+        if: steps.changed.outputs.run == 'true'
+        # `--watch` is for local dev; CI runs the server flat. Logs land in
+        # /tmp/api.log so the "Upload server logs" step can publish them on
+        # failure for debugging.
+        run: |
+          cd apps/api
+          # --preload registers the dev/test-only mock-AI generator; .env.example
+          # sets USE_MOCK_AI=true, so e2e must route through the mock rather than
+          # the real provider (which would fail on the placeholder API key).
+          NODE_ENV=development nohup bun --port 3001 --preload ./src/dev/register-mock-ai.ts src/index.ts > /tmp/api.log 2>&1 &
+          echo $! > /tmp/api.pid
+
+      - name: Wait for API
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          for i in {1..60}; do
+            if curl -sf http://localhost:3001/health > /dev/null 2>&1; then
+              echo "API up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::API never came up"
+          tail -200 /tmp/api.log || true
+          exit 1
+
+      - name: Start web dev server
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          cd apps/web
+          nohup bun --bun vite --port 3000 > /tmp/web.log 2>&1 &
+          echo $! > /tmp/web.pid
+
+      - name: Wait for web
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          for i in {1..60}; do
+            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+              echo "Web up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Web never came up"
+          tail -200 /tmp/web.log || true
+          exit 1
+
+      - name: Install Playwright browsers
+        if: steps.changed.outputs.run == 'true'
+        run: cd apps/web && bunx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        if: steps.changed.outputs.run == 'true'
+        run: bun --filter @stll/web test:e2e
+
+      # Flake guard: the dev server's dependency optimizer must finish during
+      # the cold pass. A second pass mid-session prints "optimized dependencies
+      # changed. reloading" and forces a full-page reload that can tear the page
+      # down mid-test (see optimizeDeps.include in apps/web/vite.config.ts).
+      # Fail loudly — even on a lucky pass — so a newly added lazy/runtime dep
+      # that escapes the cold scan is fixed at its source instead of flaking.
+      - name: Guard against mid-test Vite re-optimize
+        if: always() && steps.changed.outputs.run == 'true'
+        run: |
+          if grep -q "optimized dependencies changed. reloading" /tmp/web.log; then
+            echo "::error::Vite re-optimized dependencies mid-session and forced a reload. A dependency reachable only via a lazy/runtime import is missing from optimizeDeps.include in apps/web/vite.config.ts — add the dep(s) named below."
+            grep -nE "new dependencies optimized|optimized dependencies changed" /tmp/web.log || true
+            exit 1
+          fi
+          echo "No mid-session dep re-optimize detected."
+
+      - name: Upload Playwright report
+        if: failure() && steps.changed.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 7
+
+      - name: Upload server logs
+        if: failure() && steps.changed.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: server-logs
+          path: |
+            /tmp/api.log
+            /tmp/web.log
+          retention-days: 7
+
+  # Pruned-subset lockfile + prod-deps guard. The staging API image
+  # is built via `turbo prune @stll/api --docker` followed by
+  # `bun install --frozen-lockfile` against the pruned bun.lock.
+  # The other CI jobs all install against the full repo lockfile,
+  # so a workspace dep that resolves transitively from outside
+  # @stll/api's tree (e.g. via apps/web) can be missing from the
+  # relevant workspace block and still satisfy the full install —
+  # only to fail at deploy time when the prune drops the masking
+  # workspace. Mirror the Dockerfile's install path here so that
+  # class of drift fails the PR instead of the deploy.
+  #
+  # The job then re-runs the install with `--production` (no
+  # devDependencies) and compiles + smokes the API entrypoints
+  # against that tree. This catches the second class of deploy-time
+  # failure: prod code (apps/api/src/** or apps/api/scripts/**) that
+  # imports a devDependency, or a `@stll/*` workspace package whose
+  # runtime imports are mis-classified as devDependencies. Without
+  # this gate, flipping the Dockerfile to `--production` would only
+  # fail at deploy time.
+  api-image-deps:
+    needs: trust-check
+    if: >-
+      needs.trust-check.outputs.trusted == 'true'
+      || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check whether API/runner-image-affecting paths changed
+        id: changed
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base_ref="origin/$BASE_REF"
+          mapfile -t changed_files < <(git diff --name-only "$base_ref"...HEAD)
+          run=false
+          for file in "${changed_files[@]}"; do
+            case "$file" in
+              apps/api/*|apps/legal-atlas-runner/*|packages/*|bun.lock|package.json|turbo.json|.github/workflows/ci.yml)
+                run=true
+                break
+                ;;
+            esac
+          done
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [[ "$run" != "true" ]]; then
+            echo "::notice::No API/runner-image-affecting paths changed; skipping pruned-lockfile guard."
+          fi
+
+      - name: Setup Bun
+        if: steps.changed.outputs.run == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: "package.json"
+
+      - name: Install turbo
+        if: steps.changed.outputs.run == 'true'
+        # Match apps/api/Dockerfile: a global turbo install, no
+        # workspace dependency resolution beforehand.
+        run: bun install -g turbo@^2
+
+      - name: Prune monorepo for @stll/api
+        if: steps.changed.outputs.run == 'true'
+        run: turbo prune @stll/api --docker
+
+      - name: Install pruned deps with frozen lockfile
+        if: steps.changed.outputs.run == 'true'
+        # This is the exact command the Docker build runs against
+        # the pruned bun.lock in `apps/api/Dockerfile`. It is the
+        # only place that catches workspace-block drift in the
+        # repo lockfile, because the full-repo `bun ci` other jobs
+        # use accepts a stale workspace block as long as the
+        # package resolves transitively somewhere in the graph.
+        run: |
+          cd out/json
+          bun install --frozen-lockfile --ignore-scripts
+        env:
+          NPM_TOKEN: ""
+
+      - name: Prod-deps API compile smoke
+        if: steps.changed.outputs.run == 'true'
+        # Empirically prove the pruned API tree builds and its
+        # runtime worker entrypoints resolve with devDependencies
+        # stripped. Runs a fresh `bun install --production` in a
+        # parallel dir (so the lockfile-drift install above stays
+        # unchanged), overlays the full pruned source via
+        # `cp -a ../full/. .` (mirrors `COPY --from=pruner
+        # /app/out/full/ .` in `apps/api/Dockerfile`), and compiles the
+        # API binary plus runtime workers.
+        run: |
+          set -euo pipefail
+          rm -rf out-prod
+          cp -a out out-prod
+          cd out-prod/json
+          bun install --production --frozen-lockfile --ignore-scripts
+          cp -a ../full/. .
+          export NODE_ENV=production
+          bun build \
+            --compile \
+            --minify-whitespace \
+            --minify-syntax \
+            --target bun \
+            --outfile /tmp/server \
+            apps/api/src/index.ts
+          mkdir -p /tmp/runtime-workers
+          bun build \
+            --target bun \
+            --outfile /tmp/runtime-workers/pdf-worker.js \
+            apps/api/src/handlers/files/pdf-worker.ts
+          bun build \
+            --target bun \
+            --outfile /tmp/runtime-workers/extraction-worker.js \
+            apps/api/src/lib/search/extraction-worker.ts
+        env:
+          NPM_TOKEN: ""
+
+      - name: Prod-deps legal atlas runner smoke
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          rm -rf out-runner
+          turbo prune @stll/legal-atlas-runner --docker --out-dir out-runner
+          cd out-runner/json
+          bun install --production --frozen-lockfile --ignore-scripts
+          cp -a ../full/. .
+          bun --filter @stll/legal-atlas-runner build
+          bun apps/legal-atlas-runner/dist/index.js smoke
+          set +e
+          out=$(DATABASE_URL=postgres://smoke:smoke@localhost:5432/smoke \
+                S3_ENDPOINT=http://localhost \
+                S3_BUCKET=smoke \
+                S3_REGION=eu-central-1 \
+                bun apps/legal-atlas-runner/dist/index.js run case-law-ingest __smoke__ 2>&1)
+          status=$?
+          set -e
+          echo "$out"
+          if ! echo "$out" | grep -q 'Unknown adapter: __smoke__'; then
+            echo "ERROR: legal-atlas runner smoke failed under --production (exit=$status)" >&2
+            exit 1
+          fi
+        env:
+          NPM_TOKEN: ""
+
+  # Narrow Windows smoke for the dev runner. Full app CI stays on Linux,
+  # but this catches path and shell assumptions in the scripts package
+  # before Windows contributors hit them locally.
+  windows-scripts:
+    needs: trust-check
+    if: >-
+      needs.trust-check.outputs.trusted == 'true'
+      || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check whether scripts-affecting paths changed
+        id: changed
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base_ref="origin/$BASE_REF"
+          mapfile -t changed_files < <(git diff --name-only "$base_ref"...HEAD)
+          run=false
+          for file in "${changed_files[@]}"; do
+            case "$file" in
+              packages/scripts/*|package.json|bun.lock|.github/workflows/ci.yml)
+                run=true
+                break
+                ;;
+            esac
+          done
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [[ "$run" != "true" ]]; then
+            echo "::notice::No scripts-affecting paths changed; skipping Windows scripts smoke."
+          fi
+
+      - name: Setup Bun
+        if: steps.changed.outputs.run == 'true'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: "package.json"
+
+      - name: Install scripts workspace dependencies
+        if: steps.changed.outputs.run == 'true'
+        run: bun install --frozen-lockfile --ignore-scripts --filter @stll/scripts
+        env:
+          NPM_TOKEN: ""
+
+      - name: Test dev runner
+        if: steps.changed.outputs.run == 'true'
+        run: bun test packages/scripts/src/dev-runner.test.ts
 
   # Aggregation job for branch protection. The ruleset requires
   # this check to pass, which ensures untrusted PRs cannot be
@@ -357,20 +855,32 @@ jobs:
         || 'ci-result'
       }}
     if: always()
-    needs: [trust-check, ci-checks, web-build, landing-build]
+    needs:
+      [
+        trust-check,
+        ci-checks,
+        web-build,
+        landing-build,
+        e2e,
+        api-image-deps,
+        windows-scripts,
+      ]
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: Evaluate CI outcome
+        env:
+          API_IMAGE_DEPS_RESULT: ${{ needs.api-image-deps.result }}
+          CI_RESULT: ${{ needs.ci-checks.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          EVENT: ${{ github.event_name }}
+          LANDING_RESULT: ${{ needs.landing-build.result }}
+          TRUSTED: ${{ needs.trust-check.outputs.trusted }}
+          TRUST_RESULT: ${{ needs.trust-check.result }}
+          WEB_RESULT: ${{ needs.web-build.result }}
+          WINDOWS_SCRIPTS_RESULT: ${{ needs.windows-scripts.result }}
         run: |
-          TRUSTED="${{ needs.trust-check.outputs.trusted }}"
-          CI_RESULT="${{ needs.ci-checks.result }}"
-          WEB_RESULT="${{ needs.web-build.result }}"
-          LANDING_RESULT="${{ needs.landing-build.result }}"
-          TRUST_RESULT="${{ needs.trust-check.result }}"
-          EVENT="${{ github.event_name }}"
-
           # When the trust-check job was skipped (draft PR or
           # irrelevant label event), all downstream jobs are also
           # skipped. This is expected and should not block the PR.
@@ -382,7 +892,10 @@ jobs:
           if [[ "$EVENT" == "workflow_dispatch" ]]; then
             if [[ "$CI_RESULT" == "failure" || "$CI_RESULT" == "cancelled" \
                   || "$WEB_RESULT" == "failure" || "$WEB_RESULT" == "cancelled" \
-                  || "$LANDING_RESULT" == "failure" || "$LANDING_RESULT" == "cancelled" ]]; then
+                  || "$LANDING_RESULT" == "failure" || "$LANDING_RESULT" == "cancelled" \
+                  || "$E2E_RESULT" == "failure" || "$E2E_RESULT" == "cancelled" \
+                  || "$API_IMAGE_DEPS_RESULT" == "failure" || "$API_IMAGE_DEPS_RESULT" == "cancelled" \
+                  || "$WINDOWS_SCRIPTS_RESULT" == "failure" || "$WINDOWS_SCRIPTS_RESULT" == "cancelled" ]]; then
               echo "::error::CI checks failed."
               exit 1
             fi
@@ -396,12 +909,12 @@ jobs:
 
           # "cancelled" means cancel-in-progress replaced this
           # run with a newer one; the newer run is authoritative.
-          if [[ "$CI_RESULT" == "cancelled" || "$WEB_RESULT" == "cancelled" || "$LANDING_RESULT" == "cancelled" ]]; then
+          if [[ "$CI_RESULT" == "cancelled" || "$WEB_RESULT" == "cancelled" || "$LANDING_RESULT" == "cancelled" || "$E2E_RESULT" == "cancelled" || "$API_IMAGE_DEPS_RESULT" == "cancelled" || "$WINDOWS_SCRIPTS_RESULT" == "cancelled" ]]; then
             echo "CI run was superseded by a newer run (cancel-in-progress). Passing."
             exit 0
           fi
 
-          if [[ "$CI_RESULT" == "failure" || "$WEB_RESULT" == "failure" || "$LANDING_RESULT" == "failure" ]]; then
+          if [[ "$CI_RESULT" == "failure" || "$WEB_RESULT" == "failure" || "$LANDING_RESULT" == "failure" || "$E2E_RESULT" == "failure" || "$API_IMAGE_DEPS_RESULT" == "failure" || "$WINDOWS_SCRIPTS_RESULT" == "failure" ]]; then
             echo "::error::CI checks failed."
             exit 1
           fi

@@ -29,10 +29,7 @@ import type {
   MediaFile,
   InlineSdt,
   SdtProperties,
-  Insertion,
-  Deletion,
-  MoveFrom,
-  MoveTo,
+  ParagraphMarkChange,
   ParagraphPropertyChange,
   TrackedChangeInfo,
   MathEquation,
@@ -51,7 +48,6 @@ import {
   FrameYAlignSchema,
   LineSpacingRuleSchema,
   ParagraphAlignmentSchema,
-  SdtLockSchema,
   ShadingPatternSchema,
   TabLeaderSchema,
   TabStopAlignmentSchema,
@@ -60,6 +56,7 @@ import {
 } from "./parserEnums";
 import { consolidateParagraphContent } from "./runConsolidator";
 import { parseRun, parseRunProperties } from "./runParser";
+import { parseSdtProperties } from "./sdtProperties";
 import { parseSectionProperties } from "./sectionParser";
 import type { StyleMap } from "./styleParser";
 import {
@@ -73,128 +70,21 @@ import {
 } from "./xmlParser";
 import type { XmlElement } from "./xmlParser";
 
-// ============================================================================
-// SDT PROPERTIES PARSER
-// ============================================================================
-
-/**
- * Parse SDT properties (w:sdtPr) element
- */
-function parseSdtProperties(sdtPr: XmlElement | null): SdtProperties {
-  const props: SdtProperties = { sdtType: "richText" };
-  if (!sdtPr || !sdtPr.elements) {
-    return props;
-  }
-
-  for (const el of sdtPr.elements) {
-    if (el.type !== "element") {
-      continue;
-    }
-    const name = el.name?.replace(/^w:/u, "") ?? "";
-
-    switch (name) {
-      case "alias": {
-        const aliasVal = getAttribute(el, "w", "val");
-        if (aliasVal !== null) {
-          props.alias = aliasVal;
-        }
-        break;
-      }
-      case "tag": {
-        const tagVal = getAttribute(el, "w", "val");
-        if (tagVal !== null) {
-          props.tag = tagVal;
-        }
-        break;
-      }
-      case "lock": {
-        const lockVal = getAttribute(el, "w", "val");
-        props.lock = narrowEnum(lockVal, SdtLockSchema) ?? "unlocked";
-        break;
-      }
-      case "placeholder": {
-        const docPart = findChild(el, "w", "docPart");
-        if (docPart) {
-          const valEl = findChild(docPart, "w", "val");
-          if (valEl) {
-            const phVal = getAttribute(valEl, "w", "val");
-            if (phVal !== null) {
-              props.placeholder = phVal;
-            }
-          }
-        }
-        break;
-      }
-      case "showingPlcHdr":
-        props.showingPlaceholder = true;
-        break;
-      case "text":
-        props.sdtType = "plainText";
-        break;
-      case "date": {
-        props.sdtType = "date";
-        const dateVal = getAttribute(el, "w", "fullDate");
-        if (dateVal !== null) {
-          props.dateFormat = dateVal;
-        }
-        break;
-      }
-      case "dropDownList":
-        props.sdtType = "dropdown";
-        props.listItems = parseListItems(el);
-        break;
-      case "comboBox":
-        props.sdtType = "comboBox";
-        props.listItems = parseListItems(el);
-        break;
-      case "checkbox": {
-        props.sdtType = "checkbox";
-        const checked =
-          findChild(el, "w14", "checked") ?? findChild(el, "w", "checked");
-        props.checked = checked
-          ? getAttribute(checked, "w14", "val") === "1" ||
-            getAttribute(checked, "w", "val") === "1"
-          : false;
-        break;
-      }
-      case "picture":
-        props.sdtType = "picture";
-        break;
-      case "docPartObj":
-        props.sdtType = "buildingBlockGallery";
-        break;
-      case "group":
-        props.sdtType = "group";
-        break;
-      default:
-        break;
-    }
-  }
-
-  return props;
-}
-
-function parseListItems(
-  el: XmlElement,
-): { displayText: string; value: string }[] {
-  const items: { displayText: string; value: string }[] = [];
-  for (const child of el.elements ?? []) {
-    if (
-      child.type === "element" &&
-      (child.name === "w:listItem" || child.name?.endsWith(":listItem"))
-    ) {
-      items.push({
-        displayText: getAttribute(child, "w", "displayText") ?? "",
-        value: getAttribute(child, "w", "value") ?? "",
-      });
-    }
-  }
-  return items;
-}
-
 /**
  * Extract plain text from a math element (recursive text content extraction)
  */
+function extractPlainText(runs: Run[]): string {
+  let out = "";
+  for (const run of runs) {
+    for (const c of run.content) {
+      if (c.type === "text") {
+        out += c.text;
+      }
+    }
+  }
+  return out;
+}
+
 function extractMathText(el: XmlElement): string {
   let text = "";
   if (el.type === "text" && typeof el.text === "string") {
@@ -468,6 +358,102 @@ function parseFrameProperties(
 // PARAGRAPH PROPERTIES PARSER
 // ============================================================================
 
+type ParagraphPropertyChildren = {
+  bidi?: XmlElement;
+  contextualSpacing?: XmlElement;
+  framePr?: XmlElement;
+  ind?: XmlElement;
+  jc?: XmlElement;
+  keepLines?: XmlElement;
+  keepNext?: XmlElement;
+  numPr?: XmlElement;
+  outlineLvl?: XmlElement;
+  pageBreakBefore?: XmlElement;
+  pBdr?: XmlElement;
+  pStyle?: XmlElement;
+  rPr?: XmlElement;
+  shd?: XmlElement;
+  spacing?: XmlElement;
+  suppressAutoHyphens?: XmlElement;
+  suppressLineNumbers?: XmlElement;
+  tabs?: XmlElement;
+  widowControl?: XmlElement;
+};
+
+function collectFirstParagraphPropertyChildren(
+  pPr: XmlElement,
+): ParagraphPropertyChildren {
+  const children: ParagraphPropertyChildren = {};
+
+  for (const child of pPr.elements ?? []) {
+    if (child.type !== "element") {
+      continue;
+    }
+    const localName = getLocalName(child.name);
+    switch (localName) {
+      case "bidi":
+        children.bidi ??= child;
+        break;
+      case "contextualSpacing":
+        children.contextualSpacing ??= child;
+        break;
+      case "framePr":
+        children.framePr ??= child;
+        break;
+      case "ind":
+        children.ind ??= child;
+        break;
+      case "jc":
+        children.jc ??= child;
+        break;
+      case "keepLines":
+        children.keepLines ??= child;
+        break;
+      case "keepNext":
+        children.keepNext ??= child;
+        break;
+      case "numPr":
+        children.numPr ??= child;
+        break;
+      case "outlineLvl":
+        children.outlineLvl ??= child;
+        break;
+      case "pageBreakBefore":
+        children.pageBreakBefore ??= child;
+        break;
+      case "pBdr":
+        children.pBdr ??= child;
+        break;
+      case "pStyle":
+        children.pStyle ??= child;
+        break;
+      case "rPr":
+        children.rPr ??= child;
+        break;
+      case "shd":
+        children.shd ??= child;
+        break;
+      case "spacing":
+        children.spacing ??= child;
+        break;
+      case "suppressAutoHyphens":
+        children.suppressAutoHyphens ??= child;
+        break;
+      case "suppressLineNumbers":
+        children.suppressLineNumbers ??= child;
+        break;
+      case "tabs":
+        children.tabs ??= child;
+        break;
+      case "widowControl":
+        children.widowControl ??= child;
+        break;
+    }
+  }
+
+  return children;
+}
+
 /**
  * Parse paragraph formatting properties (w:pPr)
  *
@@ -496,9 +482,10 @@ export function parseParagraphProperties(
   }
 
   const formatting: ParagraphFormatting = {};
+  const propertyChildren = collectFirstParagraphPropertyChildren(pPr);
 
   // === Alignment ===
-  const jc = findChild(pPr, "w", "jc");
+  const jc = propertyChildren.jc;
   if (jc) {
     const val = narrowEnum(
       getAttribute(jc, "w", "val"),
@@ -510,13 +497,13 @@ export function parseParagraphProperties(
   }
 
   // === Bidi (right-to-left) ===
-  const bidi = findChild(pPr, "w", "bidi");
+  const bidi = propertyChildren.bidi;
   if (bidi) {
     formatting.bidi = parseBooleanElement(bidi);
   }
 
   // === Spacing ===
-  const spacing = findChild(pPr, "w", "spacing");
+  const spacing = propertyChildren.spacing;
   if (spacing) {
     const before = parseNumericAttribute(spacing, "w", "before");
     if (before !== undefined) {
@@ -565,7 +552,7 @@ export function parseParagraphProperties(
   }
 
   // === Indentation ===
-  const ind = findChild(pPr, "w", "ind");
+  const ind = propertyChildren.ind;
   if (ind) {
     const left = parseNumericAttribute(ind, "w", "left");
     if (left !== undefined) {
@@ -602,7 +589,7 @@ export function parseParagraphProperties(
   }
 
   // === Borders ===
-  const pBdr = findChild(pPr, "w", "pBdr");
+  const pBdr = propertyChildren.pBdr;
   if (pBdr) {
     const borders: ParagraphFormatting["borders"] = {};
 
@@ -642,7 +629,7 @@ export function parseParagraphProperties(
   }
 
   // === Shading ===
-  const shd = findChild(pPr, "w", "shd");
+  const shd = propertyChildren.shd;
   if (shd) {
     const shadingResult = parseShadingProperties(shd);
     if (shadingResult !== undefined) {
@@ -651,7 +638,7 @@ export function parseParagraphProperties(
   }
 
   // === Tab Stops ===
-  const tabs = findChild(pPr, "w", "tabs");
+  const tabs = propertyChildren.tabs;
   if (tabs) {
     const tabsResult = parseTabStops(tabs);
     if (tabsResult !== undefined) {
@@ -660,33 +647,33 @@ export function parseParagraphProperties(
   }
 
   // === Page Break Control ===
-  const keepNext = findChild(pPr, "w", "keepNext");
+  const keepNext = propertyChildren.keepNext;
   if (keepNext) {
     formatting.keepNext = parseBooleanElement(keepNext);
   }
 
-  const keepLines = findChild(pPr, "w", "keepLines");
+  const keepLines = propertyChildren.keepLines;
   if (keepLines) {
     formatting.keepLines = parseBooleanElement(keepLines);
   }
 
-  const widowControl = findChild(pPr, "w", "widowControl");
+  const widowControl = propertyChildren.widowControl;
   if (widowControl) {
     formatting.widowControl = parseBooleanElement(widowControl);
   }
 
-  const pageBreakBefore = findChild(pPr, "w", "pageBreakBefore");
+  const pageBreakBefore = propertyChildren.pageBreakBefore;
   if (pageBreakBefore) {
     formatting.pageBreakBefore = parseBooleanElement(pageBreakBefore);
   }
 
-  const contextualSpacing = findChild(pPr, "w", "contextualSpacing");
+  const contextualSpacing = propertyChildren.contextualSpacing;
   if (contextualSpacing) {
     formatting.contextualSpacing = parseBooleanElement(contextualSpacing);
   }
 
   // === Numbering Properties (List Info) ===
-  const numPr = findChild(pPr, "w", "numPr");
+  const numPr = propertyChildren.numPr;
   if (numPr) {
     const numIdEl = findChild(numPr, "w", "numId");
     const ilvlEl = findChild(numPr, "w", "ilvl");
@@ -711,7 +698,7 @@ export function parseParagraphProperties(
   }
 
   // === Outline Level ===
-  const outlineLvl = findChild(pPr, "w", "outlineLvl");
+  const outlineLvl = propertyChildren.outlineLvl;
   if (outlineLvl) {
     const val = parseNumericAttribute(outlineLvl, "w", "val");
     if (val !== undefined) {
@@ -720,7 +707,7 @@ export function parseParagraphProperties(
   }
 
   // === Style Reference ===
-  const pStyle = findChild(pPr, "w", "pStyle");
+  const pStyle = propertyChildren.pStyle;
   if (pStyle) {
     const val = getAttribute(pStyle, "w", "val");
     if (val) {
@@ -729,7 +716,7 @@ export function parseParagraphProperties(
   }
 
   // === Frame Properties ===
-  const framePr = findChild(pPr, "w", "framePr");
+  const framePr = propertyChildren.framePr;
   if (framePr) {
     const frameResult = parseFrameProperties(framePr);
     if (frameResult !== undefined) {
@@ -738,19 +725,19 @@ export function parseParagraphProperties(
   }
 
   // === Suppress Line Numbers ===
-  const suppressLineNumbers = findChild(pPr, "w", "suppressLineNumbers");
+  const suppressLineNumbers = propertyChildren.suppressLineNumbers;
   if (suppressLineNumbers) {
     formatting.suppressLineNumbers = parseBooleanElement(suppressLineNumbers);
   }
 
   // === Suppress Auto Hyphens ===
-  const suppressAutoHyphens = findChild(pPr, "w", "suppressAutoHyphens");
+  const suppressAutoHyphens = propertyChildren.suppressAutoHyphens;
   if (suppressAutoHyphens) {
     formatting.suppressAutoHyphens = parseBooleanElement(suppressAutoHyphens);
   }
 
   // === Default Run Properties ===
-  const rPr = findChild(pPr, "w", "rPr");
+  const rPr = propertyChildren.rPr;
   if (rPr) {
     const runPropsResult = parseRunProperties(rPr, theme, styles);
     if (runPropsResult !== undefined) {
@@ -894,6 +881,11 @@ function paragraphStartsWithRenderedPageBreak(node: XmlElement): boolean {
 }
 
 type TrackedChangeParseContext = "default" | "deletion";
+type TrackedChangeWrapperType =
+  | "insertion"
+  | "deletion"
+  | "moveFrom"
+  | "moveTo";
 
 function replaceLocalName(name: string | undefined, localName: string): string {
   if (!name) {
@@ -989,6 +981,185 @@ function parseParagraphPropertyChanges(
     .filter((change) => change.previousFormatting || change.currentFormatting);
 
   return changes.length > 0 ? changes : undefined;
+}
+
+/**
+ * Parse `<w:pPr><w:rPr><w:ins/>` or `<w:del/>` — the OOXML paragraph-mark
+ * tracked-change marker (ECMA-376 §17.13.5). Returns the first marker
+ * encountered, or undefined when none is present. `ins` and `del` are
+ * mutually exclusive in valid documents.
+ */
+function parseParagraphMarkChange(
+  pPr: XmlElement | null,
+): ParagraphMarkChange | undefined {
+  if (!pPr) {
+    return undefined;
+  }
+  const rPr = findChild(pPr, "w", "rPr");
+  if (!rPr) {
+    return undefined;
+  }
+  const ins = findChild(rPr, "w", "ins");
+  if (ins) {
+    return { kind: "ins", info: parseTrackedChangeInfo(ins) };
+  }
+  const del = findChild(rPr, "w", "del");
+  if (del) {
+    return { kind: "del", info: parseTrackedChangeInfo(del) };
+  }
+  return undefined;
+}
+
+function isTrackedChangeWrapperChild(
+  content: ParagraphContent,
+): content is Run | Hyperlink {
+  return content.type === "run" || content.type === "hyperlink";
+}
+
+// Mirror of upstream eigenpal/docx-editor PR #482 (commit 29f95751d):
+// OOXML allows runs, hyperlinks, simple/complex fields, nested SDTs,
+// and math equations directly inside `<w:sdtContent>`. Anything else
+// that the paragraph parser produced (bookmarks, comment markers,
+// tracked-change wrappers, ...) is lifted out as a sibling of the SDT
+// so the SDT wrapper itself stays valid for round-trip serialization.
+function isInlineSdtContent(
+  content: ParagraphContent,
+): content is InlineSdt["content"][number] {
+  return (
+    content.type === "run" ||
+    content.type === "hyperlink" ||
+    content.type === "simpleField" ||
+    content.type === "complexField" ||
+    content.type === "inlineSdt" ||
+    content.type === "mathEquation"
+  );
+}
+
+type PushTrackedChangeWrapperParams = {
+  contents: ParagraphContent[];
+  type: TrackedChangeWrapperType;
+  info: TrackedChangeInfo;
+  content: readonly (Run | Hyperlink)[];
+  preserveEmpty?: boolean;
+};
+
+function pushTrackedChangeWrapper({
+  contents,
+  type,
+  info,
+  content,
+  preserveEmpty = false,
+}: PushTrackedChangeWrapperParams): void {
+  if (content.length === 0 && !preserveEmpty) {
+    return;
+  }
+
+  if (type === "insertion") {
+    contents.push({ type: "insertion", info, content: [...content] });
+    return;
+  }
+
+  if (type === "deletion") {
+    contents.push({ type: "deletion", info, content: [...content] });
+    return;
+  }
+
+  if (type === "moveFrom") {
+    contents.push({ type: "moveFrom", info, content: [...content] });
+    return;
+  }
+
+  contents.push({ type: "moveTo", info, content: [...content] });
+}
+
+type PushTrackedChangeSegmentsParams = {
+  contents: ParagraphContent[];
+  type: TrackedChangeWrapperType;
+  info: TrackedChangeInfo;
+  parsedContent: readonly ParagraphContent[];
+};
+
+function pushTrackedChangeSegments({
+  contents,
+  type,
+  info,
+  parsedContent,
+}: PushTrackedChangeSegmentsParams): void {
+  if (!parsedContent.some(isTrackedChangeWrapperChild)) {
+    pushTrackedChangeWrapper({
+      contents,
+      type,
+      info,
+      content: [],
+      preserveEmpty: true,
+    });
+    contents.push(...parsedContent);
+    return;
+  }
+
+  const segment: (Run | Hyperlink)[] = [];
+
+  for (const content of parsedContent) {
+    if (isTrackedChangeWrapperChild(content)) {
+      segment.push(content);
+      continue;
+    }
+
+    pushTrackedChangeWrapper({ contents, type, info, content: segment });
+    segment.length = 0;
+    contents.push(content);
+  }
+
+  pushTrackedChangeWrapper({ contents, type, info, content: segment });
+}
+
+type PushInlineSdtSegmentsParams = {
+  contents: ParagraphContent[];
+  properties: SdtProperties;
+  parsedContent: readonly ParagraphContent[];
+};
+
+function pushInlineSdtSegments({
+  contents,
+  properties,
+  parsedContent,
+}: PushInlineSdtSegmentsParams): void {
+  if (!parsedContent.some(isInlineSdtContent)) {
+    contents.push({
+      type: "inlineSdt",
+      properties,
+      content: [],
+    });
+    contents.push(...parsedContent);
+    return;
+  }
+
+  const segment: InlineSdt["content"] = [];
+
+  const pushSegment = (): void => {
+    if (segment.length === 0) {
+      return;
+    }
+
+    contents.push({
+      type: "inlineSdt",
+      properties,
+      content: [...segment],
+    });
+    segment.length = 0;
+  };
+
+  for (const content of parsedContent) {
+    if (isInlineSdtContent(content)) {
+      segment.push(content);
+      continue;
+    }
+
+    pushSegment();
+    contents.push(content);
+  }
+
+  pushSegment();
 }
 
 /**
@@ -1109,6 +1280,7 @@ function parseParagraphContents(
         let hasFieldBegin = false;
         let hasFieldSeparate = false;
         let hasFieldEnd = false;
+        let endOriginalValue: string | undefined;
         let instrText = "";
 
         for (const content of run.content) {
@@ -1125,6 +1297,9 @@ function parseParagraphContents(
               hasFieldSeparate = true;
             } else {
               hasFieldEnd = true;
+              if (content.originalValue !== undefined) {
+                endOriginalValue = content.originalValue;
+              }
             }
           } else if (content.type === "instrText") {
             instrText += content.text;
@@ -1132,7 +1307,18 @@ function parseParagraphContents(
         }
 
         if (hasFieldBegin) {
-          // Starting a new complex field
+          // Nested complex field. Word allows fields inside the result region
+          // of another field (e.g. PAGEREF inside a TOC entry). We don't model
+          // nesting in ParagraphContent, so before resetting state for the
+          // inner field, flush any result-region runs the outer field has
+          // already accumulated (e.g. the TOC entry text + tab before its
+          // PAGEREF) into `contents` so they don't get destroyed by the reset.
+          // Pre-separator nesting (a field inside the outer's field code) is
+          // exotic enough to leave to the outer's fieldCode array.
+          if (inComplexField && afterSeparator) {
+            contents.push(...complexFieldResultRuns);
+            inComplexField = false;
+          }
           inComplexField = true;
           afterSeparator = false;
           complexFieldInstr = "";
@@ -1162,13 +1348,32 @@ function parseParagraphContents(
           }
 
           if (hasFieldEnd) {
+            // Self-numbering fields (LISTNUM, AUTONUM, …) often skip the
+            // `separate` and stash their last-rendered display on the end
+            // fldChar's `<w:numberingChange w:original="…"/>`. Without this
+            // synthesized result run, the field renders empty and any tab
+            // that follows pushes the body text into the wrong column.
+            let resultRuns = complexFieldResultRuns;
+            if (
+              resultRuns.length === 0 &&
+              !afterSeparator &&
+              endOriginalValue !== undefined
+            ) {
+              resultRuns = [
+                {
+                  type: "run",
+                  content: [{ type: "text", text: endOriginalValue }],
+                },
+              ];
+            }
+
             // Close the complex field
             const complexField: ComplexField = {
               type: "complexField",
               instruction: complexFieldInstr.trim(),
               fieldType: parseFieldType(complexFieldInstr),
               fieldCode: complexFieldCodeRuns,
-              fieldResult: complexFieldResultRuns,
+              fieldResult: resultRuns,
             };
 
             if (complexFieldLock) {
@@ -1229,16 +1434,9 @@ function parseParagraphContents(
 
       case "sdt": {
         // Structured document tag - extract properties and content
-        const sdtPr = (child.elements ?? []).find(
-          (el: XmlElement) =>
-            el.type === "element" &&
-            (el.name === "w:sdtPr" || el.name?.endsWith(":sdtPr")),
-        );
-        const sdtContentEl = (child.elements ?? []).find(
-          (el: XmlElement) =>
-            el.type === "element" &&
-            (el.name === "w:sdtContent" || el.name?.endsWith(":sdtContent")),
-        );
+        const sdtPr = findChild(child, "w", "sdtPr");
+        const sdtEndPr = findChild(child, "w", "sdtEndPr");
+        const sdtContentEl = findChild(child, "w", "sdtContent");
         if (sdtContentEl) {
           const sdtParsed = parseParagraphContents(
             sdtContentEl,
@@ -1249,16 +1447,12 @@ function parseParagraphContents(
             media,
             trackedContext,
           );
-          const properties = parseSdtProperties(sdtPr ?? null);
-          const inlineSdt: InlineSdt = {
-            type: "inlineSdt",
+          const properties = parseSdtProperties(sdtPr, sdtEndPr);
+          pushInlineSdtSegments({
+            contents,
             properties,
-            content: sdtParsed.filter(
-              (c): c is Run | Hyperlink =>
-                c.type === "run" || c.type === "hyperlink",
-            ),
-          };
-          contents.push(inlineSdt);
+            parsedContent: sdtParsed,
+          });
         }
         break;
       }
@@ -1274,15 +1468,12 @@ function parseParagraphContents(
           rels,
           media,
         );
-        const insertion: Insertion = {
+        pushTrackedChangeSegments({
+          contents,
           type: "insertion",
           info: insInfo,
-          content: insContent.filter(
-            (c): c is Run | Hyperlink =>
-              c.type === "run" || c.type === "hyperlink",
-          ),
-        };
-        contents.push(insertion);
+          parsedContent: insContent,
+        });
         break;
       }
       case "del": {
@@ -1297,15 +1488,12 @@ function parseParagraphContents(
           media,
           "deletion",
         );
-        const deletion: Deletion = {
+        pushTrackedChangeSegments({
+          contents,
           type: "deletion",
           info: delInfo,
-          content: delContent.filter(
-            (c): c is Run | Hyperlink =>
-              c.type === "run" || c.type === "hyperlink",
-          ),
-        };
-        contents.push(deletion);
+          parsedContent: delContent,
+        });
         break;
       }
       case "moveFrom": {
@@ -1319,15 +1507,12 @@ function parseParagraphContents(
           media,
           "deletion",
         );
-        const moveFrom: MoveFrom = {
+        pushTrackedChangeSegments({
+          contents,
           type: "moveFrom",
           info: moveFromInfo,
-          content: moveFromContent.filter(
-            (c): c is Run | Hyperlink =>
-              c.type === "run" || c.type === "hyperlink",
-          ),
-        };
-        contents.push(moveFrom);
+          parsedContent: moveFromContent,
+        });
         break;
       }
 
@@ -1341,15 +1526,12 @@ function parseParagraphContents(
           rels,
           media,
         );
-        const moveTo: MoveTo = {
+        pushTrackedChangeSegments({
+          contents,
           type: "moveTo",
           info: moveToInfo,
-          content: moveToContent.filter(
-            (c): c is Run | Hyperlink =>
-              c.type === "run" || c.type === "hyperlink",
-          ),
-        };
-        contents.push(moveTo);
+          parsedContent: moveToContent,
+        });
         break;
       }
 
@@ -1418,6 +1600,13 @@ function parseParagraphContents(
         // Unknown element - skip
         break;
     }
+  }
+
+  // Paragraph ended while an outer complex field is still open past its
+  // separator (e.g. a TOC field begun here but closed in a later paragraph).
+  // Flush the accumulated result runs so the displayed content survives.
+  if (inComplexField && afterSeparator) {
+    contents.push(...complexFieldResultRuns);
   }
 
   return contents;
@@ -1504,10 +1693,15 @@ export function parseParagraph(
       paragraph.propertyChanges = propertyChangesResult;
     }
 
+    const pPrMarkResult = parseParagraphMarkChange(pPr);
+    if (pPrMarkResult !== undefined) {
+      paragraph.pPrMark = pPrMarkResult;
+    }
+
     // Check for section properties within paragraph (marks end of a section)
     const sectPr = findChild(pPr, "w", "sectPr");
     if (sectPr) {
-      paragraph.sectionProperties = parseSectionProperties(sectPr, rels);
+      paragraph.sectionProperties = parseSectionProperties(sectPr);
     }
   }
 
@@ -1585,6 +1779,84 @@ export function parseParagraph(
         if (level.rPr?.fontSize) {
           listRendering.markerFontSize = level.rPr.fontSize / 2;
         }
+        if (level.rPr?.allCaps) {
+          listRendering.markerAllCaps = true;
+        }
+        if (level.suffix) {
+          listRendering.markerSuffix = level.suffix;
+        }
+        // Count inline LISTNUM (default-list) complex fields this paragraph
+        // carries. Word advances the counter at `ilvl + 1` for each, so a
+        // later sibling at that depth picks up the next letter. We also
+        // fold each LISTNUM's cached display value into the marker text and
+        // strip the field (plus its trailing tab, which Word swallowed into
+        // the marker zone) from the inline content — that way the host
+        // paragraph's marker zone reads "7.1[gap](a)" and the body text on
+        // line 1 begins at the same column as the wrapped lines below.
+        let implicitChildLevelAdvances = 0;
+        const foldedMarkerSuffix: string[] = [];
+        const filteredContent: ParagraphContent[] = [];
+        let dropNextTab = false;
+        // Word inserts paragraph-mark / bookmark / comment-range metadata
+        // between a LISTNUM field and its trailing tab. Skip those when
+        // hunting for the tab to drop, otherwise `dropNextTab` clears on
+        // the metadata node and the tab survives, breaking alignment.
+        const isMetadataContent = (content: ParagraphContent): boolean =>
+          content.type === "bookmarkStart" ||
+          content.type === "bookmarkEnd" ||
+          content.type === "commentRangeStart" ||
+          content.type === "commentRangeEnd" ||
+          content.type === "commentReference";
+        for (const content of paragraph.content) {
+          if (dropNextTab && isMetadataContent(content)) {
+            filteredContent.push(content);
+            continue;
+          }
+          if (dropNextTab) {
+            dropNextTab = false;
+            if (
+              content.type === "run" &&
+              content.content.length === 1 &&
+              content.content[0]?.type === "tab"
+            ) {
+              continue;
+            }
+          }
+          if (content.type === "complexField") {
+            const isListNum =
+              content.fieldType === "LISTNUM" ||
+              content.instruction.trim().toUpperCase().startsWith("LISTNUM");
+            if (isListNum) {
+              implicitChildLevelAdvances += 1;
+              const cached = extractPlainText(content.fieldResult);
+              if (cached) {
+                foldedMarkerSuffix.push(cached);
+              }
+              dropNextTab = true;
+              continue;
+            }
+          }
+          filteredContent.push(content);
+        }
+        if (foldedMarkerSuffix.length > 0) {
+          paragraph.content = filteredContent;
+          listRendering.marker = `${listRendering.marker}\t${foldedMarkerSuffix.join(" ")}`;
+          const nextLevel = numbering.getLevel(numId, ilvl + 1);
+          if (
+            nextLevel?.pPr?.hangingIndent === true &&
+            nextLevel.pPr.indentFirstLine !== undefined
+          ) {
+            // `indentFirstLine` is negative for hanging indents — the
+            // marker column sits at the indent's positive distance.
+            const hangingTwips = -nextLevel.pPr.indentFirstLine;
+            if (hangingTwips > 0) {
+              listRendering.markerSecondSlotOffsetTwips = hangingTwips;
+            }
+          }
+        }
+        if (implicitChildLevelAdvances > 0) {
+          listRendering.implicitChildLevelAdvances = implicitChildLevelAdvances;
+        }
         paragraph.listRendering = listRendering;
 
         // Apply level's paragraph properties (indentation) as defaults.
@@ -1599,10 +1871,19 @@ export function parseParagraph(
             directInd !== null &&
             (getAttribute(directInd, "w", "left") !== null ||
               getAttribute(directInd, "w", "start") !== null);
+          // ECMA-376 §17.3.1.12: a direct w:ind whose w:firstLine or
+          // w:hanging is "0" is a no-op and must not suppress the numbering
+          // level's hanging slot. Only treat non-zero direct values as
+          // overrides.
+          const directFirstLine = directInd
+            ? parseNumericAttribute(directInd, "w", "firstLine")
+            : undefined;
+          const directHanging = directInd
+            ? parseNumericAttribute(directInd, "w", "hanging")
+            : undefined;
           const hasDirectFirstLineOrHanging =
-            directInd !== null &&
-            (getAttribute(directInd, "w", "firstLine") !== null ||
-              getAttribute(directInd, "w", "hanging") !== null);
+            (directFirstLine !== undefined && directFirstLine !== 0) ||
+            (directHanging !== undefined && directHanging !== 0);
 
           if (!hasDirectLeft && level.pPr.indentLeft !== undefined) {
             paragraph.formatting.indentLeft = level.pPr.indentLeft;

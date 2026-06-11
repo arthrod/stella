@@ -10,6 +10,7 @@ export const LIMITS = {
   calendarTasksMax: 200,
   entitySummariesPageSize: 200,
   viewsCount: 20,
+  viewTemplatesPerUser: 50,
   templatesCount: 50,
   clauseCategoriesCount: 100,
   templateCategoriesCount: 100,
@@ -32,6 +33,14 @@ export const LIMITS = {
   agentSkillGithubDirectoriesMax: 100,
   agentSkillResourcesPerSkill: 50,
   agentSkillResourceMaxChars: 100_000,
+  mcpGatewayConnectorsMax: 20,
+  mcpGatewaySkillsMax: 100,
+  mcpGatewayToolsPerConnectorMax: 100,
+  mcpGatewayToolNameMaxChars: 128,
+  mcpGatewayToolDescriptionMaxChars: 2000,
+  mcpGatewayToolSchemaMaxChars: 20_000,
+  mcpGatewayRateLimitWindowMs: 60_000,
+  mcpGatewayRateLimitMax: 60,
   clauseVariantsPerClause: 10,
   clauseVersionsPerClause: 50,
   templateClausesPerTemplate: 50,
@@ -60,6 +69,19 @@ export const LIMITS = {
   searchQueryMaxLength: 500,
   searchPageSizeDefault: 20,
   searchPageSizeMax: 100,
+  /** Cap on the rolled-up message text indexed per chat thread for
+   *  global search. Bounds the stored tsv so a long conversation
+   *  cannot blow up the index; the headline only reads the first
+   *  2000 chars anyway. */
+  chatSearchTextMaxLength: 50_000,
+  /** Cap on searchable text indexed for one chat message. */
+  chatMessageSearchTextMaxLength: 8000,
+  /** Default result count for the internal chat-history search tool. */
+  chatHistorySearchPageSizeDefault: 6,
+  /** Max result count for the internal chat-history search tool. */
+  chatHistorySearchPageSizeMax: 10,
+  /** Max messages returned before or after a history expansion target. */
+  chatHistoryExpansionSideMax: 5,
   extractedContentMaxChars: 500_000,
   /** Hard timeout (ms) for the sandboxed extraction subprocess. */
   extractionTimeoutMs: 30_000,
@@ -69,8 +91,23 @@ export const LIMITS = {
   caseLawMatterLinksPerWorkspace: 1000,
   caseLawSearchPageSizeDefault: 20,
   caseLawSearchPageSizeMax: 100,
+  caseLawSlugCollisionScanLimit: 1000,
+  /** Max URL entries in one sitemap file by protocol. */
+  caseLawSitemapUrlLimit: 50_000,
+  /** Conservative per-shard case-law sitemap cap; leaves room for hreflang alternates under the XML byte limit. */
+  caseLawSitemapShardUrlLimit: 5000,
+  /** Max child sitemap entries in one sitemap index by protocol. */
+  caseLawSitemapIndexEntryLimit: 50_000,
   caseLawFacetLimit: 20,
   caseLawPolarityRulesPerLanguage: 500,
+  // corpus index two-stage search: lexical candidates fetched per index window
+  // before the citation-authority rerank.
+  corpusIndexSearchCandidateLimit: 300,
+  // Max corpus-index lexical candidates scanned across windows for one
+  // cursor request.
+  corpusIndexSearchScanLimit: 10_000,
+  // Decisions pushed to corpus index per indexer batch.
+  corpusIndexBatchSize: 50,
   infoSoudEventsMax: 200,
   infoSoudHearingsMax: 50,
   infoSoudRelatedCasesMax: 50,
@@ -127,6 +164,8 @@ export const FILE_SIZE_LIMITS = {
  * validate before a framework-level t.File() parser runs.
  */
 export const FILE_SIZE_LIMIT_BYTES = {
+  /** General document uploads (entities, templates). */
+  document: 50 * 1024 * 1024,
   /** Agent skill packs (`SKILL.md` or a ZIP folder). */
   skillPack: 2 * 1024 * 1024,
   /** Chat context file attachments. */
@@ -175,4 +214,17 @@ export const API_RATE_LIMITS = {
    *  against unauthenticated input, so the budget is intentionally
    *  much tighter than the general API. */
   folioCollab: { duration: 60_000, max: 30 },
+  /** Document translation: 30 req/min per IP. Each call ships a
+   *  full document to the external translation provider and
+   *  consumes the org's paid character quota, so this stays well
+   *  below the upload budget. */
+  translate: { duration: 60_000, max: 30 },
+  /** Hosted usage webhook ingest: 300 req/min per IP. Each request
+   *  triggers HMAC verification over up to ~64 KB and a database
+   *  transaction; the cap protects the route from an
+   *  unauthenticated attacker driving CPU/DB cost. Legitimate
+   *  provider traffic peaks well below 5 req/sec for any single
+   *  source IP, so this is loose enough for production while
+   *  still bounding the worst case. */
+  hostedUsageWebhook: { duration: 60_000, max: 300 },
 } as const;

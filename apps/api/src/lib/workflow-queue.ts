@@ -1,34 +1,55 @@
-import { matchError, panic, Result } from "better-result";
+import { panic, Result } from "better-result";
 import { Queue, Worker } from "bullmq";
+import type { RedisClient } from "bun";
 import { sleep } from "bun";
-import { and, asc, eq, gt, inArray, or, sql } from "drizzle-orm";
-import Redis from "ioredis";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
-import { isMockAI } from "@/api/consts";
-import type { ScopedDb } from "@/api/db";
+import type { SafeDb, ScopedDb } from "@/api/db";
 import { jsonField } from "@/api/db/json-utils";
-import { entities, fields, justifications, properties } from "@/api/db/schema";
-import type { EntityKind, FieldContent } from "@/api/db/schema-validators";
-import { env } from "@/api/env";
-import { loadOrgAIConfig } from "@/api/lib/ai-config-loader";
+import { rootDb } from "@/api/db/root";
+import {
+  cellMetadata,
+  fields,
+  justifications,
+  properties,
+} from "@/api/db/schema";
+import type { FieldContent } from "@/api/db/schema-validators";
+import {
+  loadOrgAIConfig,
+  loadPromptCachingPreference,
+} from "@/api/lib/ai-config-loader";
+import type { AIRequestServiceTier } from "@/api/lib/ai-models";
 import { captureError } from "@/api/lib/analytics";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
-import { errorTag } from "@/api/lib/errors/utils";
+import { acquireCellLocks } from "@/api/lib/cell-lock";
+import {
+  connectionErrorFields,
+  errorSystemFields,
+  errorTag,
+} from "@/api/lib/errors/utils";
 import { LIMITS } from "@/api/lib/limits";
 import { logger } from "@/api/lib/observability/logger";
-import { redisConnectionOptions } from "@/api/lib/redis-options";
-import { createRootScopedDb } from "@/api/lib/root-scoped-db";
+import {
+  createBullMqConnection,
+  createRedisClient,
+} from "@/api/lib/redis-client";
+import { createRootSafeDb, createRootScopedDb } from "@/api/lib/root-scoped-db";
 import {
   brandPersistedEntityId,
   brandPersistedPropertyId,
   brandPersistedUserId,
+  brandPersistedWorkspaceId,
   brandValidatedWorkflowActorKey,
 } from "@/api/lib/safe-id-boundaries";
 import { broadcast } from "@/api/lib/sse";
+import {
+  collectFullWorkflowTargetIds,
+  fetchExplicitWorkflowTargetRows,
+  readFullWorkflowSnapshotCursor,
+} from "@/api/lib/workflow-target-queries";
 import { resolveWorkflowTargetEntityIds } from "@/api/lib/workflow-targets";
-import { generateBatch } from "@/api/lib/workflow/generate-batch";
-import { generateBatchMock } from "@/api/lib/workflow/generate-batch-mock";
+import { getBatchGenerator } from "@/api/lib/workflow/generate-batch-provider";
 import type {
   ExecutionLevel,
   PropertyBatch,
@@ -37,6 +58,22 @@ import {
   getExecutionPlanData,
   getPropertyExecutionPlan,
 } from "@/api/lib/workflow/get-execution-plan";
+import {
+  isCurrentWorkflowRequestState,
+  parseRunningLockWorkspaceId,
+  selectOrphanWorkspaceIds,
+  selectRecoverableOrphanWorkspaceIds,
+  selectRunningLockReservation,
+} from "@/api/lib/workflow/orphan-recovery";
+import {
+  computeWorkflowJobTimeoutMs,
+  computeWorkflowRunLockTtlSec,
+  getWorkflowBatchAITimeoutMs,
+  runWorkflowBatchGenerationWithRetry,
+  WORKFLOW_ENTITY_JOB_ATTEMPTS,
+  WORKFLOW_ENTITY_JOB_BACKOFF_DELAY_MS,
+} from "@/api/lib/workflow/run-logic";
+import { parseStoredWorkflowServiceTier } from "@/api/lib/workflow/service-tier-state";
 import type { PartialAnswerUpdate } from "@/api/lib/workflow/streaming-answer";
 import { prepareBatch } from "@/api/lib/workflow/utils";
 
@@ -52,6 +89,8 @@ const WORKFLOW_RUN_STATE_FIELDS = [
   "completed",
   "plan-properties",
   "request-id",
+  "scoped",
+  "service-tier",
 ] as const;
 
 const EXTRACTION_PREVIEW_EVENT_TYPE = "workflow-extraction-preview";
@@ -79,39 +118,54 @@ type EntityJobData = {
   entityId: string;
   executionPlan: ExecutionLevel[];
   requestId: string;
+  runLockTtlSec?: number;
+  serviceTier?: AIRequestServiceTier;
+  /**
+   * Property IDs the caller wants processed even if their current
+   * content would normally cause `prepareBatch` to skip them (e.g. a
+   * `fresh` cell with a real value). Used by single-cell retry so a
+   * user can re-run an extraction over an already-populated cell.
+   */
+  forcePropertyIds?: string[];
 };
 
 // ── Public API ─────────────────────────────────────────
 
-let queue: Queue | null = null;
-let redisClient: Redis | null = null;
+let queue: Queue<EntityJobData> | null = null;
+let queueConnection: ReturnType<typeof createBullMqConnection> | null = null;
+let redisClient: RedisClient | null = null;
 
-const getRedis = (): Redis => {
-  redisClient ??= new Redis(env.REDIS_URL, {
-    ...redisConnectionOptions(),
-    maxRetriesPerRequest: null,
-  });
+const getQueueConnection = () => {
+  queueConnection ??= createBullMqConnection();
+  return queueConnection;
+};
+
+const getRedis = (): RedisClient => {
+  redisClient ??= createRedisClient();
   return redisClient;
 };
 
-const getQueue = (): Queue => {
-  queue ??= new Queue(QUEUE_NAME, {
-    connection: getRedis(),
+const getQueue = (): Queue<EntityJobData> => {
+  queue ??= new Queue<EntityJobData>(QUEUE_NAME, {
+    connection: getQueueConnection(),
     defaultJobOptions: {
       removeOnComplete: 100,
       removeOnFail: 500,
       // Retry once with backoff so a single transient failure (network
       // blip, AI provider 5xx) doesn't leave the cell empty. Stays low
       // enough that genuine logic errors surface quickly.
-      attempts: 2,
-      backoff: { type: "exponential", delay: 5000 },
+      attempts: WORKFLOW_ENTITY_JOB_ATTEMPTS,
+      backoff: {
+        type: "exponential",
+        delay: WORKFLOW_ENTITY_JOB_BACKOFF_DELAY_MS,
+      },
     },
   });
   return queue;
 };
 
 const clearWorkflowRunState = async (
-  redis: Redis,
+  redis: RedisClient,
   workspaceId: SafeId<"workspace">,
 ): Promise<void> => {
   await redis.del(
@@ -127,8 +181,19 @@ const isCurrentWorkflowRequest = async ({
 }: {
   requestId: string;
   workspaceId: SafeId<"workspace">;
-}): Promise<boolean> =>
-  (await getRedis().get(workflowKey(workspaceId, "request-id"))) === requestId;
+}): Promise<boolean> => {
+  const redis = getRedis();
+  const [currentRequestId, runningValue] = await Promise.all([
+    redis.get(workflowKey(workspaceId, "request-id")),
+    redis.get(workflowKey(workspaceId, "running")),
+  ]);
+  return isCurrentWorkflowRequestState({
+    currentRequestId,
+    legacyRunningLockValue: LEGACY_RUNNING_LOCK_VALUE,
+    requestId,
+    runningValue,
+  });
+};
 
 // Self-heal levers. Tuned conservatively so the happy path is never
 // disrupted, but a stuck job/worker can't block the workspace.
@@ -143,7 +208,7 @@ const isCurrentWorkflowRequest = async ({
 // MAX_STALLED_COUNT: a job that stalls this many times moves to
 // failed (and then retries via `attempts`).
 //
-// computeJobTimeoutMs: process-level ceiling per entity job, scaled
+// computeWorkflowJobTimeoutMs: process-level ceiling per entity job, scaled
 // with the execution plan's depth. A flat 6-minute cap would
 // deterministically abort entities with several slow dependency
 // levels even when each batch stays within its own AI timeout.
@@ -151,34 +216,23 @@ const LOCK_DURATION_MS = 5 * 60 * 1000;
 const STALLED_INTERVAL_MS = 30 * 1000;
 const MAX_STALLED_COUNT = 2;
 
-// Per-batch AI timeout. The same constant feeds into both the AI SDK
-// abort signal in `processOneBatch` and the per-job timeout below so
-// changes stay coupled.
-const BATCH_AI_TIMEOUT_MS = 120 * 1000;
-const INTEGRATION_ERROR_RETRY_DELAY_MS = 5 * 1000;
-const INTEGRATION_ERROR_ATTEMPTS = 2;
-// Floor for the per-job hard timeout — even a single-level plan gets
-// a generous window for setup, network blips, and the post-AI DB
-// writes.
-const JOB_TIMEOUT_FLOOR_MS = 6 * 60 * 1000;
-// Each dependency level runs sequentially and may itself contain
-// multiple batches sharing the per-batch timeout. The 1.5× factor
-// accommodates one retry within a batch plus DB write overhead.
-const JOB_TIMEOUT_PER_LEVEL_MS = Math.ceil(BATCH_AI_TIMEOUT_MS * 1.5);
-
-const computeJobTimeoutMs = (executionPlan: ExecutionLevel[]): number => {
-  const levels = executionPlan.length;
-  return Math.max(
-    JOB_TIMEOUT_FLOOR_MS,
-    levels * JOB_TIMEOUT_PER_LEVEL_MS + JOB_TIMEOUT_FLOOR_MS,
-  );
-};
 // Workflow-level Redis lock TTL. Long enough to outlast a single batch
 // even on big workspaces, short enough to self-heal an uncleanly-killed
 // worker without stranding the workspace for hours. The lock is also
 // extended on each entity completion below, so a long-running workflow
 // keeps the TTL fresh regardless of this initial value.
 const RUNNING_LOCK_TTL_SEC = 60 * 60;
+const RECOVERY_LOCK_SETTLE_MS = 100;
+const LEGACY_RUNNING_LOCK_VALUE = "1";
+const RECOVERY_LOCK_VALUE = "recovery";
+const RESERVE_RECOVERY_LOCK_SCRIPT = `
+local current = redis.call("GET", KEYS[1])
+if current == ARGV[1] then
+  redis.call("SET", KEYS[1], ARGV[2], "EX", ARGV[3])
+  return 1
+end
+return 0
+`;
 
 /**
  * Check if a workflow is currently running for a workspace.
@@ -187,7 +241,7 @@ export const isWorkflowRunning = async (
   workspaceId: SafeId<"workspace">,
 ): Promise<boolean> => {
   const val = await getRedis().get(workflowKey(workspaceId, "running"));
-  return val === "1";
+  return val !== null;
 };
 
 type StartWorkflowArgs = {
@@ -197,20 +251,18 @@ type StartWorkflowArgs = {
   scopedDb: ScopedDb;
   entityIds?: SafeId<"entity">[];
   entityIdsOrder?: SafeId<"entity">[];
+  /**
+   * Restrict the execution plan to these property IDs only. Used by
+   * single-cell retry to re-run one property for one entity without
+   * touching the rest of the entity's cells. Properties outside the
+   * filter are dropped from every level of the plan.
+   */
+  propertyIds?: SafeId<"property">[];
+  serviceTier?: AIRequestServiceTier;
 };
 
 type StartWorkflowResult = {
   status: "started" | "already-running" | "skipped" | "failed";
-};
-
-type WorkflowTargetEntityRow = {
-  id: SafeId<"entity">;
-  kind: EntityKind;
-};
-
-type FullWorkflowTargetCursor = {
-  createdAt: string;
-  id: SafeId<"entity">;
 };
 
 type EnqueueEntityJobsArgs = {
@@ -220,8 +272,11 @@ type EnqueueEntityJobsArgs = {
   organizationId: SafeId<"organization">;
   q: Queue;
   requestId: string;
+  runLockTtlSec: number;
   userId: SafeId<"user">;
   workspaceId: SafeId<"workspace">;
+  serviceTier: AIRequestServiceTier;
+  forcePropertyIds?: readonly SafeId<"property">[];
 };
 
 const chunkItems = <T>(items: readonly T[], size: number): T[][] => {
@@ -247,8 +302,11 @@ const enqueueEntityJobs = async ({
   organizationId,
   q,
   requestId,
+  runLockTtlSec,
+  serviceTier,
   userId,
   workspaceId,
+  forcePropertyIds,
 }: EnqueueEntityJobsArgs): Promise<void> => {
   if (entityIds.length === 0) {
     return;
@@ -269,6 +327,12 @@ const enqueueEntityJobs = async ({
           entityId,
           executionPlan,
           requestId,
+          runLockTtlSec,
+          serviceTier,
+          ...(forcePropertyIds &&
+            forcePropertyIds.length > 0 && {
+              forcePropertyIds: [...forcePropertyIds],
+            }),
         } satisfies EntityJobData,
         opts: { jobId },
       };
@@ -293,133 +357,21 @@ const removeQueuedWorkflowJobs = async (
   }
 };
 
-const fetchExplicitWorkflowTargetRows = async ({
-  inputEntityIds,
-  scopedDb,
-  workspaceId,
-}: {
-  inputEntityIds: readonly SafeId<"entity">[];
-  scopedDb: ScopedDb;
-  workspaceId: SafeId<"workspace">;
-}): Promise<WorkflowTargetEntityRow[]> => {
-  const entityRows: WorkflowTargetEntityRow[] = [];
-  for (const chunk of chunkItems(
-    inputEntityIds,
-    LIMITS.workflowEntityBatchSize,
-  )) {
-    const rows = await scopedDb((tx) =>
-      tx
-        .select({ id: entities.id, kind: entities.kind })
-        .from(entities)
-        .where(
-          and(
-            eq(entities.workspaceId, workspaceId),
-            inArray(entities.id, chunk),
-          ),
-        ),
-    );
-    for (const row of rows) {
-      entityRows.push(row);
-    }
-  }
-
-  return entityRows;
-};
-
-const WORKFLOW_TIMESTAMP_CURSOR_FORMAT = 'YYYY-MM-DD"T"HH24:MI:SS.US';
-
-const readFullWorkflowSnapshotCursor = async ({
-  scopedDb,
-}: {
-  scopedDb: ScopedDb;
-}): Promise<string> => {
-  const rows = await scopedDb((tx) =>
-    tx.execute<{ value: string }>(
-      sql`SELECT to_char(now(), ${WORKFLOW_TIMESTAMP_CURSOR_FORMAT}) AS value`,
-    ),
-  );
-  const row = rows.at(0);
-  if (!row) {
-    return panic("Workflow snapshot cursor query returned no rows");
-  }
-
-  return row.value;
-};
-
-const fetchFullWorkflowTargetBatch = async ({
-  createdAtCutoff,
-  lastCursor,
-  scopedDb,
-  workspaceId,
-}: {
-  createdAtCutoff: string;
-  lastCursor: FullWorkflowTargetCursor | null;
-  scopedDb: ScopedDb;
-  workspaceId: SafeId<"workspace">;
-}): Promise<FullWorkflowTargetCursor[]> =>
-  await scopedDb((tx) =>
-    tx
-      .select({
-        createdAt: sql<string>`to_char(${entities.createdAt}, ${WORKFLOW_TIMESTAMP_CURSOR_FORMAT})`,
-        id: entities.id,
-      })
-      .from(entities)
-      .where(
-        and(
-          eq(entities.workspaceId, workspaceId),
-          eq(entities.kind, "document"),
-          sql`${entities.createdAt} <= ${createdAtCutoff}::timestamp`,
-          ...(lastCursor === null
-            ? []
-            : [
-                or(
-                  sql`${entities.createdAt} > ${lastCursor.createdAt}::timestamp`,
-                  and(
-                    sql`${entities.createdAt} = ${lastCursor.createdAt}::timestamp`,
-                    gt(entities.id, lastCursor.id),
-                  ),
-                ),
-              ]),
-        ),
-      )
-      .orderBy(asc(entities.createdAt), asc(entities.id))
-      .limit(LIMITS.workflowEntityBatchSize),
-  );
-
-const collectFullWorkflowTargetIds = async ({
-  createdAtCutoff,
-  scopedDb,
-  workspaceId,
-}: {
-  createdAtCutoff: string;
-  scopedDb: ScopedDb;
-  workspaceId: SafeId<"workspace">;
-}): Promise<SafeId<"entity">[]> => {
-  const entityIds: SafeId<"entity">[] = [];
-  let lastCursor: FullWorkflowTargetCursor | null = null;
-
-  while (true) {
-    const rows = await fetchFullWorkflowTargetBatch({
-      createdAtCutoff,
-      lastCursor,
-      scopedDb,
-      workspaceId,
-    });
-
-    if (rows.length === 0) {
-      return entityIds;
-    }
-
-    for (const row of rows) {
-      entityIds.push(row.id);
-    }
-
-    const lastRow = rows.at(-1);
-    if (!lastRow) {
-      return entityIds;
-    }
-    lastCursor = lastRow;
-  }
+const filterPlanByPropertyIds = (
+  plan: ExecutionLevel[],
+  propertyIds: readonly SafeId<"property">[],
+): ExecutionLevel[] => {
+  const allowed = new Set<string>(propertyIds);
+  return plan
+    .map((level) =>
+      level
+        .map((batch) => ({
+          ...batch,
+          properties: batch.properties.filter((p) => allowed.has(p.id)),
+        }))
+        .filter((batch) => batch.properties.length > 0),
+    )
+    .filter((level) => level.length > 0);
 };
 
 /**
@@ -432,36 +384,46 @@ export const startWorkflow = async ({
   scopedDb,
   entityIds: inputEntityIds,
   entityIdsOrder: inputOrder,
+  propertyIds: inputPropertyIds,
+  serviceTier = "standard",
 }: StartWorkflowArgs): Promise<StartWorkflowResult> => {
   const redis = getRedis();
+  const requestId = Bun.randomUUIDv7();
 
   // Check if already running (atomic check-and-set). The TTL is the
   // safety net for an uncleanly-killed worker; tuned tight enough that
   // a recovered workspace doesn't sit blocked for hours.
   const wasSet = await redis.set(
     workflowKey(workspaceId, "running"),
-    "1",
+    requestId,
     "EX",
-    RUNNING_LOCK_TTL_SEC,
+    String(RUNNING_LOCK_TTL_SEC),
     "NX",
   );
   if (!wasSet) {
     return { status: "already-running" };
   }
 
+  await redis.set(
+    workflowKey(workspaceId, "request-id"),
+    requestId,
+    "EX",
+    RUNNING_LOCK_TTL_SEC,
+  );
+
   try {
     const executionPlanData = await getExecutionPlanData(workspaceId, scopedDb);
 
     // Property-status freshness is an optimization for full-workspace
-    // runs ("nothing changed, skip"). When the caller passes explicit
-    // `entityIds` they're saying "I just created these rows, please
-    // backfill them" — every AI property is dirty for those rows even
-    // if the property itself is otherwise "fresh" (its existing rows
-    // are computed). Force the planner to include all AI properties
-    // by overriding their status to "stale"; the per-entity targeting
-    // below still scopes the actual computation to the new rows.
+    // runs ("nothing changed, skip"). It must be bypassed when the
+    // caller is asking for an explicit re-run: entity backfills
+    // ("backfill these new rows") and column reruns ("re-extract this
+    // column") both need the property in the plan even if it is
+    // marked fresh. The per-entity / per-property targeting below
+    // still scopes the actual computation correctly.
     const planInput =
-      inputEntityIds && inputEntityIds.length > 0
+      (inputEntityIds && inputEntityIds.length > 0) ||
+      (inputPropertyIds && inputPropertyIds.length > 0)
         ? {
             ...executionPlanData,
             properties: executionPlanData.properties.map((p) => ({
@@ -471,7 +433,12 @@ export const startWorkflow = async ({
           }
         : executionPlanData;
 
-    const executionPlan = getPropertyExecutionPlan(planInput);
+    const fullExecutionPlan = getPropertyExecutionPlan(planInput);
+
+    const executionPlan =
+      inputPropertyIds && inputPropertyIds.length > 0
+        ? filterPlanByPropertyIds(fullExecutionPlan, inputPropertyIds)
+        : fullExecutionPlan;
 
     const hasWork = executionPlan.some((level) =>
       level.some((batch) => batch.properties.length > 0),
@@ -481,6 +448,20 @@ export const startWorkflow = async ({
       await clearWorkflowRunState(redis, workspaceId);
       return { status: "skipped" };
     }
+    const runLockTtlSec = computeWorkflowRunLockTtlSec(
+      executionPlan,
+      serviceTier,
+    );
+    await Promise.all([
+      redis.expire(workflowKey(workspaceId, "running"), runLockTtlSec),
+      redis.expire(workflowKey(workspaceId, "request-id"), runLockTtlSec),
+    ]);
+    await redis.set(
+      workflowKey(workspaceId, "service-tier"),
+      serviceTier,
+      "EX",
+      runLockTtlSec,
+    );
 
     const isExplicitRun =
       inputEntityIds !== undefined && inputEntityIds.length > 0;
@@ -517,15 +498,7 @@ export const startWorkflow = async ({
       return { status: "skipped" };
     }
 
-    const requestId = Bun.randomUUIDv7();
-
     // Store entity count for completion tracking
-    await redis.set(
-      workflowKey(workspaceId, "request-id"),
-      requestId,
-      "EX",
-      RUNNING_LOCK_TTL_SEC,
-    );
     await redis.set(workflowKey(workspaceId, "total"), String(targetCount));
     await redis.set(workflowKey(workspaceId, "completed"), "0");
 
@@ -540,8 +513,32 @@ export const startWorkflow = async ({
       workflowKey(workspaceId, "plan-properties"),
       JSON.stringify(planPropertyIds),
       "EX",
-      RUNNING_LOCK_TTL_SEC,
+      runLockTtlSec,
     );
+
+    // Single-cell retries (propertyIds + entityIds) only touch a
+    // subset of (entity, property) pairs. `finishWorkflow` must NOT
+    // freshen those properties workspace-wide afterwards: the other
+    // entities still hold values from the previous extraction, so
+    // the property is genuinely still stale at workspace scope. The
+    // flag lets us tell scoped runs apart from a full sweep.
+    //
+    // Column reruns (propertyIds without entityIds) re-process every
+    // entity for the property, so finishWorkflow may freshen as
+    // usual — do NOT set the scoped flag in that case.
+    const isCellScopedRun =
+      inputPropertyIds &&
+      inputPropertyIds.length > 0 &&
+      inputEntityIds &&
+      inputEntityIds.length > 0;
+    if (isCellScopedRun) {
+      await redis.set(
+        workflowKey(workspaceId, "scoped"),
+        "1",
+        "EX",
+        runLockTtlSec,
+      );
+    }
 
     // Broadcast running status
     broadcastWorkflowStatus(workspaceId, true);
@@ -564,8 +561,14 @@ export const startWorkflow = async ({
           organizationId,
           q,
           requestId,
+          runLockTtlSec,
+          serviceTier,
           userId,
           workspaceId,
+          ...(inputPropertyIds &&
+            inputPropertyIds.length > 0 && {
+              forcePropertyIds: inputPropertyIds,
+            }),
         });
       }
     } catch (error: unknown) {
@@ -582,6 +585,419 @@ export const startWorkflow = async ({
   }
 };
 
+// ── Orphan reconciliation ──────────────────────────────
+//
+// A workflow's Redis run-state can outlive the worker that owns it when
+// the API process dies mid-job — a `bun --watch` hot-reload on save, an
+// OOM, a `kill -9`, or SIGTERM on deploy. The job is abandoned after its
+// cells were set to `pending` but before `finishWorkflow` clears the
+// lock, and a hard kill emits no BullMQ `failed` event, so neither the
+// `running` lock nor the `pending` cells self-heal: every retry is
+// rejected with a 409 until the hour-long lock TTL lapses, and the cells
+// spin forever. The reconciler closes that gap. Any workspace holding a
+// `running` lock or owning `pending` cells with no in-flight queue job is
+// orphaned; its pending cells are flipped to `error` (still re-runnable)
+// and its run-state cleared. Death-cause-agnostic: the next worker boot
+// heals whatever the previous one left behind.
+
+const RECONCILE_INTERVAL_MS = 60 * 1000;
+// Settle window before acting. A workflow that has just taken its
+// `running` lock but not yet enqueued its first entity batch would look
+// orphaned for a moment; we re-confirm against a fresh job snapshot after
+// this delay so a starting run is never reconciled away.
+const RECONCILE_SETTLE_MS = 5 * 1000;
+// Non-terminal BullMQ states. A job in any of these means the workspace
+// still has reclaimable work in flight, so its run-state is legitimate.
+const LIVE_JOB_STATES = [
+  "active",
+  "waiting",
+  "delayed",
+  "prioritized",
+  "waiting-children",
+  "paused",
+] as const;
+// Upper bound on the live-job snapshot. If the queue holds more in-flight
+// jobs than this, skip the cycle rather than risk treating a busy
+// workspace as orphaned from a truncated scan — a false positive must
+// never clobber a healthy run. A later, quieter cycle reconciles it.
+const LIVE_JOB_SCAN_LIMIT = 10_000;
+const RUNNING_LOCK_SCAN_PATTERN = `${WORKFLOW_KEY_PREFIX}:*:running`;
+const RUNNING_LOCK_SCAN_COUNT = "200";
+
+type LiveWorkspaceSnapshot = {
+  workspaceIds: Set<string>;
+  truncated: boolean;
+};
+
+// `Array.isArray` widens `unknown` to `any[]`; this guard narrows to
+// `unknown[]` instead so the SCAN reply stays type-checked.
+const isUnknownArray = (value: unknown): value is readonly unknown[] =>
+  Array.isArray(value);
+
+const scanRunningLockWorkspaceIds = async (
+  redis: RedisClient,
+): Promise<string[]> => {
+  const workspaceIds: string[] = [];
+  let cursor = "0";
+  do {
+    // Bun's RedisClient exposes raw commands via `send`; SCAN returns
+    // [nextCursor, keys]. Iterating the cursor keeps a large keyspace off
+    // a single blocking pass (unlike KEYS).
+    const reply: unknown = await redis.send("SCAN", [
+      cursor,
+      "MATCH",
+      RUNNING_LOCK_SCAN_PATTERN,
+      "COUNT",
+      RUNNING_LOCK_SCAN_COUNT,
+    ]);
+    if (!isUnknownArray(reply) || reply.length < 2) {
+      break;
+    }
+    const nextCursor = reply[0];
+    const keys = reply[1];
+    if (typeof nextCursor !== "string" || !isUnknownArray(keys)) {
+      break;
+    }
+    for (const key of keys) {
+      if (typeof key !== "string") {
+        continue;
+      }
+      const workspaceId = parseRunningLockWorkspaceId(key);
+      if (workspaceId !== null) {
+        workspaceIds.push(workspaceId);
+      }
+    }
+    cursor = nextCursor;
+  } while (cursor !== "0");
+  return workspaceIds;
+};
+
+const selectWorkspacesWithPendingCells = async (
+  workspaceIds?: readonly string[],
+): Promise<string[]> => {
+  if (workspaceIds?.length === 0) {
+    return [];
+  }
+
+  const pendingWorkspaceIds: string[] = [];
+  const workspaceIdBatches =
+    workspaceIds === undefined
+      ? [null]
+      : chunkItems(workspaceIds, LIMITS.workflowEntityBatchSize);
+
+  for (const workspaceIdBatch of workspaceIdBatches) {
+    const workspaceFilter =
+      workspaceIdBatch === null
+        ? undefined
+        : inArray(
+            fields.workspaceId,
+            workspaceIdBatch.map((id) => brandPersistedWorkspaceId(id)),
+          );
+    const rows = await rootDb
+      .selectDistinct({ workspaceId: fields.workspaceId })
+      .from(fields)
+      .where(and(workspaceFilter, sql`${fields.content}->>'type' = 'pending'`));
+    for (const row of rows) {
+      pendingWorkspaceIds.push(row.workspaceId);
+    }
+  }
+
+  return pendingWorkspaceIds;
+};
+
+const snapshotLiveWorkspaceIds = async (
+  q: Queue<EntityJobData>,
+): Promise<LiveWorkspaceSnapshot> => {
+  const jobs = await q.getJobs(
+    [...LIVE_JOB_STATES],
+    0,
+    LIVE_JOB_SCAN_LIMIT - 1,
+  );
+  const workspaceIds = new Set<string>();
+  for (const job of jobs) {
+    const workspaceId = job.data.workspaceId;
+    if (workspaceId.length === 0) {
+      continue;
+    }
+    workspaceIds.add(workspaceId);
+  }
+  return { workspaceIds, truncated: jobs.length >= LIVE_JOB_SCAN_LIMIT };
+};
+
+const readWorkflowRequestIds = async (
+  redis: RedisClient,
+  workspaceIds: readonly string[],
+): Promise<Map<string, string | null>> => {
+  const requestIds = new Map<string, string | null>();
+  for (const workspaceIdBatch of chunkItems(
+    workspaceIds,
+    LIMITS.workflowEntityBatchSize,
+  )) {
+    await Promise.all(
+      workspaceIdBatch.map(async (id) => {
+        const requestId = await redis.get(
+          workflowKey(brandPersistedWorkspaceId(id), "request-id"),
+        );
+        requestIds.set(id, requestId);
+      }),
+    );
+  }
+  return requestIds;
+};
+
+const readWorkflowRunningValues = async (
+  redis: RedisClient,
+  workspaceIds: readonly string[],
+): Promise<Map<string, string | null>> => {
+  const runningValues = new Map<string, string | null>();
+  for (const workspaceIdBatch of chunkItems(
+    workspaceIds,
+    LIMITS.workflowEntityBatchSize,
+  )) {
+    await Promise.all(
+      workspaceIdBatch.map(async (id) => {
+        const runningValue = await redis.get(
+          workflowKey(brandPersistedWorkspaceId(id), "running"),
+        );
+        runningValues.set(id, runningValue);
+      }),
+    );
+  }
+  return runningValues;
+};
+
+const reserveExistingRunningLock = async (
+  redis: RedisClient,
+  runningKey: string,
+  expectedRunningValue: string,
+): Promise<boolean> => {
+  const reply: unknown = await redis.send("EVAL", [
+    RESERVE_RECOVERY_LOCK_SCRIPT,
+    "1",
+    runningKey,
+    expectedRunningValue,
+    RECOVERY_LOCK_VALUE,
+    String(RUNNING_LOCK_TTL_SEC),
+  ]);
+  return Number(reply) === 1;
+};
+
+type ShouldRecoverWorkflowOptions = {
+  expectedRequestId: string | null;
+  redis: RedisClient;
+  workspaceId: SafeId<"workspace">;
+};
+
+const shouldRecoverWorkflow = async ({
+  expectedRequestId,
+  redis,
+  workspaceId,
+}: ShouldRecoverWorkflowOptions): Promise<boolean> => {
+  const runningKey = workflowKey(workspaceId, "running");
+  const requestIdKey = workflowKey(workspaceId, "request-id");
+  const wasSet = await redis.set(
+    runningKey,
+    RECOVERY_LOCK_VALUE,
+    "EX",
+    String(RUNNING_LOCK_TTL_SEC),
+    "NX",
+  );
+
+  if (wasSet) {
+    const requestId = await redis.get(requestIdKey);
+    if (requestId === expectedRequestId) {
+      return true;
+    }
+
+    await redis.del(runningKey);
+    return false;
+  }
+
+  const [runningValue, requestId] = await Promise.all([
+    redis.get(runningKey),
+    redis.get(requestIdKey),
+  ]);
+
+  if (runningValue === null || requestId !== expectedRequestId) {
+    return false;
+  }
+
+  const reservation = selectRunningLockReservation({
+    expectedRequestId,
+    legacyRunningLockValue: LEGACY_RUNNING_LOCK_VALUE,
+    recoveryLockValue: RECOVERY_LOCK_VALUE,
+    requestId,
+    runningValue,
+  });
+  if (reservation.status === "reserve") {
+    return reserveExistingRunningLock(
+      redis,
+      runningKey,
+      reservation.expectedRunningValue,
+    );
+  }
+  if (reservation.status === "skip") {
+    return false;
+  }
+
+  // Legacy locks used "1" as the running value and wrote request-id
+  // separately. Let that startup window settle before treating one as
+  // a stable orphan.
+  await sleep(RECOVERY_LOCK_SETTLE_MS);
+  const [settledRunningValue, settledRequestId] = await Promise.all([
+    redis.get(runningKey),
+    redis.get(requestIdKey),
+  ]);
+  if (
+    settledRunningValue !== LEGACY_RUNNING_LOCK_VALUE ||
+    settledRequestId !== expectedRequestId
+  ) {
+    return false;
+  }
+
+  return reserveExistingRunningLock(
+    redis,
+    runningKey,
+    LEGACY_RUNNING_LOCK_VALUE,
+  );
+};
+
+type RecoverOrphanedWorkflowOptions = {
+  expectedRequestId: string | null;
+  workspaceId: SafeId<"workspace">;
+};
+
+const recoverOrphanedWorkflow = async ({
+  expectedRequestId,
+  workspaceId,
+}: RecoverOrphanedWorkflowOptions): Promise<void> => {
+  const redis = getRedis();
+  const shouldRecover = await shouldRecoverWorkflow({
+    expectedRequestId,
+    redis,
+    workspaceId,
+  });
+  if (!shouldRecover) {
+    return;
+  }
+
+  // Error the stuck `pending` cells first, while the orphaned lock still
+  // blocks any new run from re-populating them. `error` cells stay
+  // eligible for re-extraction (see `prepareBatch`), so a retry or the
+  // next full run picks them back up.
+  const erroredFields = await rootDb
+    .update(fields)
+    .set({ content: { type: "error", version: 1 } })
+    .where(
+      and(
+        eq(fields.workspaceId, workspaceId),
+        sql`${fields.content}->>'type' = 'pending'`,
+      ),
+    )
+    .returning({ id: fields.id });
+
+  // Then release the run-state so retries / new runs stop hitting the
+  // "a workflow is already running" 409.
+  await clearWorkflowRunState(redis, workspaceId);
+
+  logger.warn("workflow.orphan_reconciled", {
+    workspaceId,
+    erroredFields: String(erroredFields.length),
+  });
+
+  // Push the cleared status + errored cells to any connected client.
+  broadcastWorkflowStatus(workspaceId, false);
+};
+
+type ReconcileOrphanedWorkflowsOptions = {
+  // Boot passes `true` to also sweep the DB for `pending` cells whose
+  // lock already lapsed via TTL; periodic ticks pass `false` and rely on
+  // the cheap lock scan alone.
+  scanPendingCells: boolean;
+};
+
+/**
+ * Reconcile workflows orphaned by a killed worker. Safe to call
+ * repeatedly; a no-op when nothing is orphaned. Exported for the boot +
+ * interval wiring in `initWorkflowWorker` and for operational scripts.
+ */
+export const reconcileOrphanedWorkflows = async ({
+  scanPendingCells,
+}: ReconcileOrphanedWorkflowsOptions): Promise<void> => {
+  const redis = getRedis();
+  const lockedWorkspaceIds = await scanRunningLockWorkspaceIds(redis);
+  const pendingWorkspaceIds = scanPendingCells
+    ? await selectWorkspacesWithPendingCells()
+    : await selectWorkspacesWithPendingCells(lockedWorkspaceIds);
+
+  const candidateWorkspaceIds = [...lockedWorkspaceIds, ...pendingWorkspaceIds];
+  if (candidateWorkspaceIds.length === 0) {
+    return;
+  }
+
+  const q = getQueue();
+  const live = await snapshotLiveWorkspaceIds(q);
+  if (live.truncated) {
+    logger.warn("workflow.reconcile_skipped_backlog", {
+      candidates: String(candidateWorkspaceIds.length),
+    });
+    return;
+  }
+
+  const orphanCandidates = selectOrphanWorkspaceIds({
+    candidateWorkspaceIds,
+    liveWorkspaceIds: live.workspaceIds,
+  });
+  if (orphanCandidates.length === 0) {
+    return;
+  }
+
+  const pendingWorkspaceIdSet = new Set(pendingWorkspaceIds);
+  const initialRequestIds = await readWorkflowRequestIds(
+    redis,
+    orphanCandidates,
+  );
+
+  // Re-confirm after a settle delay so a workflow that is mid-startup
+  // (lock taken, first batch not yet enqueued) is not mistaken for an
+  // orphan.
+  await sleep(RECONCILE_SETTLE_MS);
+  const confirmed = await snapshotLiveWorkspaceIds(q);
+  if (confirmed.truncated) {
+    return;
+  }
+
+  const currentRequestIds = await readWorkflowRequestIds(
+    redis,
+    orphanCandidates,
+  );
+  const currentRunningValues = await readWorkflowRunningValues(
+    redis,
+    orphanCandidates,
+  );
+  const recoveryWorkspaceIds = new Set<string>();
+  for (const workspaceId of orphanCandidates) {
+    if (currentRunningValues.get(workspaceId) === RECOVERY_LOCK_VALUE) {
+      recoveryWorkspaceIds.add(workspaceId);
+    }
+  }
+  const recoverableOrphans = selectRecoverableOrphanWorkspaceIds({
+    candidateWorkspaceIds: orphanCandidates,
+    currentRequestIds,
+    initialRequestIds,
+    liveWorkspaceIds: confirmed.workspaceIds,
+    pendingWorkspaceIds: pendingWorkspaceIdSet,
+    recoveryWorkspaceIds,
+  });
+
+  for (const workspaceId of recoverableOrphans) {
+    await recoverOrphanedWorkflow({
+      expectedRequestId: currentRequestIds.get(workspaceId) ?? null,
+      workspaceId: brandPersistedWorkspaceId(workspaceId),
+    });
+  }
+};
+
 // ── Worker ─────────────────────────────────────────────
 
 /**
@@ -590,10 +1006,7 @@ export const startWorkflow = async ({
 export const initWorkflowWorker = () => {
   // BullMQ Worker uses blocking commands (BRPOPLPUSH) so it
   // needs a dedicated Redis connection, not the shared one.
-  const workerConnection = new Redis(env.REDIS_URL, {
-    ...redisConnectionOptions(),
-    maxRetriesPerRequest: null,
-  });
+  const workerConnection = createBullMqConnection();
 
   const worker = new Worker<EntityJobData>(
     QUEUE_NAME,
@@ -614,7 +1027,10 @@ export const initWorkflowWorker = () => {
       // AI timeout. A fixed 6-min ceiling would deterministically
       // abort entities with several slow levels even when each
       // individual batch stays within budget.
-      const jobTimeoutMs = computeJobTimeoutMs(job.data.executionPlan);
+      const jobTimeoutMs = computeWorkflowJobTimeoutMs(
+        job.data.executionPlan,
+        job.data.serviceTier ?? "standard",
+      );
       const timeoutHandle = setTimeout(() => {
         controller.abort(
           new Error(
@@ -692,6 +1108,7 @@ export const initWorkflowWorker = () => {
         branded.organizationId,
         brandPersistedUserId(data.userId),
         data.requestId,
+        data.runLockTtlSec ?? RUNNING_LOCK_TTL_SEC,
       );
     })().catch((completionError: unknown) => {
       captureError(completionError, {
@@ -702,12 +1119,33 @@ export const initWorkflowWorker = () => {
   });
 
   worker.on("error", (error) => {
-    logger.error("workflow.worker_error", { "error.type": errorTag(error) });
+    logger.error("workflow.worker_error", connectionErrorFields(error));
   });
 
   logger.info("workflow.worker_started", {
     concurrency: String(MAX_CONCURRENT_ENTITIES),
   });
+
+  // Heal whatever a previously-killed worker left orphaned. Boot runs a
+  // thorough pass (also sweeping the DB for pending cells whose lock has
+  // already lapsed); the interval then catches orphans that form at
+  // runtime — e.g. a job exhausts its retries while the lock is held —
+  // without waiting for a restart.
+  const runReconcile = (scanPendingCells: boolean): void => {
+    void reconcileOrphanedWorkflows({ scanPendingCells }).catch(
+      (error: unknown) => {
+        captureError(error);
+        logger.error("workflow.reconcile_failed", errorSystemFields(error));
+      },
+    );
+  };
+  runReconcile(true);
+  const reconcileTimer = setInterval(
+    () => runReconcile(false),
+    RECONCILE_INTERVAL_MS,
+  );
+  // The reconcile cadence must not keep the process alive at shutdown.
+  reconcileTimer.unref();
 
   return worker;
 };
@@ -783,7 +1221,10 @@ const processEntityJob = async (data: EntityJobData, signal: AbortSignal) => {
     entityId,
     executionPlan,
     requestId,
+    serviceTier = "standard",
+    forcePropertyIds,
   } = data;
+  const forcedPropertyIds: ReadonlySet<string> = new Set(forcePropertyIds);
 
   // Brand IDs at the boundary — job data stores plain strings (JSON).
   const branded = brandValidatedWorkflowActorKey({
@@ -802,6 +1243,11 @@ const processEntityJob = async (data: EntityJobData, signal: AbortSignal) => {
   }
 
   const scopedDb = createRootScopedDb({
+    organizationId: branded.organizationId,
+    userId,
+    workspaceIds: [branded.workspaceId],
+  });
+  const safeDb = createRootSafeDb({
     organizationId: branded.organizationId,
     userId,
     workspaceIds: [branded.workspaceId],
@@ -837,8 +1283,12 @@ const processEntityJob = async (data: EntityJobData, signal: AbortSignal) => {
             batch,
             level,
             scopedDb,
+            safeDb,
             requestId,
             signal,
+            serviceTier,
+            userId,
+            forcedPropertyIds,
           }),
       ),
     );
@@ -857,6 +1307,7 @@ const processEntityJob = async (data: EntityJobData, signal: AbortSignal) => {
     branded.organizationId,
     userId,
     requestId,
+    data.runLockTtlSec ?? RUNNING_LOCK_TTL_SEC,
   );
 };
 
@@ -867,8 +1318,12 @@ type ProcessOneBatchArgs = {
   batch: PropertyBatch;
   level: number;
   scopedDb: ScopedDb;
+  safeDb: SafeDb;
   requestId: string;
   signal: AbortSignal;
+  serviceTier: AIRequestServiceTier;
+  userId: SafeId<"user">;
+  forcedPropertyIds: ReadonlySet<string>;
 };
 
 type BatchPreviewPublisherArgs = {
@@ -951,8 +1406,12 @@ const processOneBatch = async ({
   batch: rawBatch,
   level,
   scopedDb,
+  safeDb,
   requestId,
   signal,
+  serviceTier,
+  userId,
+  forcedPropertyIds,
 }: ProcessOneBatchArgs) => {
   signal.throwIfAborted();
   const isCurrentRequest = await isCurrentWorkflowRequest({
@@ -997,7 +1456,32 @@ const processOneBatch = async ({
     batchFields.map((f) => [f.propertyId, f.contentType]),
   );
 
-  const batch = prepareBatch(rawBatch, fieldContentMap);
+  const lockedCellRows = await scopedDb((tx) =>
+    tx
+      .select({
+        propertyId: cellMetadata.propertyId,
+        metadata: cellMetadata.metadata,
+      })
+      .from(cellMetadata)
+      .where(
+        and(
+          eq(cellMetadata.entityVersionId, entityVersionId),
+          inArray(cellMetadata.propertyId, propertyIds),
+        ),
+      ),
+  );
+  const lockedPropertyIds = new Set<string>(
+    lockedCellRows
+      .filter((row) => row.metadata.locked === true)
+      .map((row) => row.propertyId),
+  );
+
+  const batch = prepareBatch(
+    rawBatch,
+    fieldContentMap,
+    lockedPropertyIds,
+    forcedPropertyIds,
+  );
 
   if (batch.properties.length === 0) {
     return;
@@ -1023,58 +1507,55 @@ const processOneBatch = async ({
     // Broadcast so frontend shows pending state
     broadcastInvalidation(workspaceId, ["entities", workspaceId]);
 
-    const orgAIConfig = await loadOrgAIConfig(organizationId);
-    const generateFn = isMockAI() ? generateBatchMock : generateBatch;
+    const [orgAIConfig, promptCachingEnabled] = await Promise.all([
+      loadOrgAIConfig(organizationId),
+      loadPromptCachingPreference(organizationId),
+    ]);
+    const generateFn = getBatchGenerator();
 
-    let batchResult: Awaited<ReturnType<typeof generateFn>> | undefined;
-    for (let attempt = 1; attempt <= INTEGRATION_ERROR_ATTEMPTS; attempt++) {
-      // generateBatch returns a Result<T, E> directly. The combined
-      // signal aborts when EITHER the per-batch AI timeout fires OR the
-      // worker-level per-job timeout does, so the AI SDK actually cancels
-      // the in-flight request.
-      batchResult = await generateFn({
-        abortSignal: AbortSignal.any([
-          AbortSignal.timeout(BATCH_AI_TIMEOUT_MS),
-          signal,
-        ]),
-        batch,
-        entityVersionId,
-        organizationId,
-        workspaceId,
-        scopedDb,
-        orgAIConfig,
-        onPartialAnswer: previewPublisher.publish,
-      });
-
-      if (!Result.isError(batchResult)) {
-        break;
-      }
-
-      const retryIntegrationError: boolean = matchError(batchResult.error, {
-        WorkflowIntegrationError: () => true,
-        WorkflowValidationError: () => false,
-      });
-      if (!retryIntegrationError || attempt >= INTEGRATION_ERROR_ATTEMPTS) {
-        break;
-      }
-
-      captureError(batchResult.error, {
-        workspaceId,
-        entityId,
-        batchId: batch.id,
-        level: String(level),
-        requestId,
-        attempt: String(attempt),
-        retry: "true",
-      });
-      signal.throwIfAborted();
-      await sleep(INTEGRATION_ERROR_RETRY_DELAY_MS);
-      signal.throwIfAborted();
-    }
-
-    if (batchResult === undefined) {
-      return;
-    }
+    // generateBatch returns a Result<T, E> directly. The combined
+    // signal aborts when EITHER the per-batch AI timeout fires OR the
+    // worker-level per-job timeout does, so the AI SDK actually cancels
+    // the in-flight request.
+    const batchResult = await runWorkflowBatchGenerationWithRetry({
+      generate: async () =>
+        await generateFn({
+          abortSignal: AbortSignal.any([
+            AbortSignal.timeout(getWorkflowBatchAITimeoutMs(serviceTier)),
+            signal,
+          ]),
+          batch,
+          entityVersionId,
+          organizationId,
+          workspaceId,
+          scopedDb,
+          orgAIConfig,
+          promptCachingEnabled,
+          serviceTier,
+          usageMetering: {
+            actionType: "background",
+            organizationId,
+            safeDb,
+            serviceTier,
+            userId,
+            workspaceId,
+          },
+          onPartialAnswer: previewPublisher.publish,
+        }),
+      onRetryError: (error, attempt) => {
+        captureError(error, {
+          workspaceId,
+          entityId,
+          batchId: batch.id,
+          level: String(level),
+          requestId,
+          attempt: String(attempt),
+          retry: "true",
+        });
+      },
+      sleep,
+      throwIfAborted: () => signal.throwIfAborted(),
+    });
 
     if (Result.isError(batchResult)) {
       captureError(batchResult.error, {
@@ -1113,13 +1594,50 @@ const processOneBatch = async ({
     }
 
     // Write AI results to DB
-    const allPropertyIds = [
+    const candidatePropertyIds = [
       ...processedFields.aiResults.map((r) => r.propertyId),
       ...processedFields.unsupportedPropertyIds,
       ...processedFields.skippedPropertyIds,
     ];
 
     await scopedDb(async (tx) => {
+      // Acquire per-cell advisory locks before re-checking lock state.
+      // `SELECT FOR UPDATE` alone cannot block a manual edit that
+      // inserts a brand-new `cell_metadata` row (READ COMMITTED takes
+      // no gap lock); `acquireCellLocks` serializes with
+      // `acquireCellLock` in lockCellOnManualEdit on a key derived
+      // from (entityVersionId, propertyId), so we either see the new
+      // lock here or the manual edit waits for our COMMIT.
+      await acquireCellLocks({
+        tx,
+        entityVersionId,
+        propertyIds: candidatePropertyIds,
+      });
+      const lockedRowsAtWrite =
+        candidatePropertyIds.length > 0
+          ? await tx
+              .select({
+                propertyId: cellMetadata.propertyId,
+                metadata: cellMetadata.metadata,
+              })
+              .from(cellMetadata)
+              .where(
+                and(
+                  eq(cellMetadata.entityVersionId, entityVersionId),
+                  inArray(cellMetadata.propertyId, candidatePropertyIds),
+                ),
+              )
+              .for("update")
+          : [];
+      const lockedAtWrite = new Set<string>(
+        lockedRowsAtWrite
+          .filter((row) => row.metadata.locked === true)
+          .map((row) => row.propertyId),
+      );
+      const allPropertyIds = candidatePropertyIds.filter(
+        (id) => !lockedAtWrite.has(id),
+      );
+
       if (allPropertyIds.length > 0) {
         await tx
           .delete(fields)
@@ -1132,22 +1650,24 @@ const processOneBatch = async ({
       }
 
       const fieldValues = [
-        ...processedFields.aiResults.map(
-          ({ fieldId, propertyId, content }) => ({
+        ...processedFields.aiResults
+          .filter(({ propertyId }) => !lockedAtWrite.has(propertyId))
+          .map(({ fieldId, propertyId, content }) => ({
             id: fieldId,
             workspaceId,
             propertyId,
             entityVersionId,
             content,
-          }),
-        ),
-        ...processedFields.unsupportedPropertyIds.map((propertyId) => ({
-          id: createSafeId<"field">(),
-          workspaceId,
-          propertyId,
-          entityVersionId,
-          content: { type: "unsupported" as const, version: 1 as const },
-        })),
+          })),
+        ...processedFields.unsupportedPropertyIds
+          .filter((propertyId) => !lockedAtWrite.has(propertyId))
+          .map((propertyId) => ({
+            id: createSafeId<"field">(),
+            workspaceId,
+            propertyId,
+            entityVersionId,
+            content: { type: "unsupported" as const, version: 1 as const },
+          })),
       ];
 
       if (fieldValues.length > 0) {
@@ -1155,15 +1675,25 @@ const processOneBatch = async ({
       }
 
       if (processedFields.aiJustifications.length > 0) {
-        await tx.insert(justifications).values(
-          processedFields.aiJustifications.map((j) => ({
-            id: j.justificationId,
-            workspaceId,
-            fieldId: j.fieldId,
-            content: j.content,
-            fileFieldIds: j.fileFieldIds,
-          })),
+        const aiResultFieldIdsForLockedProps = new Set(
+          processedFields.aiResults
+            .filter(({ propertyId }) => lockedAtWrite.has(propertyId))
+            .map(({ fieldId }) => fieldId),
         );
+        const liveJustifications = processedFields.aiJustifications.filter(
+          (j) => !aiResultFieldIdsForLockedProps.has(j.fieldId),
+        );
+        if (liveJustifications.length > 0) {
+          await tx.insert(justifications).values(
+            liveJustifications.map((j) => ({
+              id: j.justificationId,
+              workspaceId,
+              fieldId: j.fieldId,
+              content: j.content,
+              fileFieldIds: j.fileFieldIds,
+            })),
+          );
+        }
       }
     });
 
@@ -1181,6 +1711,7 @@ const onEntityCompleted = async (
   organizationId: SafeId<"organization">,
   userId: SafeId<"user">,
   requestId: string,
+  runLockTtlSec: number,
 ) => {
   const isCurrentRequest = await isCurrentWorkflowRequest({
     requestId,
@@ -1206,12 +1737,14 @@ const onEntityCompleted = async (
   // of letting a slow batch fall back to the "freshen everything"
   // path or admit a parallel run.
   await Promise.all([
-    redis.expire(workflowKey(workspaceId, "running"), RUNNING_LOCK_TTL_SEC),
-    redis.expire(
-      workflowKey(workspaceId, "plan-properties"),
-      RUNNING_LOCK_TTL_SEC,
-    ),
-    redis.expire(workflowKey(workspaceId, "request-id"), RUNNING_LOCK_TTL_SEC),
+    redis.expire(workflowKey(workspaceId, "running"), runLockTtlSec),
+    redis.expire(workflowKey(workspaceId, "plan-properties"), runLockTtlSec),
+    redis.expire(workflowKey(workspaceId, "request-id"), runLockTtlSec),
+    redis.expire(workflowKey(workspaceId, "service-tier"), runLockTtlSec),
+    // Refresh the scoped flag's TTL for the same reason: if it
+    // expires mid-run, `finishWorkflow` would mistake a long-running
+    // scoped retry for a full sweep and freshen the property globally.
+    redis.expire(workflowKey(workspaceId, "scoped"), runLockTtlSec),
   ]);
 };
 
@@ -1236,47 +1769,60 @@ const finishWorkflow = async (
     workspaceIds: [workspaceId],
   });
 
-  // Freshen only the properties that were part of this workflow's plan.
-  // Properties created mid-workflow are not in the snapshot — they stay
-  // stale and trigger an automatic follow-up run below.
-  let processedIds: SafeId<"property">[] = [];
-  try {
-    const planRaw = await redis.get(
-      workflowKey(workspaceId, "plan-properties"),
-    );
-    if (planRaw !== null) {
-      const parsed: unknown = JSON.parse(planRaw);
-      if (Array.isArray(parsed)) {
-        processedIds = parsed
-          .filter((value): value is string => typeof value === "string")
-          .map((value) => brandPersistedPropertyId(value));
-      }
-    }
+  // Scoped runs (single-cell retry) only touch a subset of entities
+  // for the chosen property. Workspace-wide freshness and straggler
+  // detection both reason about all entities, so they're meaningless
+  // here and would actively hide still-stale cells from the next full
+  // sweep.
+  const wasScopedRun =
+    (await redis.get(workflowKey(workspaceId, "scoped"))) === "1";
+  const serviceTier = parseStoredWorkflowServiceTier(
+    await redis.get(workflowKey(workspaceId, "service-tier")),
+  );
 
-    if (processedIds.length > 0) {
-      await scopedDb((tx) =>
-        tx
-          .update(properties)
-          .set({ status: "fresh" })
-          .where(
-            and(
-              eq(properties.workspaceId, workspaceId),
-              inArray(properties.id, processedIds),
+  if (!wasScopedRun) {
+    // Freshen only the properties that were part of this workflow's
+    // plan. Properties created mid-workflow are not in the snapshot —
+    // they stay stale and trigger an automatic follow-up run below.
+    let processedIds: SafeId<"property">[] = [];
+    try {
+      const planRaw = await redis.get(
+        workflowKey(workspaceId, "plan-properties"),
+      );
+      if (planRaw !== null) {
+        const parsed: unknown = JSON.parse(planRaw);
+        if (Array.isArray(parsed)) {
+          processedIds = parsed
+            .filter((value): value is string => typeof value === "string")
+            .map((value) => brandPersistedPropertyId(value));
+        }
+      }
+
+      if (processedIds.length > 0) {
+        await scopedDb((tx) =>
+          tx
+            .update(properties)
+            .set({ status: "fresh" })
+            .where(
+              and(
+                eq(properties.workspaceId, workspaceId),
+                inArray(properties.id, processedIds),
+              ),
             ),
-          ),
-      );
-    } else {
-      // Backwards-compat: pre-snapshot workflows had no plan recorded.
-      // Behave as before so they still finalize.
-      await scopedDb((tx) =>
-        tx
-          .update(properties)
-          .set({ status: "fresh" })
-          .where(eq(properties.workspaceId, workspaceId)),
-      );
+        );
+      } else {
+        // Backwards-compat: pre-snapshot workflows had no plan recorded.
+        // Behave as before so they still finalize.
+        await scopedDb((tx) =>
+          tx
+            .update(properties)
+            .set({ status: "fresh" })
+            .where(eq(properties.workspaceId, workspaceId)),
+        );
+      }
+    } catch (error: unknown) {
+      captureError(error, { workspaceId });
     }
-  } catch (error: unknown) {
-    captureError(error, { workspaceId });
   }
 
   // Clean up Redis state
@@ -1285,6 +1831,10 @@ const finishWorkflow = async (
   // Broadcast completion
   broadcastWorkflowStatus(workspaceId, false);
   broadcastInvalidation(workspaceId, ["properties", workspaceId]);
+
+  if (wasScopedRun) {
+    return;
+  }
 
   // Catch up on any AI-model properties created mid-workflow. They
   // were left stale by the partial freshen above; kick off a follow-up
@@ -1313,6 +1863,7 @@ const finishWorkflow = async (
         organizationId,
         userId,
         scopedDb,
+        serviceTier,
       }).catch((error: unknown) => captureError(error, { workspaceId }));
     }
   } catch (error: unknown) {
@@ -1340,16 +1891,46 @@ const setFieldsStatus = async ({
   const propertyIds = batch.properties.map((p) => p.id);
 
   await scopedDb(async (tx) => {
+    // Re-check locks under the per-cell advisory lock. The
+    // lockedPropertyIds snapshot above (line ~1007) is taken
+    // outside any lock, so a manual edit that lands between that
+    // snapshot and this write would otherwise have its field value
+    // clobbered by the `pending` placeholder before the final AI
+    // write tx gets a chance to filter it out.
+    await acquireCellLocks({ tx, entityVersionId, propertyIds });
+    const lockedRows = await tx
+      .select({
+        propertyId: cellMetadata.propertyId,
+        metadata: cellMetadata.metadata,
+      })
+      .from(cellMetadata)
+      .where(
+        and(
+          eq(cellMetadata.entityVersionId, entityVersionId),
+          inArray(cellMetadata.propertyId, propertyIds),
+        ),
+      );
+    const lockedNow = new Set<string>(
+      lockedRows
+        .filter((row) => row.metadata.locked === true)
+        .map((row) => row.propertyId),
+    );
+    const writablePropertyIds = propertyIds.filter((id) => !lockedNow.has(id));
+
+    if (writablePropertyIds.length === 0) {
+      return;
+    }
+
     await tx
       .delete(fields)
       .where(
         and(
           eq(fields.entityVersionId, entityVersionId),
-          inArray(fields.propertyId, propertyIds),
+          inArray(fields.propertyId, writablePropertyIds),
         ),
       );
 
-    const fieldValues = propertyIds.map((propertyId) => ({
+    const fieldValues = writablePropertyIds.map((propertyId) => ({
       id: createSafeId<"field">(),
       workspaceId,
       propertyId,
@@ -1357,9 +1938,7 @@ const setFieldsStatus = async ({
       content: { type: contentType, version: 1 as const },
     }));
 
-    if (fieldValues.length > 0) {
-      await tx.insert(fields).values(fieldValues);
-    }
+    await tx.insert(fields).values(fieldValues);
   });
 };
 
@@ -1370,6 +1949,13 @@ const broadcastWorkflowStatus = (
   broadcastInvalidation(workspaceId, ["workspaces", workspaceId, "workflow"]);
   if (!running) {
     broadcastInvalidation(workspaceId, ["entities", workspaceId]);
+    // Extraction writes new justifications alongside the field values;
+    // without this the provenance hover stays stale until a reload.
+    broadcastInvalidation(workspaceId, [
+      "workspaces",
+      workspaceId,
+      "justifications",
+    ]);
   }
 };
 

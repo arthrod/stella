@@ -127,7 +127,9 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
       await invalidateCalendarTasks();
     }
 
-    useInspectorStore.getState().openTask(entityId, "", true);
+    useInspectorStore
+      .getState()
+      .openTask({ taskId: entityId, workspaceId, isNew: true });
   };
 
   // Current viewport date (month/week navigation state)
@@ -401,6 +403,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
         })
         .then(() => {
           void invalidateCalendarTasks();
+          return;
         })
         .catch(() => {
           // non-critical
@@ -416,6 +419,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
         })
         .then(() => {
           void invalidateCalendarTasks();
+          return;
         })
         .catch(() => {
           // non-critical
@@ -585,6 +589,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
                           onDrop={(entityId, kind) =>
                             handleDrop(day.date, entityId, kind)
                           }
+                          workspaceId={workspaceId}
                         />
                       ))}
                     </div>
@@ -614,6 +619,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
                   onDrop={(entityId, kind) =>
                     handleDrop(day.date, entityId, kind)
                   }
+                  workspaceId={workspaceId}
                 />
               ))}
             </div>

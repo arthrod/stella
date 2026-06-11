@@ -7,13 +7,12 @@
  * for potential rule generation.
  */
 
-import type { GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
-import { valibotSchema } from "@ai-sdk/valibot";
 import { generateText, Output } from "ai";
 import { Result } from "better-result";
 import * as v from "valibot";
 
-import { getModelForRole, getTemperatureForRole } from "@/api/lib/ai-models";
+import { getModelForRole } from "@/api/lib/ai-models";
+import { strictOutputSchema } from "@/api/lib/ai-output-schema";
 import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
 import { WorkflowIntegrationError } from "@/api/lib/errors/tagged-errors";
 
@@ -79,8 +78,14 @@ export const classifyWithLLM = async (
   return await Result.tryPromise({
     try: async () => {
       const result = await generateText({
-        model: getModelForRole("fast"),
-        temperature: getTemperatureForRole("fast"),
+        // System-level pipeline call (no per-org context) — keep caching
+        // on so identical citation/language combinations hit the cache.
+        model: getModelForRole("fast", null, {
+          promptCachingEnabled: true,
+          scopeKey: `polarity:${language}`,
+          organizationId: null,
+          serviceTier: "flex",
+        }),
         system: SYSTEM_PROMPT,
         messages: [
           {
@@ -92,16 +97,8 @@ ${context}`,
           },
         ],
         output: Output.object({
-          schema: valibotSchema(classificationSchema),
+          schema: strictOutputSchema(classificationSchema),
         }),
-        providerOptions: {
-          google: {
-            thinkingConfig: {
-              thinkingLevel: "minimal",
-              includeThoughts: false,
-            },
-          } satisfies GoogleGenerativeAIProviderOptions,
-        },
         abortSignal: abortSignal
           ? AbortSignal.any([abortSignal, AbortSignal.timeout(15_000)])
           : AbortSignal.timeout(15_000),

@@ -26,6 +26,7 @@ import {
   getChatSkillMetadata,
   listAvailableChatSkillMetadata,
 } from "@/api/handlers/chat/skills";
+import { CHAT_THREAD_PLACEHOLDER_TITLE } from "@/api/handlers/chat/thread-title";
 import { readonlyOrgFunctionContracts } from "@/api/handlers/chat/tools/execute/org-manifest";
 import { buildReadonlyFunctionManifest } from "@/api/handlers/chat/tools/execute/readonly-manifest";
 import type { ReadonlyFunctionManifest } from "@/api/handlers/chat/tools/execute/readonly-manifest";
@@ -63,13 +64,18 @@ const buildPromptMentionExample = ({
 }: BuildPromptMentionExampleProps) => `[${label}](${prefix}${id})`;
 
 const CORE_RULE_SECTIONS = [
-  "You are an AI feature inside Stella, a legal workspace product. You retrieve documents, draft text, and answer questions on behalf of the user. Skip greetings and persona — answer directly. For complex or ambiguous tasks (drafting documents, multi-step workflows), call `ask-user` to gather requirements BEFORE acting.",
-  "ASK-USER BOUNDARY: Use `ask-user` only for missing task requirements such as facts, preferences, jurisdiction, parties, or scope. Never use `ask-user` to ask for permission, consent, approval, or whether you may call an available tool; Stella handles tool approvals outside the model.",
-  "TRUTHFULNESS: Never guess, infer, or fabricate document content; retrieve real data through tools before answering. Only claim that an action happened (a document was edited, a field updated, a file created) when the corresponding tool returned a successful result for THAT specific action. If the tool returned skipped operations, returned nothing applied, or errored, say so plainly and tell the user what's needed to make it work. Never paper over a failed or partial action.",
-  `DOCX REVIEW TAGS: DOCX text returned by read tools can include review tags: ${DOCX_REVIEW_MARKUP_EXAMPLES.insertion}, ${DOCX_REVIEW_MARKUP_EXAMPLES.deletion}, and ${DOCX_REVIEW_MARKUP_EXAMPLES.comment}. Insert tags identify text added by review. Delete tags identify text removed by review. Comment tags are notes about nearby document text, not body text. Tag attributes can include author, initials, date, status, and thread when the DOCX provides them; use those attributes to answer who, when, whether a comment is resolved, and whether it is a reply. For questions about the reviewed/current wording, use inserted text and ignore deleted/comment text unless it matters to the answer. For questions about prior wording, edits, redlines, additions, removals, or comments, use the tags to distinguish what changed. Do not show tag syntax to the user unless they explicitly ask for it.`,
-  "CITATIONS: When a tool result includes a document URL, source URL, citation URL, or other stable external link, cite the relevant claim with a normal Markdown link using the document's human title or citation as link text. Stella renders these links in the inspector pane. Do not invent URLs; cite only links returned by tools or already present in source material.",
-  "LEGAL REFERENCE RESOLUTION: Treat citation/reference resolver tools as exact-match helpers, not exhaustive search. If a resolver returns no match, try a broader search tool with the original citation and likely variants before concluding the source is unavailable.",
-  'USER-FACING LANGUAGE: Talk to the user in their domain (legal work), not in ours. Never expose internal or implementation names — words like "Folio", "ProseMirror", "blockId", "snapshot", "metadata column", "property of type file", "schema", "ref", "entity id", "workspace id", or any tool name belong to the system, not the user. Refer to documents, matters, and folders by their human names. Always reply in the language of the user\'s latest message. Do not infer the reply language from UI locale, timezone, filenames, document text, document labels, quoted examples, or tool output. Tool outputs include `mention` markdown strings — copy those verbatim when naming objects in user-facing text instead of rewriting refs in parentheses.',
+  "You are an AI inside stella, a legal workspace. Answer directly; skip greetings and persona. For complex or ambiguous tasks, call `ask-user` to gather requirements before acting.",
+  "ASK-USER BOUNDARY: Use `ask-user` only for missing task facts (preferences, jurisdiction, parties, scope). Never use it to request tool-call permission or consent — stella handles approvals outside the model. When you decide to call `ask-user`, do not emit any other tool calls (web_search, run-stella-query, etc.) in the same turn — wait for the user's answer first; otherwise the user sees retrieved data before they have answered the clarifying question and that data may be off-topic. EXCEPTION: `load-skill` may immediately precede `ask-user` in the same turn so the clarifying questions can be informed by the skill's methodology.",
+  "REPEATED-QUESTION GUARD: When the user answers a question (even tersely — 'Yes', 'Czechia', 'all parties'), treat the answer as the answer and advance to the next step. Do not re-ask the same question with cosmetic rewording or restate it as confirmation. If their answer leaves a required fact still missing, ask ONLY for that missing fact, never the one they already answered.",
+  "TRUTHFULNESS: Never guess, infer, or fabricate document content — retrieve via tools first. Only claim an action occurred when its tool returned success for that action; surface skips, no-ops, and errors plainly.",
+  "EXTERNAL-FACT SOURCING: Always try to ground factual answers in an external source before falling back to your own knowledge. The skill catalog is in this prompt — pick a matching skill and `load-skill` if one fits; otherwise call `web_search` (with `fetch_url` follow-up when snippets are short or contradict). Only when those tools return nothing usable may you answer from your own knowledge, and you MUST flag that you have no source for the claim. Never use `run-stella-query` for external research — that tool reads stella's internal workspace data only. Cite tool-returned sources in the reply.",
+  "POST-LOAD-SKILL: After `load-skill` returns, never produce a 'Loaded the X skill' confirmation message. In the SAME turn, do one of: (a) immediately apply the skill's methodology to the user's stated task using the appropriate tool(s) and surface the result as your answer; or (b) if the user's request is bare (just a skill reference) or missing facts the skill explicitly requires (jurisdiction, parties, scope, parameters), call `ask-user` with the SPECIFIC clarifying questions the skill methodology calls for — never generic 'what do you want me to do?'. Read the skill body; ask only for what the skill needs to proceed.",
+  "SKILL-RESOURCES: When `load-skill` returns a non-empty `resources` list, treat those paths as part of the skill's methodology — not optional appendices. Before producing the final answer, call `read-skill-resource` on every resource the user's task plausibly depends on (criteria checklists, jurisdictional references, templates the skill prescribes). EMIT ALL READ CALLS IN A SINGLE ASSISTANT TURN — multiple `read-skill-resource` invocations issued together execute in parallel and finish in one round-trip; issuing them across separate turns serializes the reads and multiplies latency. Never claim you 'applied the skill' if you only read the top-level instructions; if you skip resources, say so plainly and offer to re-run with the resources read.",
+  "SKILL-REF LINKS: When the user's message contains a markdown link of the form `[name](#stella-skill-ref=slug)`, treat it as an explicit request to use that skill. Call `load-skill` with `skillName: slug` immediately (unless that skill is already loaded in this thread), then follow POST-LOAD-SKILL. Do not echo the link or narrate the load.",
+  `DOCX REVIEW TAGS: DOCX text from read tools may contain insertion/deletion/comment tags (${DOCX_REVIEW_MARKUP_EXAMPLES.insertion}, ${DOCX_REVIEW_MARKUP_EXAMPLES.deletion}, ${DOCX_REVIEW_MARKUP_EXAMPLES.comment}) with optional author/initials/date/status/thread attributes. For current wording, use inserted text and ignore deletions/comments unless asked; for change history or comments, use the tags. Never show tag syntax unless explicitly asked.`,
+  "CITATIONS: When a tool returns a stable URL, cite each individual claim inline with its OWN Markdown link — one citation per sentence (or per discrete fact) rather than a single trailing 'Sources:' block. Anchor text should be short (source domain, citation, or `[1]`-style footnote), and each link must point to the specific URL that supports THAT claim. The stella inspector opens these links in-app on click, so prefer them over plain text. Never invent URLs.",
+  "LEGAL REFERENCE RESOLUTION: Citation resolvers are exact-match. On a no-match, retry with a broader search tool using citation variants before declaring it unavailable.",
+  "USER-FACING LANGUAGE: Speak in legal-work terms; never expose internal names, tool names, or schema identifiers — refer to documents, matters, and folders by their human names. Reply in the user's UI language (see user context); switch only if the user themselves writes a natural-language message in another language. Copy `mention` strings from tool outputs verbatim instead of rewriting refs.",
 ] as const;
 
 export type UserContext = IncomingUserContext;
@@ -78,14 +84,32 @@ type PromptSkillMetadata = SkillMetadata & {
   source?: "built-in" | "installed" | undefined;
 };
 
+declare const __chatPromptPartBrand: unique symbol;
+
+export type ChatCacheStablePrefix = string & {
+  readonly [__chatPromptPartBrand]: "cacheStablePrefix";
+};
+
+export type ChatSafePrompt = string & {
+  readonly [__chatPromptPartBrand]: "safePrompt";
+};
+
+export type ChatUntrustedPromptSuffix = string & {
+  readonly [__chatPromptPartBrand]: "untrustedSuffix";
+};
+
+export type ChatFullPrompt = string & {
+  readonly [__chatPromptPartBrand]: "fullPrompt";
+};
+
 export type ChatPromptParts = {
-  cacheStablePrefix: string;
+  cacheStablePrefix: ChatCacheStablePrefix;
   /**
    * Server-built scaffold: product copy, built-in skill catalog,
    * jurisdictions, workspace metadata. Carries no third-party PII
    * and is sent to the model verbatim — *no anonymization*.
    */
-  safePrompt: string;
+  safePrompt: ChatSafePrompt;
   /**
    * User-supplied dynamic context concatenated onto the scaffold:
    * active file body, case-law decision text, external-source
@@ -93,18 +117,72 @@ export type ChatPromptParts = {
    * anonymizer runs over this before it reaches the third-party
    * model, so any names embedded inside get placeholdered.
    */
-  untrustedSuffix: string;
+  untrustedSuffix: ChatUntrustedPromptSuffix;
   /**
    * `safePrompt + untrustedSuffix`. Kept for callers that want
    * the whole thing without going through the boundary (e.g.
    * non-anonymized mode, prompt-cache key derivation, debug
    * logging).
    */
-  fullPrompt: string;
+  fullPrompt: ChatFullPrompt;
   skillMetadata: readonly PromptSkillMetadata[];
 };
 
-export const buildChatPromptCacheKey = (cacheStablePrefix: string) => {
+const brandChatCacheStablePrefix = (text: string): ChatCacheStablePrefix =>
+  // SAFETY: only this prompt assembler mints cache-stable prefixes.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
+  text as ChatCacheStablePrefix;
+
+const brandChatSafePrompt = (text: string): ChatSafePrompt =>
+  // SAFETY: only this prompt assembler mints the trusted scaffold.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
+  text as ChatSafePrompt;
+
+const brandChatUntrustedPromptSuffix = (
+  text: string,
+): ChatUntrustedPromptSuffix =>
+  // SAFETY: only this prompt assembler mints the dynamic suffix.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
+  text as ChatUntrustedPromptSuffix;
+
+const brandChatFullPrompt = (text: string): ChatFullPrompt =>
+  // SAFETY: fullPrompt is derived from already-branded prompt parts.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
+  text as ChatFullPrompt;
+
+const ANONYMIZED_MODE_SYSTEM_HINT = [
+  "ANONYMIZED MODE: Names, organizations and other identifying entities the user mentions have been replaced with stable placeholders such as `[PERSON_1]`, `[ORGANIZATION_1]`, `[DATE_1]`. The same placeholder always refers to the same real entity within this conversation.",
+  'When you call a stella internal tool (run-stella-query, listContacts, listMatters, etc.), pass the placeholder verbatim — including the square brackets — as if it were the real name. stella deanonymizes the placeholder back to the real value before the lookup runs and re-anonymizes the result before you see it. So `read.listContacts({ query: "[PERSON_1]" })` is the correct shape; the lookup will hit the real record.',
+  'Do not try to invent the real value behind a placeholder, ask the user for it, or refuse to proceed because the placeholder "isn\'t a real name". External (non-stella) tools, by contrast, only ever receive the placeholder.',
+].join(" ");
+
+const buildChatFullPrompt = ({
+  safePrompt,
+  untrustedSuffix,
+}: {
+  safePrompt: ChatSafePrompt;
+  untrustedSuffix: ChatUntrustedPromptSuffix;
+}): ChatFullPrompt => brandChatFullPrompt(`${safePrompt}${untrustedSuffix}`);
+
+const nonEmptyPromptPart = (part: string | null | undefined): part is string =>
+  part !== null && part !== undefined && part.length > 0;
+
+export const appendAnonymizedModeHintToChatSafePrompt = (
+  base: ChatSafePrompt,
+): ChatSafePrompt =>
+  brandChatSafePrompt(joinPromptSections([base, ANONYMIZED_MODE_SYSTEM_HINT]));
+
+export const extendChatUntrustedPromptSuffix = (
+  base: ChatUntrustedPromptSuffix,
+  additions: readonly (string | null | undefined)[],
+): ChatUntrustedPromptSuffix => {
+  const parts = [base, ...additions].filter(nonEmptyPromptPart);
+  return brandChatUntrustedPromptSuffix(parts.join("\n\n"));
+};
+
+export const buildChatPromptCacheKey = (
+  cacheStablePrefix: ChatCacheStablePrefix,
+) => {
   const hash = new Bun.CryptoHasher("sha256")
     .update(cacheStablePrefix)
     .digest("hex")
@@ -241,13 +319,18 @@ export const buildChatSystemPromptParts = async ({
     // produced an untrusted half (matter-name interpolation, user
     // profile block); prepend it so anonymization covers the
     // whole user-driven tail.
-    const untrustedSuffix = `${safeParts.untrustedSuffix}${appendedUntrusted}`;
+    const untrustedSuffix = brandChatUntrustedPromptSuffix(
+      `${safeParts.untrustedSuffix}${appendedUntrusted}`,
+    );
 
     return Result.ok({
       cacheStablePrefix: safeParts.cacheStablePrefix,
       safePrompt: safeParts.safePrompt,
       untrustedSuffix,
-      fullPrompt: `${safeParts.safePrompt}${untrustedSuffix}`,
+      fullPrompt: buildChatFullPrompt({
+        safePrompt: safeParts.safePrompt,
+        untrustedSuffix,
+      }),
       skillMetadata,
     });
   });
@@ -326,7 +409,7 @@ export const extractTitle = (parts: ChatMessage["parts"]) => {
     return `${plainText.slice(0, TITLE_MAX_LENGTH)}…`;
   }
 
-  return plainText || "New chat";
+  return plainText || CHAT_THREAD_PLACEHOLDER_TITLE;
 };
 
 type BuildGlobalPromptProps = {
@@ -531,6 +614,7 @@ const buildActiveFilePrompt = ({
   return [
     `ACTIVE FILE: The user is viewing "${safeName}" (entity ref ${entityRef}) in the inspector sidebar.`,
     `DEFAULT SCOPE: While an active file is set, treat it as the sole subject of any open-ended question ("what's going on", "summarize this", "what does it say", "explain", and similar). Read its contents with \`read.getMatterEntityContents\` using \`matterRefs: ["${matterRef}"]\` and \`entityRefs: ["${entityRef}"]\`, and answer ONLY from that file.`,
+    `LONG-DOCUMENT LOOKUPS: \`read.getMatterEntityContents\` only returns the START of the document (server truncates long files). If the user asks where, whether, or how a specific term/phrase appears — definitions ("how is X defined?"), citations ("does it mention Y?"), references ("which section covers Z?") — call \`read.searchInEntityContent\` with that term as \`query\` instead. It scans the FULL document and returns matching snippets in document order, so an Index entry pointing to "Article I" never blocks you from finding the actual definition. Treat \`totalHits\` as a lower bound when \`totalHitsCapped\` is true.`,
     "DIRECT FILE FALLBACK: If the latest user message includes the active file as a direct attachment, inspect that attachment directly before answering. Do not claim the file has no extracted text when a direct attachment is available for this turn.",
     activeFile.supportsDocxEdits
       ? "`create-document` creates a separate new DOCX from legal-source directives. Do NOT use it to edit, rewrite, replace, save, or make a new version of the active file. If live DOCX editing is available below, use `apply-active-docx-edits`; otherwise explain that the document must be opened for editing first. Never create a substitute document."
@@ -546,9 +630,12 @@ const buildActiveFilePrompt = ({
 const buildActiveDocxEditPrompt = (activeFile: IncomingActiveFile) => {
   const snapshot = activeFile.docxEditSnapshot;
   if (!snapshot) {
-    return [
-      "ACTIVE DOCX EDITING: The editor is briefly initialising and you don't have block ids yet to target with `apply-active-docx-edits`. Reply with EXACTLY ONE short sentence (in the user's language) asking them to retry in a moment — the editor is loading. Do NOT add a second sentence, do NOT offer alternatives, do NOT ask the user to specify focus, do NOT lecture about modes. Do not claim you changed anything. Do not invent block ids. Do not call `run-stella-query`, `read.getMatterEntityContents`, or `create-document` to satisfy edit requests.",
-    ].join("\n");
+    // Editor snapshot isn't ready yet, so we can't expose
+    // `apply-active-docx-edits`. Stay silent about the loading state
+    // — the user finds "please try again in a moment" jarring — and
+    // just answer the request normally. Don't fabricate edits and
+    // don't claim work that wasn't done.
+    return "";
   }
 
   const truncatedBlockCount = Math.max(
@@ -562,6 +649,7 @@ const buildActiveDocxEditPrompt = (activeFile: IncomingActiveFile) => {
         blockId: string;
         kind: typeof block.kind;
         label?: string;
+        styleId?: string;
         text: string;
       } = {
         blockId: block.id,
@@ -574,6 +662,9 @@ const buildActiveDocxEditPrompt = (activeFile: IncomingActiveFile) => {
 
       if (block.displayLabel) {
         promptBlock.label = block.displayLabel;
+      }
+      if (block.styleId) {
+        promptBlock.styleId = block.styleId;
       }
 
       return promptBlock;
@@ -588,15 +679,16 @@ const buildActiveDocxEditPrompt = (activeFile: IncomingActiveFile) => {
     "ACTIVE DOCX EDITING: The open document is available for in-place editing. Whether or not the editor is currently unlocked is irrelevant to your decision to call the tool — the user's accept click in the review panel handles unlocking.",
     'TOOL CALL IS MANDATORY when the user asks — in any language — to change, edit, replace, rewrite, fix, correct, review, redline, proofread, revise, or otherwise modify this document, or confirms an earlier proposal ("yes do it", "go ahead"). You MUST call `apply-active-docx-edits` before claiming any work. Do not refuse because the document might be read-only — your job is to propose; the user applies.',
     'FORBIDDEN: Any reply that asserts work has been done, prepared, queued, suggested, drafted, or "is ready for review" — in any phrasing — without `apply-active-docx-edits` being called in the same turn is a TRUTHFULNESS violation. Examples of forbidden lies: "I prepared N suggestions", "the changes are ready in the panel", "formatting unification is ready", "draft is queued", "review is prepared". If you cannot produce any operations (nothing to fix, or the request is outside the tool\'s capability), say so plainly and DO NOT pretend otherwise.',
-    'TOOL CAPABILITY (and its limits): `apply-active-docx-edits` operates on TEXT CONTENT inside paragraphs, headings, and list items only. It can replace, insert, delete, or comment on text. It CANNOT change visual formatting — fonts, bold/italic/underline, font size, colour, indents, alignment, margins, line spacing, list bullet style, paragraph styles (Heading 1 etc.), tabs, or page layout. If the user asks for formatting changes ("format", "unify formatting", "make headings bigger", "bold the parties"), tell them honestly that the AI tool only edits text content; suggest they use the document\'s own formatting controls. Do NOT pretend you queued formatting changes — there is no operation type for that.',
+    'TOOL CAPABILITY (and its limits): `apply-active-docx-edits` operates on TEXT CONTENT inside paragraphs, headings, and list items, and can insert a few structural elements: page breaks (`pageBreakBefore` on an insert), clause-heading paragraphs (via `styleId`), and side-by-side signature tables (`insertSignatureTable`). It CANNOT change visual run formatting — fonts, bold/italic/underline, font size, colour, indents, alignment, margins, line spacing, list bullet style, tabs, or arbitrary paragraph styles outside the supported set. If the user asks for run-formatting changes ("make headings bigger", "bold the parties", "change the font"), tell them honestly that the AI tool only edits text and the structural elements listed above; suggest they use the document\'s own formatting controls. Do NOT pretend you queued formatting changes that have no operation.',
     'FIELD CODES: A block whose text shows odd gaps — e.g. "Section .", "Schedule No. .", "Page of", "Date: ." — has a Word field code (cross-reference, page number, date, sequence number) the user must edit IN WORD. The rendered number/text is generated from the field; it is not literal block text and `replaceInBlock` cannot fill it in. Skip those blocks: tell the user honestly that AI cannot edit cross-reference / field codes (they should refresh fields in Word with Ctrl+A then F9), and propose only the edits that target real block text. NEVER queue an op whose `find` contains a gap that\'s really a field code.',
-    "Do not call `run-stella-query`, `read.getMatterEntityContents`, or `create-document` to satisfy active DOCX edit requests; `apply-active-docx-edits` is the only tool that can propose changes to the open document.",
+    "Do not call `run-stella-query`, `read.getMatterEntityContents`, `read.searchInEntityContent`, or `create-document` to satisfy active DOCX edit requests; `apply-active-docx-edits` is the only tool that can propose changes to the open document.",
     'CASCADING CHANGES: Before proposing any edit, scan the document for places that REFER TO or DEPEND ON the value being changed and include the dependent fixes in the SAME tool call. Examples: (a) the user changes a price — every restatement of that number in words, in totals, in instalment schedules, in deposit/balance lines, in penalty caps that reference it, must be updated together; (b) the user changes a party name — every occurrence (signature block, header, cross-reference list, defined-terms section) must follow; (c) the user changes a date — derived deadlines, anniversaries, and statute references that depend on it must follow; (d) the user changes a clause number — every cross-reference ("as set out in Article X") must follow. If the right cascade is genuinely ambiguous (e.g. user lowers the total but the document splits it into deposit + arrears and you cannot tell which side absorbs the delta), call `ask-user` ONCE with the specific cascade question before producing any operations. Don\'t propose half a change.',
-    "Use the block ids below for tool operations. Prefer `replaceInBlock` with an exact `find` string for localized edits. Use `replaceBlock` only when the whole paragraph/list item should change.",
-    'Tool input example: {"operations":[{"type":"replaceInBlock","blockId":"b-0010","find":"Acme Inc.","replace":"Example Ltd.","severity":"low","area":"Names"}]}. Operations must be objects, not strings. Use `blockId`, not `id`.',
+    "Use the block ids below for tool operations. Prefer `replaceInBlock` with an exact `find` string for localized edits. Use `replaceBlock` when the whole paragraph/list item should change. Use `deleteBlock` to remove a paragraph. Use `insertAfterBlock` or `insertBeforeBlock` (anchored on the neighbouring block id) to add a new paragraph.",
+    'STRUCTURAL INSERTS (use the canonical op, not directive text): For a page break, call `insertAfterBlock` with `pageBreakBefore: true` (the `text` may be empty). For a numbered heading (clause), call `insertAfterBlock` (or `insertBeforeBlock`) with `styleId: "ClauseHeading1"` (or `ClauseHeading2`, `ClauseHeading3`) and the heading text in `text`. For a signature block, call `insertSignatureTable` with one entry per party (`name` required; `signatory` and `title` optional). These ops produce real structural elements in the document. DO NOT emit directive markers like `@pagebreak`, `@clause`, `@signatures`, `@title`, or `[[placeholders]]` as paragraph text — those belong to `create-document`, not to this editor; in this tool they would land in the doc as literal characters. Pick one canonical op per intent and use it.',
+    'Tool input example: {"operations":[{"type":"replaceInBlock","blockId":"1A2B3C4D","find":"Acme Inc.","replace":"Example Ltd.","severity":"low","area":"Names"}]}. Operations must be objects, not strings. Use `blockId`, not `id`. Most block ids are 8-character uppercase hex (Word `w14:paraId`), with `seq-` fallback ids possible for older snapshots; always copy ids verbatim from the editable-blocks list below.',
     'ALWAYS set `severity` and `area` on each operation. `severity`: "low" for typos / spelling / minor style, "medium" for routine wording or terminology fixes, "high" for substantive changes (numbers, dates, parties, legal effect). `area`: a short topic label that groups related ops, e.g. "Spelling", "Penalty", "Payment Terms", "Names", "Cross-references". The review panel sorts and groups by these — empty severity/area collapses everything into one undifferentiated bucket and is bad UX.',
     'After the tool returns, reply with ONE short sentence (in the user\'s language) covering the count and the high-level goal — e.g. "13 spelling and typo fixes are ready to review in the panel." Do NOT enumerate the operations, do NOT list block ids or before/after pairs in your reply — the panel already shows every suggestion with its full context. Repeating them is noise. NEVER claim the document was changed; only ids that appear in `applied` represent actual document changes (rare with this tool). Never paraphrase a `queued` result as a completed change.',
-    "CITATIONS IN PLAIN ANSWERS: When you summarise, quote, or refer to specific content from the open document in a normal text reply (i.e. NOT inside `apply-active-docx-edits`), wrap the supporting paragraph snippet in a Markdown link whose href is `#folio:<blockId>` (note the leading `#` — it is required, the link will be stripped without it). Example: `the contract is governed by [Delaware law](#folio:b-0042)`. The link TEXT must be a short, human-meaningful phrase quoted or paraphrased from the cited block — typically 1–6 words in the user's language (e.g. `[Delaware law]`, `[July 20, 2021]`, `[$1,500,000]`). NEVER use the href itself as the link text (NOT `[#folio:b-0042](#folio:b-0042)`), NEVER leave the text empty (`[](#folio:b-0042)`), NEVER use Markdown autolinks like `<#folio:b-0042>` — those render as broken citations. Cite at most a few blocks per reply (only the ones a user would want to verify); never invent a blockId that's not in the list.",
+    "CITATIONS IN PLAIN ANSWERS: When you summarise, quote, or refer to specific content from the open document in a normal text reply (i.e. NOT inside `apply-active-docx-edits`), wrap the supporting paragraph snippet in a Markdown link whose href is `#folio:<blockId>` (note the leading `#` — it is required, the link will be stripped without it). Example: `the contract is governed by [Delaware law](#folio:1A2B3C4D)`. Copy block ids verbatim from the block list — do NOT shorten, pad, prefix, or otherwise mangle them. The link TEXT must be a short, human-meaningful phrase quoted or paraphrased from the cited block — typically 1–6 words in the user's language (e.g. `[Delaware law]`, `[July 20, 2021]`, `[$1,500,000]`). NEVER use the href itself as the link text (NOT `[#folio:1A2B3C4D](#folio:1A2B3C4D)`), NEVER leave the text empty (`[](#folio:1A2B3C4D)`), NEVER use Markdown autolinks like `<#folio:1A2B3C4D>` — those render as broken citations. Cite at most a few blocks per reply (only the ones a user would want to verify); never invent a blockId that's not in the list.",
     truncationNotice,
     ["Editable DOCX blocks:", "```json", JSON.stringify(blocks), "```"].join(
       "\n",
@@ -790,12 +882,12 @@ const READONLY_API_HINT = (() => {
   );
 
   return [
-    "For Stella data reads, use the Stella API:",
+    "For stella data reads, use the stella API:",
     "- call `run-stella-query` with TypeScript that uses `read.*`",
     "- every read result stores records in `result.items`; paginated list results also include `result.hasMore` and `result.nextOffset`",
     "- call `describe-stella-api({name})` only when you need a function's full input/output schema",
     "When answering about workspace or organization data, fetch current data inside `run-stella-query`; never answer counts or exhaustive lists from prior context, visible UI state, examples, or pasted arrays such as `const entities = [...]`. Paginate until `hasMore` is false when the answer requires the complete set. Prefer focused action/UI tools whenever one fits.",
-    "Available Stella read functions:",
+    "Available stella read functions:",
     ...lines,
   ].join("\n");
 })();
@@ -860,21 +952,23 @@ const buildPromptParts = ({
 }: BuildPromptProps): ChatPromptParts => {
   const { safeSkillMetadata, untrustedSkillMetadata } =
     splitSkillMetadataForPrompt(skillMetadata);
-  const cacheStablePrefix = joinPromptSections([
-    ...CORE_RULE_SECTIONS,
-    buildSkillCatalogSection(safeSkillMetadata),
-    READONLY_API_HINT,
-  ]);
+  const cacheStablePrefix = brandChatCacheStablePrefix(
+    joinPromptSections([
+      ...CORE_RULE_SECTIONS,
+      buildSkillCatalogSection(safeSkillMetadata),
+      READONLY_API_HINT,
+    ]),
+  );
   // Safe half: scaffold + jurisdiction labels. Both are
   // server-defined catalogs with no third-party PII.
-  const safeSections = [cacheStablePrefix];
+  const safeSections: string[] = [cacheStablePrefix];
   const practiceJurisdictionLine = buildPracticeJurisdictionLine(
     practiceJurisdictions,
   );
   if (practiceJurisdictionLine) {
     safeSections.push(practiceJurisdictionLine);
   }
-  const safePrompt = joinPromptSections(safeSections);
+  const safePrompt = brandChatSafePrompt(joinPromptSections(safeSections));
 
   // Untrusted half: anything that interpolates user-controlled
   // text into the prompt. Installed skill names/descriptions are
@@ -891,16 +985,17 @@ const buildPromptParts = ({
   if (userContextBlock) {
     untrustedSections.push(userContextBlock);
   }
-  const untrustedSuffix =
+  const untrustedSuffix = brandChatUntrustedPromptSuffix(
     untrustedSections.length > 0
       ? `\n\n${joinPromptSections(untrustedSections)}`
-      : "";
+      : "",
+  );
 
   return {
     cacheStablePrefix,
     safePrompt,
     untrustedSuffix,
-    fullPrompt: `${safePrompt}${untrustedSuffix}`,
+    fullPrompt: buildChatFullPrompt({ safePrompt, untrustedSuffix }),
     skillMetadata,
   };
 };
@@ -954,7 +1049,9 @@ const buildPracticeJurisdictionLine = (
 const joinPromptSections = (sections: readonly string[]) =>
   sections.filter((section) => section.length > 0).join("\n\n");
 
-const buildSkillCatalogSection = (skillMetadata: readonly SkillMetadata[]) => {
+const buildSkillCatalogSection = (
+  skillMetadata: readonly PromptSkillMetadata[],
+) => {
   if (skillMetadata.length === 0) {
     return "";
   }
@@ -967,7 +1064,7 @@ const buildSkillCatalogSection = (skillMetadata: readonly SkillMetadata[]) => {
     .join("\n");
 
   return [
-    "Available Stella skills are listed below by name and description only.",
+    "Available stella skills are listed below by name and description only.",
     "Use `load-skill` before applying a skill's detailed methodology. " +
       "Use `read-skill-resource` only for resource paths returned by `load-skill`.",
     "Skills provide reasoning methodology and templates; they do not grant data access.",
@@ -981,6 +1078,10 @@ export const buildUserContextBlock = (userContext: UserContext | null) => {
   }
 
   const lines = [`User registered as: ${userContext.userName}`];
+
+  if (userContext.locale) {
+    lines.push(`User UI language (BCP-47): ${userContext.locale}`);
+  }
 
   if (userContext.wordEditAuthorName) {
     lines.push(`DOCX edit author: ${userContext.wordEditAuthorName}`);

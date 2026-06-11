@@ -23,12 +23,13 @@ const searchEndpoint = createSafeRootHandler(
     permissions: { workspace: ["read"] },
     body: searchBodySchema,
   } satisfies HandlerConfig,
-  async function* ({ activeWorkspaceIds, body, scopedDb, session }) {
+  async function* ({ activeWorkspaceIds, body, scopedDb, session, user }) {
     const response = yield* Result.await(
       Result.tryPromise(
         async () =>
           await searchHandler({
             organizationId: session.activeOrganizationId,
+            userId: user.id,
             accessibleWorkspaceIds: activeWorkspaceIds,
             body,
             scopedDb,
@@ -66,8 +67,17 @@ const refineSearchEndpoint = createSafeRootHandler(
   {
     permissions: { workspace: ["read"] },
     body: refineSearchBodySchema,
+    requiresUsage: { actionType: "chat", modelRole: "fast" },
   } satisfies HandlerConfig,
-  async function* ({ body, orgAIConfig, scopedDb, session }) {
+  async function* ({
+    body,
+    orgAIConfig,
+    promptCachingEnabled,
+    safeDb,
+    scopedDb,
+    session,
+    user,
+  }) {
     const response = yield* Result.await(
       Result.tryPromise(
         async () =>
@@ -75,7 +85,10 @@ const refineSearchEndpoint = createSafeRootHandler(
             organizationId: session.activeOrganizationId,
             body,
             orgAIConfig,
+            promptCachingEnabled,
+            safeDb,
             scopedDb,
+            userId: user.id,
           }),
       ),
     );
@@ -88,22 +101,29 @@ const summarizeSearchEndpoint = createSafeRootHandler(
   {
     permissions: { workspace: ["read"] },
     body: summarizeSearchBodySchema,
+    requiresUsage: { actionType: "chat", modelRole: "fast" },
   } satisfies HandlerConfig,
   async function* ({
     activeWorkspaceIds,
     body,
     orgAIConfig,
+    promptCachingEnabled,
+    safeDb,
     scopedDb,
     session,
+    user,
   }) {
     const response = yield* Result.await(
       Result.tryPromise(
         async () =>
           await summarizeSearchResults({
             organizationId: session.activeOrganizationId,
+            userId: user.id,
             accessibleWorkspaceIds: activeWorkspaceIds,
             body,
             orgAIConfig,
+            promptCachingEnabled,
+            safeDb,
             scopedDb,
           }),
       ),
@@ -125,6 +145,7 @@ const searchSummaryChatEndpoint = createSafeRootHandler(
     scopedDb,
     session,
     user,
+    recordAuditEvent,
   }) {
     const response = yield* Result.await(
       Result.tryPromise(
@@ -136,6 +157,7 @@ const searchSummaryChatEndpoint = createSafeRootHandler(
             safeDb,
             scopedDb,
             userId: user.id,
+            recordAuditEvent,
           }),
       ),
     );

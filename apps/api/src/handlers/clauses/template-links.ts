@@ -1,9 +1,12 @@
+import { panic } from "better-result";
 import { and, eq, sql } from "drizzle-orm";
 import { status, t } from "elysia";
 import type { Static } from "elysia";
 
 import type { ScopedDb } from "@/api/db";
 import { templateClauses } from "@/api/db/schema";
+import type { AuditRecorder } from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tSafeId } from "@/api/lib/custom-schema";
@@ -130,6 +133,7 @@ type LinkClauseProps = {
   organizationId: SafeId<"organization">;
   templateId: SafeId<"template">;
   body: LinkClauseBody;
+  recordAuditEvent: AuditRecorder;
 };
 
 export const linkClauseHandler = async ({
@@ -137,6 +141,7 @@ export const linkClauseHandler = async ({
   organizationId,
   templateId,
   body,
+  recordAuditEvent,
 }: LinkClauseProps) => {
   const template = await verifyTemplateOwnership(
     scopedDb,
@@ -233,6 +238,26 @@ export const linkClauseHandler = async ({
         insertedAt: templateClauses.insertedAt,
       });
 
+    if (row) {
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CLAUSE_TEMPLATE_LINK,
+        resourceId: row.id,
+        changes: {
+          created: {
+            old: null,
+            new: {
+              templateId,
+              clauseId: row.clauseId,
+              clauseVariantId: row.clauseVariantId,
+              clauseVersionId: row.clauseVersionId,
+              slotName: row.slotName,
+            },
+          },
+        },
+      });
+    }
+
     return row;
   });
 
@@ -252,6 +277,7 @@ type UnlinkClauseProps = {
   organizationId: SafeId<"organization">;
   templateId: SafeId<"template">;
   linkId: SafeId<"templateClause">;
+  recordAuditEvent: AuditRecorder;
 };
 
 export const unlinkClauseHandler = async ({
@@ -259,6 +285,7 @@ export const unlinkClauseHandler = async ({
   organizationId,
   templateId,
   linkId,
+  recordAuditEvent,
 }: UnlinkClauseProps) => {
   const template = await verifyTemplateOwnership(
     scopedDb,
@@ -277,7 +304,13 @@ export const unlinkClauseHandler = async ({
         templateId: { eq: templateId },
         organizationId: { eq: organizationId },
       },
-      columns: { id: true },
+      columns: {
+        id: true,
+        clauseId: true,
+        clauseVariantId: true,
+        clauseVersionId: true,
+        slotName: true,
+      },
     }),
   );
 
@@ -285,18 +318,36 @@ export const unlinkClauseHandler = async ({
     return status(404, { message: "Link not found" });
   }
 
-  await scopedDb((tx) =>
-    tx
+  await scopedDb(async (tx) => {
+    await tx
       .delete(templateClauses)
       .where(
         and(
           eq(templateClauses.id, linkId),
           eq(templateClauses.templateId, templateId),
         ),
-      ),
-  );
+      );
 
-  return undefined;
+    await recordAuditEvent(tx, {
+      action: AUDIT_ACTION.DELETE,
+      resourceType: AUDIT_RESOURCE_TYPE.CLAUSE_TEMPLATE_LINK,
+      resourceId: linkId,
+      changes: {
+        deleted: {
+          old: {
+            templateId,
+            clauseId: existing.clauseId,
+            clauseVariantId: existing.clauseVariantId,
+            clauseVersionId: existing.clauseVersionId,
+            slotName: existing.slotName,
+          },
+          new: null,
+        },
+      },
+    });
+  });
+
+  return {};
 };
 
 // ── Sync to latest version ──────────────────────────
@@ -306,6 +357,7 @@ type SyncClauseProps = {
   organizationId: SafeId<"organization">;
   templateId: SafeId<"template">;
   linkId: SafeId<"templateClause">;
+  recordAuditEvent: AuditRecorder;
 };
 
 export const syncClauseHandler = async ({
@@ -313,6 +365,7 @@ export const syncClauseHandler = async ({
   organizationId,
   templateId,
   linkId,
+  recordAuditEvent,
 }: SyncClauseProps) => {
   const template = await verifyTemplateOwnership(
     scopedDb,
@@ -334,6 +387,7 @@ export const syncClauseHandler = async ({
       columns: {
         id: true,
         clauseId: true,
+        clauseVersionId: true,
       },
     }),
   );
@@ -381,8 +435,8 @@ export const syncClauseHandler = async ({
     });
   }
 
-  const [updated] = await scopedDb((tx) =>
-    tx
+  const updated = await scopedDb(async (tx) => {
+    const [row] = await tx
       .update(templateClauses)
       .set({ clauseVersionId: latestVersion.id })
       .where(
@@ -394,8 +448,27 @@ export const syncClauseHandler = async ({
       .returning({
         id: templateClauses.id,
         clauseVersionId: templateClauses.clauseVersionId,
-      }),
-  );
+      });
+
+    await recordAuditEvent(tx, {
+      action: AUDIT_ACTION.UPDATE,
+      resourceType: AUDIT_RESOURCE_TYPE.CLAUSE_TEMPLATE_LINK,
+      resourceId: linkId,
+      changes: {
+        clauseVersionId: {
+          old: link.clauseVersionId,
+          new: latestVersion.id,
+        },
+      },
+      metadata: { syncedToVersion: latestVersion.version },
+    });
+
+    return row;
+  });
+
+  if (!updated) {
+    panic("Failed to sync template clause link");
+  }
 
   return updated;
 };

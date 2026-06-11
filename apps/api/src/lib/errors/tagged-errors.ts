@@ -2,6 +2,8 @@ import { TaggedError } from "better-result";
 
 import type { ChatTransportErrorCode } from "@stll/anonymize-chat";
 
+export { FetchBoundaryError } from "@stll/errors";
+
 export type HandlerErrorStatusCode =
   | 400
   | 401
@@ -77,6 +79,24 @@ export class TelemetryError extends TaggedError("TelemetryError")<{
   cause?: unknown;
 }>() {}
 
+export const USAGE_LIMIT_EXCEEDED_REASONS = [
+  "no_entitlement",
+  "usage_limit_exceeded",
+  "entitlement_inactive",
+] as const;
+
+export type UsageLimitExceededReason =
+  (typeof USAGE_LIMIT_EXCEEDED_REASONS)[number];
+
+export class UsageLimitExceededError extends TaggedError(
+  "UsageLimitExceededError",
+)<{
+  message: string;
+  required: number;
+  available: number;
+  reason: UsageLimitExceededReason;
+}>() {}
+
 export class HealthCheckError extends TaggedError("HealthCheckError")<{
   message: string;
   cause?: unknown;
@@ -111,6 +131,13 @@ export class ChatToolError extends TaggedError("ChatToolError")<{
  */
 export class ChatEmptyCompletionError extends TaggedError(
   "ChatEmptyCompletionError",
+)<{
+  message: string;
+}>() {}
+
+/** Chat agent looped past the recovery budget. */
+export class ChatLoopDetectedError extends TaggedError(
+  "ChatLoopDetectedError",
 )<{
   message: string;
 }>() {}
@@ -195,4 +222,12 @@ export class ExtractionWorkerError extends TaggedError(
 )<{
   message: string;
   exitCode: number | null;
+}>() {}
+
+/** Timeout waiting for a readiness probe, subprocess, or external resource. */
+export class TimeoutError extends TaggedError("TimeoutError")<{
+  message: string;
+  label: string;
+  timeoutMs?: number;
+  cause?: unknown;
 }>() {}

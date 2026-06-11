@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { IntlProvider } from "use-intl";
 
 import { ChatApprovalContext } from "@/components/chat/chat-approval-context";
@@ -11,10 +11,19 @@ import type { PersistedChatMessage } from "@/components/chat/chat-ui-tools";
 import messages from "@/i18n/langs/en.json";
 import type Messages from "@/i18n/langs/messages.gen";
 
-process.env["VITE_API_URL"] = "http://localhost:3001";
+const previousApiUrl = process.env["VITE_API_URL"];
+process.env["VITE_API_URL"] = previousApiUrl ?? "https://api.example.test";
 
 const { ChatThreadMessages } =
   await import("@/components/chat/chat-thread-messages");
+
+afterAll(() => {
+  if (previousApiUrl === undefined) {
+    delete process.env["VITE_API_URL"];
+    return;
+  }
+  process.env["VITE_API_URL"] = previousApiUrl;
+});
 
 const renderWithProviders = (children: ReactNode) =>
   renderToStaticMarkup(
@@ -79,6 +88,42 @@ describe("chat thread messages", () => {
     expect(html).toContain("Draft answer");
     expect(html).toContain('aria-label="Copy"');
     expect(html).toContain(">Copy</button>");
+  });
+
+  test("uses generated thumbnail URLs for image attachments with placeholders", () => {
+    const imagePart = {
+      type: "file",
+      filename: "evidence.png",
+      mediaType: "image/png",
+      placeholder: "data:image/png;base64,AAAA",
+      url: "stella://file::file_test123",
+    } as const;
+    const chatMessages: PersistedChatMessage[] = [
+      {
+        id: "message-A",
+        parts: [imagePart],
+        role: "user",
+      },
+    ];
+
+    const html = renderWithProviders(
+      <ChatThreadMessages
+        approvalPendingMessageId={null}
+        messages={chatMessages}
+        onAskUserSubmit={() => {}}
+        onCreateDocumentResolve={() => {}}
+        onOpenCreatedDocument={() => {}}
+        showToolCalls={false}
+        streamdownComponents={{
+          a: ({ children, ...props }) => <a {...props}>{children}</a>,
+        }}
+      />,
+    );
+
+    expect(html).toContain("/v1/user-files/file_test123/content");
+    expect(html).toContain("/v1/user-files/file_test123/thumbnail");
+    expect(html).toContain("background-image");
+    expect(html).toContain("data:image/png;base64,AAAA");
   });
 
   test("shows retry only on the latest assistant response", () => {
@@ -203,6 +248,28 @@ describe("chat thread messages", () => {
     expect(html).not.toContain("provider details must stay hidden");
   });
 
+  test("maps model-unavailable stream errors to admin-facing copy", () => {
+    const html = renderWithProviders(
+      <ChatThreadMessages
+        approvalPendingMessageId={null}
+        error={new Error("model_unavailable")}
+        messages={[]}
+        onAskUserSubmit={() => {}}
+        onCreateDocumentResolve={() => {}}
+        onOpenCreatedDocument={() => {}}
+        onResend={() => {}}
+        showToolCallDetails={false}
+        streamdownComponents={{
+          a: ({ children, ...props }) => <a {...props}>{children}</a>,
+        }}
+      />,
+    );
+
+    expect(html).toContain("The configured AI model is no longer available");
+    expect(html).toContain("Resend");
+    expect(html).not.toContain("model_unavailable");
+  });
+
   test("offers a raw-send override when anonymization blocks an attachment", () => {
     const html = renderWithProviders(
       <ChatThreadMessages
@@ -212,7 +279,7 @@ describe("chat thread messages", () => {
             JSON.stringify({
               code: "third_party_boundary_refusal",
               message:
-                "Cannot send this attachment to the AI in anonymized mode because Stella cannot extract and anonymize it safely.",
+                "Cannot send this attachment to the AI in anonymized mode because stella cannot extract and anonymize it safely.",
             }),
           )
         }
@@ -229,7 +296,7 @@ describe("chat thread messages", () => {
       />,
     );
 
-    expect(html).toContain("Stella could not anonymize one attachment");
+    expect(html).toContain("stella could not anonymize one attachment");
     expect(html).toContain("Send without anonymization");
     expect(html).not.toContain("Cannot send this attachment");
   });

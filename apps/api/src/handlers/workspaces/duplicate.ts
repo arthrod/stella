@@ -17,16 +17,12 @@ import {
   workspaceViews,
 } from "@/api/db/schema";
 import type { FieldContent } from "@/api/db/schema-validators";
+import { THUMBNAIL_MIME_TYPE } from "@/api/handlers/files/image-derivative";
 import { createFileKey } from "@/api/handlers/files/utils";
 import { captureError } from "@/api/lib/analytics";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
-import {
-  AUDIT_ACTION,
-  AUDIT_RESOURCE_TYPE,
-  createAuditContext,
-  writeAuditLog,
-} from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { allocateEntityStamp } from "@/api/lib/document-counter";
@@ -163,6 +159,14 @@ const collectFileCopies = (content: FieldContent): FileCopy[] => {
     });
   }
 
+  if (content.thumbnailFileId) {
+    copies.push({
+      sourceFileId: content.thumbnailFileId,
+      targetFileId: Bun.randomUUIDv7(),
+      mimeType: THUMBNAIL_MIME_TYPE,
+    });
+  }
+
   return copies;
 };
 
@@ -200,6 +204,9 @@ const remapFieldContent = (
     id: fileIdMap.get(content.id) ?? content.id,
     pdfFileId: content.pdfFileId
       ? (fileIdMap.get(content.pdfFileId) ?? content.pdfFileId)
+      : null,
+    thumbnailFileId: content.thumbnailFileId
+      ? (fileIdMap.get(content.thumbnailFileId) ?? content.thumbnailFileId)
       : null,
   };
 };
@@ -353,9 +360,8 @@ const duplicateWorkspace = createSafeHandler(
     session,
     user,
     workspaceId: sourceWorkspaceId,
-    request,
-    server,
     body: { includeContent },
+    recordAuditEvent,
   }) {
     const organizationId = session.activeOrganizationId;
     const targetWorkspaceId = createSafeId<"workspace">();
@@ -370,6 +376,7 @@ const duplicateWorkspace = createSafeHandler(
             clientId: true,
             billingReference: true,
             color: true,
+            leadUserId: true,
           },
         });
 
@@ -580,6 +587,7 @@ const duplicateWorkspace = createSafeHandler(
         clientId: snapshot.workspace.clientId,
         billingReference: snapshot.workspace.billingReference,
         color: snapshot.workspace.color,
+        leadUserId: snapshot.workspace.leadUserId,
         name: newName,
         reference,
       });
@@ -778,27 +786,18 @@ const duplicateWorkspace = createSafeHandler(
         }
       }
 
-      await writeAuditLog(
-        {
-          ...createAuditContext({
-            organizationId,
-            workspaceId: targetWorkspaceId,
-            userId: user.id,
-            request,
-            server,
-          }),
-          action: AUDIT_ACTION.CREATE,
-          resourceType: AUDIT_RESOURCE_TYPE.WORKSPACE,
-          resourceId: targetWorkspaceId,
-          changes: {
-            created: {
-              old: { sourceWorkspaceId, includeContent },
-              new: { name: newName, reference },
-            },
+      await recordAuditEvent(tx, {
+        workspaceId: targetWorkspaceId,
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.WORKSPACE,
+        resourceId: targetWorkspaceId,
+        changes: {
+          created: {
+            old: { sourceWorkspaceId, includeContent },
+            new: { name: newName, reference },
           },
         },
-        tx,
-      );
+      });
 
       return {
         ok: true as const,

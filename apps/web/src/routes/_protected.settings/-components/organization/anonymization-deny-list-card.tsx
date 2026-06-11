@@ -68,6 +68,7 @@ const LABEL_TRANSLATION_KEY = {
   organization: "common.anonymizationLabels.organization",
   "phone number": "common.anonymizationLabels.phoneNumber",
   address: "common.anonymizationLabels.address",
+  country: "common.country",
   "email address": "common.anonymizationLabels.emailAddress",
   date: "common.anonymizationLabels.date",
   "date of birth": "common.anonymizationLabels.dateOfBirth",
@@ -444,7 +445,7 @@ export const AnonymizationDenyListCard = () => {
                   pendingCanonical.trim().length === 0 ||
                   updateMutation.isPending
                 }
-                label={t("settings.organization.anonymization.addAction")}
+                label={t("common.add")}
               />
             </div>
             <div className="flex items-center gap-2">

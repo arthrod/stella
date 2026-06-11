@@ -15,7 +15,7 @@ import {
 } from "@/components/chat/chat-ui-tools";
 
 describe("chat tool titles", () => {
-  test("maps Stella API tools to translation keys", () => {
+  test("maps stella API tools to translation keys", () => {
     expect(getChatToolTitleKey("describe-stella-api")).toBe(
       "chat.tool.describe-stella-api",
     );
@@ -47,11 +47,16 @@ describe("chat tool titles", () => {
 
 describe("isApprovalPart", () => {
   test("distinguishes official public lookup tools from other public tools", () => {
-    expect(isPublicOfficialChatToolName("ares_lookup_company")).toBe(true);
-    expect(isPublicOfficialChatToolName("ares_search_companies")).toBe(true);
+    expect(isPublicOfficialChatToolName("business_registry_lookup")).toBe(true);
+    expect(isPublicOfficialChatToolName("infosoud_lookup_case")).toBe(true);
     expect(isPublicOfficialChatToolName("mcp__salvia__search_decisions")).toBe(
       false,
     );
+    // Legacy aliases that pre-date the unified business_registry_lookup
+    // tool should NOT count as currently-registered public-official
+    // tools — they only render in chat history.
+    expect(isPublicOfficialChatToolName("ares_lookup_company")).toBe(false);
+    expect(isPublicOfficialChatToolName("ares_search_companies")).toBe(false);
   });
 
   test("treats active DOCX edit tools as approval parts", () => {

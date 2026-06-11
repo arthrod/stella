@@ -27,6 +27,7 @@ import type {
   EntitiesWindowCursorValues,
 } from "@/api/handlers/entities/window-cursor";
 import type { SafeId } from "@/api/lib/branded-types";
+import { liveDesktopEditSessionPredicates } from "@/api/lib/desktop-edit-session-predicates";
 import {
   AGENDA_ITEM_KIND,
   AGENDA_ITEM_SOURCE,
@@ -49,8 +50,17 @@ type CellMetadataFlagProvenanceResult = {
   addedByImage: string | null;
 };
 
-type CellMetadataResult = Omit<CellMetadata, "flagProvenance"> & {
+type CellLockProvenanceResult = NonNullable<CellMetadata["lockProvenance"]> & {
+  lockedByName: string | null;
+  lockedByImage: string | null;
+};
+
+type CellMetadataResult = Omit<
+  CellMetadata,
+  "flagProvenance" | "lockProvenance"
+> & {
   flagProvenance?: Record<string, CellMetadataFlagProvenanceResult>;
+  lockProvenance?: CellLockProvenanceResult;
 };
 
 export type QueryEntityResult = {
@@ -158,6 +168,9 @@ const getCellMetadataActorIds = (
     for (const provenance of Object.values(row.metadata.flagProvenance ?? {})) {
       userIds.add(provenance.addedBy);
     }
+    if (row.metadata.lockProvenance) {
+      userIds.add(row.metadata.lockProvenance.lockedBy);
+    }
   }
   return [...userIds];
 };
@@ -173,28 +186,37 @@ const enrichCellMetadata = (
   actorMap: Map<string, CellMetadataActor>,
 ): CellMetadataResult => {
   const provenanceEntries = Object.entries(metadata.flagProvenance ?? {});
-  if (provenanceEntries.length === 0) {
-    return {
-      manualFlags: metadata.manualFlags,
-      version: metadata.version,
-    };
-  }
+  const lockActor = metadata.lockProvenance
+    ? actorMap.get(metadata.lockProvenance.lockedBy)
+    : undefined;
+  const lockProvenance = metadata.lockProvenance
+    ? {
+        ...metadata.lockProvenance,
+        lockedByName: lockActor?.name ?? null,
+        lockedByImage: lockActor?.image ?? null,
+      }
+    : undefined;
 
   return {
-    ...metadata,
-    flagProvenance: Object.fromEntries(
-      provenanceEntries.map(([flag, provenance]) => {
-        const actor = actorMap.get(provenance.addedBy);
-        return [
-          flag,
-          {
-            ...provenance,
-            addedByName: actor?.name ?? null,
-            addedByImage: actor?.image ?? null,
-          },
-        ];
-      }),
-    ),
+    version: metadata.version,
+    manualFlags: metadata.manualFlags,
+    ...(provenanceEntries.length > 0 && {
+      flagProvenance: Object.fromEntries(
+        provenanceEntries.map(([flag, provenance]) => {
+          const actor = actorMap.get(provenance.addedBy);
+          return [
+            flag,
+            {
+              ...provenance,
+              addedByName: actor?.name ?? null,
+              addedByImage: actor?.image ?? null,
+            },
+          ];
+        }),
+      ),
+    }),
+    ...(metadata.locked === true && { locked: true }),
+    ...(lockProvenance && { lockProvenance }),
   };
 };
 
@@ -857,7 +879,7 @@ const queryEntitiesGenerator = async function* ({
         .where(
           and(
             inArray(desktopEditSessions.entityId, pageIds),
-            eq(desktopEditSessions.status, "open"),
+            ...liveDesktopEditSessionPredicates(new Date()),
           ),
         )
         .orderBy(desktopEditSessions.createdAt);

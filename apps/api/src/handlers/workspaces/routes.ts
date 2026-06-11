@@ -12,6 +12,7 @@ import {
   readWorkspaceAnonymizationTerms,
 } from "@/api/handlers/workspaces/anonymization-terms";
 import archiveWorkspace from "@/api/handlers/workspaces/archive";
+import cellRetry from "@/api/handlers/workspaces/cell-retry";
 import createWorkspaces from "@/api/handlers/workspaces/create";
 import deleteWorkspace from "@/api/handlers/workspaces/delete-by-id";
 import duplicateWorkspace from "@/api/handlers/workspaces/duplicate";
@@ -26,6 +27,7 @@ import { readJustificationsHandler } from "@/api/handlers/workspaces/read-justif
 import readWorkspaceNavigation from "@/api/handlers/workspaces/read-navigation";
 import { readOverviewHandler } from "@/api/handlers/workspaces/read-overview";
 import { readWorkflowHandler } from "@/api/handlers/workspaces/read-workflow-status";
+import workflowTargetCount from "@/api/handlers/workspaces/read-workflow-target-count";
 import unarchiveWorkspace from "@/api/handlers/workspaces/unarchive";
 import updateActiveWorkspace from "@/api/handlers/workspaces/update-active";
 import updateWorkspace from "@/api/handlers/workspaces/update-by-id";
@@ -197,6 +199,14 @@ export const workspacesRoute = new Elysia({ prefix: "/workspaces" })
         .post("/workflow/start", workflowStart.handler, {
           body: workflowStart.config.body,
           permissions: workflowStart.config.permissions,
+        })
+        .post("/workflow/target-count", workflowTargetCount.handler, {
+          body: workflowTargetCount.config.body,
+          permissions: workflowTargetCount.config.permissions,
+        })
+        .post("/cell-retry", cellRetry.handler, {
+          body: cellRetry.config.body,
+          permissions: cellRetry.config.permissions,
         })
         .post("/justifications/query", readJustifications.handler, {
           body: readJustifications.config.body,

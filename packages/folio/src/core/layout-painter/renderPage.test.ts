@@ -1,14 +1,22 @@
 import { describe, expect, test } from "bun:test";
 
+import { clearAllCaches } from "../layout-engine/measure/cache";
+import { resetCanvasContext } from "../layout-engine/measure/measureContainer";
 import type {
+  FieldRun,
   Page,
+  HeaderFooterContent,
   ParagraphBlock,
   ParagraphMeasure,
   TableBlock,
+  TableFragment,
   TableMeasure,
+  TextBoxBlock,
+  TextBoxMeasure,
 } from "../layout-engine/types";
 import type { BlockLookup } from "./index";
 import {
+  applySectionHeaderFooterOptions,
   computePageFingerprint,
   getDefaultPageFontFamily,
   renderPage,
@@ -20,6 +28,18 @@ class FakeElement {
   dataset: Record<string, string> = {};
   style: Record<string, string> = {};
   children: FakeElement[] = [];
+  parent: FakeElement | undefined;
+  readonly classList = {
+    add: (...classNames: string[]) => {
+      const current = this.className.split(" ").filter(Boolean);
+      for (const className of classNames) {
+        if (!current.includes(className)) {
+          current.push(className);
+        }
+      }
+      this.className = current.join(" ");
+    },
+  };
   private ownText = "";
   readonly tagName: string;
 
@@ -39,20 +59,112 @@ class FakeElement {
   }
 
   append(...children: FakeElement[]): void {
-    this.children.push(...children);
+    for (const child of children) {
+      this.addChild(child);
+    }
   }
 
   appendChild(child: FakeElement): FakeElement {
-    this.children.push(child);
+    this.addChild(child);
     return child;
   }
 
-  getContext(): null {
+  prepend(...children: FakeElement[]): void {
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const child = children[index];
+      if (!child) {
+        continue;
+      }
+      child.removeFromParent();
+      child.parent = this;
+      this.children.unshift(child);
+    }
+  }
+
+  getContext() {
+    return {
+      font: "",
+      measureText(text: string) {
+        return {
+          width: text.length * 5,
+          actualBoundingBoxAscent: 8,
+          actualBoundingBoxDescent: 2,
+        };
+      },
+    };
+  }
+
+  querySelectorAll<T = FakeElement>(selector: string): T[] {
+    const selectors = selector.split(",").map((value) => value.trim());
+    const matches: FakeElement[] = [];
+    for (const child of this.children) {
+      matches.push(...child.querySelectorAllMatching(selectors));
+    }
+    return matches as T[];
+  }
+
+  querySelector(selector: string): FakeElement | null {
+    if (selector.startsWith(".")) {
+      return findByClass(this, selector.slice(1)) ?? null;
+    }
+    if (this.tagName.toLowerCase() === selector.toLowerCase()) {
+      return this;
+    }
+    for (const child of this.children) {
+      const match = child.querySelector(selector);
+      if (match) {
+        return match;
+      }
+    }
     return null;
   }
 
-  querySelectorAll(): FakeElement[] {
-    return [];
+  private querySelectorAllMatching(selectors: string[]): FakeElement[] {
+    const matches = selectors.some((selector) => this.matches(selector))
+      ? [this]
+      : [];
+    for (const child of this.children) {
+      matches.push(...child.querySelectorAllMatching(selectors));
+    }
+    return matches;
+  }
+
+  private matches(selector: string): boolean {
+    if (selector === 'img[style*="z-index"]') {
+      return (
+        this.tagName.toLowerCase() === "img" &&
+        this.style.zIndex !== undefined &&
+        this.style.zIndex !== ""
+      );
+    }
+    if (selector === '.layout-textbox[style*="z-index"]') {
+      return (
+        this.className.split(" ").includes("layout-textbox") &&
+        this.style.zIndex !== undefined &&
+        this.style.zIndex !== ""
+      );
+    }
+    if (selector.startsWith(".")) {
+      return this.className.split(" ").includes(selector.slice(1));
+    }
+    return this.tagName.toLowerCase() === selector.toLowerCase();
+  }
+
+  private removeFromParent(): void {
+    if (!this.parent) {
+      return;
+    }
+    const index = this.parent.children.indexOf(this);
+    if (index !== -1) {
+      this.parent.children.splice(index, 1);
+    }
+    this.parent = undefined;
+  }
+
+  private addChild(child: FakeElement): void {
+    child.removeFromParent();
+    child.parent = this;
+    this.children.push(child);
   }
 }
 
@@ -96,6 +208,42 @@ function findByClass(
   }
 
   return undefined;
+}
+
+function collectByClass(
+  element: FakeElement,
+  className: string,
+): FakeElement[] {
+  const matches = element.className.split(" ").includes(className)
+    ? [element]
+    : [];
+
+  for (const child of element.children) {
+    matches.push(...collectByClass(child, className));
+  }
+
+  return matches;
+}
+
+function withFakeTextMeasure(runTest: () => void): void {
+  const originalDocument = globalThis.document;
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: fakeDocument,
+  });
+  clearAllCaches();
+  resetCanvasContext();
+
+  try {
+    runTest();
+  } finally {
+    resetCanvasContext();
+    clearAllCaches();
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: originalDocument,
+    });
+  }
 }
 
 const page: Page = {
@@ -143,10 +291,144 @@ function lookup(block: ParagraphBlock): BlockLookup {
   ]);
 }
 
+function headerFooterTextContent(text: string): HeaderFooterContent {
+  const block: ParagraphBlock = {
+    kind: "paragraph",
+    id: `hf-${text}`,
+    runs: [{ kind: "text", text }],
+  };
+  const measure: ParagraphMeasure = {
+    kind: "paragraph",
+    lines: [
+      {
+        fromRun: 0,
+        fromChar: 0,
+        toRun: 0,
+        toChar: text.length,
+        width: text.length * 5,
+        ascent: 8,
+        descent: 2,
+        lineHeight: 12,
+      },
+    ],
+    totalHeight: 12,
+  };
+  return {
+    blocks: [block],
+    measures: [measure],
+    height: 12,
+  };
+}
+
+function textBoxMeasure(width: number, height: number): TextBoxMeasure {
+  return { kind: "textBox", width, height, innerMeasures: [] };
+}
+
 describe("render page fingerprint", () => {
   test("changes when comment annotations change without layout geometry changing", () => {
     expect(computePageFingerprint(page, lookup(blockWithComment()))).not.toBe(
       computePageFingerprint(page, lookup(blockWithComment(123))),
+    );
+  });
+
+  test("changes when a text run gains a bold mark without layout geometry changing", () => {
+    const plain: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p1",
+      runs: [{ kind: "text", text: "hello", pmStart: 1, pmEnd: 6 }],
+    };
+    const bolded: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p1",
+      runs: [{ kind: "text", text: "hello", pmStart: 1, pmEnd: 6, bold: true }],
+    };
+    expect(computePageFingerprint(page, lookup(plain))).not.toBe(
+      computePageFingerprint(page, lookup(bolded)),
+    );
+  });
+
+  test("changes when run text content changes without layout geometry changing", () => {
+    const before: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p1",
+      runs: [{ kind: "text", text: "hello", pmStart: 1, pmEnd: 6 }],
+    };
+    const after: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p1",
+      runs: [{ kind: "text", text: "world", pmStart: 1, pmEnd: 6 }],
+    };
+    expect(computePageFingerprint(page, lookup(before))).not.toBe(
+      computePageFingerprint(page, lookup(after)),
+    );
+  });
+
+  test("changes when a field instruction changes without layout geometry changing", () => {
+    const field = (instruction: string): FieldRun => ({
+      kind: "field",
+      fieldType: "OTHER",
+      instruction,
+      fallback: "cached",
+      pmStart: 1,
+      pmEnd: 2,
+    });
+    const before: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p1",
+      runs: [field("REF _A")],
+    };
+    const after: ParagraphBlock = {
+      kind: "paragraph",
+      id: "p1",
+      runs: [field("REF _B")],
+    };
+
+    expect(computePageFingerprint(page, lookup(before))).not.toBe(
+      computePageFingerprint(page, lookup(after)),
+    );
+  });
+
+  test("changes when split table fragment metadata changes", () => {
+    const fragment: TableFragment = {
+      kind: "table",
+      blockId: "t1",
+      x: 72,
+      y: 72,
+      width: 300,
+      height: 80,
+      fromRow: 1,
+      toRow: 2,
+      headerRowCount: 1,
+      continuesFromPrev: true,
+      continuesOnNext: true,
+      topClip: 40,
+      bottomClip: 120,
+    };
+    const tablePage: Page = { ...page, fragments: [fragment] };
+
+    expect(computePageFingerprint(tablePage)).not.toBe(
+      computePageFingerprint({
+        ...tablePage,
+        fragments: [{ ...fragment, topClip: 60 }],
+      }),
+    );
+    expect(computePageFingerprint(tablePage)).not.toBe(
+      computePageFingerprint({
+        ...tablePage,
+        fragments: [{ ...fragment, bottomClip: 100 }],
+      }),
+    );
+    expect(computePageFingerprint(tablePage)).not.toBe(
+      computePageFingerprint({
+        ...tablePage,
+        fragments: [{ ...fragment, headerRowCount: 2 }],
+      }),
+    );
+    expect(computePageFingerprint(tablePage)).not.toBe(
+      computePageFingerprint({
+        ...tablePage,
+        fragments: [{ ...fragment, continuesOnNext: false }],
+      }),
     );
   });
 });
@@ -156,6 +438,111 @@ describe("page font fallback", () => {
     expect(getDefaultPageFontFamily()).toBe(
       "Calibri, Carlito, Arial, Helvetica, sans-serif",
     );
+  });
+});
+
+describe("floating text box render zones", () => {
+  test("does not apply a page-pinned band to earlier fragments", () => {
+    withFakeTextMeasure(() => {
+      const before: ParagraphBlock = {
+        kind: "paragraph",
+        id: "before",
+        runs: [{ kind: "text", text: "before" }],
+      };
+      const after: ParagraphBlock = {
+        kind: "paragraph",
+        id: "after",
+        runs: [{ kind: "text", text: "after" }],
+      };
+      const band: TextBoxBlock = {
+        kind: "textBox",
+        id: "band",
+        width: 300,
+        height: 80,
+        content: [],
+        wrapType: "topAndBottom",
+        position: { vertical: { relativeTo: "margin", posOffset: 0 } },
+      };
+      const paragraphMeasure: ParagraphMeasure = {
+        kind: "paragraph",
+        lines: [
+          {
+            fromRun: 0,
+            fromChar: 0,
+            toRun: 0,
+            toChar: 6,
+            width: 30,
+            ascent: 8,
+            descent: 2,
+            lineHeight: 10,
+          },
+        ],
+        totalHeight: 10,
+      };
+      const bandMeasure: TextBoxMeasure = {
+        kind: "textBox",
+        width: 300,
+        height: 80,
+        innerMeasures: [],
+      };
+      const rendered = renderPage(
+        {
+          ...page,
+          fragments: [
+            {
+              kind: "paragraph",
+              blockId: "before",
+              x: 72,
+              y: 72,
+              width: 672,
+              height: 10,
+              fromLine: 0,
+              toLine: 1,
+            },
+            {
+              kind: "textBox",
+              blockId: "band",
+              x: 72,
+              y: 72,
+              width: 300,
+              height: 80,
+            },
+            {
+              kind: "paragraph",
+              blockId: "after",
+              x: 72,
+              y: 72,
+              width: 672,
+              height: 10,
+              fromLine: 0,
+              toLine: 1,
+            },
+          ],
+        },
+        { pageNumber: 1, totalPages: 1, section: "body" },
+        {
+          document: fakeDocument,
+          blockLookup: new Map([
+            ["before", { block: before, measure: paragraphMeasure }],
+            ["band", { block: band, measure: bandMeasure }],
+            ["after", { block: after, measure: paragraphMeasure }],
+          ]),
+        },
+      ) as unknown as FakeElement;
+
+      const paragraphs = collectByClass(rendered, "layout-paragraph");
+      const beforeLine = findByClass(
+        paragraphs.find((el) => el.dataset["blockId"] === "before")!,
+        "layout-line",
+      );
+      const afterLine = findByClass(
+        paragraphs.find((el) => el.dataset["blockId"] === "after")!,
+        "layout-line",
+      );
+
+      expect(beforeLine?.style.marginTop).toBeUndefined();
+      expect(afterLine?.style.marginTop).toBe("80px");
+    });
   });
 });
 
@@ -175,6 +562,126 @@ describe("header and footer rendering", () => {
       findByClass(pageElement as unknown as FakeElement, "layout-page-footer")
         ?.style.opacity,
     ).toBe("0.62");
+  });
+
+  test("resolves even headers and footers from the section page number", () => {
+    const pageOptions = {};
+    const applied = applySectionHeaderFooterOptions(
+      {
+        ...page,
+        number: 2,
+        sectionPageNumber: 1,
+        headerFooterRefs: {
+          footerDefault: "default-footer",
+          footerEven: "even-footer",
+        },
+        fragments: [],
+      },
+      pageOptions,
+      {
+        footerContentByRId: new Map([
+          ["default-footer", headerFooterTextContent("Default footer")],
+          ["even-footer", headerFooterTextContent("Even footer")],
+        ]),
+      },
+    );
+
+    expect(applied).toBe(true);
+    expect(pageOptions).toEqual({
+      footerContent: headerFooterTextContent("Default footer"),
+    });
+  });
+
+  test("keeps top-and-bottom text boxes in header flow", () => {
+    const textBoxBlock: TextBoxBlock = {
+      kind: "textBox",
+      id: "hf-box",
+      width: 160,
+      height: 40,
+      displayMode: "block",
+      wrapType: "topAndBottom",
+      content: [],
+    };
+    const afterBlock: ParagraphBlock = {
+      kind: "paragraph",
+      id: "hf-after",
+      runs: [{ kind: "text", text: "After box" }],
+    };
+
+    const pageElement = renderPage(
+      { ...page, fragments: [] },
+      { pageNumber: 1, totalPages: 1, section: "body" },
+      {
+        document: fakeDocument,
+        headerContent: {
+          blocks: [textBoxBlock, afterBlock],
+          measures: [
+            textBoxMeasure(textBoxBlock.width, textBoxBlock.height),
+            {
+              kind: "paragraph",
+              lines: [],
+              totalHeight: 12,
+            },
+          ],
+          height: 52,
+        },
+      },
+    );
+
+    const paragraphs = collectByClass(
+      pageElement as unknown as FakeElement,
+      "layout-paragraph",
+    );
+    const afterParagraph = paragraphs.find(
+      (element) => element.dataset["blockId"] === "hf-after",
+    );
+
+    expect(afterParagraph?.style.top).toBe("40px");
+  });
+
+  test("preserves footer content offset when moving behind images to the page layer", () => {
+    const footerNaturalTop = page.size.h - 48;
+    const footerImageBlock: ParagraphBlock = {
+      kind: "paragraph",
+      id: "footer-background",
+      runs: [
+        {
+          kind: "image",
+          src: "footer-bg.png",
+          width: 160,
+          height: 40,
+          wrapType: "behind",
+          position: {
+            vertical: { relativeTo: "page", posOffset: 0 },
+          },
+        },
+      ],
+    };
+
+    const pageElement = renderPage(
+      { ...page, fragments: [] },
+      { pageNumber: 1, totalPages: 1, section: "body" },
+      {
+        document: fakeDocument,
+        footerContent: {
+          rId: "rIdFooter",
+          blocks: [footerImageBlock],
+          measures: [{ kind: "paragraph", lines: [], totalHeight: 0 }],
+          height: 0,
+          visualTop: -footerNaturalTop,
+          visualBottom: -footerNaturalTop + 40,
+        },
+      },
+    );
+
+    const image = (pageElement as unknown as FakeElement).querySelector("img");
+
+    expect(image?.parent).toBe(pageElement);
+    expect(image?.style.top).toBe("0px");
+    expect(image?.style.left).toBe("72px");
+    expect(image?.style.zIndex).toBe("0");
+    expect(image?.dataset["hfSlotKind"]).toBe("footer");
+    expect(image?.dataset["hfRid"]).toBe("rIdFooter");
   });
 });
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { panic } from "better-result";
+
 import { resolveCliLookupInput } from "./cli-input.js";
 import { InfoSoudClient } from "./client.js";
 import { isCourtCode, resolveCourtCodeAlias } from "./courts.js";
@@ -34,13 +36,11 @@ type CliFlags = {
 };
 
 const printStdout = (value: string): void => {
-  // eslint-disable-next-line no-console -- CLI output
-  console.log(value);
+  process.stdout.write(`${value}\n`);
 };
 
 const printStderr = (value: string): void => {
-  // eslint-disable-next-line no-console -- CLI error output
-  console.error(value);
+  process.stderr.write(`${value}\n`);
 };
 
 const parseArgs = (args: readonly string[]): CliFlags => {
@@ -78,7 +78,7 @@ const parseArgs = (args: readonly string[]): CliFlags => {
     }
 
     if (arg.startsWith("-")) {
-      throw new Error(`Unknown option: ${arg}`);
+      panic(`Unknown option: ${arg}`);
     }
 
     positionals.push(arg);
@@ -98,7 +98,7 @@ const resolveCourtReference = async (
 
   const resolved = await client.resolveCourtCode(trimmed);
   if (!resolved) {
-    throw new Error(`Cannot resolve court from ${JSON.stringify(value)}`);
+    panic(`Cannot resolve court from ${JSON.stringify(value)}`);
   }
 
   return resolved;
@@ -136,7 +136,7 @@ const main = async (): Promise<void> => {
     }
 
     if (flags.json && flags.csv) {
-      throw new Error("Use either --json or --csv, not both");
+      panic("Use either --json or --csv, not both");
     }
 
     const client = new InfoSoudClient();
@@ -150,7 +150,7 @@ const main = async (): Promise<void> => {
     const courtArg = flags.positionals.at(1);
 
     if (!spisInput) {
-      throw new Error("Missing spisová značka");
+      panic("Missing spisová značka");
     }
 
     const { courtReference, parsedSpisZn } = resolveCliLookupInput({
@@ -159,7 +159,7 @@ const main = async (): Promise<void> => {
     });
 
     if (!courtReference) {
-      throw new Error(
+      panic(
         "Court code is required. Pass it as the second argument, include it in the spisová značka, or use a resolvable court name.",
       );
     }

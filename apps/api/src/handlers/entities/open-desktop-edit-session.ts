@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { t } from "elysia";
 import type { Static } from "elysia";
 
-import type { SafeDb, Transaction } from "@/api/db";
+import type { SafeDb, SafeDbError, Transaction } from "@/api/db";
 import {
   desktopEditSessions,
   entityVersions,
@@ -11,9 +11,16 @@ import {
 } from "@/api/db/schema";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
+import type { AuditRecorder } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tSafeId } from "@/api/lib/custom-schema";
+import {
+  expiredOwnDesktopEditSessionTargetPredicates,
+  liveDesktopEditSessionPredicates,
+  liveOwnDesktopEditSessionTargetPredicates,
+} from "@/api/lib/desktop-edit-session-predicates";
 import {
   computeTokenExpiresAt,
   createDesktopEditSessionToken,
@@ -51,10 +58,14 @@ export type OpenDesktopEditSessionResponse = {
 type OpenDesktopEditSessionHandlerProps = {
   body: Static<typeof openDesktopEditSessionBodySchema>;
   organizationId: SafeId<"organization">;
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   userId: SafeId<"user">;
   workspaceId: SafeId<"workspace">;
 };
+
+const isUniqueViolationSafeDbError = (error: SafeDbError): boolean =>
+  "cause" in error && isPgError(error.cause, PG_ERROR.UNIQUE_VIOLATION);
 
 type ExistingOpenDesktopEditSession = {
   baseVersionId: SafeId<"entityVersion">;
@@ -66,12 +77,14 @@ type ExistingOpenDesktopEditSession = {
 
 const readExistingOpenDesktopEditSession = async ({
   entityId,
+  now,
   propertyId,
   tx,
   userId,
   workspaceId,
 }: {
   entityId: SafeId<"entity">;
+  now: Date;
   propertyId: SafeId<"property">;
   tx: Transaction;
   userId: SafeId<"user">;
@@ -88,11 +101,13 @@ const readExistingOpenDesktopEditSession = async ({
     .from(desktopEditSessions)
     .where(
       and(
-        eq(desktopEditSessions.createdBy, userId),
-        eq(desktopEditSessions.entityId, entityId),
-        eq(desktopEditSessions.propertyId, propertyId),
-        eq(desktopEditSessions.status, "open"),
-        eq(desktopEditSessions.workspaceId, workspaceId),
+        ...liveOwnDesktopEditSessionTargetPredicates({
+          entityId,
+          now,
+          propertyId,
+          userId,
+          workspaceId,
+        }),
       ),
     )
     .limit(1)
@@ -101,10 +116,60 @@ const readExistingOpenDesktopEditSession = async ({
   return existingSessions.at(0) ?? null;
 };
 
+const expireStaleOwnDesktopEditSessions = async ({
+  entityId,
+  now,
+  propertyId,
+  recordAuditEvent,
+  tx,
+  userId,
+  workspaceId,
+}: {
+  entityId: SafeId<"entity">;
+  now: Date;
+  propertyId: SafeId<"property">;
+  recordAuditEvent: AuditRecorder;
+  tx: Transaction;
+  userId: SafeId<"user">;
+  workspaceId: SafeId<"workspace">;
+}) => {
+  const expiredSessions = await tx
+    .update(desktopEditSessions)
+    .set({ status: "expired", closedAt: now })
+    .where(
+      and(
+        ...expiredOwnDesktopEditSessionTargetPredicates({
+          entityId,
+          now,
+          propertyId,
+          userId,
+          workspaceId,
+        }),
+      ),
+    )
+    .returning({ id: desktopEditSessions.id });
+
+  if (expiredSessions.length === 0) {
+    return;
+  }
+
+  await recordAuditEvent(
+    tx,
+    expiredSessions.map((session) => ({
+      action: AUDIT_ACTION.UPDATE,
+      resourceType: AUDIT_RESOURCE_TYPE.DESKTOP_EDIT_SESSION,
+      resourceId: session.id,
+      changes: { status: { old: "open", new: "expired" } },
+      metadata: { reason: "token_expired_on_open" },
+    })),
+  );
+};
+
 const buildExistingOpenDesktopEditSessionResponse = async ({
   existingSession,
   organizationId,
   propertyId,
+  recordAuditEvent,
   sessionToken,
   sessionTokenHash,
   tx,
@@ -113,6 +178,7 @@ const buildExistingOpenDesktopEditSessionResponse = async ({
   existingSession: ExistingOpenDesktopEditSession;
   organizationId: SafeId<"organization">;
   propertyId: SafeId<"property">;
+  recordAuditEvent: AuditRecorder;
   sessionToken: string;
   sessionTokenHash: string;
   tx: Transaction;
@@ -145,7 +211,7 @@ const buildExistingOpenDesktopEditSessionResponse = async ({
     .where(
       and(
         eq(desktopEditSessions.id, existingSession.id),
-        eq(desktopEditSessions.status, "open"),
+        ...liveDesktopEditSessionPredicates(new Date()),
       ),
     )
     .returning({ id: desktopEditSessions.id });
@@ -154,10 +220,20 @@ const buildExistingOpenDesktopEditSessionResponse = async ({
     return null;
   }
 
+  await recordAuditEvent(tx, {
+    action: AUDIT_ACTION.UPDATE,
+    resourceType: AUDIT_RESOURCE_TYPE.DESKTOP_EDIT_SESSION,
+    resourceId: existingSession.id,
+    changes: {
+      sessionTokenHash: { old: "***", new: "***" },
+    },
+    metadata: { reason: "resumed_existing_session" },
+  });
+
   if (existingSession.checkpointUpdatedAt) {
     return {
       baseVersionNumber: baseVersion.versionNumber,
-      downloadUrl: presignDocxDownloadFromFileId({
+      downloadUrl: await presignDocxDownloadFromFileId({
         fileId: existingSession.checkpointFileId,
         fileName: existingSession.fileName,
         organizationId,
@@ -190,7 +266,7 @@ const buildExistingOpenDesktopEditSessionResponse = async ({
 
   return {
     baseVersionNumber: baseVersion.versionNumber,
-    downloadUrl: presignDocxFieldDownload({
+    downloadUrl: await presignDocxFieldDownload({
       fileContent: baseVersionContent,
       organizationId,
       workspaceId,
@@ -207,6 +283,7 @@ const buildExistingOpenDesktopEditSessionResponse = async ({
 export const openDesktopEditSessionHandler = async function* ({
   body: { entityId, force, propertyId },
   organizationId,
+  recordAuditEvent,
   safeDb,
   userId,
   workspaceId,
@@ -231,16 +308,20 @@ export const openDesktopEditSessionHandler = async function* ({
         });
 
         const existing = await tx
-          .select({ id: desktopEditSessions.id })
+          .select({
+            id: desktopEditSessions.id,
+            createdBy: desktopEditSessions.createdBy,
+          })
           .from(desktopEditSessions)
           .where(
             and(
               eq(desktopEditSessions.entityId, entityId),
               eq(desktopEditSessions.propertyId, propertyId),
               eq(desktopEditSessions.workspaceId, workspaceId),
-              eq(desktopEditSessions.status, "open"),
+              ...liveDesktopEditSessionPredicates(new Date()),
             ),
           )
+          .orderBy(desktopEditSessions.createdAt)
           .limit(1);
 
         const target = existing.at(0);
@@ -255,6 +336,16 @@ export const openDesktopEditSessionHandler = async function* ({
               takeoverRequestedAt: null,
             })
             .where(eq(desktopEditSessions.id, target.id));
+
+          await recordAuditEvent(tx, {
+            action: AUDIT_ACTION.UPDATE,
+            resourceType: AUDIT_RESOURCE_TYPE.DESKTOP_EDIT_SESSION,
+            resourceId: target.id,
+            changes: {
+              createdBy: { old: target.createdBy, new: userId },
+            },
+            metadata: { reason: "force_takeover" },
+          });
         }
       }),
     );
@@ -269,8 +360,20 @@ export const openDesktopEditSessionHandler = async function* ({
         workspaceId,
       });
 
+      const now = new Date();
+      await expireStaleOwnDesktopEditSessions({
+        entityId,
+        now,
+        propertyId,
+        recordAuditEvent,
+        tx,
+        userId,
+        workspaceId,
+      });
+
       const existingSession = await readExistingOpenDesktopEditSession({
         entityId,
+        now: new Date(),
         propertyId,
         tx,
         userId,
@@ -282,6 +385,7 @@ export const openDesktopEditSessionHandler = async function* ({
           existingSession,
           organizationId,
           propertyId,
+          recordAuditEvent,
           sessionToken,
           sessionTokenHash,
           tx,
@@ -348,9 +452,26 @@ export const openDesktopEditSessionHandler = async function* ({
         workspaceId,
       });
 
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.DESKTOP_EDIT_SESSION,
+        resourceId: sessionId,
+        changes: {
+          created: {
+            old: null,
+            new: {
+              entityId,
+              propertyId,
+              baseVersionId: currentTarget.baseVersionId,
+              fileName: currentTarget.fileContent.fileName,
+            },
+          },
+        },
+      });
+
       return {
         baseVersionNumber: currentTarget.baseVersionNumber,
-        downloadUrl: presignDocxFieldDownload({
+        downloadUrl: await presignDocxFieldDownload({
           fileContent: currentTarget.fileContent,
           organizationId,
           workspaceId,
@@ -369,23 +490,18 @@ export const openDesktopEditSessionHandler = async function* ({
   // Handle unique violation: retry without insert, then with insert
   if (Result.isError(firstAttempt)) {
     const error = firstAttempt.error;
-    if ("cause" in error && isPgError(error.cause, PG_ERROR.UNIQUE_VIOLATION)) {
+    if (isUniqueViolationSafeDbError(error)) {
       const retryResult = await runOpenSession({ allowInsert: false });
       if (Result.isError(retryResult)) {
-        return Result.err(
-          new HandlerError({ status: 500, message: "Internal server error" }),
-        );
+        return Result.err(retryResult.error);
       }
-      if (retryResult.value === null) {
-        return Result.err(
-          new HandlerError({ status: 500, message: "Internal server error" }),
-        );
+      if (retryResult.value !== null) {
+        firstAttempt = retryResult;
+      } else {
+        firstAttempt = Result.ok(null);
       }
-      firstAttempt = retryResult;
     } else {
-      return Result.err(
-        new HandlerError({ status: 500, message: "Internal server error" }),
-      );
+      return Result.err(error);
     }
   }
 
@@ -428,10 +544,18 @@ const config = {
 
 const openDesktopEditSession = createSafeHandler(
   config,
-  async function* ({ body, safeDb, session, user, workspaceId }) {
+  async function* ({
+    body,
+    safeDb,
+    session,
+    user,
+    workspaceId,
+    recordAuditEvent,
+  }) {
     const result = yield* openDesktopEditSessionHandler({
       body,
       organizationId: session.activeOrganizationId,
+      recordAuditEvent,
       safeDb,
       userId: user.id,
       workspaceId,

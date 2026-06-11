@@ -10,6 +10,8 @@
  */
 
 import {
+  Suspense,
+  lazy,
   useRef,
   useCallback,
   useState,
@@ -52,13 +54,12 @@ import {
   SelectTrigger as StSelectTrigger,
   SelectValue as StSelectValue,
 } from "@stll/ui/components/select";
+import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 
 import {
   applyFolioAIEditOperations,
   createFolioAIEditSnapshot,
 } from "../core/ai-edits";
-import { repackDocx } from "../core/docx/rezip";
-import { attemptSelectiveSave } from "../core/docx/selectiveSave";
 // ProseMirror editor
 import {
   TextSelection,
@@ -130,6 +131,16 @@ import {
   findNextChange,
   findPreviousChange,
 } from "../core/prosemirror/commands/comments";
+import {
+  blockSdtAttrsToSdtProperties,
+  findBlockSdtMatch,
+  findBlockSdtMatches,
+  removeContentControlTr,
+  setContentControlContentTr,
+  setContentControlValueTr,
+} from "../core/prosemirror/commands/contentControls";
+import { setContentControlContentBlocksTr } from "../core/prosemirror/commands/contentControlsBlockFill";
+import { proseDocToBlocks } from "../core/prosemirror/conversion/fromProseDoc";
 import { ExtensionManager } from "../core/prosemirror/extensions/ExtensionManager";
 import {
   getChangedParagraphIds,
@@ -142,6 +153,7 @@ import { createStarterKit } from "../core/prosemirror/extensions/StarterKit";
 import { createAICitationDecorationsPlugin } from "../core/prosemirror/plugins/aiCitationDecorations";
 import { createAISuggestionDecorationsPlugin } from "../core/prosemirror/plugins/aiSuggestionDecorations";
 import { createAnonymizationDecorationsPlugin } from "../core/prosemirror/plugins/anonymizationDecorations";
+import { autocompleteSuggestionPlugin } from "../core/prosemirror/plugins/autocompleteSuggestion";
 import {
   createSuggestionModePlugin,
   setSuggestionMode,
@@ -163,7 +175,7 @@ import { useDocumentHistory } from "../hooks/useHistory";
 import { useTableSelection } from "../hooks/useTableSelection";
 import { PagedEditor } from "../paged-editor/PagedEditor";
 import type { PagedEditorRef } from "../paged-editor/PagedEditor";
-import { clampRangeToDocSize } from "./aiEditRange";
+import { clampRangeToDocSize, resolveFolioAIBlockRange } from "./aiEditRange";
 import { resolveCommentCreationRange } from "./commentAnchors";
 import {
   EMPTY_ANCHOR_POSITIONS,
@@ -173,17 +185,17 @@ import {
   createComment,
   findSelectionYPosition,
   getCommentAuthorKey,
-  getCommentParentId,
   getFallbackCommentYPosition,
   pruneOrphanedComments,
   removePendingCommentMarkRange,
 } from "./commentsHelpers";
-import { CommentsSidebar } from "./CommentsSidebar";
 import type { TrackedChangeEntry } from "./CommentsSidebar";
+import { ContentControlWidgetsOverlay } from "./ContentControlWidgetsOverlay";
 // Dialog hooks and utilities (static imports — lightweight, no UI)
 import type { FindMatch } from "./dialogs/findReplaceUtils";
 import type { ImagePropertiesData } from "./dialogs/ImagePropertiesDialog";
 import { useFindReplace as useFindReplaceState } from "./dialogs/useFindReplace";
+import { DocumentOutline } from "./DocumentOutline";
 import type {
   DocxEditorProps,
   DocxEditorRef,
@@ -220,7 +232,6 @@ import {
   buildSelectionFormatting,
   extractListState,
 } from "./selectionFormattingBuilder";
-import { TextContextMenu } from "./TextContextMenu";
 import type { TextContextAction, TextContextMenuItem } from "./TextContextMenu";
 import { ToolbarButton, ToolbarSeparator } from "./Toolbar";
 import type { FormattingAction } from "./Toolbar";
@@ -233,6 +244,29 @@ import { getBuiltinTableStyle } from "./ui/table-styles";
 import type { TableStylePreset } from "./ui/table-styles";
 import type { TableAction } from "./ui/table-types";
 import { Tooltip } from "./ui/Tooltip";
+import { useFolioComments } from "./useFolioComments";
+
+const CommentsSidebar = lazy(() =>
+  import("./CommentsSidebar").then((m) => ({
+    default: m.CommentsSidebar,
+  })),
+);
+
+const TextContextMenu = lazy(() =>
+  import("./TextContextMenu").then((m) => ({
+    default: m.TextContextMenu,
+  })),
+);
+
+const loadAttemptSelectiveSave = async () => {
+  const { attemptSelectiveSave } = await import("../core/docx/selectiveSave");
+  return attemptSelectiveSave;
+};
+
+const loadRepackDocx = async () => {
+  const { repackDocx } = await import("../core/docx/rezip");
+  return repackDocx;
+};
 
 // Toast stub — host app provides the real toast system.
 // Uses a temporary DOM banner so the user sees feedback even without
@@ -406,6 +440,8 @@ export function DocxEditor({
   theme,
   showToolbar = true,
   showZoomControl = true,
+  showReviewControls = true,
+  showHeaderFooterEditing = true,
   showMarginGuides: _showMarginGuides = false,
   marginGuideColor: _marginGuideColor,
   initialZoom = 1,
@@ -419,7 +455,7 @@ export function DocxEditor({
   preserveDocumentWhileLoading = false,
   initialScrollTop,
   onScrollTopChange,
-  showOutline: showOutlineProp = false,
+  showOutline: showOutlineProp = true,
   onPrint,
   onCopy: _onCopy,
   onCut: _onCut,
@@ -434,6 +470,8 @@ export function DocxEditor({
   selectedAnonymizationCanonical = null,
   anonymizationSelectionSeq,
   collaboration,
+  featureFlags,
+  onSelectiveSaveTripwire,
 }: DocxEditorProps & { ref?: Ref<DocxEditorRef> }) {
   const t = useTranslations("folio");
 
@@ -459,30 +497,13 @@ export function DocxEditor({
   const [showOutline, setShowOutline] = useState(showOutlineProp);
   const showOutlineRef = useRef(false);
   showOutlineRef.current = showOutline;
-  const [_outlineHeadings, setHeadingInfos] = useState<HeadingInfo[]>([]);
+  const [outlineHeadings, setHeadingInfos] = useState<HeadingInfo[]>([]);
 
-  // Comments sidebar state
-  const [showCommentsSidebar, setShowCommentsSidebar] = useState(false);
-  const [visibleCommentAuthors, setVisibleCommentAuthors] =
-    useState<Set<string> | null>(null);
-  const [activeCommentId, setActiveCommentId] = useState<number | null>(null);
-  const [comments, setComments] = useState<Comment[]>([]);
-  const commentsDirtyRef = useRef(false);
-  const commentsRef = useRef<Comment[]>([]);
-  commentsRef.current = comments;
   const [, setTrackedChanges] = useState<TrackedChangeEntry[]>([]);
   const [anchorPositions, setAnchorPositions] = useState<Map<string, number>>(
     EMPTY_ANCHOR_POSITIONS,
   );
 
-  const [isAddingComment, setIsAddingComment] = useState(false);
-  const [commentSelectionRange, setCommentSelectionRange] = useState<{
-    from: number;
-    to: number;
-  } | null>(null);
-  const [addCommentYPosition, setAddCommentYPosition] = useState<number | null>(
-    null,
-  );
   const {
     editingMode,
     readOnly,
@@ -496,18 +517,16 @@ export function DocxEditor({
     readOnlyProp,
   });
 
-  // Floating "add comment" button position (relative to scroll container, null = hidden)
-  const [floatingCommentBtn, setFloatingCommentBtn] = useState<{
-    top: number;
-    left: number;
-    from: number;
-    to: number;
-  } | null>(null);
-
   // Debounce timer for extractTrackedChanges (avoid full doc walk on every keystroke)
   const extractTrackedChangesTimerRef = useRef<ReturnType<
     typeof setTimeout
   > | null>(null);
+
+  // Debounce timer for collectHeadings — same reasoning as tracked changes:
+  // a doc-wide descend on every keystroke stalls typing on large documents.
+  const collectHeadingsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   // Extract tracked changes from ProseMirror state
   const extractTrackedChanges = useCallback(() => {
@@ -564,11 +583,14 @@ export function DocxEditor({
     setTrackedChanges(merged);
   }, []);
 
-  // Clean up debounce timer on unmount
+  // Clean up debounce timers on unmount
   useEffect(
     () => () => {
       if (extractTrackedChangesTimerRef.current) {
         clearTimeout(extractTrackedChangesTimerRef.current);
+      }
+      if (collectHeadingsTimerRef.current) {
+        clearTimeout(collectHeadingsTimerRef.current);
       }
     },
     [],
@@ -577,12 +599,6 @@ export function DocxEditor({
   // Sync outline visibility when prop changes
   useEffect(() => {
     setShowOutline(showOutlineProp);
-    if (showOutlineProp) {
-      const view = pagedEditorRef.current?.getView();
-      if (view) {
-        setHeadingInfos(collectHeadings(view.state.doc));
-      }
-    }
   }, [showOutlineProp]);
 
   // History hook for undo/redo - start with null document
@@ -592,89 +608,6 @@ export function DocxEditor({
     enableKeyboardShortcuts: true,
   });
 
-  // Extract comments from document model on initial load
-  const commentsLoadedRef = useRef(false);
-  useEffect(() => {
-    if (commentsLoadedRef.current) {
-      return;
-    }
-    const doc = history.state;
-    if (!doc) {
-      return;
-    }
-    const bodyComments = doc.package.document.comments;
-    if (bodyComments && bodyComments.length > 0) {
-      setComments(bodyComments);
-      setVisibleCommentAuthors(null);
-      setActiveCommentId(null);
-      if (autoOpenReviewSidebar) {
-        setShowCommentsSidebar(true);
-      }
-      commentsLoadedRef.current = true;
-    }
-  }, [autoOpenReviewSidebar, history.state]);
-
-  const commentAuthors = useMemo(() => {
-    const seen = new Set<string>();
-    const authors: string[] = [];
-    for (const comment of comments) {
-      const commentAuthor = getCommentAuthorKey(comment.author);
-      if (!seen.has(commentAuthor)) {
-        seen.add(commentAuthor);
-        authors.push(commentAuthor);
-      }
-    }
-    return authors;
-  }, [comments]);
-
-  const visibleCommentAuthorSet = useMemo(
-    () => visibleCommentAuthors ?? new Set(commentAuthors),
-    [visibleCommentAuthors, commentAuthors],
-  );
-
-  const visibleCommentIds = useMemo(() => {
-    const ids = new Set<number>([PENDING_COMMENT_ID]);
-    for (const comment of comments) {
-      if (visibleCommentAuthorSet.has(getCommentAuthorKey(comment.author))) {
-        ids.add(comment.id);
-      }
-    }
-    return ids;
-  }, [comments, visibleCommentAuthorSet]);
-
-  const visibleComments = useMemo(() => {
-    const visibleRootIds = new Set<number>();
-    for (const comment of comments) {
-      const parentId = getCommentParentId(comment);
-      if (
-        parentId === null ||
-        parentId === undefined ||
-        !visibleCommentIds.has(comment.id)
-      ) {
-        continue;
-      }
-      visibleRootIds.add(parentId);
-    }
-    return comments.filter((comment) => {
-      const parentId = getCommentParentId(comment);
-      if (parentId !== null && parentId !== undefined) {
-        return visibleCommentIds.has(comment.id);
-      }
-      return (
-        visibleCommentIds.has(comment.id) || visibleRootIds.has(comment.id)
-      );
-    });
-  }, [comments, visibleCommentIds]);
-
-  const activeCommentVisible =
-    activeCommentId !== null && visibleCommentIds.has(activeCommentId);
-
-  useEffect(() => {
-    if (!activeCommentVisible) {
-      setActiveCommentId(null);
-    }
-  }, [activeCommentVisible]);
-
   // Extension manager — built once, provides schema + plugins + commands
   const extensionManager = useMemo(() => {
     const mgr = new ExtensionManager(createStarterKit());
@@ -683,10 +616,19 @@ export function DocxEditor({
     return mgr;
   }, []);
 
+  const [initialSuggestionMode] = useState(() => ({
+    active: editingMode === "suggesting",
+    author,
+  }));
+
   // Suggestion mode plugin
   const suggestionPlugin = useMemo(
-    () => createSuggestionModePlugin(editingMode === "suggesting", author),
-    [], // eslint-disable-line react-hooks/exhaustive-deps
+    () =>
+      createSuggestionModePlugin(
+        initialSuggestionMode.active,
+        initialSuggestionMode.author,
+      ),
+    [initialSuggestionMode],
   );
   // AI suggestion decorations — non-mutating overlay for the review
   // queue. Always present; the plugin renders nothing until
@@ -722,8 +664,19 @@ export function DocxEditor({
       }),
     [],
   );
+  // Inline autocomplete. Always installed and idle by default;
+  // becomes active only when the host pushes a `start` meta via
+  // {@link startAutocompleteSuggestion}. The keymap option lets
+  // the plugin intercept Tab/⌘→/Esc; it sits early in the plugin
+  // array so it runs before list-indent Tab handlers in the
+  // extension chain.
+  const autocompletePlugin = useMemo(
+    () => autocompleteSuggestionPlugin({ keymap: true }),
+    [],
+  );
   const editorPlugins = useMemo(
     () => [
+      autocompletePlugin,
       ...(collaboration?.plugins ?? []),
       suggestionPlugin,
       aiSuggestionPlugin,
@@ -731,6 +684,7 @@ export function DocxEditor({
       anonymizationDecorationsPlugin,
     ],
     [
+      autocompletePlugin,
       collaboration?.plugins,
       suggestionPlugin,
       aiSuggestionPlugin,
@@ -740,32 +694,86 @@ export function DocxEditor({
   );
 
   // Surface the live PM view to the host for AI overlay wiring.
-  // We watch `history.state` because the document re-loads (e.g.,
-  // unlocking from preview into editing) re-mount the PagedEditor
-  // and replace the view instance.
+  // PagedEditor reports the exact create/destroy lifecycle; the
+  // history-state pass catches document replacements that swap the
+  // view under the same host component.
   const lastReportedViewRef = useRef<EditorView | null>(null);
-  useEffect(() => {
+  const reportEditorViewReady = useCallback(
+    (view: EditorView | null) => {
+      if (!onEditorViewReady) {
+        return;
+      }
+      if (lastReportedViewRef.current === view) {
+        return;
+      }
+      lastReportedViewRef.current = view;
+      onEditorViewReady(view);
+    },
+    [onEditorViewReady],
+  );
+  useLayoutEffect(() => {
     if (!onEditorViewReady) {
       return;
     }
     const view = pagedEditorRef.current?.getView() ?? null;
-    if (lastReportedViewRef.current === view) {
-      return;
-    }
-    lastReportedViewRef.current = view;
-    onEditorViewReady(view);
-  }, [onEditorViewReady, history.state]);
+    reportEditorViewReady(view);
+  }, [onEditorViewReady, reportEditorViewReady, history.state]);
   useEffect(() => {
     if (!onEditorViewReady) {
       return;
     }
     return () => {
-      if (lastReportedViewRef.current !== null) {
-        lastReportedViewRef.current = null;
-        onEditorViewReady(null);
+      reportEditorViewReady(null);
+    };
+  }, [onEditorViewReady, reportEditorViewReady]);
+
+  // Refresh outline headings when the document loads or the outline is enabled.
+  // handleDocumentChange keeps it in sync after subsequent edits. Page-number
+  // resolution depends on the paged layout having run at least once, so we
+  // retry briefly until every heading has a page or we give up.
+  useEffect(() => {
+    if (!showOutline) {
+      return;
+    }
+    const view = pagedEditorRef.current?.getView();
+    if (!view) {
+      return;
+    }
+    const headings = collectHeadings(view.state.doc);
+    setHeadingInfos(headings);
+
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const fill = () => {
+      attempts++;
+      const pagedRef = pagedEditorRef.current;
+      if (!pagedRef) {
+        return;
+      }
+      let unresolved = false;
+      for (const heading of headings) {
+        if (heading.pageNumber == null) {
+          const page = pagedRef.getPageNumberForPmPos(heading.pmPos);
+          if (page !== null) {
+            heading.pageNumber = page;
+          } else {
+            unresolved = true;
+          }
+        }
+      }
+      // Push a fresh array so React picks up the mutated entries.
+      setHeadingInfos([...headings]);
+      if (unresolved && attempts < 10) {
+        timer = setTimeout(fill, 300);
       }
     };
-  }, [onEditorViewReady]);
+    timer = setTimeout(fill, 100);
+    return () => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [showOutline, history.state]);
 
   // Refs
   const pagedEditorRef = useRef<PagedEditorRef>(null);
@@ -784,7 +792,7 @@ export function DocxEditor({
   } = useContextMenu({ pagedEditorRef });
   const toolbarWrapperRef = useRef<HTMLDivElement>(null);
   const toolbarRoRef = useRef<ResizeObserver | null>(null);
-  const [_toolbarHeight, setToolbarHeight] = useState(0);
+  const [toolbarHeight, setToolbarHeight] = useState(0);
   // Keep history.state accessible in stable callbacks without stale closures
   const historyStateRef = useRef(history.state);
   historyStateRef.current = history.state;
@@ -795,62 +803,35 @@ export function DocxEditor({
     color: { rgb: "000000" },
   });
 
-  const syncCommentHighlightStyles = useCallback(() => {
-    const root = editorContentRef.current;
-    if (!root) {
-      return;
-    }
-
-    const nodes = root.querySelectorAll<HTMLElement>(
-      ".layout-run-text[data-comment-id], .docx-comment[data-comment-id]",
-    );
-    for (const node of nodes) {
-      const commentId = Number.parseInt(node.dataset["commentId"] ?? "", 10);
-      const isPending = commentId === PENDING_COMMENT_ID;
-      const isVisible = isPending || visibleCommentIds.has(commentId);
-      if (!isVisible) {
-        node.style.backgroundColor = "transparent";
-        node.style.borderBottom = "2px solid transparent";
-        node.style.boxShadow = "none";
-        delete node.dataset["activeComment"];
-        continue;
-      }
-
-      if (activeCommentId === commentId) {
-        node.style.backgroundColor =
-          "var(--doc-comment-active-bg, rgba(255, 212, 0, 0.22))";
-        node.style.borderBottom =
-          "1px solid var(--doc-comment-active-border, rgba(180, 130, 0, 0.62))";
-        node.style.boxShadow = "none";
-        node.dataset["activeComment"] = "true";
-        continue;
-      }
-
-      node.style.backgroundColor =
-        "var(--doc-comment-bg, rgba(255, 212, 0, 0.08))";
-      node.style.borderBottom =
-        "1px solid var(--doc-comment-border, rgba(180, 130, 0, 0.24))";
-      node.style.boxShadow = "none";
-      delete node.dataset["activeComment"];
-    }
-  }, [visibleCommentIds, activeCommentId]);
-
-  useLayoutEffect(() => {
-    syncCommentHighlightStyles();
-  }, [syncCommentHighlightStyles, anchorPositions]);
-
-  useEffect(() => {
-    syncCommentHighlightStyles();
-    const firstFrame = requestAnimationFrame(() => {
-      syncCommentHighlightStyles();
-      requestAnimationFrame(syncCommentHighlightStyles);
-    });
-    const timeout = setTimeout(syncCommentHighlightStyles, 120);
-    return () => {
-      cancelAnimationFrame(firstFrame);
-      clearTimeout(timeout);
-    };
-  }, [comments.length, syncCommentHighlightStyles]);
+  const {
+    comments,
+    setComments,
+    commentsRef,
+    commentsDirtyRef,
+    commentsLoadedRef,
+    showCommentsSidebar,
+    setShowCommentsSidebar,
+    setVisibleCommentAuthors,
+    activeCommentId,
+    setActiveCommentId,
+    isAddingComment,
+    setIsAddingComment,
+    commentSelectionRange,
+    setCommentSelectionRange,
+    addCommentYPosition,
+    setAddCommentYPosition,
+    floatingCommentBtn,
+    setFloatingCommentBtn,
+    commentAuthors,
+    visibleCommentAuthorSet,
+    visibleComments,
+    syncCommentHighlightStyles,
+  } = useFolioComments({
+    doc: history.state,
+    autoOpenReviewSidebar,
+    anchorPositions,
+    editorContentRef,
+  });
   // Cache style resolver to avoid recreating on every selection change
   const styleResolverCacheRef = useRef<{
     styles: unknown;
@@ -940,12 +921,25 @@ export function DocxEditor({
     footerContent,
     firstPageHeaderContent,
     firstPageFooterContent,
+    activeHeaderRId,
+    activeFooterRId,
+    activeFirstHeaderRId,
+    activeFirstFooterRId,
     effectiveSectionProperties,
     handleHeaderFooterDoubleClick,
-    handleHeaderFooterSave,
     handleBodyClick,
     handleRemoveHeaderFooter,
-  } = useHeaderFooterEditor({ history, pushDocument, hfEditorRef });
+  } = useHeaderFooterEditor({
+    history,
+    pushDocument,
+    // Hook reads live HF PM state at close time (the in-place sync
+    // that previously kept package.headers/footers current per
+    // keystroke was removed to fix the undo-corruption bug; the
+    // close path now flushes via this callback). PagedEditor's ref
+    // exposes per-rId view lookup; the hook supplies the rId it
+    // already resolved internally for save / remove.
+    getHfView: (rId) => pagedEditorRef.current?.getHfView(rId) ?? null,
+  });
 
   // Helper to get the active editor's view — returns HF editor view when in HF editing mode
   const getActiveEditorView = useCallback(() => {
@@ -1050,7 +1044,24 @@ export function DocxEditor({
           clearTimeout(extractTrackedChangesTimerRef.current);
           extractTrackedChangesTimerRef.current = null;
         }
-      }, [findReplace, setHfEditPosition]),
+        if (collectHeadingsTimerRef.current) {
+          clearTimeout(collectHeadingsTimerRef.current);
+          collectHeadingsTimerRef.current = null;
+        }
+      }, [
+        commentsDirtyRef,
+        commentsLoadedRef,
+        findReplace,
+        setActiveCommentId,
+        setAddCommentYPosition,
+        setCommentSelectionRange,
+        setComments,
+        setFloatingCommentBtn,
+        setHfEditPosition,
+        setIsAddingComment,
+        setShowCommentsSidebar,
+        setVisibleCommentAuthors,
+      ]),
       setDocumentLoadState: useCallback((documentLoad: DocumentLoadState) => {
         setState((prev) => ({ ...prev, documentLoad }));
       }, []),
@@ -1082,6 +1093,7 @@ export function DocxEditor({
     history.state,
     extractTrackedChanges,
     autoOpenReviewSidebar,
+    setShowCommentsSidebar,
   ]);
 
   const initialScrollAppliedRef = useRef(false);
@@ -1131,16 +1143,36 @@ export function DocxEditor({
   const handleDocumentChange = useCallback(
     (newDocument: Document) => {
       const currentComments = commentsRef.current;
-      const documentWithComments = structuredClone(newDocument);
-      documentWithComments.package.document.comments = currentComments;
+      const documentWithComments = {
+        ...newDocument,
+        package: {
+          ...newDocument.package,
+          document: {
+            ...newDocument.package.document,
+            comments: currentComments,
+          },
+        },
+      };
       pushDocument(documentWithComments);
       onChange?.(documentWithComments);
-      // Update outline headings if sidebar is open
+      // Update outline headings if sidebar is open (debounced — collectHeadings
+      // descends the whole doc, expensive on large files).
       if (showOutlineRef.current) {
-        const view = pagedEditorRef.current?.getView();
-        if (view) {
-          setHeadingInfos(collectHeadings(view.state.doc));
+        if (collectHeadingsTimerRef.current) {
+          clearTimeout(collectHeadingsTimerRef.current);
         }
+        collectHeadingsTimerRef.current = setTimeout(() => {
+          const view = pagedEditorRef.current?.getView();
+          if (view) {
+            const headings = collectHeadings(view.state.doc);
+            const pagedRef = pagedEditorRef.current;
+            for (const heading of headings) {
+              heading.pageNumber =
+                pagedRef?.getPageNumberForPmPos(heading.pmPos) ?? null;
+            }
+            setHeadingInfos(headings);
+          }
+        }, 400);
       }
       // Re-extract tracked changes after document change (debounced to avoid
       // full-document walk on every keystroke in suggestion mode)
@@ -1158,6 +1190,7 @@ export function DocxEditor({
       pushDocument,
       extractTrackedChanges,
       refreshBodyHistoryAvailability,
+      commentsRef,
     ],
   );
 
@@ -1170,6 +1203,36 @@ export function DocxEditor({
     const pmDoc = pagedEditorRef.current?.getDocument();
     if (pmDoc) {
       doc.package.document.content = pmDoc.package.document.content;
+    }
+    // Flush in-flight HF PM edits into the cloned package — the persistent
+    // hidden HF EditorViews don't mutate history.state per keystroke
+    // (Codex #487 P1: 20:18 review), so a "Save As .docx" called while the
+    // chrome is still open would otherwise ship the pre-edit content for
+    // every rId the user touched (Codex #487 P1 follow-up: 20:52 review).
+    // We walk the cloned headers / footers (structuredClone gave us fresh
+    // HF objects), look up the matching persistent view, and overwrite
+    // each rId's `.content` with `proseDocToBlocks(view.state.doc)`. The
+    // original history.state remains untouched because every mutation
+    // lands on the cloned Map / HF objects.
+    const editor = pagedEditorRef.current;
+    if (editor) {
+      const flushBag = (bag: Map<string, { content: unknown }> | undefined) => {
+        if (!bag) {
+          return;
+        }
+        for (const [rId, hf] of bag) {
+          const view = editor.getHfView(rId);
+          if (view) {
+            hf.content = proseDocToBlocks(view.state.doc);
+          }
+        }
+      };
+      flushBag(
+        doc.package.headers as Map<string, { content: unknown }> | undefined,
+      );
+      flushBag(
+        doc.package.footers as Map<string, { content: unknown }> | undefined,
+      );
     }
     // Drop comment threads whose anchor text has been edited away. The
     // in-memory `comments` array can outlive its in-body anchors (PM
@@ -1193,7 +1256,7 @@ export function DocxEditor({
       referencedCommentIds,
     );
     return doc;
-  }, [history.state]);
+  }, [history.state, commentsRef]);
 
   const replaceComments = useCallback(
     (nextComments: Comment[]) => {
@@ -1208,14 +1271,20 @@ export function DocxEditor({
 
       onChange?.(currentDocument);
     },
-    [buildCurrentDocument, onChange],
+    [
+      buildCurrentDocument,
+      commentsDirtyRef,
+      commentsRef,
+      onChange,
+      setComments,
+    ],
   );
 
   const updateComments = useCallback(
     (updater: (comments: Comment[]) => Comment[]) => {
       replaceComments(updater(commentsRef.current));
     },
-    [replaceComments],
+    [commentsRef, replaceComments],
   );
 
   const selectFindMatch = useCallback((match: FindMatch): boolean => {
@@ -1473,8 +1542,15 @@ export function DocxEditor({
       // Notify parent
       onSelectionChange?.(selectionState);
     },
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-    [onSelectionChange, isAddingComment, readOnly],
+    [
+      getActiveEditorView,
+      getCachedStyleResolver,
+      isAddingComment,
+      onSelectionChange,
+      readOnly,
+      setFloatingCommentBtn,
+      theme,
+    ],
   );
 
   // Table selection hook
@@ -2370,6 +2446,11 @@ export function DocxEditor({
       readOnly,
       contextMenu.selectionRange.from,
       contextMenu.selectionRange.to,
+      setAddCommentYPosition,
+      setCommentSelectionRange,
+      setFloatingCommentBtn,
+      setIsAddingComment,
+      setShowCommentsSidebar,
     ],
   );
 
@@ -2400,6 +2481,11 @@ export function DocxEditor({
   // Handle save
   const handleSave = useCallback(
     async (options?: { selective?: boolean }): Promise<ArrayBuffer | null> => {
+      let tripwireResult:
+        | Parameters<NonNullable<typeof onSelectiveSaveTripwire>>[0]
+        | null = null;
+      let savedBuffer: ArrayBuffer | null = null;
+
       try {
         // Build current document from PM editor state
         const doc = buildCurrentDocument();
@@ -2407,24 +2493,72 @@ export function DocxEditor({
           return null;
         }
 
-        // Try selective save first (patches only changed paragraphs). If the
-        // edit cannot be patched, fall back to guarded repack: repackDocx now
-        // validates section/header/footer references before returning bytes.
-        const useSelective = options?.selective !== false;
-        const view = pagedEditorRef.current?.getView();
-        let buffer: ArrayBuffer | null = null;
+        const { resolveSelectiveSaveFlags } =
+          await import("../core/docx/selectiveSaveFlags");
+        const flags = resolveSelectiveSaveFlags(featureFlags);
 
-        if (useSelective && view && originalBufferRef.current) {
+        // The tripwire observes the selective path independently from the
+        // user-visible save mode. Only `useSelectiveForSave` is allowed to
+        // choose the returned bytes.
+        const useSelectiveForSave =
+          flags.selectiveSave && options?.selective !== false;
+        const shouldAttemptSelective =
+          useSelectiveForSave || flags.selectiveSaveTripwire;
+        const view = pagedEditorRef.current?.getView();
+        const baselineBuffer = originalBufferRef.current;
+        let selectiveBuffer: ArrayBuffer | null = null;
+
+        if (shouldAttemptSelective && view && baselineBuffer) {
           const editorState = view.state;
-          buffer = await attemptSelectiveSave(doc, originalBufferRef.current, {
+          const attemptSelectiveSave = await loadAttemptSelectiveSave();
+          selectiveBuffer = await attemptSelectiveSave(doc, baselineBuffer, {
             changedParaIds: getChangedParagraphIds(editorState),
             structuralChange: hasStructuralChanges(editorState),
             hasUntrackedChanges: hasUntrackedChanges(editorState),
+            maxBytes: flags.selectiveSaveMaxBytes,
           });
         }
 
+        let buffer: ArrayBuffer | null = useSelectiveForSave
+          ? selectiveBuffer
+          : null;
+        let fullBuffer: ArrayBuffer | null = null;
+        const repackSourceDoc = baselineBuffer
+          ? { ...doc, originalBuffer: baselineBuffer }
+          : doc;
+
         if (!buffer) {
-          buffer = await repackDocx(doc);
+          const repackDocx = await loadRepackDocx();
+          fullBuffer = await repackDocx(repackSourceDoc);
+          buffer = fullBuffer;
+        } else if (flags.selectiveSaveTripwire) {
+          try {
+            const repackDocx = await loadRepackDocx();
+            fullBuffer = await repackDocx(repackSourceDoc);
+          } catch {
+            // Tripwire-only full repack failures must never poison a
+            // successful selective save.
+          }
+        }
+
+        if (
+          flags.selectiveSaveTripwire &&
+          fullBuffer &&
+          onSelectiveSaveTripwire
+        ) {
+          // The comparison itself never blocks the save path. The host
+          // callback runs after the save try/catch so test harnesses may fail
+          // on mismatches by throwing.
+          try {
+            const { compareSelectiveVsFull } =
+              await import("../core/docx/selectiveSaveTripwire");
+            tripwireResult = await compareSelectiveVsFull(
+              selectiveBuffer,
+              fullBuffer,
+            );
+          } catch {
+            // Comparison failures must never poison the save path.
+          }
         }
 
         // Clear change tracker after successful save
@@ -2435,15 +2569,28 @@ export function DocxEditor({
         commentsDirtyRef.current = false;
 
         onSave?.(buffer);
-        return buffer;
+        savedBuffer = buffer;
       } catch (error) {
         onError?.(
           error instanceof Error ? error : new Error("Failed to save document"),
         );
         return null;
       }
+
+      if (tripwireResult && onSelectiveSaveTripwire) {
+        onSelectiveSaveTripwire(tripwireResult);
+      }
+      return savedBuffer;
     },
-    [buildCurrentDocument, onSave, onError, originalBufferRef],
+    [
+      buildCurrentDocument,
+      onSave,
+      onError,
+      originalBufferRef,
+      featureFlags,
+      onSelectiveSaveTripwire,
+      commentsDirtyRef,
+    ],
   );
 
   // Handle error from editor
@@ -2487,6 +2634,9 @@ export function DocxEditor({
       print: handleDirectPrint,
       loadDocument: loadParsedDocument,
       loadDocumentBuffer: loadBuffer,
+      ensureEditorView: (options?: { focus?: boolean }) => {
+        pagedEditorRef.current?.ensureView(options);
+      },
       createAIEditSnapshot: () => {
         const view = pagedEditorRef.current?.getView();
         return view ? createFolioAIEditSnapshot(view.state.doc) : null;
@@ -2580,22 +2730,19 @@ export function DocxEditor({
         if (!view) {
           return false;
         }
-        // Prefer the caller's snapshot (the one the AI saw when it
-        // generated the suggestion); only fall back to a fresh recompute
-        // when the caller didn't pass one. A recomputed snapshot
-        // re-numbers blocks after any structural accept, so `b-0007`
-        // would point to a different paragraph than the panel's pending
-        // suggestion is referencing.
-        const resolvedSnapshot =
-          snapshot ?? createFolioAIEditSnapshot(view.state.doc);
-        const anchor = resolvedSnapshot.anchors[blockId];
-        if (!anchor) {
+        // ParaId-backed ids resolve against the live document so
+        // queued suggestions still navigate correctly after earlier
+        // accepts insert or delete paragraphs above them. `seq-*`
+        // fallback ids keep using the snapshot the AI saw.
+        const range = resolveFolioAIBlockRange({
+          blockId,
+          doc: view.state.doc,
+          snapshot,
+        });
+        if (range === null) {
           return false;
         }
-        const { from, to } = clampRangeToDocSize(
-          view.state.doc.content.size,
-          anchor,
-        );
+        const { from, to } = range;
         const $from = view.state.doc.resolve(from);
         const $to = view.state.doc.resolve(to);
         view.dispatch(
@@ -2604,6 +2751,79 @@ export function DocxEditor({
         requestAnimationFrame(() => {
           pagedEditorRef.current?.scrollToPosition(from);
         });
+        return true;
+      },
+      getContentControls: (filter = {}) => {
+        const view = pagedEditorRef.current?.getView();
+        if (!view) {
+          return [];
+        }
+        return findBlockSdtMatches(view.state.doc, filter).map((match) => ({
+          properties: blockSdtAttrsToSdtProperties(match.node),
+          path: match.path,
+          pmPos: match.pos,
+        }));
+      },
+      scrollToContentControl: (filter) => {
+        const view = pagedEditorRef.current?.getView();
+        if (!view) {
+          return false;
+        }
+        const match = findBlockSdtMatch(view.state.doc, filter);
+        if (!match) {
+          return false;
+        }
+        // Place selection just inside the SDT (after its opening token).
+        const inside = match.pos + 1;
+        const $pos = view.state.doc.resolve(inside);
+        view.dispatch(view.state.tr.setSelection(TextSelection.near($pos)));
+        requestAnimationFrame(() => {
+          pagedEditorRef.current?.scrollToPosition(inside);
+        });
+        return true;
+      },
+      setContentControlContent: (filter, input, options = {}) => {
+        const view = pagedEditorRef.current?.getView();
+        if (!view) {
+          return false;
+        }
+        const tr =
+          typeof input === "string"
+            ? setContentControlContentTr(view.state, filter, input, options)
+            : setContentControlContentBlocksTr(
+                view.state,
+                filter,
+                input,
+                options,
+              );
+        if (!tr) {
+          return false;
+        }
+        view.dispatch(tr);
+        return true;
+      },
+      setContentControlValue: (filter, input, options = {}) => {
+        const view = pagedEditorRef.current?.getView();
+        if (!view) {
+          return false;
+        }
+        const tr = setContentControlValueTr(view.state, filter, input, options);
+        if (!tr) {
+          return false;
+        }
+        view.dispatch(tr);
+        return true;
+      },
+      removeContentControl: (filter, options = {}) => {
+        const view = pagedEditorRef.current?.getView();
+        if (!view) {
+          return false;
+        }
+        const tr = removeContentControlTr(view.state, filter, options);
+        if (!tr) {
+          return false;
+        }
+        view.dispatch(tr);
         return true;
       },
     }),
@@ -2618,6 +2838,7 @@ export function DocxEditor({
       loadParsedDocument,
       loadBuffer,
       updateComments,
+      commentsDirtyRef,
     ],
   );
 
@@ -2747,7 +2968,7 @@ export function DocxEditor({
     }
   };
 
-  const toolbarPriorityExtra = (
+  const toolbarPriorityExtra = !showReviewControls ? null : (
     <div className="flex shrink-0 items-center gap-1">
       <Button
         onClick={toggleTrackChanges}
@@ -2986,7 +3207,7 @@ export function DocxEditor({
       <ErrorBoundary onError={handleEditorError}>
         <div
           ref={containerRef}
-          className={`folio-root folio-editor${displayMode !== "all-markup" ? ` folio-root--${displayMode}` : ""} ${className}`}
+          className={`folio-root folio-editor${displayMode !== "all-markup" ? ` folio-root--${displayMode}` : ""}${showHeaderFooterEditing ? "" : " folio-no-hf-edit"} ${className}`}
           style={containerStyle}
           data-testid="folio-editor"
         >
@@ -3079,14 +3300,14 @@ export function DocxEditor({
                   <div
                     ref={editorContentRef}
                     style={{ position: "relative", flex: 1, minWidth: 0 }}
-                    onMouseDown={(e) => {
+                    onMouseDown={containedHandler(editorContentRef, (e) => {
                       // Focus editor when clicking on the background area (not the editor itself)
                       // Using mouseDown for immediate response before focus can be lost
                       if (e.target === e.currentTarget) {
                         e.preventDefault();
                         pagedEditorRef.current?.focus();
                       }
-                    }}
+                    })}
                     onContextMenu={handleEditorContextMenu}
                   >
                     <PagedEditor
@@ -3098,10 +3319,18 @@ export function DocxEditor({
                       footerContent={footerContent}
                       firstPageHeaderContent={firstPageHeaderContent}
                       firstPageFooterContent={firstPageFooterContent}
+                      headerContentRId={activeHeaderRId}
+                      footerContentRId={activeFooterRId}
+                      firstPageHeaderContentRId={activeFirstHeaderRId}
+                      firstPageFooterContentRId={activeFirstFooterRId}
                       {...(history.state.package.styles
                         ? { styles: history.state.package.styles }
                         : {})}
-                      onHeaderFooterDoubleClick={handleHeaderFooterDoubleClick}
+                      onHeaderFooterDoubleClick={
+                        showHeaderFooterEditing
+                          ? handleHeaderFooterDoubleClick
+                          : undefined
+                      }
                       hfEditMode={hfEditPosition}
                       onBodyClick={handleBodyClick}
                       zoom={zoom}
@@ -3112,8 +3341,18 @@ export function DocxEditor({
                         ? { onReadOnlyEditAttempt: onReadonlyEditAttempt }
                         : {})}
                       onSelectionChange={(_from, _to) => {
-                        // Extract full selection state from PM and use the standard handler
-                        const view = pagedEditorRef.current?.getView();
+                        // Extract full selection state from whichever PM
+                        // is active. When the user is editing HF the
+                        // hfEditorRef delegates to the persistent hidden
+                        // HF view via pagedEditorRef.getHfView(activeRId);
+                        // reading body PM here would leave the toolbar
+                        // (FormattingBar, table / image context) showing
+                        // stale body-selection state while its actions
+                        // target the HF view (post-eigenpal#611).
+                        const view =
+                          getActiveEditorView() ??
+                          pagedEditorRef.current?.getView() ??
+                          null;
                         if (view) {
                           const selectionState = extractSelectionState(
                             view.state,
@@ -3125,6 +3364,9 @@ export function DocxEditor({
                       }}
                       {...(onSelectionTextChange !== undefined
                         ? { onSelectionTextChange }
+                        : {})}
+                      {...(onEditorViewReady !== undefined
+                        ? { onEditorViewReady: reportEditorViewReady }
                         : {})}
                       externalPlugins={editorPlugins}
                       {...(collaboration !== undefined
@@ -3139,7 +3381,9 @@ export function DocxEditor({
                         selectedAnonymizationCanonical
                       }
                       anonymizationSelectionSeq={anonymizationSelectionSeq}
-                      onAnchorPositionsChange={setAnchorPositions}
+                      {...(showCommentsSidebar
+                        ? { onAnchorPositionsChange: setAnchorPositions }
+                        : {})}
                       onTotalPagesChange={(totalPages) => {
                         setScrollPageInfo((previous) =>
                           updateScrollPageTotal(previous, totalPages),
@@ -3149,136 +3393,145 @@ export function DocxEditor({
                       sidebarOverlay={(() => {
                         if (showCommentsSidebar) {
                           return (
-                            <CommentsSidebar
-                              activeCommentId={activeCommentId}
-                              comments={visibleComments}
-                              anchorPositions={anchorPositions}
-                              pageWidth={(() => {
-                                const sp =
-                                  history.state.package.document
-                                    .finalSectionProperties;
-                                return sp?.pageWidth
-                                  ? Math.round(sp.pageWidth / 15)
-                                  : 816;
-                              })()}
-                              editorContainerRef={scrollContainerRef}
-                              onCommentClick={(id) => {
-                                setActiveCommentId(id);
-                              }}
-                              onCommentResolve={(id) => {
-                                updateComments((prev) =>
-                                  prev.map((c) =>
-                                    c.id === id
-                                      ? {
-                                          ...c,
-                                          done: true,
-                                        }
-                                      : c,
-                                  ),
-                                );
-                              }}
-                              onCommentDelete={(id) => {
-                                updateComments((prev) =>
-                                  prev.filter(
-                                    (c) => c.id !== id && c.parentId !== id,
-                                  ),
-                                );
-                                if (activeCommentId === id) {
-                                  setActiveCommentId(null);
-                                }
-                              }}
-                              onCommentReply={(id, text) => {
-                                updateComments((prev) => [
-                                  ...prev,
-                                  createComment(text, author, id),
-                                ]);
-                              }}
-                              onAddComment={(addText) => {
-                                const comment = createComment(addText, author);
-                                // Replace pending comment mark with the real comment ID
-                                const view = pagedEditorRef.current?.getView();
-                                if (!view || !commentSelectionRange) {
-                                  return false;
-                                }
-                                const marked = applyCommentMarkRange(
-                                  view,
-                                  commentSelectionRange,
-                                  comment.id,
-                                  {
-                                    replacePending: true,
-                                  },
-                                );
-                                if (!marked) {
-                                  return false;
-                                }
-                                const commentAuthor = getCommentAuthorKey(
-                                  comment.author,
-                                );
-                                setVisibleCommentAuthors((current) => {
-                                  if (current === null) {
-                                    return null;
-                                  }
-                                  const next = new Set(current);
-                                  next.add(commentAuthor);
-                                  return next;
-                                });
-                                setActiveCommentId(comment.id);
-                                updateComments((prev) => [...prev, comment]);
-                                pagedEditorRef.current?.relayout();
-                                requestAnimationFrame(() => {
-                                  syncCommentHighlightStyles();
-                                  requestAnimationFrame(
-                                    syncCommentHighlightStyles,
+                            <Suspense fallback={null}>
+                              <CommentsSidebar
+                                activeCommentId={activeCommentId}
+                                comments={visibleComments}
+                                anchorPositions={anchorPositions}
+                                pageWidth={(() => {
+                                  const sp =
+                                    history.state.package.document
+                                      .finalSectionProperties;
+                                  return sp?.pageWidth
+                                    ? Math.round(sp.pageWidth / 15)
+                                    : 816;
+                                })()}
+                                editorContainerRef={scrollContainerRef}
+                                onCommentClick={(id) => {
+                                  setActiveCommentId(id);
+                                }}
+                                onCommentResolve={(id) => {
+                                  updateComments((prev) =>
+                                    prev.map((c) =>
+                                      c.id === id
+                                        ? {
+                                            ...c,
+                                            done: true,
+                                          }
+                                        : c,
+                                    ),
                                   );
-                                });
-                                setIsAddingComment(false);
-                                setCommentSelectionRange(null);
-                                setAddCommentYPosition(null);
-                                return true;
-                              }}
-                              onTrackedChangeReply={(revisionId, text) => {
-                                updateComments((prev) => [
-                                  ...prev,
-                                  createComment(text, author, revisionId),
-                                ]);
-                              }}
-                              onCancelAddComment={() => {
-                                // Remove pending comment highlight
-                                const view = pagedEditorRef.current?.getView();
-                                if (view && commentSelectionRange) {
-                                  removePendingCommentMarkRange(
+                                }}
+                                onCommentDelete={(id) => {
+                                  updateComments((prev) =>
+                                    prev.filter(
+                                      (c) => c.id !== id && c.parentId !== id,
+                                    ),
+                                  );
+                                  if (activeCommentId === id) {
+                                    setActiveCommentId(null);
+                                  }
+                                }}
+                                onCommentReply={(id, text) => {
+                                  updateComments((prev) => [
+                                    ...prev,
+                                    createComment(text, author, id),
+                                  ]);
+                                }}
+                                onAddComment={(addText) => {
+                                  const comment = createComment(
+                                    addText,
+                                    author,
+                                  );
+                                  // Replace pending comment mark with the real comment ID
+                                  const view =
+                                    pagedEditorRef.current?.getView();
+                                  if (!view || !commentSelectionRange) {
+                                    return false;
+                                  }
+                                  const marked = applyCommentMarkRange(
                                     view,
                                     commentSelectionRange,
+                                    comment.id,
+                                    {
+                                      replacePending: true,
+                                    },
                                   );
-                                }
-                                setIsAddingComment(false);
-                                setCommentSelectionRange(null);
-                                setAddCommentYPosition(null);
-                              }}
-                              onAcceptChange={(from, to) => {
-                                const view = pagedEditorRef.current?.getView();
-                                if (view) {
-                                  acceptChange(from, to)(
-                                    view.state,
-                                    view.dispatch,
+                                  if (!marked) {
+                                    return false;
+                                  }
+                                  const commentAuthor = getCommentAuthorKey(
+                                    comment.author,
                                   );
-                                  extractTrackedChanges();
-                                }
-                              }}
-                              onRejectChange={(from, to) => {
-                                const view = pagedEditorRef.current?.getView();
-                                if (view) {
-                                  rejectChange(from, to)(
-                                    view.state,
-                                    view.dispatch,
-                                  );
-                                  extractTrackedChanges();
-                                }
-                              }}
-                              isAddingComment={isAddingComment}
-                              addCommentYPosition={addCommentYPosition}
-                              topOffset={0}
-                            />
+                                  setVisibleCommentAuthors((current) => {
+                                    if (current === null) {
+                                      return null;
+                                    }
+                                    const next = new Set(current);
+                                    next.add(commentAuthor);
+                                    return next;
+                                  });
+                                  setActiveCommentId(comment.id);
+                                  updateComments((prev) => [...prev, comment]);
+                                  pagedEditorRef.current?.relayout();
+                                  requestAnimationFrame(() => {
+                                    syncCommentHighlightStyles();
+                                    requestAnimationFrame(
+                                      syncCommentHighlightStyles,
+                                    );
+                                  });
+                                  setIsAddingComment(false);
+                                  setCommentSelectionRange(null);
+                                  setAddCommentYPosition(null);
+                                  return true;
+                                }}
+                                onTrackedChangeReply={(revisionId, text) => {
+                                  updateComments((prev) => [
+                                    ...prev,
+                                    createComment(text, author, revisionId),
+                                  ]);
+                                }}
+                                onCancelAddComment={() => {
+                                  // Remove pending comment highlight
+                                  const view =
+                                    pagedEditorRef.current?.getView();
+                                  if (view && commentSelectionRange) {
+                                    removePendingCommentMarkRange(
+                                      view,
+                                      commentSelectionRange,
+                                    );
+                                  }
+                                  setIsAddingComment(false);
+                                  setCommentSelectionRange(null);
+                                  setAddCommentYPosition(null);
+                                }}
+                                onAcceptChange={(from, to) => {
+                                  const view =
+                                    pagedEditorRef.current?.getView();
+                                  if (view) {
+                                    acceptChange(from, to)(
+                                      view.state,
+                                      view.dispatch,
+                                    );
+                                    extractTrackedChanges();
+                                  }
+                                }}
+                                onRejectChange={(from, to) => {
+                                  const view =
+                                    pagedEditorRef.current?.getView();
+                                  if (view) {
+                                    rejectChange(from, to)(
+                                      view.state,
+                                      view.dispatch,
+                                    );
+                                    extractTrackedChanges();
+                                  }
+                                }}
+                                isAddingComment={isAddingComment}
+                                addCommentYPosition={addCommentYPosition}
+                                topOffset={0}
+                              />
+                            </Suspense>
                           );
                         }
                         return undefined;
@@ -3430,20 +3683,35 @@ export function DocxEditor({
                         if (!targetEl || !parentEl) {
                           return null;
                         }
+                        // Resolve the active HF rId for this edit session;
+                        // the chrome delegates getView/focus/undo/redo to the
+                        // persistent hidden HF EditorView mounted by
+                        // HiddenHeaderFooterPMs (post-eigenpal#611). The
+                        // inline overlay no longer mounts its own visible PM.
+                        const activeRId = (() => {
+                          if (hfEditIsFirstPage) {
+                            return hfEditPosition === "header"
+                              ? activeFirstHeaderRId
+                              : activeFirstFooterRId;
+                          }
+                          return hfEditPosition === "header"
+                            ? activeHeaderRId
+                            : activeFooterRId;
+                        })();
+                        const getActiveView = () =>
+                          activeRId
+                            ? (pagedEditorRef.current?.getHfView(activeRId) ??
+                              null)
+                            : null;
                         return (
                           <InlineHeaderFooterEditor
                             ref={hfEditorRef}
-                            headerFooter={activeHf}
                             position={hfEditPosition}
                             targetElement={targetEl}
                             parentElement={parentEl}
-                            onSave={handleHeaderFooterSave}
-                            onClose={() => setHfEditPosition(null)}
-                            onSelectionChange={handleSelectionChange}
+                            getActiveView={getActiveView}
+                            onClose={handleBodyClick}
                             onRemove={handleRemoveHeaderFooter}
-                            {...(history.state.package.styles
-                              ? { styles: history.state.package.styles }
-                              : {})}
                           />
                         );
                       })()}
@@ -3482,7 +3750,44 @@ export function DocxEditor({
               )}
 
               {/* Document outline sidebar — absolutely positioned, doesn't scroll */}
-              {/* Document outline and comments sidebar provided by host app */}
+              {showOutline && outlineHeadings.length > 1 && (
+                <DocumentOutline
+                  headings={outlineHeadings}
+                  scrollContainerRef={scrollContainerRef}
+                  topOffset={toolbarHeight}
+                  docSize={
+                    pagedEditorRef.current?.getView()?.state.doc.content.size ??
+                    0
+                  }
+                  onHeadingClick={(pmPos) => {
+                    pagedEditorRef.current?.scrollToPosition(pmPos);
+                    // Wait for the paged editor to mount the target paragraph
+                    // (smooth-scroll + virtualisation buffer warm-up), then
+                    // trigger the CSS flash animation.
+                    let attempts = 0;
+                    const flash = () => {
+                      attempts++;
+                      const container = scrollContainerRef.current;
+                      if (!container) {
+                        return;
+                      }
+                      const el = container.querySelector<HTMLElement>(
+                        `.layout-page-content [data-pm-start="${String(pmPos)}"]`,
+                      );
+                      if (el) {
+                        delete el.dataset["folioOutlineFlash"];
+                        void el.offsetWidth;
+                        el.dataset["folioOutlineFlash"] = "";
+                        return;
+                      }
+                      if (attempts < 30) {
+                        requestAnimationFrame(flash);
+                      }
+                    };
+                    requestAnimationFrame(flash);
+                  }}
+                />
+              )}
             </div>
             {/* end wrapper for scroll container + outline */}
           </div>
@@ -3499,16 +3804,25 @@ export function DocxEditor({
           />
 
           {/* Right-click context menu */}
-          <TextContextMenu
-            isOpen={contextMenu.isOpen}
-            position={contextMenu.position}
-            hasSelection={contextMenu.hasSelection}
-            isEditable={!readOnly}
-            items={contextMenuItems}
-            onAction={(action) => {
-              void handleContextMenuAction(action);
-            }}
-            onClose={handleContextMenuClose}
+          {contextMenu.isOpen && (
+            <Suspense fallback={null}>
+              <TextContextMenu
+                isOpen={contextMenu.isOpen}
+                position={contextMenu.position}
+                hasSelection={contextMenu.hasSelection}
+                isEditable={!readOnly}
+                items={contextMenuItems}
+                onAction={(action) => {
+                  void handleContextMenuAction(action);
+                }}
+                onClose={handleContextMenuClose}
+              />
+            </Suspense>
+          )}
+
+          {/* Dropdown / date pickers for content controls */}
+          <ContentControlWidgetsOverlay
+            getEditorView={() => pagedEditorRef.current?.getView() ?? null}
           />
 
           {/* Toast notifications */}

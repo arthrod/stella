@@ -4,7 +4,6 @@
     ".": {
       "entry": ["scripts/*.ts", "i18n-unused.config.js", "oxlint.config.ts"],
       "ignoreDependencies": [
-        "@fontsource-variable/source-serif-4",
         "@tanstack/eslint-plugin-query",
         "@tanstack/eslint-plugin-router",
         "eslint",
@@ -14,18 +13,20 @@
         "ultracite",
         "i18n-unused",
         "oxlint",
+        "squawk-cli",
         "vite"
       ],
       "ignoreBinaries": ["scripts/dev.sh"]
     },
     "apps/api": {
       "entry": [
-        "src/index.ts",
+        "src/index.ts!",
+        "src/handlers/files/pdf-worker.ts!",
+        "src/lib/search/extraction-worker.ts!",
         "scripts/*.ts",
         "src/scripts/*.ts",
-        "src/handlers/files/pdf-worker.ts",
+        "src/dev/register-mock-ai.ts",
         "src/lib/__fixtures__/*.ts",
-        "src/lib/search/extraction-worker.ts",
         "src/handlers/case-law/seed-court-weights.ts",
         "src/handlers/case-law/ingestion/adapters/health-check.ts",
         "src/handlers/case-law/ingestion/adapters/update-fixtures.ts",
@@ -39,7 +40,7 @@
       "ignoreDependencies": ["@electric-sql/pglite"]
     },
     "apps/web": {
-      "entry": ["src/main.tsx", "vite.config.ts"],
+      "entry": ["src/main.tsx", "src/server.ts!", "vite.config.ts"],
       "ignore": [
         "public/dark-mode-init.js",
         "src/routeTree.gen.ts",
@@ -51,20 +52,25 @@
       ],
       "ignoreDependencies": ["react-grab", "@libpdf/core", "idb"]
     },
-    "apps/docs": {
+    "apps/landing": {
       "entry": [
         "src/**/*.astro",
         "src/content.config.ts",
-        "src/styles/custom.css",
-        "astro.config.*"
-      ]
-    },
-    "apps/landing": {
-      "entry": ["src/**/*.astro", "astro.config.*", "postcss.config.mjs"],
+        "src/pages/**/*.ts",
+        "astro.config.*",
+        "postcss.config.mjs"
+      ],
       "ignoreDependencies": ["@tailwindcss/postcss"]
     },
-    "packages/case-law": {
-      "entry": ["src/*.ts", "src/**/*.test.ts"]
+    "apps/legal-atlas-runner": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"],
+      "ignoreDependencies": ["@stll/api"]
+    },
+    "packages/legal-atlas": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
+    },
+    "packages/legal-ast": {
+      "entry": ["src/index.ts", "src/**/*.test.ts"]
     },
     "packages/permissions": {
       "entry": ["src/index.ts"]

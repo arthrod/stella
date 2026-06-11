@@ -7,6 +7,7 @@ import { ChevronsUpDownIcon, XIcon } from "lucide-react";
 
 import { Input } from "@stll/ui/components/input";
 import { ScrollArea } from "@stll/ui/components/scroll-area";
+import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 import { cn } from "@stll/ui/lib/utils";
 
 const ComboboxContext = React.createContext<{
@@ -74,7 +75,7 @@ function ComboboxInput({
   const sizeValue = size ?? "default";
 
   return (
-    <div className="text-foreground relative w-full not-has-[>*.w-full]:w-fit has-disabled:opacity-64">
+    <ComboboxPrimitive.InputGroup className="text-foreground relative w-full not-has-[>*.w-full]:w-fit has-disabled:opacity-64">
       {Boolean(startAddon) && (
         <div
           aria-hidden="true"
@@ -123,7 +124,7 @@ function ComboboxInput({
           <XIcon />
         </ComboboxClear>
       )}
-    </div>
+    </ComboboxPrimitive.InputGroup>
   );
 }
 
@@ -351,7 +352,7 @@ function ComboboxChips({
         className,
       )}
       data-slot="combobox-chips"
-      onMouseDown={(e) => {
+      onMouseDown={containedHandler(chipsRef, (e) => {
         const { target } = e;
         if (!(target instanceof Element)) {
           return;
@@ -366,7 +367,7 @@ function ComboboxChips({
         if (input && !chipsRef.current.querySelector("input:focus")) {
           input.focus();
         }
-      }}
+      })}
       ref={chipsRef}
       {...props}
     >

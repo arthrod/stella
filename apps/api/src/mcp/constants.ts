@@ -3,6 +3,9 @@ import { env } from "@/api/env";
 export const MCP_DEFAULT_RESOURCE_SCOPES = [
   "stella:search",
   "stella:read",
+  "stella:onboarding",
+  "stella:skills",
+  "stella:external_mcps",
 ] as const;
 
 export const MCP_ANONYMIZED_RESOURCE_SCOPES = [

@@ -6,6 +6,7 @@
  */
 
 import { getHeaderRowsHeight } from "../layout-engine/index";
+import { measuredLineRangeHeight } from "../layout-engine/lineFlow";
 import type {
   Layout,
   Page,
@@ -198,16 +199,11 @@ function calculateParagraphFragmentHeight(
   fragment: ParagraphFragment,
   measure: ParagraphMeasure,
 ): number {
-  let height = 0;
-  for (
-    let i = fragment.fromLine;
-    i < fragment.toLine && i < measure.lines.length;
-    i++
-  ) {
-    // SAFETY: i is bounded by measure.lines.length in loop condition
-    height += measure.lines[i]!.lineHeight;
-  }
-  return height;
+  return measuredLineRangeHeight(
+    measure.lines,
+    fragment.fromLine,
+    fragment.toLine,
+  );
 }
 
 /**
@@ -423,7 +419,8 @@ export function hitTestTableCell(
       }
     } else {
       // Adjust localY to skip past repeated header rows
-      const adjustedLocalY = localY - headerHeight;
+      const adjustedLocalY =
+        localY - headerHeight + (tableFragment.topClip ?? 0);
       for (
         let r = tableFragment.fromRow;
         r < tableFragment.toRow && r < tableMeasure.rows.length;
@@ -533,7 +530,8 @@ export function hitTestTableCell(
 
     // Calculate position within cell (rough - doesn't account for padding)
     const cellLocalX = localX - colLeft;
-    const cellLocalY = localY - rowTop;
+    const clipOffset = isClickOnHeader ? 0 : (tableFragment.topClip ?? 0);
+    const cellLocalY = localY - rowTop + clipOffset;
 
     return {
       fragment: tableFragment,

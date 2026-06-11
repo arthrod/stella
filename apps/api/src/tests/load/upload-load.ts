@@ -1,3 +1,4 @@
+import { FetchBoundaryError } from "@/api/lib/errors/tagged-errors";
 import { readTestJson } from "@/api/tests/helpers/test-tool-set";
 
 /**
@@ -110,14 +111,24 @@ const authenticate = async (
 
   const setCookie = response.headers.get("set-cookie");
   if (!setCookie) {
-    throw new Error(`Auth failed (${response.status}): no set-cookie header`);
+    throw new FetchBoundaryError({
+      url: response.url,
+      status: response.status,
+      statusText: response.statusText,
+      message: `Auth failed (${response.status}): no set-cookie header`,
+    });
   }
 
   // Extract the session cookie name and value. Dev runs may use a
   // per-port cookie prefix so multiple localhost servers can coexist.
   const match = /^([^=]*\.session_token)=([^;]+)/u.exec(setCookie);
   if (!match) {
-    throw new Error("Could not parse session cookie");
+    throw new FetchBoundaryError({
+      url: response.url,
+      status: response.status,
+      statusText: response.statusText,
+      message: "Could not parse session cookie",
+    });
   }
 
   return `${match[1]}=${match[2]}`;
@@ -194,8 +205,7 @@ const runPool = async <T>(
 
   const workers = Array.from(
     { length: Math.min(concurrency, tasks.length) },
-    // eslint-disable-next-line require-await
-    async () => worker(),
+    async () => await worker(),
   );
   await Promise.all(workers);
   return results;
@@ -307,10 +317,15 @@ const main = async () => {
 
   // Build task list
   const tasks = files.map(
-    (file, i) =>
-      // eslint-disable-next-line require-await
-      async () =>
-        uploadFile(file, i, args.baseUrl, args.workspaceId, propertyId, cookie),
+    (file, i) => async () =>
+      await uploadFile(
+        file,
+        i,
+        args.baseUrl,
+        args.workspaceId,
+        propertyId,
+        cookie,
+      ),
   );
 
   // Run

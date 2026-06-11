@@ -1,17 +1,20 @@
 import type React from "react";
-import { Children } from "react";
+import { Children, useState } from "react";
 
 import { skipToken, useQuery } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   FileTextIcon,
   FolderIcon,
+  GlobeIcon,
   LandmarkIcon,
   LayersIcon,
   ListTodoIcon,
+  WandSparklesIcon,
 } from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { isFolioBlockId } from "@stll/folio";
 import { cn } from "@stll/ui/lib/utils";
 
 import { openCaseLawDecision } from "@/components/chat/case-law-open";
@@ -33,6 +36,7 @@ import { entityOptions } from "@/routes/_protected.workspaces/$workspaceId/-quer
 const DECISION_HASH_PREFIX = "#stella-decision=";
 const ENTITY_REF_HASH_PREFIX = "#stella-entity-ref=";
 const WORKSPACE_REF_HASH_PREFIX = "#stella-workspace-ref=";
+export const SKILL_REF_HASH_PREFIX = "#stella-skill-ref=";
 // Hash fragment, NOT a `folio:` scheme. Streamdown runs
 // rehype-sanitize over rendered links; only its protocol
 // whitelist (http/https/mailto/tel) survives. Custom schemes
@@ -240,36 +244,120 @@ const EntityRefChip = ({
   rawId,
   label,
   fallbackWorkspaceId,
+  interactive,
 }: {
   rawId: string;
   label: React.ReactNode;
   fallbackWorkspaceId?: string | undefined;
+  interactive: boolean;
 }) => {
+  const navigate = useNavigate();
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+
   const separator = rawId.indexOf(":");
   const refWorkspaceId =
     separator !== -1 ? rawId.slice(0, separator) : fallbackWorkspaceId;
   const refEntityId = separator !== -1 ? rawId.slice(separator + 1) : rawId;
+  const textLabel = typeof label === "string" ? label : "Reference";
+  const icon = (
+    <EntityChipIcon
+      entityId={refEntityId}
+      label={label}
+      workspaceId={refWorkspaceId}
+    />
+  );
+  const displayLabel = getEntityDisplayLabel(label);
+
+  if (!interactive || !refWorkspaceId) {
+    return (
+      <InlinePill leadingIcon={icon} truncate>
+        {displayLabel}
+      </InlinePill>
+    );
+  }
+
   return (
     <InlinePill
-      leadingIcon={
-        <EntityChipIcon
-          entityId={refEntityId}
-          label={label}
-          workspaceId={refWorkspaceId}
-        />
-      }
+      leadingIcon={icon}
+      onActivate={buildParsedEntityActivate({
+        navigate,
+        pathname,
+        id: refEntityId,
+        textLabel,
+        workspaceId: refWorkspaceId,
+      })}
       truncate
     >
-      {getEntityDisplayLabel(label)}
+      {displayLabel}
     </InlinePill>
   );
 };
 
-const WorkspaceRefChip = ({ label }: { label: React.ReactNode }) => (
-  <InlinePill leadingIcon={<LayersIcon className="size-3 shrink-0" />} truncate>
-    {label}
-  </InlinePill>
-);
+const SkillRefChip = ({
+  label,
+  interactive,
+}: {
+  slug: string;
+  label: React.ReactNode;
+  interactive: boolean;
+}) => {
+  const navigate = useNavigate();
+  const icon = <WandSparklesIcon className="size-3 shrink-0" />;
+  if (!interactive) {
+    return (
+      <InlinePill leadingIcon={icon} truncate>
+        {label}
+      </InlinePill>
+    );
+  }
+  return (
+    <InlinePill
+      leadingIcon={icon}
+      onActivate={() =>
+        void navigate({ to: "/knowledge/tools", search: { kind: "skill" } })
+      }
+      truncate
+    >
+      {label}
+    </InlinePill>
+  );
+};
+
+const WorkspaceRefChip = ({
+  workspaceId,
+  label,
+  interactive,
+}: {
+  workspaceId: string;
+  label: React.ReactNode;
+  interactive: boolean;
+}) => {
+  const navigate = useNavigate();
+  const icon = <LayersIcon className="size-3 shrink-0" />;
+  if (!interactive) {
+    return (
+      <InlinePill leadingIcon={icon} truncate>
+        {label}
+      </InlinePill>
+    );
+  }
+  return (
+    <InlinePill
+      leadingIcon={icon}
+      onActivate={() =>
+        void navigate({
+          to: "/workspaces/$workspaceId",
+          params: { workspaceId },
+        })
+      }
+      truncate
+    >
+      {label}
+    </InlinePill>
+  );
+};
 
 const buildParsedEntityActivate =
   ({
@@ -414,6 +502,7 @@ const MentionChip = ({
     return (
       <EntityRefChip
         fallbackWorkspaceId={workspaceId}
+        interactive={interactive}
         label={label}
         rawId={href.slice(ENTITY_REF_HASH_PREFIX.length)}
       />
@@ -421,7 +510,23 @@ const MentionChip = ({
   }
 
   if (href.startsWith(WORKSPACE_REF_HASH_PREFIX)) {
-    return <WorkspaceRefChip label={label} />;
+    return (
+      <WorkspaceRefChip
+        interactive={interactive}
+        label={label}
+        workspaceId={href.slice(WORKSPACE_REF_HASH_PREFIX.length)}
+      />
+    );
+  }
+
+  if (href.startsWith(SKILL_REF_HASH_PREFIX)) {
+    return (
+      <SkillRefChip
+        interactive={interactive}
+        label={label}
+        slug={href.slice(SKILL_REF_HASH_PREFIX.length)}
+      />
+    );
   }
 
   const parsed = parseStellaMentionHref(href);
@@ -457,9 +562,16 @@ export const StreamdownMentionLink = ({
   }
 
   if (href.startsWith(FOLIO_BLOCK_PREFIX)) {
-    const blockId = href.slice(FOLIO_BLOCK_PREFIX.length);
+    const rawBlockId = href.slice(FOLIO_BLOCK_PREFIX.length);
+    // The AI rendered a `#folio:<id>` href into its answer; refuse
+    // anything that doesn't structurally match a folio id so a
+    // typo / hallucinated legacy `b-NNNN` doesn't get plumbed
+    // through `requestBlockScroll`.
+    if (!isFolioBlockId(rawBlockId)) {
+      return <span {...props}>{children}</span>;
+    }
     return (
-      <FolioBlockChip blockId={blockId} interactive={interactive}>
+      <FolioBlockChip blockId={rawBlockId} interactive={interactive}>
         {children}
       </FolioBlockChip>
     );
@@ -469,6 +581,7 @@ export const StreamdownMentionLink = ({
     href.startsWith(DECISION_HASH_PREFIX) ||
     href.startsWith(ENTITY_REF_HASH_PREFIX) ||
     href.startsWith(WORKSPACE_REF_HASH_PREFIX) ||
+    href.startsWith(SKILL_REF_HASH_PREFIX) ||
     parseStellaMentionHref(href) ? (
       <MentionChip
         href={href}
@@ -493,31 +606,11 @@ export const StreamdownMentionLink = ({
   const httpUrl = getHttpUrl(href);
   if (httpUrl) {
     return (
-      <button
-        className={cn(
-          "text-foreground decoration-border underline",
-          "underline-offset-2 transition-colors",
-          "hover:decoration-foreground cursor-pointer",
-        )}
-        onClick={() => {
-          const source = useExternalSourceStore
-            .getState()
-            .getSource(httpUrl.toString());
-          useInspectorStore.getState().openExternal({
-            url: httpUrl.toString(),
-            connectorSlug: source?.connectorSlug,
-            iconHref: source?.iconHref,
-            label: getPlainText(children) ?? source?.title ?? httpUrl.hostname,
-            provider: source?.provider,
-            snippet: source?.snippet,
-            sourceToolName: source?.sourceToolName,
-            text: source?.text,
-          });
-        }}
-        type="button"
-      >
-        {children}
-      </button>
+      <FaviconCitationChip
+        children={children}
+        url={httpUrl}
+        workspaceId={workspaceId ?? null}
+      />
     );
   }
 
@@ -593,9 +686,10 @@ const useFolioChipChildren = (
   const t = useTranslations();
   const text = collectChipText(children).trim();
   if (text.length === 0 || text.toLowerCase().startsWith("#folio:")) {
-    // Strip the `b-` prefix and any leading zeros so the fallback
-    // reads as a clean ordinal — e.g. `b-0064` → `64` → "str. 64".
-    const numeric = blockId.replace(/^b-0*/u, "") || blockId;
+    // Strip the `seq-` prefix and any leading zeros so the fallback
+    // reads as a clean ordinal — e.g. `seq-0064` → `64` → "str. 64".
+    // ParaId-shaped ids surface verbatim.
+    const numeric = blockId.replace(/^seq-0*/u, "") || blockId;
     return t("chat.folioCitationFallback", { n: numeric });
   }
   return children;
@@ -639,4 +733,172 @@ const pickActiveDocxTabId = (
     (tab) => tab.type === "pdf" && tab.mimeType === DOCX_MIME,
   );
   return fallback ? fallback.id : null;
+};
+
+// A "footnote-style" link label is one whose visible text is short
+// and looks like a citation marker — `[1]`, `1`, `(2)`, or the bare
+// hostname. Such labels carry no information beyond the chip itself,
+// so we render the chip alone. Anything more descriptive (legal
+// citations, sentence fragments, human-named sources) is preserved as
+// underlined text with the chip appended.
+const FOOTNOTE_LABEL_RE = /^[([]?\s*\d{1,3}\s*[)\]]?$/u;
+const isFootnoteLabel = (label: string, hostname: string): boolean =>
+  FOOTNOTE_LABEL_RE.test(label) || label.toLowerCase() === hostname;
+
+const FaviconCitationChip = ({
+  children,
+  url,
+  workspaceId,
+}: {
+  children: React.ReactNode;
+  url: URL;
+  workspaceId: string | null;
+}) => {
+  const hostname = url.hostname.replace(/^www\./u, "");
+  const inlineLabel = (getPlainText(children) ?? "").trim();
+  const source = useExternalSourceStore((state) =>
+    state.getSource(url.toString()),
+  );
+  const hoverTitle = source?.title || inlineLabel || hostname;
+  const showInlineLabel =
+    inlineLabel.length > 0 && !isFootnoteLabel(inlineLabel, hostname);
+  const handleClick = () => {
+    useInspectorStore.getState().openExternal({
+      url: url.toString(),
+      connectorSlug: source?.connectorSlug,
+      iconHref: source?.iconHref,
+      label: source?.title ?? inlineLabel,
+      provider: source?.provider,
+      snippet: source?.snippet,
+      sourceToolName: source?.sourceToolName,
+      text: source?.text,
+      workspaceId,
+    });
+  };
+
+  if (showInlineLabel) {
+    return (
+      <button
+        aria-label={`${hoverTitle} (${hostname})`}
+        className={cn(
+          "text-foreground decoration-border underline",
+          "underline-offset-2 transition-colors",
+          "hover:decoration-foreground cursor-pointer",
+          "inline-flex items-center gap-1",
+        )}
+        onClick={handleClick}
+        title={
+          hoverTitle && hoverTitle !== hostname
+            ? `${hoverTitle} — ${hostname}`
+            : hostname
+        }
+        type="button"
+      >
+        <span>{children}</span>
+        <FaviconChip hostname={hostname} inline tooltipTitle={hoverTitle} />
+      </button>
+    );
+  }
+
+  return (
+    <FaviconChip
+      hostname={hostname}
+      onClick={handleClick}
+      tooltipTitle={hoverTitle}
+    />
+  );
+};
+
+const FaviconChip = ({
+  hostname,
+  onClick,
+  inline = false,
+  tooltipTitle,
+}: {
+  hostname: string;
+  onClick?: () => void;
+  inline?: boolean;
+  tooltipTitle: string;
+}) => {
+  const Wrapper = onClick ? "button" : "span";
+  // Defer the favicon GET until the user reveals intent on this
+  // specific chip — see <FaviconImage> above for the rationale.
+  const [faviconRequested, setFaviconRequested] = useState(false);
+  const revealFavicon = () => setFaviconRequested(true);
+  return (
+    <span
+      className={cn(
+        "group/citation relative inline-block size-[1em]",
+        inline ? "" : "mx-0.5 align-[-0.2em]",
+      )}
+      onFocus={revealFavicon}
+      onMouseEnter={revealFavicon}
+    >
+      <Wrapper
+        aria-label={onClick ? tooltipTitle : undefined}
+        className={cn(
+          "border-border bg-muted/30",
+          "absolute inset-0 grid place-items-center",
+          "overflow-hidden rounded-full border",
+          onClick
+            ? "hover:bg-muted/60 focus-visible:ring-ring/50 cursor-pointer focus-visible:ring-2 focus-visible:outline-none"
+            : "",
+        )}
+        onClick={onClick}
+        type={onClick ? "button" : undefined}
+      >
+        <FaviconImage hostname={hostname} loaded={faviconRequested} />
+      </Wrapper>
+      <span
+        className={cn(
+          "border-border bg-popover text-popover-foreground",
+          "pointer-events-none absolute start-[calc(100%+0.25em)] top-1/2",
+          "z-10 max-w-[20em] -translate-y-1/2 truncate whitespace-nowrap",
+          "rounded-md border px-1.5 py-0.5 text-[0.78em] leading-none shadow-sm",
+          "opacity-0 transition-opacity duration-150",
+          "group-focus-within/citation:opacity-100 group-hover/citation:opacity-100",
+        )}
+        role="tooltip"
+      >
+        {tooltipTitle}
+      </span>
+    </span>
+  );
+};
+
+/**
+ * Renders the cited domain's favicon ONLY after the parent chip
+ * reveals user intent (the `loaded` flag is flipped by the chip
+ * wrapper's hover/focus handler). Default render is the bundled
+ * GlobeIcon so merely scrolling past a chat message never sends a
+ * GET to the cited domain — that passive disclosure is the lever
+ * the Codex review flagged.
+ */
+const FaviconImage = ({
+  hostname,
+  loaded,
+}: {
+  hostname: string;
+  loaded: boolean;
+}) => {
+  const [errored, setErrored] = useState(false);
+  if (!loaded || errored) {
+    return (
+      <GlobeIcon
+        aria-hidden="true"
+        className="text-muted-foreground size-[0.85em]"
+      />
+    );
+  }
+  return (
+    <img
+      alt=""
+      aria-hidden="true"
+      className="size-[0.85em] object-contain"
+      loading="lazy"
+      onError={() => setErrored(true)}
+      referrerPolicy="no-referrer"
+      src={`https://${hostname}/favicon.ico`}
+    />
+  );
 };

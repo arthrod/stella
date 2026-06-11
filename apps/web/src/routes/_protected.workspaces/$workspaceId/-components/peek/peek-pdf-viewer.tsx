@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -26,6 +27,10 @@ import "@stll/folio/editor.css";
 
 import "./peek-docx.css";
 import { FileViewerWithAI } from "@/components/ai-suggestions/file-viewer-with-ai";
+import {
+  useDocxFitZoom,
+  useDocxWheelZoom,
+} from "@/components/docx-preview-zoom";
 import { QuerySuspenseBoundary } from "@/components/query-suspense-boundary";
 import { StellaMark } from "@/components/stella-mark";
 import Tooltip from "@/components/tooltip";
@@ -37,10 +42,7 @@ import { APIError } from "@/lib/errors";
 import { usePDFStore } from "@/lib/pdf/pdf-context";
 import { PDFPage } from "@/lib/pdf/pdf-page";
 import { PDFViewport } from "@/lib/pdf/pdf-viewport";
-import {
-  useDocxFitZoom,
-  useDocxWheelZoom,
-} from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-preview-zoom";
+import { composeRefs } from "@/lib/slot";
 import { useDocxBlockScroll } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/use-docx-block-scroll";
 import { fileOptions } from "@/routes/_protected.workspaces/$workspaceId/-components/files/queries";
 import { PageAnonymization } from "@/routes/_protected.workspaces/$workspaceId/-components/pdf/page-anonymization";
@@ -464,7 +466,13 @@ const PeekDocxViewer = ({
   const analytics = useAnalytics();
   const editorRef = useRef<DocxEditorRef>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const targetZoom = useDocxFitZoom(containerRef, scaleOffset);
+  const { containerRef: fitZoomRef, fitZoom: targetZoom } = useDocxFitZoom({
+    scaleOffset,
+  });
+  const composedContainerRef = useMemo(
+    () => composeRefs(containerRef, fitZoomRef),
+    [fitZoomRef],
+  );
   useDocxBlockScroll({ editorRef, fieldId });
 
   // Sync scaleOffset from inspector +/- buttons to Folio zoom
@@ -496,7 +504,7 @@ const PeekDocxViewer = ({
   }, [analytics, fieldId, printActionsRef, workspaceId]);
 
   return (
-    <div ref={containerRef} className="h-full overflow-auto">
+    <div ref={composedContainerRef} className="h-full overflow-auto">
       <DocxEditor
         ref={editorRef}
         autoOpenReviewSidebar={false}

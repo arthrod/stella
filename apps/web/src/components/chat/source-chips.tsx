@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
@@ -134,6 +134,7 @@ export const SourceChips = ({
         <ExternalSourceChip
           key={`${messageId}-external-source-${source.url}`}
           source={source}
+          workspaceId={workspaceId ?? null}
         />
       ))}
     </div>
@@ -225,7 +226,18 @@ const SourceIcon = ({
   return <FileTextIcon className={cn(cls, "text-muted-foreground")} />;
 };
 
-const ExternalSourceChip = ({ source }: { source: ExternalSourceEntry }) => {
+const ExternalSourceChip = ({
+  source,
+  workspaceId,
+}: {
+  source: ExternalSourceEntry;
+  workspaceId: string | null;
+}) => {
+  // Defer the favicon GET until the user actively hovers/focuses
+  // this chip — passive renders of a chat message must not fan out
+  // requests to every cited host.
+  const [faviconRequested, setFaviconRequested] = useState(false);
+  const revealFavicon = () => setFaviconRequested(true);
   const handleClick = () => {
     useInspectorStore.getState().openExternal({
       connectorSlug: source.connectorSlug,
@@ -236,6 +248,7 @@ const ExternalSourceChip = ({ source }: { source: ExternalSourceEntry }) => {
       sourceToolName: source.sourceToolName,
       text: source.text,
       url: source.url,
+      workspaceId,
     });
   };
 
@@ -247,9 +260,15 @@ const ExternalSourceChip = ({ source }: { source: ExternalSourceEntry }) => {
         "hover:bg-muted cursor-pointer",
       )}
       onClick={handleClick}
+      onFocus={revealFavicon}
+      onMouseEnter={revealFavicon}
       type="button"
     >
-      <ExternalSourceIcon iconHref={source.iconHref} />
+      <ExternalSourceIcon
+        iconHref={source.iconHref}
+        loaded={faviconRequested}
+        url={source.url}
+      />
       <span className="max-w-[20ch] truncate">{source.title}</span>
     </button>
   );
@@ -257,8 +276,12 @@ const ExternalSourceChip = ({ source }: { source: ExternalSourceEntry }) => {
 
 const ExternalSourceIcon = ({
   iconHref,
+  loaded,
+  url,
 }: {
   iconHref?: string | undefined;
+  loaded: boolean;
+  url?: string | undefined;
 }) => {
   if (iconHref) {
     return (
@@ -274,7 +297,46 @@ const ExternalSourceIcon = ({
     );
   }
 
-  return <ExternalLinkIcon className={cn(cls, "text-muted-foreground")} />;
+  return <SourceFavicon loaded={loaded} url={url} />;
+};
+
+type SourceFaviconProps = {
+  url: string | undefined;
+  /**
+   * The favicon image only mounts when this flag flips to `true`;
+   * the parent chip owns the flag and flips it on hover/focus so
+   * passively viewing a message does not GET every cited host. See
+   * the per-message rationale in `streamdown-mention-link.tsx`.
+   */
+  loaded: boolean;
+};
+
+const SourceFavicon = ({ url, loaded }: SourceFaviconProps) => {
+  const [errored, setErrored] = useState(false);
+  const hostname = (() => {
+    if (!url) {
+      return null;
+    }
+    try {
+      return new URL(url).hostname.replace(/^www\./u, "");
+    } catch {
+      return null;
+    }
+  })();
+  if (!hostname || errored || !loaded) {
+    return <ExternalLinkIcon className={cn(cls, "text-muted-foreground")} />;
+  }
+  return (
+    <img
+      alt=""
+      aria-hidden="true"
+      className="border-border size-3 shrink-0 rounded-full border object-contain"
+      loading="lazy"
+      onError={() => setErrored(true)}
+      referrerPolicy="no-referrer"
+      src={`https://${hostname}/favicon.ico`}
+    />
+  );
 };
 
 const SourceChip = ({

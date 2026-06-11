@@ -7,49 +7,38 @@ import { useTranslations } from "use-intl";
 import { Popover, PopoverPopup } from "@stll/ui/components/popover";
 import { cn } from "@stll/ui/lib/utils";
 
+import type { SlashItem } from "@/components/chat/prompt-slash-extension";
+import {
+  getSlashItemsInRenderOrder,
+  groupSlashItemsBySection,
+  type SlashSectionKey,
+} from "@/components/chat/prompt-slash-list.logic";
 import type { TranslationKey } from "@/i18n/types";
-import type { ChatPrompt, PromptScope } from "@/lib/prompts/types";
 
-const SCOPE_ORDER: PromptScope[] = ["private", "team"];
-const SCOPE_LABEL_KEYS = {
-  private: "chat.prompts.scope.private",
-  team: "chat.prompts.scope.team",
-} satisfies Record<PromptScope, TranslationKey>;
+// Prompts and SKILL.md skills are one user-facing concept ("skills"), so
+// they share section headers grouped by scope rather than split by feed.
+const SECTION_LABEL_KEYS = {
+  private: "chat.skills.scope.private",
+  team: "chat.skills.scope.team",
+  "built-in": "knowledge.agentSkills.builtInSection",
+} satisfies Record<SlashSectionKey, TranslationKey>;
 
-const useScopeLabel = () => {
-  const t = useTranslations();
-  return (scope: PromptScope): string => t(SCOPE_LABEL_KEYS[scope]);
-};
+const getItemKey = (item: SlashItem): string =>
+  item.kind === "prompt"
+    ? `prompt:${item.prompt.id}`
+    : `skill:${item.skill.id}`;
 
-const groupByScope = (
-  items: ChatPrompt[],
-): { scope: PromptScope; items: ChatPrompt[] }[] => {
-  const groups = new Map<PromptScope, ChatPrompt[]>();
+const getItemName = (item: SlashItem): string =>
+  item.kind === "prompt" ? item.prompt.name : item.skill.name;
 
-  for (const item of items) {
-    const list = groups.get(item.scope);
-    if (list) {
-      list.push(item);
-    } else {
-      groups.set(item.scope, [item]);
-    }
-  }
-
-  const result: { scope: PromptScope; items: ChatPrompt[] }[] = [];
-  for (const scope of SCOPE_ORDER) {
-    const group = groups.get(scope);
-    if (group && group.length > 0) {
-      result.push({ scope, items: group });
-    }
-  }
-  return result;
-};
+const getItemSecondary = (item: SlashItem): string =>
+  item.kind === "prompt" ? item.prompt.body : item.skill.description;
 
 type PromptSlashListHandle = ReturnType<
   NonNullable<SuggestionOptions["render"]>
 >;
 
-type PromptSlashListProps = SuggestionProps<ChatPrompt> & {
+type PromptSlashListProps = SuggestionProps<SlashItem> & {
   ref?: Ref<PromptSlashListHandle>;
 };
 
@@ -60,12 +49,14 @@ export const PromptSlashList = ({
   ref,
 }: PromptSlashListProps) => {
   const t = useTranslations();
-  const scopeLabel = useScopeLabel();
   const [isOpen, setIsOpen] = useState(true);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const groups = groupSlashItemsBySection(items);
+  const renderedItems = getSlashItemsInRenderOrder(groups);
+  const itemCount = renderedItems.length;
 
-  const safeIndex = Math.min(selectedIndex, Math.max(0, items.length - 1));
+  const safeIndex = Math.min(selectedIndex, Math.max(0, itemCount - 1));
 
   useEffect(() => {
     setSelectedIndex(0);
@@ -85,7 +76,7 @@ export const PromptSlashList = ({
   }, [safeIndex]);
 
   const select = (index: number) => {
-    const item = items[index];
+    const item = renderedItems.at(index);
     if (item) {
       command(item);
     }
@@ -93,17 +84,15 @@ export const PromptSlashList = ({
 
   useImperativeHandle(ref, () => ({
     onKeyDown: ({ event }) => {
-      if (items.length === 0) {
+      if (itemCount === 0) {
         return false;
       }
       if (event.key === "ArrowUp") {
-        setSelectedIndex(
-          (current) => (current + items.length - 1) % items.length,
-        );
+        setSelectedIndex((current) => (current + itemCount - 1) % itemCount);
         return true;
       }
       if (event.key === "ArrowDown") {
-        setSelectedIndex((current) => (current + 1) % items.length);
+        setSelectedIndex((current) => (current + 1) % itemCount);
         return true;
       }
       if (event.key === "Enter" || event.key === "Tab") {
@@ -120,7 +109,7 @@ export const PromptSlashList = ({
     },
   }));
 
-  if (items.length === 0) {
+  if (itemCount === 0) {
     return (
       <Popover modal={true} onOpenChange={setIsOpen} open={isOpen}>
         <PopoverPopup
@@ -139,7 +128,6 @@ export const PromptSlashList = ({
   }
 
   let runningIndex = 0;
-  const groups = groupByScope(items);
 
   return (
     <Popover modal={true} onOpenChange={setIsOpen} open={isOpen}>
@@ -152,9 +140,9 @@ export const PromptSlashList = ({
       >
         <div className="max-h-72 space-y-1 overflow-y-auto" ref={listRef}>
           {groups.map((group) => (
-            <div key={group.scope}>
+            <div key={group.section}>
               <div className="text-muted-foreground px-2 py-1 text-[11px] font-medium tracking-wide uppercase">
-                {scopeLabel(group.scope)}
+                {t(SECTION_LABEL_KEYS[group.section])}
               </div>
               {group.items.map((item) => {
                 const index = runningIndex++;
@@ -168,7 +156,7 @@ export const PromptSlashList = ({
                         : "hover:bg-accent/50",
                     )}
                     data-index={index}
-                    key={item.id}
+                    key={getItemKey(item)}
                     onClick={() => select(index)}
                     onMouseDown={(event) => {
                       // Keep the editor focused so `command` can run
@@ -179,10 +167,10 @@ export const PromptSlashList = ({
                     type="button"
                   >
                     <p className="text-foreground text-xs font-medium">
-                      {item.name}
+                      {getItemName(item)}
                     </p>
                     <p className="text-muted-foreground line-clamp-2 text-[11px] leading-snug">
-                      {item.body}
+                      {getItemSecondary(item)}
                     </p>
                   </button>
                 );

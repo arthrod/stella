@@ -14,7 +14,7 @@ pre-commit:
       run: bun run secrets:check:staged
     lint:
       glob: "**/*.{ts,tsx,js,jsx}"
-      run: bun --bun oxlint -c oxlint.config.ts --threads=2 --deny-warnings --type-aware --fix {staged_files}
+      run: bun --bun oxlint -c oxlint.config.ts --threads=2 --deny-warnings --no-error-on-unmatched-pattern --fix {staged_files}
       stage_fixed: true
     format:
       glob: "**/*.{ts,tsx,js,jsx,json,css}"
@@ -32,9 +32,16 @@ pre-push:
   parallel: false
   commands:
     typecheck:
-      run: bun run typecheck --concurrency=2
-    lint:
-      run: bun run lint --concurrency=2 -- --threads=2
+      # Scoped to packages changed vs. origin/main plus their dependents
+      # (turbo `...[ref]` filter). tsgo itself still runs project-wide
+      # within each selected package, but unaffected packages are skipped
+      # entirely instead of being walked for cache decisions.
+      run: bun run typecheck "--filter=...[origin/main]" --concurrency=2
+    # Lint runs in CI on every push (~10-15 min full-monorepo). Keeping
+    # it on pre-push too added another ~15-18 min of waiting that
+    # duplicated the CI signal, so the local hook drops it. The
+    # pre-commit hook still lints staged files inline for fast feedback
+    # on the most common class of mistakes.
     format:
       run: bun run format --concurrency=2 -- --check
     i18n:

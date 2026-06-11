@@ -5,23 +5,20 @@ import type { Static } from "elysia";
 
 import type { SafeDb } from "@/api/db";
 import { entities, entityVersions, fields, workspaces } from "@/api/db/schema";
-import type { FieldContent } from "@/api/db/schema-validators";
+import {
+  extractFieldFileRefs,
+  filterUnreferencedFieldFileRefs,
+} from "@/api/handlers/files/field-file-refs";
 import { deleteS3Objects } from "@/api/handlers/files/utils";
 import { captureError } from "@/api/lib/analytics";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
-import {
-  AUDIT_ACTION,
-  AUDIT_RESOURCE_TYPE,
-  createAuditContext,
-  writeAuditLog,
-} from "@/api/lib/audit-log";
-import type { AuditContext } from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
+import type { AuditRecorder } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tSafeId } from "@/api/lib/custom-schema";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { getSearchProvider } from "@/api/lib/search/provider";
-import { PDF_MIME_TYPE } from "@/api/mime-types";
 
 const deleteEntitiesBodySchema = t.Object({
   entityIds: t.Array(tSafeId("entity"), { minItems: 1 }),
@@ -33,34 +30,15 @@ type DeleteEntitiesHandlerProps = {
   safeDb: SafeDb;
   organizationId: SafeId<"organization">;
   workspaceId: SafeId<"workspace">;
-  auditContext: AuditContext;
+  recordAuditEvent: AuditRecorder;
   body: DeleteEntitiesBodySchema;
-};
-
-type FileRef = { fileId: string; mimeType: string };
-
-const extractFileRefs = (content: FieldContent): FileRef[] => {
-  if (content.type !== "file") {
-    return [];
-  }
-
-  const refs: FileRef[] = [{ fileId: content.id, mimeType: content.mimeType }];
-
-  if (content.pdfFileId) {
-    refs.push({
-      fileId: content.pdfFileId,
-      mimeType: PDF_MIME_TYPE,
-    });
-  }
-
-  return refs;
 };
 
 const deleteEntitiesHandler = async function* ({
   safeDb,
   organizationId,
   workspaceId,
-  auditContext,
+  recordAuditEvent,
   body,
 }: DeleteEntitiesHandlerProps) {
   const readOnlyEntities = yield* Result.await(
@@ -101,14 +79,27 @@ const deleteEntitiesHandler = async function* ({
     }),
   );
 
-  const fileRefs = fieldRows.flatMap((row) => extractFileRefs(row.content));
+  const fileRefs = fieldRows.flatMap((row) =>
+    extractFieldFileRefs(row.content),
+  );
+  const unreferencedFileRefs = yield* Result.await(
+    safeDb(
+      async (tx) =>
+        await filterUnreferencedFieldFileRefs({
+          tx,
+          workspaceId,
+          fileRows: fileRefs,
+          excludedEntityIds: body.entityIds,
+        }),
+    ),
+  );
 
   // Delete S3 objects before the DB delete.
   // On retry, already-deleted objects are no-ops.
 
   Result.unwrap(
     await deleteS3Objects({
-      fileRows: fileRefs,
+      fileRows: unreferencedFileRefs,
       organizationId,
       workspaceId,
     }),
@@ -138,9 +129,9 @@ const deleteEntitiesHandler = async function* ({
         .set({ lastActivityAt: new Date() })
         .where(eq(workspaces.id, workspaceId));
 
-      await writeAuditLog(
+      await recordAuditEvent(
+        tx,
         deleted.map((entity) => ({
-          ...auditContext,
           action: AUDIT_ACTION.DELETE,
           resourceType: AUDIT_RESOURCE_TYPE.ENTITY,
           resourceId: entity.id,
@@ -155,7 +146,6 @@ const deleteEntitiesHandler = async function* ({
             },
           },
         })),
-        tx,
       );
 
       return deleted;
@@ -168,7 +158,7 @@ const deleteEntitiesHandler = async function* ({
     provider.removeEntity(entity.id).catch(captureError);
   }
 
-  return Result.ok(undefined);
+  return Result.ok({});
 };
 
 const config = {
@@ -178,26 +168,12 @@ const config = {
 
 const deleteEntities = createSafeHandler(
   config,
-  async function* ({
-    safeDb,
-    session,
-    workspaceId,
-    user,
-    request,
-    server,
-    body,
-  }) {
+  async function* ({ safeDb, session, workspaceId, body, recordAuditEvent }) {
     return yield* deleteEntitiesHandler({
       safeDb,
       organizationId: session.activeOrganizationId,
       workspaceId,
-      auditContext: createAuditContext({
-        organizationId: session.activeOrganizationId,
-        workspaceId,
-        userId: user.id,
-        request,
-        server,
-      }),
+      recordAuditEvent,
       body,
     });
   },

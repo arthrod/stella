@@ -17,6 +17,7 @@ type Messages = {
     };
   };
   "ai": {
+    "analyzeWithAI": "Analyze with AI";
     "editWithAI": "Edit with AI";
     "keyRequired": {
       "cta": "Open AI settings";
@@ -66,6 +67,7 @@ type Messages = {
   "auth": {
     "betaNoticeBody": "As a precaution during beta, do not upload sensitive, privileged, personal, irreplaceable, or production-critical data. Cloud is a demo service.";
     "betaNoticeTitle": "Beta";
+    "checkSpamHint": "If you don't see it, check your spam folder.";
     "chooseOrganization": "Choose which organization to work in";
     "codeSentAgain": "We sent a new code.";
     "continueWithEmail": "Continue";
@@ -75,7 +77,6 @@ type Messages = {
     "createOrganization": "Create an organization";
     "createOrganizationButton": "Create organization";
     "emailPlaceholder": "you@example.com";
-    "enterTheCode": "Enter the code";
     "headline": "Clarity for every case.";
     "invitation": {
       "declined": "Invitation declined";
@@ -240,7 +241,6 @@ type Messages = {
     "stopTimer": "Stop";
     "timerActive": "Timer running";
     "timesheets": "Timesheets";
-    "today": "Today";
     "total": "Total";
     "week": "Week";
     "writeOff": "Write off";
@@ -257,13 +257,11 @@ type Messages = {
     "analyzing": "Analyzing...";
     "columns": {
       "caseNumber": "Case number";
-      "country": "Country";
       "court": "Court";
     };
     "decisionNotFound": "Decision not found";
     "emptyState": "No decisions found. Configure a source and run a sync to import case law.";
     "filters": {
-      "country": "Country";
       "court": "Court";
       "dateFrom": "From";
       "dateTo": "To";
@@ -276,9 +274,14 @@ type Messages = {
       "dissent": "Dissent";
       "footer": "Footer";
       "header": "Header";
-      "history": "History";
       "ruling": "Ruling";
       "unknown": "Other";
+    };
+    "seo": {
+      "browse": "Browse case law";
+      "countries": "Countries";
+      "courts": "Courts";
+      "years": "Years";
     };
     "sources": {
       "empty": "No sources configured.";
@@ -303,6 +306,52 @@ type Messages = {
       "statutes": "Applicable statutes";
       "viewOriginal": "View source";
     };
+  };
+  "catalogue": {
+    "addCustom": "Add custom";
+    "addCustomMcp": "Add integration";
+    "addCustomSkill": "Add skill";
+    "by": "By {author}";
+    "configuration": "Configuration";
+    "cost": {
+      "free": "Free";
+      "paid": "Paid";
+    };
+    "detailAuthMethod": "Authentication";
+    "empty": "No entries match the current filter.";
+    "filter": {
+      "mcps": "Integrations";
+      "nativeTools": "Always available";
+      "skills": "Skills";
+    };
+    "filterHint": "Filtered to {codes}";
+    "firstParty": "stella";
+    "firstPartyTooltip": "Built by the stella team";
+    "install": "Install";
+    "installFailed": "Install failed";
+    "installPack": "Install {count, plural, one {# tool} other {# tools}}";
+    "installed": "Installed {name}";
+    "installedShort": "Installed";
+    "onboarding": {
+      "packTitle": "Recommended for your jurisdiction";
+    };
+    "openHomepage": "Open homepage";
+    "packDescription": "{count, plural, one {# tool} other {# tools}} curated for your practice. One-click install or pick individually below.";
+    "packInstalled": "{count, plural, one {# tool installed} other {# tools installed}}";
+    "packPartial": "Installed {installed}, {failed} failed";
+    "recommended": "Recommended";
+    "removed": "This tool is no longer available.";
+    "sectionOthers": "Others";
+    "sectionRecommended": "Recommended";
+    "settings": {
+      "packTitle": "Recommended pack";
+    };
+    "setup": {
+      "account": "Account";
+      "apiKey": "API key";
+      "none": "No setup";
+    };
+    "unavailable": "Not available yet";
   };
   "chat": {
     "acceptAllCount": "Accept all ({count})";
@@ -333,22 +382,26 @@ type Messages = {
       "denied": "Denied";
       "deny": "Deny";
       "externalMcpDescription": "Only the information needed for this tool call will be sent.";
-      "externalMcpQuestion": "Can Stella send this request to {provider}?";
+      "externalMcpQuestion": "Can stella send this request to {provider}?";
     };
     "askAnything": "Ask anything";
     "askUser": {
       "custom": "Write your own";
       "default": "Default";
+      "edit": "Edit answers";
+      "editWarning": "Re-running will discard the downstream replies in this conversation.";
       "noAnswer": "No answer";
       "placeholder": "Your answer";
+      "rerun": "Re-run from here";
       "submit": "Submit answers";
     };
     "attachFile": "Attach file";
     "attachedImage": "Attached image";
     "attachment": "Attachment";
+    "cancelQueuedMessage": "Cancel queued message";
     "caseLawGreeting": "Ask about this decision — its full text is available here.";
     "chatAbout": "Chat about this";
-    "contextPlaceholder": "Chat about {context}, / for prompts, @ to add context";
+    "contextPlaceholder": "Chat about {context}, / for skills, @ to add context";
     "createDocument": {
       "continue": "Create document";
       "created": "Document created";
@@ -386,23 +439,20 @@ type Messages = {
     "landing": {
       "lastAccessedMatters": "Last accessed matters";
       "noMatters": "No matters yet";
-      "noPrompts": "No prompts yet";
+      "noPrompts": "No skills yet";
       "noRecentChats": "No recent chats";
       "pinnedMatters": "Pinned matters";
-      "prompts": "Prompts";
+      "prompts": "Skills";
       "recentChats": "Recent chats";
     };
     "maxAttachmentsReached": "Maximum {count} files per message";
     "mention": {
       "category": {
-        "clauses": "Clauses";
         "contacts": "Contacts";
         "entities": "In this matter";
-        "matters": "Matters";
         "templates": "Templates";
       };
       "loadError": "Failed to load entities";
-      "noResults": "No results";
     };
     "moveToMain": "Move to main view";
     "moveToSide": "Move to side panel";
@@ -416,30 +466,36 @@ type Messages = {
     "pastedText": {
       "expand": "Show full text";
       "fromClipboard": "Pasted {count, plural, one {# character} other {# characters}}";
-      "fromPromptFallback": "Prompt";
-      "remove": "Remove";
+      "fromPromptFallback": "Skill";
     };
-    "placeholder": "Type your question here, / for prompts, @ to add context";
+    "placeholder": "Type your question here, / for skills, @ to add context";
     "prompts": {
-      "noResults": "No matching prompts";
-      "noShortcuts": "No prompts yet. Add some in Knowledge → Prompts.";
-      "scope": {
-        "private": "Your prompts";
-        "team": "Team prompts";
-      };
+      "noResults": "No matching skills";
+      "noShortcuts": "No skills yet. Add some in Knowledge → Skills.";
       "tryOne": "Try one of these to start";
     };
+    "queuedAttachmentCount": "{count, plural, one {# attachment} other {# attachments}}";
+    "queuedNotice": "Queued — sends when the current response finishes";
+    "recapLoading": "Recapping the conversation…";
     "removeSuggestion": "(remove)";
     "resend": "Resend";
     "resizeThread": "Resize conversation";
     "send": "Send message";
     "sendError": "There was an issue sending your message. Contact support if the error persists.";
-    "sendErrorAnonymizationBlocked": "Stella could not anonymize one attachment, so nothing was sent. Remove the file or send this message without anonymization.";
-    "sendErrorInsufficientCredits": "The AI provider needs more credits. Contact your workspace admin to top up the account.";
+    "sendErrorAnonymizationBlocked": "stella could not anonymize one attachment, so nothing was sent. Remove the file or send this message without anonymization.";
+    "sendErrorLoopDetected": "The AI response repeated too many times. Try again with a narrower request.";
+    "sendErrorModelUnavailable": "The configured AI model is no longer available. Ask your workspace admin to update the model in organization settings.";
+    "sendErrorProviderBilling": "The AI provider reported a billing problem. Contact your workspace admin.";
     "sendErrorProviderUnavailable": "The AI provider is temporarily unavailable. Please try again in a moment.";
-    "sendErrorQuotaExhausted": "The AI provider's quota is exhausted. Try again in a minute, or contact your workspace admin to upgrade the plan.";
+    "sendErrorQuotaExhausted": "The AI provider's quota is exhausted. Try again in a minute, or contact your workspace admin.";
     "sendPrompt": "Send message";
     "sendWithoutAnonymization": "Send without anonymization";
+    "skills": {
+      "scope": {
+        "private": "Your skills";
+        "team": "Team skills";
+      };
+    };
     "sources": "Sources:";
     "stopResponse": "Stop";
     "suggestionSeverity": {
@@ -453,7 +509,6 @@ type Messages = {
       "stale": "Stale";
     };
     "thinking": "Working with context";
-    "threads": "History";
     "tool": {
       "apply-active-docx-edits": "Preparing document edits";
       "ares_lookup_company": "Searching company records";
@@ -465,6 +520,7 @@ type Messages = {
       "boe_get_law_structure": "BOE law structure";
       "boe_search_legislation": "BOE legislation search";
       "borme_get_summary": "BORME daily summary";
+      "business_registry_lookup": "Searching business registry";
       "create-document": "Preparing document";
       "describe-stella-api": "Preparing data lookup";
       "describe-stella-function": "Preparing data lookup";
@@ -476,15 +532,21 @@ type Messages = {
       "docxInsertBeforeSummary": "Insert text before {blockId}";
       "docxReplaceBlockSummary": "Replace {blockId}";
       "docxReplaceSummary": "Replace “{find}” with “{replace}”";
+      "docxSignatureTableSummary": "Insert signature table near {blockId}";
       "execute-typescript": "Reading workspace data";
+      "expand-chat-history": "Reading chat history";
+      "fetch_url": "Reading page";
+      "infosoud_lookup_case": "InfoSoud case lookup";
       "load-skill": "Reading guidance";
       "read-contact": "Reading contact";
       "read-content-across-matters": "Reading content across matters";
       "read-skill-resource": "Reading guidance";
       "run-stella-query": "Reading workspace data";
       "search-across-matters": "Searching across matters";
+      "search-chat-history": "Searching chat history";
       "unknown": "Using tool";
       "update-entity-fields": "Updating metadata";
+      "web_search": "Searching the web";
     };
     "toolCall": {
       "characterCount": "{count, plural, one {# character} other {# characters}}";
@@ -497,6 +559,17 @@ type Messages = {
     };
     "unsupportedFileType": "Unsupported file type";
     "uploadFailed": "Failed to process file";
+    "webSearch": {
+      "answer": "Web search summary";
+      "answerDisclaimer": "Synthesized from public web results below. Verify against the linked sources.";
+      "fetchedFrom": "from {source}";
+      "openSource": "Open {source} in a new tab";
+      "sources": "Sources";
+      "toggleDescription": "Let the model search the public web and read pages for this conversation.";
+      "toggleLabel": "Web search";
+      "toggleOff": "Turn off web search";
+      "toggleOn": "Turn on web search";
+    };
   };
   "clauses": {
     "addVariant": "Add variant";
@@ -526,7 +599,6 @@ type Messages = {
     "editClause": "Edit clause";
     "export": "Export";
     "exportFailed": "Failed to export clauses";
-    "history": "History";
     "import": "Import";
     "importFailed": "Failed to import clauses";
     "importResult": "{created, plural, one {# created} other {# created}}, {skipped, plural, one {# skipped} other {# skipped}}";
@@ -623,6 +695,7 @@ type Messages = {
     "copied": "Copied to clipboard";
     "copy": "Copy";
     "copyLink": "Copy link";
+    "country": "Country";
     "createdAt": "Created at {date}";
     "currency": "Currency";
     "currentPage": "Current page";
@@ -632,6 +705,7 @@ type Messages = {
     "deleteConfirmDescription": "Are you sure you want to delete \"{name}\"? This action cannot be undone.";
     "deletedCount": "{count, plural, one {# item} other {# items}} deleted";
     "description": "Description";
+    "details": "Details";
     "documentation": "Documentation";
     "done": "Done";
     "download": "Download";
@@ -656,6 +730,43 @@ type Messages = {
     "invoices": "Invoices";
     "kind": "Kind";
     "language": "Language";
+    "languages": {
+      "AR": "Arabic";
+      "BG": "Bulgarian";
+      "CS": "Czech";
+      "DA": "Danish";
+      "DE": "German";
+      "EL": "Greek";
+      "EN-GB": "English (British)";
+      "EN-US": "English (American)";
+      "ES": "Spanish";
+      "ES-419": "Spanish (Latin American)";
+      "ET": "Estonian";
+      "FI": "Finnish";
+      "FR": "French";
+      "HU": "Hungarian";
+      "ID": "Indonesian";
+      "IT": "Italian";
+      "JA": "Japanese";
+      "KO": "Korean";
+      "LT": "Lithuanian";
+      "LV": "Latvian";
+      "NB": "Norwegian (Bokmål)";
+      "NL": "Dutch";
+      "PL": "Polish";
+      "PT-BR": "Portuguese (Brazilian)";
+      "PT-PT": "Portuguese (European)";
+      "RO": "Romanian";
+      "RU": "Russian";
+      "SK": "Slovak";
+      "SL": "Slovenian";
+      "SV": "Swedish";
+      "TR": "Turkish";
+      "UK": "Ukrainian";
+      "ZH": "Chinese (simplified, ZH)";
+      "ZH-HANS": "Chinese (simplified)";
+      "ZH-HANT": "Chinese (traditional)";
+    };
     "loadMore": "Load more";
     "loading": "Loading";
     "logTime": "Log time";
@@ -694,12 +805,15 @@ type Messages = {
     "selectARole": "Select a role";
     "sessions": "Sessions";
     "settings": "Settings";
+    "showAll": "Show all";
+    "showLess": "Show less";
     "showMore": "Show more";
     "signOut": "Sign out";
     "somethingWentWrong": "Something went wrong";
     "sort": "Sort";
     "status": "Status";
     "today": "Today";
+    "translate": "Translate";
     "tryAgain": "Try again";
     "type": "Type";
     "typeNameToConfirm": "Type the name to confirm";
@@ -714,17 +828,21 @@ type Messages = {
   };
   "consent": {
     "allow": "Allow";
+    "completeSetup": "Complete setup";
     "defaultClientName": "An application";
     "deny": "Deny";
     "description": "{clientName} wants to access your stella workspace";
     "error": "Something went wrong. Please try again.";
-    "organization": "Organization";
+    "missingJurisdictions": "Your stella organization hasn't set up its practice jurisdictions yet. Some jurisdiction-aware tools will be unavailable until you complete setup.";
     "permissions": "This will allow the application to:";
+    "scopeExternalMcps": "Use your connected integrations";
+    "scopeOnboarding": "Configure your organization's practice jurisdictions";
     "scopeProfile": "Access your profile information";
     "scopeRead": "Read your documents, matters, and contacts";
     "scopeReadAnonymized": "Read anonymized versions of your documents and matters";
     "scopeSearch": "Search your documents and matters";
     "scopeSearchAnonymized": "Search anonymized versions of your documents and matters";
+    "scopeSkills": "Use your saved stella skills";
     "title": "Authorize access";
   };
   "contacts": {
@@ -805,7 +923,6 @@ type Messages = {
       "bankAccounts": "Bank accounts";
       "billingAddress": "Billing address";
       "billingAddressCity": "City";
-      "billingAddressCountry": "Country";
       "billingAddressLine1": "Street";
       "billingAddressLine2": "Street 2";
       "billingAddressPostalCode": "Postal code";
@@ -847,9 +964,7 @@ type Messages = {
     };
   };
   "docxReview": {
-    "accept": "Accept";
     "acceptAll": "Accept all";
-    "allFilter": "All";
     "applyAs": "as";
     "applyDirect": "Direct";
     "applyMode": "Apply as:";
@@ -869,13 +984,11 @@ type Messages = {
     "rejectAll": "Reject all";
     "revert": "Revert";
     "reviewed": "reviewed";
-    "saveIdentity": "Save";
     "savingIdentity": "Saving…";
     "severityHigh": "High";
     "severityLow": "Low";
     "severityMedium": "Medium";
     "severityUnspecified": "Unspecified";
-    "showHidden": "Show all";
     "skipped": "Could not apply: {reason}";
     "statusAccepted": "Accepted";
     "statusApplying": "Applying change…";
@@ -905,6 +1018,7 @@ type Messages = {
     "failedToDeleteContact": "Failed to delete client";
     "failedToDeleteEntities": "Failed to delete entities";
     "failedToDeleteProperty": "Failed to delete property";
+    "failedToDeleteTemplate": "Failed to delete template";
     "failedToDeleteView": "Failed to delete view";
     "failedToDeleteWorkspace": "Failed to delete matter";
     "failedToDuplicateView": "Failed to duplicate view";
@@ -918,6 +1032,7 @@ type Messages = {
     "failedToRenameWorkspace": "Failed to rename matter";
     "failedToReorderViews": "Failed to reorder views";
     "failedToResendInvitation": "Failed to resend invitation";
+    "failedToSaveTemplate": "Failed to save template";
     "failedToSelectOrganization": "Failed to select organization";
     "failedToSendInvitation": "Failed to send invitation";
     "failedToSendVerificationCode": "Failed to send verification code";
@@ -956,7 +1071,6 @@ type Messages = {
     "confirmDeleteVersion": "This will permanently delete version {version}. This action cannot be undone.";
     "current": "Current";
     "deleteVersion": "Delete version";
-    "description": "Description";
     "descriptionPlaceholder": "Add a note about this version...";
     "downloadRedline": "Download redline";
     "dropToUploadVersion": "Drop to upload as new version";
@@ -1007,7 +1121,7 @@ type Messages = {
     "bold": "Bold";
     "boldShortcut": "Bold (Ctrl+B)";
     "bulletList": "Bullet List";
-    "checkingDocxEditDescription": "Stella is still checking whether this DOCX can be edited safely. Try again when the document finishes loading.";
+    "checkingDocxEditDescription": "stella is still checking whether this DOCX can be edited safely. Try again when the document finishes loading.";
     "checkingDocxEditTitle": "Checking document";
     "comment": "Comment";
     "comments": {
@@ -1022,6 +1136,9 @@ type Messages = {
       "unknownAuthor": "Unknown";
       "visibility": "Comments";
     };
+    "contentControlDateAriaLabel": "Pick a date";
+    "contentControlDropdownAriaLabel": "Dropdown options";
+    "contentControlDropdownNoOptions": "No options";
     "copy": "Copy";
     "copyLink": "Copy link";
     "cut": "Cut";
@@ -1038,13 +1155,12 @@ type Messages = {
     "doubleClickHeader": "Double-click to add header";
     "editAuthRequired": "Refresh stella and sign in again before editing this document.";
     "editDownloadFailed": "The document could not be downloaded for editing.";
-    "editFile": "Edit";
     "editLink": "Edit link";
     "editOpenFailed": "The document could not be opened for editing.";
     "editOpenFailedTitle": "Could not open DOCX";
     "editPermissionDenied": "You do not have permission to edit this document.";
     "editSaveFailedTitle": "Could not save DOCX";
-    "editSessionTakenOver": "This editing session was taken over elsewhere.";
+    "editSessionTakenOver": "Another tab, window, or device opened this document for editing, so this session was released. Unsaved local changes are preserved — reopen the doc to continue.";
     "findReplace": {
       "close": "Close search";
       "find": "Find";
@@ -1069,6 +1185,7 @@ type Messages = {
     "finishEditing": "Finish editing";
     "fontColor": "Font color";
     "fontGroup": "Font";
+    "fontSize": "Font size";
     "formattingToolbar": "Formatting toolbar";
     "hideDetails": "Hide details";
     "historyGroup": "History";
@@ -1135,7 +1252,6 @@ type Messages = {
   };
   "inspector": {
     "anonymization": {
-      "addAction": "Add";
       "addPlaceholder": "Term to anonymize";
       "contextMenuAddAction": "Anonymize selection";
       "deleteAction": "Delete term";
@@ -1169,7 +1285,6 @@ type Messages = {
     };
     "facet": {
       "anonymization": "Anonymization";
-      "preview": "Preview";
       "previewInFullViewToast": "Preview is the main view here. Click the minimize button to see it alongside metadata.";
     };
     "hidePane": "Hide pane";
@@ -1196,32 +1311,82 @@ type Messages = {
   };
   "knowledge": {
     "agentSkills": {
+      "aiRewrite": "Rewrite with AI";
+      "aiRewritePlaceholder": "Tighten the wording; add a step for citing sources…";
+      "aiRewritePrompt": "Describe how to rewrite this file";
+      "aiRewriteRunning": "Rewriting…";
+      "binaryPreviewUnsupported": "Binary preview is not supported. Edit this file by re-uploading the skill package.";
       "builtInBadge": "Built in";
       "builtInSection": "Built-in skills";
       "chooseFile": "Choose a file or drag it here";
+      "coaching": {
+        "publish": "Publish skill";
+      };
       "deleteConfirmDescription": "\"{name}\" will be removed from this workspace.";
       "deleteConfirmTitle": "Delete skill?";
+      "deleteFile": "Delete file";
+      "deleteFileConfirm": "Delete file? This cannot be undone.";
       "description": "Install SKILL.md packs that add specialist methods and read-only resources to chat.";
       "disableSkill": "Disable skill";
       "disabled": "Disabled";
+      "discardChanges": "Discard";
       "dropFile": "Drop SKILL.md or .zip here";
+      "editSkill": "Edit skill";
+      "editTitle": "Edit skill";
       "emptyDescription": "Upload a SKILL.md file, a zipped skill folder, or import a public GitHub skill URL.";
       "emptyTitle": "Install your first skill";
       "enableSkill": "Enable skill";
       "enabled": "Enabled";
+      "fileExists": "A file with this path already exists";
+      "filesHeading": "Files";
+      "formBody": "Instructions";
+      "formBodyHelp": "Markdown instructions the agent reads when the skill is invoked.";
+      "formDescription": "Description";
+      "formName": "Name";
+      "formVersion": "Version";
+      "formVersionPlaceholder": "1.0.0";
+      "generateAddResource": "Add file";
+      "generateDraft": "Draft skill";
+      "generateExamplesLabel": "Example triggers or scenarios (optional)";
+      "generateExamplesPlaceholder": "When a user asks about... When reviewing a contract that... ";
+      "generateFeedbackLabel": "Adjustments (optional)";
+      "generateFeedbackPlaceholder": "Tighten the trigger conditions; add a step about citing sources.";
+      "generateHelp": "Describe the skill you want. The model drafts a SKILL.md you can review and edit before installing.";
+      "generateIntentLabel": "What should this skill do?";
+      "generateIntentPlaceholder": "A skill that summarises court rulings into a short brief with the holding, reasoning, and citation.";
+      "generateResourceContentPlaceholder": "Markdown content for this file…";
+      "generateResourceDuplicatePathError": "Each companion file path must be unique.";
+      "generateResourcePathError": "Path must start with references/, prompts/, or knowledge/ and end in .md (lowercase letters, digits, hyphens, dots, underscores).";
+      "generateResourcesHelp": "Companion markdown files bundled alongside SKILL.md.";
+      "generateResourcesLabel": "Companion files";
+      "generateSkill": "Generate with AI";
+      "generateTitle": "Generate skill with AI";
+      "generating": "Generating…";
+      "howItRuns": "How it runs";
       "importHelp": "Paste a direct SKILL.md URL, a GitHub file URL, or a GitHub folder URL that contains SKILL.md.";
       "importSkill": "Import from URL";
       "importTitle": "Import skill";
+      "invalidPath": "Path must use lowercase letters, digits, dots, hyphens, or underscores";
       "license": "License: {license}";
+      "newFile": "New file";
+      "newFileFilenamePlaceholder": "notes.md";
+      "newFilePathPlaceholder": "folder/notes.md";
+      "newFolder": "New folder";
+      "pdfPreviewSoon": "PDF preview will be available once binary skill resources are supported.";
       "privateSection": "Your skills";
+      "regenerate": "Regenerate";
+      "renameFile": "Rename";
       "resources": "{count, plural, one {# resource} other {# resources}}";
       "scope": "Visibility";
       "scopePrivate": "Only me";
       "scopeTeam": "Everyone in the organisation";
+      "selectFileHint": "Select a file from the list to open it in the editor panel on the right.";
       "selectedFile": "Selected: {name}";
       "sourceUpload": "Uploaded";
       "sourceUrl": "Public URL";
       "teamSection": "Team skills";
+      "unsavedChanges": "Unsaved changes — discard?";
+      "uploadFile": "Upload file";
       "uploadHelp": "Use a SKILL.md file or a .zip folder containing SKILL.md and optional read-only resources.";
       "uploadSkill": "Upload skill";
       "uploadTitle": "Upload skill";
@@ -1231,7 +1396,7 @@ type Messages = {
     "mcp": {
       "addAndConnect": "Add and connect";
       "addServer": "Add server";
-      "addServerCardTitle": "Add new MCP server";
+      "addServerCardTitle": "Add new integration";
       "auth": {
         "bearer": "Bearer token";
         "none": "No auth";
@@ -1241,22 +1406,22 @@ type Messages = {
       "connect": "Connect";
       "connectedToast": "MCP connected";
       "connectedWithLastUsed": "Connected · last used {time}";
-      "description": "Manage the external MCP servers that can add tools to chat. Tokens are stored per user.";
+      "description": "Manage the integrations that can add tools to chat. Tokens are stored per user.";
       "detected": "Detected {authType}";
       "disable": "Disable";
       "disabled": "Connected · disabled";
       "disconnect": "Disconnect";
-      "emptyDescription": "Curated legal MCP connectors will appear here as they are enabled for your workspace.";
-      "emptyTitle": "No MCP connectors yet";
+      "emptyDescription": "Curated legal integrations will appear here as they are enabled for your workspace.";
+      "emptyTitle": "No integrations yet";
       "enable": "Enable";
-      "errorDescription": "The connector could not be updated.";
+      "errorDescription": "The integration could not be updated.";
       "errorTitle": "MCP failed";
-      "mcpExplainer": "MCP servers add external services to the chat that the AI can work with.";
+      "mcpExplainer": "Integrations connect external services to the chat that the AI can work with.";
       "namePlaceholder": "Display name";
       "needsReauth": "Needs reconnect";
       "off": "Off";
       "on": "On";
-      "otherTitle": "Other connectors";
+      "otherTitle": "Other integrations";
       "probe": "Probe";
       "recommendedBadge": "Recommended";
       "recommendedFor": "Recommended for {jurisdictions}";
@@ -1277,68 +1442,96 @@ type Messages = {
       };
       "caseLaw": {
         "description": "Court decisions and case law database";
-        "title": "Case Law";
       };
       "clauses": {
         "description": "Reusable clause library";
-        "title": "Clauses";
-      };
-      "connectors": {
-        "description": "Connect stella to external tools";
-        "title": "MCP";
       };
       "mcp": {
         "description": "Connect stella to external tools";
         "title": "MCP";
       };
       "prompts": {
-        "description": "Reusable instructions available from / in chat";
-        "title": "Prompts";
-      };
-      "skills": {
-        "description": "Focused AI capabilities for specialist workflows";
+        "description": "Reusable skills available from / in chat";
         "title": "Skills";
       };
       "templates": {
         "description": "Document templates with placeholders";
         "title": "Templates";
       };
+      "tools": {
+        "description": "Skills, integrations, and always-available tools the AI can use in chat";
+        "title": "Tools";
+      };
     };
     "skills": {
-      "addShortcut": "Add prompt";
+      "addShortcut": "Add skill";
+      "blueprintGallery": {
+        "cards": {
+          "answerFromSources": {
+            "blurb": "Answer a question grounded in authoritative sources.";
+            "inside": "a source hierarchy · a research prompt";
+            "title": "Answer from sources";
+          };
+          "checkAgainstRules": {
+            "blurb": "Review a document and flag what fails, with citations.";
+            "inside": "references by jurisdiction · a checklist · a review prompt";
+            "title": "Check against rules";
+          };
+          "intakeToDraft": {
+            "blurb": "Ask for the facts, then draft a document.";
+            "inside": "an interview · model documents · a draft prompt";
+            "title": "Intake to draft";
+          };
+        };
+        "insideLabel": "Inside";
+        "startBlank": "Start from blank";
+        "startBlankHint": "An empty skill, for when you know exactly what you want.";
+        "subtitle": "Pick a starting shape. We set up the folders and walk you through filling them in.";
+        "title": "How should your skill work?";
+      };
+      "commandConflict": "A skill with this / command already exists";
+      "commandHelp": "Type it in chat to run this skill.";
+      "commandLabel": "Chat command (optional)";
+      "commandPlaceholder": "e.g. summarize";
+      "createTitle": "New skill";
       "defaultBadge": "Default";
-      "deleteConfirmDescription": "This prompt will be permanently removed.";
-      "deleteConfirmTitle": "Delete prompt?";
-      "deleteShortcut": "Delete prompt";
-      "editShortcut": "Edit prompt";
-      "emptyDescription": "Create reusable prompts for the work your team repeats, from summaries to first-pass drafting instructions.";
-      "emptyState": "No prompts yet. Add your first one.";
-      "emptyTitle": "Create your first prompt";
-      "emptyVideoLabel": "Prompts overview";
+      "deleteConfirmDescription": "This skill will be permanently removed.";
+      "deleteConfirmTitle": "Delete skill?";
+      "deleteShortcut": "Delete skill";
+      "editShortcut": "Edit skill";
+      "emptyDescription": "Create reusable skills for the work your team repeats, from summaries to first-pass drafting instructions.";
+      "emptyState": "No skills yet. Add your first one.";
+      "emptyTitle": "Create your first skill";
+      "emptyVideoLabel": "Skills overview";
       "errors": {
-        "commandConflict": "A prompt with this / name already exists";
+        "commandConflict": "A skill with this / name already exists";
         "commandInvalid": "Use only lowercase letters, digits, hyphens and underscores";
-        "commandReserved": "\"/{command}\" is a reserved prompt";
+        "commandReserved": "\"/{command}\" is a reserved skill";
       };
       "form": {
-        "command": "Prompt shortcut";
-        "commandHint": "The / prompt name: lowercase letters, numbers, hyphens, and underscores only";
+        "command": "Skill shortcut";
+        "commandHint": "The / skill name: lowercase letters, numbers, hyphens, and underscores only";
         "commandPlaceholder": "e.g. summarize";
         "commandPrefix": "/";
         "description": "Description";
         "descriptionPlaceholder": "Short description shown in the picker";
         "name": "Name";
         "namePlaceholder": "e.g. Summarise document";
-        "prompt": "Prompt";
-        "promptPlaceholder": "The text inserted into the chat composer when this prompt is used";
+        "prompt": "Instructions";
+        "promptPlaceholder": "Instructions inserted into the chat composer when this skill is used";
         "scope": "Visibility";
         "scopePrivate": "Only me";
         "scopeTeam": "Everyone in the organisation";
       };
-      "privateSection": "Your prompts";
-      "shadowed": "Shadowed by team prompt";
-      "teamSection": "Team prompts";
+      "privateSection": "Your skills";
+      "shadowed": "Shadowed by team skill";
+      "teamSection": "Team skills";
     };
+  };
+  "markdownEditor": {
+    "rawLabel": "Markdown source";
+    "showFormatted": "Formatted";
+    "showRaw": "Show raw";
   };
   "navigation": {
     "account": "Account";
@@ -1372,7 +1565,30 @@ type Messages = {
     "aiConfigFailed": "Couldn't save your AI configuration. You can finish it from settings.";
     "aiSubtitle": "Bring your own API key. You can change providers and models anytime.";
     "aiTitle": "Connect your AI provider";
+    "catalogueAlwaysOn": "Always on";
+    "catalogueClearSearch": "Clear search";
+    "catalogueCommunityHeading": "Others";
+    "catalogueContinueWithCount": "Continue with {count, plural, one {# tool} other {# tools}}";
+    "catalogueDetailAbout": "About";
+    "catalogueDetailAuthor": "Author";
+    "catalogueDetailCost": "Cost";
+    "catalogueDetailJurisdictions": "Jurisdictions";
+    "catalogueDetailLicense": "License";
+    "catalogueDetailSetup": "Setup";
+    "catalogueFootnote": "You can build your own tools later directly in the app, or <link>request adding one via GitHub</link>.";
+    "cataloguePartial": "Installed {installed}, {failed} failed";
+    "cataloguePreviewBaseline": "Built-in";
+    "cataloguePreviewCount": "{count, plural, =0 {No capabilities} one {# capability} other {# capabilities}}";
+    "cataloguePreviewEmpty": "Pick from the recommended pack or discover more below.";
+    "cataloguePreviewYourStack": "Your stack";
+    "catalogueProposeTool": "Propose a new tool";
+    "catalogueSearchPlaceholder": "Search skills and tools";
+    "catalogueSubtitle": "stella can call these tools when answering. Pick the ones that match your practice; you can change this anytime in settings.";
+    "catalogueThirdPartyConfirm": "Add anyway";
+    "catalogueThirdPartyDisclaimer": "This is third-party code contributed by {author}. stella has not reviewed, endorsed, or maintained it. You are solely responsible for verifying it is suitable for your practice and compliant with your firm's policies. By adding it, you accept that you use it at your own risk.";
+    "catalogueTitle": "Customize your AI";
     "changeAnytime": "You can change this anytime in settings.";
+    "continue": "Continue";
     "creating": {
       "ai": "Saving AI configuration...";
       "done": "Finishing up...";
@@ -1396,7 +1612,7 @@ type Messages = {
     "jurisdictionSaveFailed": "Couldn't save your jurisdictions. You can finish this from settings.";
     "jurisdictionSearchLabel": "Search countries";
     "jurisdictionSearchPlaceholder": "Search countries";
-    "jurisdictionSubtitle": "Choose the countries you commonly work with. Stella will use this to customize your experience.";
+    "jurisdictionSubtitle": "Choose the countries you commonly work with. stella will use this to customize your experience.";
     "jurisdictionSuggested": "Suggested";
     "jurisdictionTitle": "Pick your practice jurisdictions";
     "orgNameLabel": "Team name";
@@ -1405,6 +1621,7 @@ type Messages = {
     "skipStep": "Skip this step";
     "someInvitesFailed": "{count, plural, one {# invitation failed} other {# invitations failed}}";
     "stepAi": "AI";
+    "stepCatalogue": "Catalogue";
     "stepDesktop": "Desktop";
     "stepJurisdiction": "Jurisdiction";
     "stepOrganization": "Team";
@@ -1428,7 +1645,7 @@ type Messages = {
       "configure": "Configure";
       "credentialsPanel": "Key";
       "customModelBadge": "Custom · {provider}";
-      "customModelDescription": "This model ID is not in Stella’s catalog. It will be passed to the selected provider as typed.";
+      "customModelDescription": "This model ID is not in stella’s catalog. It will be passed to the selected provider as typed.";
       "customModelHint": "No catalog match. Type any model ID; custom IDs are saved as typed.";
       "dataRegion": "Data region";
       "dataRegionDescription": "Routes AI calls through the selected region for data sovereignty.";
@@ -1439,11 +1656,10 @@ type Messages = {
       "description": "Bring your own API key or configure data sovereignty region.";
       "editProviders": "Edit providers";
       "endpoint": "Endpoint";
-      "endpointDescription": "Use the Azure OpenAI or Azure Foundry /openai/v1 endpoint. Stella stores the normalized endpoint.";
+      "endpointDescription": "Use the Azure OpenAI or Azure Foundry /openai/v1 endpoint. stella stores the normalized endpoint.";
       "keepSavedKey": "Keep saved key";
       "modelForRole": "{role} model";
       "modelIdPlaceholder": "Search models";
-      "modelRequired": "Required";
       "modelsDescription": "Choose a provider and one offered multimodal model for each AI category.";
       "modelsPanel": "Modes";
       "newApiKey": "New API key";
@@ -1468,7 +1684,7 @@ type Messages = {
       "providerForRole": "{role} provider";
       "providerKeyInvalid": "{provider} rejected the key. Double-check it before saving.";
       "providerKeyInvalidShort": "Invalid";
-      "providersDescription": "Add the provider credentials you want Stella to use.";
+      "providersDescription": "Add the provider credentials you want stella to use.";
       "providersPanel": "Providers";
       "regions": {
         "ch": "Switzerland (europe-west6)";
@@ -1562,6 +1778,7 @@ type Messages = {
     "escKey": "ESC";
     "kinds": {
       "caseLaw": "Case law";
+      "chat": "Chat";
       "contact": "Contact";
       "document": "Document";
       "folder": "Folder";
@@ -1594,7 +1811,7 @@ type Messages = {
   };
   "selfhost": {
     "dismissUpdate": "Dismiss update notice";
-    "updateAvailable": "Stella v{latest} is available. You're running v{installed}.";
+    "updateAvailable": "stella v{latest} is available. You're running v{installed}.";
     "viewReleaseNotes": "View release notes";
   };
   "settings": {
@@ -1611,7 +1828,6 @@ type Messages = {
       "preferredNamePlaceholder": "Your name";
       "profile": "Profile";
       "profileDescription": "Manage your personal preferences";
-      "sessions": "Sessions";
       "timezone": "Timezone";
       "timezoneDescription": "Used for timestamps in notifications and emails";
       "timezoneSaved": "Timezone updated";
@@ -1626,7 +1842,6 @@ type Messages = {
       "ai": "AI configuration";
       "aiDescription": "Bring your own API key or configure data sovereignty region";
       "anonymization": {
-        "addAction": "Add";
         "addPlaceholder": "Term to always mask (e.g. firm name)";
         "deleteAction": "Delete term";
         "description": "Curate the firm-wide deny list of terms the anonymization pipeline always masks, and import a starter list from CSV, TXT, or JSON";
@@ -1649,13 +1864,42 @@ type Messages = {
       "practiceJurisdictions": "Practice jurisdictions";
       "profile": "Profile";
       "profileDescription": "Update organization name";
-      "renameAction": "Rename";
+      "promptCaching": {
+        "description": "When on, stella adds cache markers so repeated AI requests over the same document or thread cost ~10x less and finish faster. Cached prompts live with the AI provider for up to 5 minutes, scoped to your organization. Turning off stops stella from sending cache markers, but providers may still cache opportunistically — only a Zero Data Retention contract with the provider fully disables server-side caching.";
+        "title": "Prompt caching";
+        "toggleLabel": "Allow prompt caching with AI providers";
+      };
       "renameDescription": "Members will see the new name immediately.";
       "renameTitle": "Rename organization";
       "renameTypeToConfirm": "Type the new name to confirm: {name}";
-      "title": "Organization";
+      "usage": "Usage";
+      "usageDescription": "Usage limits and entitlement state for this organisation";
+      "usageEmptyDescription": "Configure a usage entitlement to enable metered AI features for this organisation.";
+      "usageEmptyTitle": "No usage entitlement";
+      "usageEndsOnTemplate": "Ends on {date}";
+      "usageLimitAvailable": "Available";
+      "usageLimitDescriptionEntitlementInactive": "The organisation's usage entitlement is paused or inactive. Review hosted usage management or contact an operator.";
+      "usageLimitDescriptionNoEntitlement": "AI features need an active usage entitlement for this organisation.";
+      "usageLimitDescriptionUsageLimitExceeded": "This action cannot run with the organisation's current usage state.";
+      "usageLimitNeeded": "Needed";
+      "usageLimitNotNow": "Not now";
+      "usageLimitTitleEntitlementInactive": "Usage entitlement is not active";
+      "usageLimitTitleNoEntitlement": "Usage entitlement required";
+      "usageLimitTitleUsageLimitExceeded": "AI usage limit reached";
+      "usageLoading": "Loading…";
+      "usageManage": "Manage hosted usage";
+      "usageManageError": "Could not open hosted usage management";
+      "usageManuallyManaged": "Manually managed";
+      "usageSeats": "{count, plural, one {# seat} other {# seats}}";
+      "usageStatusActive": "Active";
+      "usageStatusCancelled": "Cancelled";
+      "usageStatusPastDue": "Past due";
+      "usageStatusPaused": "Paused";
+      "usageStatusTrialing": "Trialing";
+      "usageUnitCount": "{count, plural, one {# unit} other {# units}}";
+      "usageUnitsBalanceTemplate": "{remaining} units available";
+      "usageUnitsThisPeriod": "Usage units this period";
     };
-    "title": "Settings";
   };
   "success": {
     "aiConfigDeleted": "AI configuration removed";
@@ -1675,6 +1919,7 @@ type Messages = {
     "otherSessionsRevoked": "Other sessions revoked";
     "partyAdded": "Party added";
     "partyRemoved": "Party removed";
+    "promptCachingUpdated": "Prompt caching preference updated";
     "roleUpdated": "Role updated";
     "sessionRevoked": "Session revoked";
     "taskCreated": "Task created";
@@ -1762,7 +2007,6 @@ type Messages = {
     "fillForm": "Fill template";
     "generate": "Generate document";
     "generating": "Generating...";
-    "history": "History";
     "inputTypes": {
       "boolean": "Yes / No";
       "date": "Date";
@@ -1776,10 +2020,8 @@ type Messages = {
     "newTemplate": "New template";
     "noTemplates": "No templates yet";
     "pdfConversionFailed": "Failed to convert to PDF";
-    "preview": "Preview";
     "previewEmpty": "No content to preview";
     "previewFailed": "Failed to generate preview";
-    "previewFill": "Preview";
     "previewFillLoading": "Generating preview...";
     "previewFillTitle": "Fill preview";
     "previewSectionBody": "Body";
@@ -1810,6 +2052,41 @@ type Messages = {
     "versionsEmpty": "No version history";
     "viewVersion": "View";
   };
+  "translate": {
+    "dialog": {
+      "description": "Translate the open document via DeepL. The translated copy lands in this matter as a new document.";
+      "noLanguagesFound": "No languages found";
+      "notConfigured": "DeepL is not configured for this organisation. Add a DeepL API key in organisation settings to enable translation.";
+      "selectPlaceholder": "Choose a language";
+      "targetLanguage": "Target language";
+      "title": "Translate document";
+      "translating": "Translating…";
+    };
+    "error": {
+      "title": "Translation failed";
+    };
+    "settings": {
+      "apiKeyLabel": "API key";
+      "apiKeyPlaceholder": "00000000-0000-0000-0000-000000000000:fx";
+      "currentKey": "Stored key";
+      "description": "Configure a DeepL API key to enable document translation. Free and Pro keys are both supported.";
+      "remove": "Remove";
+      "removed": "DeepL key removed";
+      "removedDescription": "Translation is disabled until a new key is added.";
+      "removing": "Removing…";
+      "save": "Save";
+      "saved": "DeepL key saved";
+      "savedDescription": "Translations are now available.";
+      "saving": "Saving…";
+      "tierFree": "Free";
+      "tierPro": "Pro";
+      "title": "DeepL translation";
+    };
+    "success": {
+      "description": "Saved as \"{fileName}\"";
+      "title": "Translation ready";
+    };
+  };
   "validation": {
     "organizationNameRequired": "Organization name is required";
     "slugFormat": "Slug must be lowercase letters, numbers, and hyphens";
@@ -1824,6 +2101,7 @@ type Messages = {
       "copied": "Copied to Matter";
       "copyOption": "Copy (keep original)";
       "description": "Copy or move \"{name}\" to another Matter";
+      "descriptionCount": "Copy or move {count, plural, one {# item} other {# items}} to another Matter";
       "menuItem": "Copy/Move to Matter";
       "moveButton": "Move";
       "moveOption": "Move (delete original)";
@@ -1905,7 +2183,7 @@ type Messages = {
         "takeoverWaiting": "Waiting for response";
         "takeoverWaitingDescription": "Asking {name} to release the lock...";
         "unavailableDescription": "Start stella desktop and keep it running before using desktop editing.";
-        "unavailableTitle": "Stella desktop is not available.";
+        "unavailableTitle": "stella desktop is not available.";
         "updateRequiredDescription": "stella desktop needs an update. It will update automatically when active desktop edits are finished; try again after it restarts.";
         "updateRequiredTitle": "Update stella desktop";
       };
@@ -1921,6 +2199,17 @@ type Messages = {
       "uploading": "Uploading files";
       "uploadingDescription": "Don't close this page until the files are uploaded";
       "uploadingProgress": "{completed, number} of {total, number} uploaded";
+      "versionOrNewFile": {
+        "createNewOption": "Create new file";
+        "description": "You dropped \"{fileName}\" onto an existing document.";
+        "extensionMismatch": "Extension mismatch: expected {expected}, got {actual}";
+        "extensionMismatchError": "File extension does not match the existing document";
+        "noExtension": "no extension";
+        "replaceOption": "Upload as new version";
+        "title": "Upload new version or create new file?";
+      };
+      "versionUploadFailed": "Version upload failed";
+      "versionUploaded": "New version uploaded";
       "xfaFormNotSupported": "This PDF contains an XFA form. Preview may not display correctly.";
     };
     "filesystem": {
@@ -1932,6 +2221,51 @@ type Messages = {
       "newSubfolder": "New subfolder";
       "noFilesYet": "No files yet";
       "version": "Version";
+    };
+    "filters": {
+      "chips": {
+        "client": "{count, plural, one {Client: # selected} other {Clients: # selected}}";
+        "createdAt": "Created: {label}";
+        "items": "Items: {label}";
+        "lastActivityAt": "Last active: {label}";
+        "lead": "Lead: {label}";
+        "leadAny": "any";
+        "leadNone": "none";
+        "team": "{count, plural, one {Team: # selected} other {Team: # selected}}";
+      };
+      "clear": "Clear filter";
+      "clearAll": "Clear all filters";
+      "date": {
+        "custom": "Custom range…";
+        "customRange": "{from} – {to}";
+        "from": "From {date}";
+        "last30d": "Last 30 days";
+        "last7d": "Last 7 days";
+        "thisMonth": "This month";
+        "thisWeek": "This week";
+        "to": "Until {date}";
+      };
+      "from": "From";
+      "items": {
+        "between": "{from}–{to}";
+        "gte": "Min";
+        "lte": "Max";
+        "max": "≤ {value}";
+        "min": "≥ {value}";
+      };
+      "noMatches": "No matches";
+      "searchClients": "Search clients…";
+      "team": {
+        "filterAsLead": "Set as lead filter";
+        "hasLead": "Has any lead";
+        "lead": "Lead";
+        "leadActive": "Lead";
+        "leadInactive": "Set lead";
+        "members": "Members";
+        "noLead": "No lead";
+        "searchMembers": "Search members…";
+      };
+      "to": "To";
     };
     "generatingCitations": "Generating citations...";
     "importOrganizer": {
@@ -1958,7 +2292,6 @@ type Messages = {
       "organized": "Files organized";
       "regenerate": "Regenerate";
       "reset": "Reset to AI suggestions";
-      "retry": "Retry";
       "selectedOfTotal": "{selected, number} / {total, number}";
       "summaryToMove": "to move";
       "summaryToRename": "to rename";
@@ -2001,6 +2334,13 @@ type Messages = {
       "usePropertyHint": "Use Kind, Author, or a single-select property";
     };
     "lastActive": "Last active {time}";
+    "lead": "Lead";
+    "leadEmpty": "No lead";
+    "leadPicker": {
+      "noMatchingMembers": "No matching members";
+      "placeholder": "Search members…";
+      "title": "Set lead";
+    };
     "lockMatter": "Lock";
     "matterInfo": "Matter info";
     "mattersCount": "{count, plural, one {# matter} other {# matters}}";
@@ -2083,7 +2423,6 @@ type Messages = {
       "entitySidebar": "Entity details";
       "evidence": "Justification";
       "fullView": "Full view";
-      "goBack": "Go back";
       "incorrectPassword": "Incorrect password. Please try again.";
       "nextPage": "Next page";
       "openFullView": "Open full view";
@@ -2104,10 +2443,20 @@ type Messages = {
       "addReadingSource": "add";
       "aiExtraction": "AI extraction";
       "autoPromptFailed": "Couldn't generate a prompt.";
-      "chipDate": "Date";
-      "chipMulti": "Multi option";
+      "bulk": {
+        "addAnother": "Add another column";
+        "createFailed": "Couldn't create columns";
+        "createMany": "Create {count} columns";
+        "createOne": "Create column";
+        "createdMany": "Created {count} columns";
+        "createdOne": "Column created";
+        "promptPlaceholder": "What should this column extract? Refine in the column dialog to use / and @.";
+        "title": "Add columns";
+      };
+      "chipManual": "Without AI";
+      "chipMulti": "Tags";
       "chipNumber": "Number";
-      "chipSingle": "Single option";
+      "chipSingle": "Tag";
       "chipText": "Text";
       "clip": "Clip";
       "composerTitle": "Tell stella what to find";
@@ -2115,7 +2464,6 @@ type Messages = {
       "conditions": "Conditions ({count})";
       "createColumn": "Create column";
       "createOption": "Create \"{option}\"";
-      "date": "Date";
       "defaultNames": {
         "file": "File Property";
         "multiSelect": "Multi Select Property";
@@ -2131,7 +2479,6 @@ type Messages = {
       "editConditions": "Edit conditions";
       "editConditionsDescription": "Set conditions for when this property should be generated.";
       "enterAValue": "Enter a value";
-      "error": "Error";
       "extractEntityType": "Extract entity type";
       "extractEntityTypeDescription": "Create an AI-extracted table column.";
       "extractionInstruction": "AI instruction";
@@ -2149,6 +2496,7 @@ type Messages = {
       "int": "Integer";
       "keepEmpty": "Keep Empty";
       "manualColumn": "Manual column";
+      "markAllAsReviewed": "Mark all as reviewed";
       "multiSelect": "Multi Select";
       "nameProperty": "Name property";
       "newColumn": "New column";
@@ -2164,11 +2512,11 @@ type Messages = {
       "previewSkipped": "No applicable input on this document.";
       "previewSubject": "Try it on a sample";
       "previewUnsupported": "Preview unsupported for this document type.";
-      "readingFrom": "Reading from";
+      "readingFrom": "AI reads from";
       "referencesItself": "Property references itself through other properties";
+      "rerunColumn": "Rerun column";
       "resultType": "Result type";
-      "returnsLabel": "Returns";
-      "saveChanges": "Save changes";
+      "returnsLabel": "Format";
       "scopeFile": "Current file";
       "scopeFileDescription": "Use {property} and run this file now.";
       "scopeFileUnavailable": "No file source is available for this view.";
@@ -2183,6 +2531,7 @@ type Messages = {
       "sortAscendingDate": "Oldest first";
       "sortDescending": "Sort descending";
       "sortDescendingDate": "Newest first";
+      "suggestWithAI": "Suggest with AI";
       "text": "Text";
       "typeChangeWarning": "Existing data will be cleared and rebuilt on save.";
       "unnamedColumn": "this column";
@@ -2213,11 +2562,17 @@ type Messages = {
         "verified": "Verified";
         "verifiedDescription": "Manually confirmed.";
       };
+      "lock": {
+        "lock": "Lock cell";
+        "locked": "Locked";
+        "unlock": "Unlock cell";
+      };
       "reorderReadOnly": "Table rows follow the current sort";
       "tightContent": "Tight";
       "wrapContent": "Wrap content";
     };
     "tasksCount": "{count, plural, one {# agenda item} other {# agenda items}}";
+    "team": "Team";
     "tools": {
       "aiModel": "AI Model";
       "manualInput": "Manually";
@@ -2237,7 +2592,6 @@ type Messages = {
         "noDates": "No date property selected";
         "showAdditionalDates": "Additional dates";
         "showBy": "Show by";
-        "today": "Today";
         "updatedAt": "Last updated";
         "week": "Week";
         "year": "Year";
@@ -2264,7 +2618,21 @@ type Messages = {
         "timeline": "Timeline";
       };
       "newView": "New {layout}";
+      "saveAsTemplate": "Save as template…";
       "selectProperty": "Select property";
+      "templates": {
+        "created": "Template saved";
+        "delete": "Delete template";
+        "deleteConfirmDescription": "Delete template “{name}”? This cannot be undone.";
+        "deleted": "Template deleted";
+        "description": "Save the current view’s layout as a template you can reuse.";
+        "empty": "No templates yet. Save the current view to create one.";
+        "nameLabel": "Template name";
+        "namePlaceholder": "e.g. Active matters";
+        "save": "Save template";
+        "title": "View templates";
+        "use": "Use template";
+      };
       "timeline": {
         "day": "Day";
         "endDate": "End date";
@@ -2275,12 +2643,24 @@ type Messages = {
         "startDate": "Start date";
         "week": "Week";
       };
+      "useTemplate": "Use template…";
     };
     "workflow": {
       "allManualInputsDescription": "Please add at least one AI property to start the workflow";
       "allManualInputsTitle": "All properties are manual inputs";
       "generate": "Generate";
+      "largeRunPrompt": {
+        "description": "This will queue AI extraction for {count} entities. Start it only if you want to process this many files now.";
+        "start": "Start extraction";
+        "title": "Start AI extraction?";
+      };
       "noFieldsToProcess": "No fields to process";
+      "serviceTierPrompt": {
+        "description": "This workflow will queue AI extraction for {count} entities. Start now with standard credits, or use reduced credits and wait longer.";
+        "flex": "Use reduced credits";
+        "standard": "Start now";
+        "title": "Use reduced credits?";
+      };
       "someFieldsOutdatedDescription": "Please update Single and Multi Select fields to match their property options";
       "someFieldsOutdatedTitle": "Some fields are outdated";
       "startedSuccessfully": "Workflow started successfully";

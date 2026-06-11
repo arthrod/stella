@@ -2,9 +2,11 @@ import Elysia from "elysia";
 
 import deleteThread from "@/api/handlers/chat/delete-thread";
 import getMessages from "@/api/handlers/chat/get-messages";
+import getThreadRecap from "@/api/handlers/chat/get-thread-recap";
 import getThreads from "@/api/handlers/chat/get-threads";
 import resolveFileThread from "@/api/handlers/chat/resolve-file-thread";
 import sendMessage from "@/api/handlers/chat/send-message";
+import updateThread from "@/api/handlers/chat/update-thread";
 import { permissionMacro, workspaceAccessMacro } from "@/api/lib/auth";
 
 export const chatRoute = new Elysia({ prefix: "/chat" })
@@ -29,8 +31,19 @@ export const chatRoute = new Elysia({ prefix: "/chat" })
     permissions: deleteThread.config.permissions,
     query: deleteThread.config.query,
   })
+  .patch("/threads/:threadId", updateThread.handler, {
+    body: updateThread.config.body,
+    params: updateThread.config.params,
+    permissions: updateThread.config.permissions,
+    query: updateThread.config.query,
+  })
   .get("/threads/:threadId/messages", getMessages.handler, {
     params: getMessages.config.params,
     permissions: getMessages.config.permissions,
     query: getMessages.config.query,
+  })
+  .post("/threads/:threadId/recap", getThreadRecap.handler, {
+    params: getThreadRecap.config.params,
+    permissions: getThreadRecap.config.permissions,
+    query: getThreadRecap.config.query,
   });

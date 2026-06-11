@@ -245,8 +245,8 @@ function RouteComponent() {
     return (
       <div className="flex flex-1 items-center justify-center p-8">
         <div className="flex w-full max-w-md flex-col items-center gap-4 text-center">
-          <div className="flex size-12 items-center justify-center rounded-lg bg-emerald-100 dark:bg-emerald-900/30">
-            <CheckCircle2Icon className="size-6 text-emerald-600 dark:text-emerald-400" />
+          <div className="bg-success/15 dark:bg-success/15 flex size-12 items-center justify-center rounded-lg">
+            <CheckCircle2Icon className="text-success size-6" />
           </div>
           <div>
             <h2 className="text-base font-semibold">
@@ -548,8 +548,7 @@ const TemplateDetail = ({
     (e: React.KeyboardEvent) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        // eslint-disable-next-line @typescript-eslint/no-floating-promises
-        saveRename();
+        void saveRename();
         return;
       }
       if (e.key === "Escape") {
@@ -754,9 +753,9 @@ const TemplateDetail = ({
           <Tabs defaultValue="fields">
             <TabsList variant="underline">
               <TabsTab value="fields">{t("templates.fields")}</TabsTab>
-              <TabsTab value="preview">{t("templates.preview")}</TabsTab>
+              <TabsTab value="preview">{t("common.preview")}</TabsTab>
               <TabsTab value="clauses">{t("common.clauses")}</TabsTab>
-              <TabsTab value="history">{t("templates.history")}</TabsTab>
+              <TabsTab value="history">{t("common.history")}</TabsTab>
             </TabsList>
 
             <TabsPanel value="fields">

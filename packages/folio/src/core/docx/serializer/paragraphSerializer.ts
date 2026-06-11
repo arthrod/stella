@@ -14,6 +14,7 @@ import type {
   Paragraph,
   ParagraphContent,
   ParagraphFormatting,
+  ParagraphMarkChange,
   Run,
   Hyperlink,
   BookmarkStart,
@@ -32,6 +33,7 @@ import type {
   BorderSpec,
   ShadingProperties,
   TextFormatting,
+  TrackedChangeInfo,
 } from "../../types/document";
 // oxlint-disable-next-line import/no-cycle
 import { serializeRun, serializeTextFormatting } from "./runSerializer";
@@ -409,11 +411,36 @@ function serializeFrameProperties(frame: ParagraphFormatting["frame"]): string {
 /**
  * Serialize paragraph formatting properties to w:pPr XML
  */
+function serializeTrackedChangeAttrs(info: TrackedChangeInfo): string {
+  const parts = [`w:id="${info.id}"`, `w:author="${escapeXml(info.author)}"`];
+  if (info.date !== undefined) {
+    parts.push(`w:date="${escapeXml(info.date)}"`);
+  }
+  return parts.join(" ");
+}
+
+function serializeParagraphMarkChange(mark: ParagraphMarkChange): string {
+  const attrs = serializeTrackedChangeAttrs(mark.info);
+  return `<w:${mark.kind} ${attrs}/>`;
+}
+
 export function serializeParagraphFormatting(
   formatting: ParagraphFormatting | undefined,
   propertyChanges?: ParagraphPropertyChange[],
+  pPrMark?: ParagraphMarkChange,
 ): string {
   const parts: string[] = [];
+
+  // Emit a boolean toggle: a bare element for true, `w:val="0"` for an explicit
+  // false (which disables a value inherited from a style, so the override
+  // survives round-trip), and nothing when absent ("inherit").
+  const pushToggle = (name: string, value: boolean | undefined): void => {
+    if (value === true) {
+      parts.push(`<w:${name}/>`);
+    } else if (value === false) {
+      parts.push(`<w:${name} w:val="0"/>`);
+    }
+  };
 
   if (formatting) {
     // Style reference (must be first)
@@ -421,22 +448,11 @@ export function serializeParagraphFormatting(
       parts.push(`<w:pStyle w:val="${escapeXml(formatting.styleId)}"/>`);
     }
 
-    // Keep next/lines/widow
-    if (formatting.keepNext) {
-      parts.push("<w:keepNext/>");
-    }
-
-    if (formatting.keepLines) {
-      parts.push("<w:keepLines/>");
-    }
-
-    if (formatting.contextualSpacing) {
-      parts.push("<w:contextualSpacing/>");
-    }
-
-    if (formatting.pageBreakBefore) {
-      parts.push("<w:pageBreakBefore/>");
-    }
+    // Keep next/lines, contextual spacing, page break before.
+    pushToggle("keepNext", formatting.keepNext);
+    pushToggle("keepLines", formatting.keepLines);
+    pushToggle("contextualSpacing", formatting.contextualSpacing);
+    pushToggle("pageBreakBefore", formatting.pageBreakBefore);
 
     // Frame properties
     const frameXml = serializeFrameProperties(formatting.frame);
@@ -445,11 +461,7 @@ export function serializeParagraphFormatting(
     }
 
     // Widow control
-    if (formatting.widowControl === false) {
-      parts.push('<w:widowControl w:val="0"/>');
-    } else if (formatting.widowControl === true) {
-      parts.push("<w:widowControl/>");
-    }
+    pushToggle("widowControl", formatting.widowControl);
 
     // Numbering
     const numPrXml = serializeNumbering(formatting.numPr);
@@ -475,15 +487,9 @@ export function serializeParagraphFormatting(
       parts.push(tabsXml);
     }
 
-    // Suppress line numbers
-    if (formatting.suppressLineNumbers) {
-      parts.push("<w:suppressLineNumbers/>");
-    }
-
-    // Suppress auto hyphens
-    if (formatting.suppressAutoHyphens) {
-      parts.push("<w:suppressAutoHyphens/>");
-    }
+    // Suppress line numbers / auto hyphens
+    pushToggle("suppressLineNumbers", formatting.suppressLineNumbers);
+    pushToggle("suppressAutoHyphens", formatting.suppressAutoHyphens);
 
     // Spacing
     const spacingXml = serializeSpacing(formatting);
@@ -498,9 +504,7 @@ export function serializeParagraphFormatting(
     }
 
     // Text direction (bidi)
-    if (formatting.bidi) {
-      parts.push("<w:bidi/>");
-    }
+    pushToggle("bidi", formatting.bidi);
 
     // Justification
     if (formatting.alignment) {
@@ -520,16 +524,23 @@ export function serializeParagraphFormatting(
     // run-in merge. Without serializing it back, saving a doc
     // through Folio loses the soft paragraph break and the heading
     // becomes a normal separate paragraph in Word.
-    if (formatting.runProperties || formatting.runInWithNext) {
+    //
+    // EG_ParaRPrTrackChanges (ECMA-376 §17.13.5 / wml.xsd:1837) puts
+    // <w:ins>/<w:del> FIRST inside the paragraph mark's rPr; strict
+    // readers reject other orderings.
+    if (pPrMark || formatting.runProperties || formatting.runInWithNext) {
+      const pPrMarkXml = pPrMark ? serializeParagraphMarkChange(pPrMark) : "";
       const innerRPr = formatting.runProperties
         ? extractRPrInner(serializeTextFormatting(formatting.runProperties))
         : "";
       const specVanishXml = formatting.runInWithNext ? "<w:specVanish/>" : "";
-      const fullInner = `${innerRPr}${specVanishXml}`;
+      const fullInner = `${pPrMarkXml}${innerRPr}${specVanishXml}`;
       if (fullInner.length > 0) {
         parts.push(`<w:rPr>${fullInner}</w:rPr>`);
       }
     }
+  } else if (pPrMark) {
+    parts.push(`<w:rPr>${serializeParagraphMarkChange(pPrMark)}</w:rPr>`);
   }
 
   if (propertyChanges && propertyChanges.length > 0) {
@@ -794,6 +805,14 @@ function serializeInlineSdt(sdt: InlineSdt): string {
   if (props.lock && props.lock !== "unlocked") {
     prParts.push(`<w:lock w:val="${props.lock}"/>`);
   }
+  if (props.placeholder) {
+    // OOXML shape: `<w:placeholder><w:docPart w:val="..."/></w:placeholder>`.
+    // The placeholder identifier lives in `w:val` on the nested `w:docPart`,
+    // mirroring the parse in `paragraphParser.ts`.
+    prParts.push(
+      `<w:placeholder><w:docPart w:val="${escapeXml(props.placeholder)}"/></w:placeholder>`,
+    );
+  }
   if (props.showingPlaceholder) {
     prParts.push("<w:showingPlcHdr/>");
   }
@@ -803,13 +822,25 @@ function serializeInlineSdt(sdt: InlineSdt): string {
     case "plainText":
       prParts.push("<w:text/>");
       break;
-    case "date":
-      if (props.dateFormat) {
-        prParts.push(`<w:date w:fullDate="${escapeXml(props.dateFormat)}"/>`);
+    case "date": {
+      // `w:date@w:fullDate` is the ISO-8601 bound value; `w:dateFormat` is
+      // the display format. Older code (before the shared parser
+      // split these) wrote the format into `w:fullDate`, which corrupted
+      // round-trip — keep them on separate model fields and emit each
+      // into its right element.
+      const fullDateAttr = props.dateValueISO
+        ? ` w:fullDate="${escapeXml(props.dateValueISO)}"`
+        : "";
+      const formatChild = props.dateFormat
+        ? `<w:dateFormat w:val="${escapeXml(props.dateFormat)}"/>`
+        : "";
+      if (fullDateAttr || formatChild) {
+        prParts.push(`<w:date${fullDateAttr}>${formatChild}</w:date>`);
       } else {
         prParts.push("<w:date/>");
       }
       break;
+    }
     case "dropdown": {
       const items = (props.listItems ?? [])
         .map(
@@ -849,11 +880,31 @@ function serializeInlineSdt(sdt: InlineSdt): string {
   }
 
   const contentXml = sdt.content
-    .map((item) => {
-      if (item.type === "run") {
-        return serializeRun(item);
+    .map((item): string => {
+      switch (item.type) {
+        case "run":
+          return serializeRun(item);
+        case "hyperlink":
+          return serializeHyperlink(item);
+        case "simpleField":
+          return serializeSimpleField(item);
+        case "complexField":
+          return serializeComplexField(item);
+        case "inlineSdt":
+          return serializeInlineSdt(item);
+        case "mathEquation":
+          // Round-trip the raw OMML XML directly
+          return item.ommlXml || "";
+        default: {
+          // Exhaustiveness check: if a new type is added to
+          // InlineSdt['content'] (see docx-core/src/model/content.ts)
+          // without a matching case here, TypeScript errors out instead
+          // of silently dropping content on save. Keep this in sync with
+          // the filter in createInlineSdtFromNode (fromProseDoc.ts).
+          const _exhaustive: never = item;
+          return _exhaustive;
+        }
       }
-      return serializeHyperlink(item);
     })
     .join("");
 
@@ -871,6 +922,14 @@ function serializeMoveRangeStart(
 /**
  * Serialize a tracked change wrapper (ins/del/moveFrom/moveTo)
  */
+function rewriteRunTextAsDeleted(xml: string): string {
+  return xml
+    .replace(/<w:t\b/gu, "<w:delText")
+    .replace(/<\/w:t>/gu, "</w:delText>")
+    .replace(/<w:instrText\b/gu, "<w:delInstrText")
+    .replace(/<\/w:instrText>/gu, "</w:delInstrText>");
+}
+
 function serializeTrackedChange(
   tag: "ins" | "del" | "moveFrom" | "moveTo",
   change: Insertion | Deletion | MoveFrom | MoveTo,
@@ -891,15 +950,43 @@ function serializeTrackedChange(
     attrs.push(`w:date="${escapeXml(normalizedDate)}"`);
   }
 
+  const serializeDeletedRun = (run: Run): string => {
+    const xml = serializeRun(run);
+    const hasDrawingContent = run.content.some(
+      (c) => c.type === "drawing" || c.type === "shape",
+    );
+    if (!hasDrawingContent) {
+      return rewriteRunTextAsDeleted(xml);
+    }
+
+    const hasTextualContent = run.content.some(
+      (c) => c.type !== "drawing" && c.type !== "shape",
+    );
+    if (!hasTextualContent) {
+      return xml;
+    }
+
+    return run.content
+      .map((content) => {
+        const contentXml = serializeRun({ ...run, content: [content] });
+        if (content.type === "drawing" || content.type === "shape") {
+          return contentXml;
+        }
+        return rewriteRunTextAsDeleted(contentXml);
+      })
+      .join("");
+  };
+
   const contentXml = change.content
     .map((item) => {
       if (item.type === "run") {
+        // A deleted drawing/shape run keeps its content verbatim: a picture
+        // has no `<w:t>`, and a shape's nested textbox text
+        // (`<w:txbxContent><w:t>`) must NOT be rewritten to `<w:delText>` —
+        // that markup belongs only to a run's own deleted text, not to a
+        // nested textbox document. eigenpal #641.
         if (tag === "del" || tag === "moveFrom") {
-          return serializeRun(item)
-            .replace(/<w:t\b/gu, "<w:delText")
-            .replace(/<\/w:t>/gu, "</w:delText>")
-            .replace(/<w:instrText\b/gu, "<w:delInstrText")
-            .replace(/<\/w:instrText>/gu, "</w:delInstrText>");
+          return serializeDeletedRun(item);
         }
         return serializeRun(item);
       }
@@ -995,6 +1082,7 @@ export function serializeParagraph(paragraph: Paragraph): string {
   const pPrXml = serializeParagraphFormatting(
     paragraph.formatting,
     paragraph.propertyChanges,
+    paragraph.pPrMark,
   );
   const sectionPropertiesXml = serializeSectionProperties(
     paragraph.sectionProperties,

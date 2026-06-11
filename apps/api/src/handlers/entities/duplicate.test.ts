@@ -8,6 +8,7 @@ import {
   fields,
 } from "@/api/db/schema";
 import type { FieldContent } from "@/api/db/schema-validators";
+import { createAuditRecorder } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { toSafeId } from "@/api/lib/branded-types";
 import { createScopedDbMock } from "@/api/tests/scoped-db-mock";
@@ -16,6 +17,14 @@ const processExtractionMock = mock(async () => {});
 
 void mock.module("@/api/lib/search/process-extraction", () => ({
   processExtraction: processExtractionMock,
+}));
+
+const fileMock = mock(() => ({}));
+const writeMock = mock(async () => undefined);
+const s3DeleteMock = mock(async () => undefined);
+
+void mock.module("@/api/lib/s3", () => ({
+  getS3: () => ({ delete: s3DeleteMock, file: fileMock, write: writeMock }),
 }));
 
 const { default: duplicateEntity } = await import("./duplicate");
@@ -49,6 +58,10 @@ type InsertedEntity = {
   docSequence?: number | null;
 };
 
+type InsertedField = {
+  content: FieldContent;
+};
+
 const isInsertedEntity = (value: unknown): value is InsertedEntity =>
   typeof value === "object" &&
   value !== null &&
@@ -56,6 +69,9 @@ const isInsertedEntity = (value: unknown): value is InsertedEntity =>
   "kind" in value &&
   "name" in value &&
   "parentId" in value;
+
+const isInsertedField = (value: unknown): value is InsertedField =>
+  typeof value === "object" && value !== null && "content" in value;
 
 const isArrayWithLength = (
   value: unknown,
@@ -92,18 +108,29 @@ const createContext = ({
   safeDb,
 }: {
   safeDb: Parameters<typeof duplicateEntity.handler>[0]["safeDb"];
-}): Parameters<typeof duplicateEntity.handler>[0] =>
+}): Parameters<typeof duplicateEntity.handler>[0] => {
+  const recorderBindings = {
+    organizationId,
+    workspaceId,
+    userId,
+    request: new Request("https://example.test/v1/entities/duplicate"),
+    server: null,
+  };
+
   // eslint-disable-next-line typescript/no-unsafe-type-assertion -- test fixture only provides fields touched by the handler
-  ({
+  return {
     workspaceId,
     user: { id: userId },
     session: { activeOrganizationId: organizationId },
     memberRole: { role: "owner" },
     body: { entityId: rootFolderId },
-    request: new Request("https://example.test/v1/entities/duplicate"),
+    request: recorderBindings.request,
     route: "/v1/entities/:workspaceId/duplicate",
     safeDb,
-  }) as Parameters<typeof duplicateEntity.handler>[0];
+    recordAuditEvent: createAuditRecorder(recorderBindings),
+    createAuditRecorder: () => createAuditRecorder(recorderBindings),
+  } as Parameters<typeof duplicateEntity.handler>[0];
+};
 
 describe("duplicate entity", () => {
   test("duplicates folder trees instead of rejecting folders", async () => {
@@ -178,6 +205,22 @@ describe("duplicate entity", () => {
     expect(insertedAuditLogs).toHaveLength(1);
     const auditBatch = insertedAuditLogs.at(0);
     expect(isArrayWithLength(auditBatch, 3)).toBe(true);
+    const fieldBatch = insertedFields.at(0);
+    expect(isArrayWithLength(fieldBatch, 1)).toBe(true);
+    if (!isArrayWithLength(fieldBatch, 1)) {
+      throw new Error("Expected duplicated file field batch");
+    }
+
+    const duplicatedFileField = fieldBatch.at(0);
+    expect(isInsertedField(duplicatedFileField)).toBe(true);
+    if (!isInsertedField(duplicatedFileField)) {
+      throw new Error("Expected duplicated file field");
+    }
+    expect(duplicatedFileField.content.type).toBe("file");
+    if (duplicatedFileField.content.type === "file") {
+      expect(duplicatedFileField.content.id).not.toBe(fileContent.id);
+    }
+    expect(writeMock).toHaveBeenCalledTimes(1);
 
     const rootDuplicate = insertedEntities.at(0);
     const documentDuplicate = insertedEntities.at(1);

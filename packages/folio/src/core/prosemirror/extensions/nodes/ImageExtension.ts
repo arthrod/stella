@@ -2,6 +2,7 @@
  * Image Extension — inline/floating image node
  */
 
+import { expectImageAttrs } from "../../attrs";
 import type { ImageAttrs } from "../../schema/nodes";
 import { createNodeExtension } from "../create";
 
@@ -11,6 +12,7 @@ export const ImageExtension = createNodeExtension({
   nodeSpec: {
     inline: true,
     group: "inline",
+    marks: "_",
     draggable: true,
     attrs: {
       src: {},
@@ -23,16 +25,22 @@ export const ImageExtension = createNodeExtension({
       displayMode: { default: "inline" },
       cssFloat: { default: null },
       transform: { default: null },
+      opacity: { default: null },
       distTop: { default: null },
       distBottom: { default: null },
       distLeft: { default: null },
       distRight: { default: null },
+      cropTop: { default: null },
+      cropRight: { default: null },
+      cropBottom: { default: null },
+      cropLeft: { default: null },
       position: { default: null },
       borderWidth: { default: null },
       borderColor: { default: null },
       borderStyle: { default: null },
       wrapText: { default: null },
       hlinkHref: { default: null },
+      _docxRawXml: { default: null },
     },
     parseDOM: [
       {
@@ -45,6 +53,9 @@ export const ImageExtension = createNodeExtension({
             | NonNullable<ImageAttrs["cssFloat"]>
             | undefined;
           const borderWidthRaw = element.dataset["borderWidth"];
+          const opacityRaw = element.dataset["opacity"];
+          const opacityParsed =
+            opacityRaw === undefined ? Number.NaN : Number(opacityRaw);
           return {
             src: element.getAttribute("src") || "",
             ...(alt ? { alt } : {}),
@@ -62,6 +73,9 @@ export const ImageExtension = createNodeExtension({
             ...(element.dataset["transform"]
               ? { transform: element.dataset["transform"] }
               : {}),
+            ...(Number.isFinite(opacityParsed)
+              ? { opacity: opacityParsed }
+              : {}),
             ...(borderWidthRaw ? { borderWidth: Number(borderWidthRaw) } : {}),
             ...(element.dataset["borderColor"]
               ? { borderColor: element.dataset["borderColor"] }
@@ -74,7 +88,7 @@ export const ImageExtension = createNodeExtension({
       },
     ],
     toDOM(node) {
-      const attrs = node.attrs as ImageAttrs;
+      const attrs = expectImageAttrs(node);
       const domAttrs: Record<string, string> = {
         src: attrs.src,
         class: "docx-image",
@@ -100,6 +114,12 @@ export const ImageExtension = createNodeExtension({
       }
       if (attrs.transform) {
         domAttrs["data-transform"] = attrs.transform;
+      }
+      // eigenpal #424 (opacity render pipeline). Use `!= null` so a PM
+      // schema default of `null` is treated like undefined and not
+      // serialized as the string "null".
+      if (attrs.opacity != null) {
+        domAttrs["data-opacity"] = String(attrs.opacity);
       }
       if (attrs.borderWidth) {
         domAttrs["data-border-width"] = String(attrs.borderWidth);
@@ -171,6 +191,12 @@ export const ImageExtension = createNodeExtension({
 
       if (attrs.transform) {
         styles.push(`transform: ${attrs.transform}`);
+      }
+
+      // eigenpal #424 (opacity render pipeline). `!= null` so a PM null
+      // default doesn't paint as `opacity: 0`.
+      if (attrs.opacity != null && attrs.opacity < 1) {
+        styles.push(`opacity: ${Math.max(0, attrs.opacity)}`);
       }
 
       if (attrs.borderWidth && attrs.borderWidth > 0) {

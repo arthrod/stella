@@ -18,9 +18,18 @@ import {
   buildVersionStamp,
   cloneFieldsForRevision,
 } from "@/api/handlers/entities/version-utils";
+import {
+  allocateFileObject,
+  fileContentWithMintedObject,
+} from "@/api/handlers/files/file-object-ids";
 import { pdfDerivativeStateForFile } from "@/api/handlers/files/gotenberg";
 import { createFileKey } from "@/api/handlers/files/utils";
 import { captureError } from "@/api/lib/analytics";
+import {
+  AUDIT_ACTION,
+  AUDIT_RESOURCE_TYPE,
+  createAuditRecorder,
+} from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tSafeId } from "@/api/lib/custom-schema";
@@ -48,11 +57,15 @@ export const finalizeDesktopEditSessionBodySchema = t.Object({
 type FinalizeDesktopEditSessionHandlerProps = {
   body: Static<typeof finalizeDesktopEditSessionBodySchema>;
   sessionId: SafeId<"desktopEditSession">;
+  request: Request;
+  server: Parameters<typeof createAuditRecorder>[0]["server"];
 };
 
 export const finalizeDesktopEditSessionHandler = async ({
   body: { sessionToken },
   sessionId,
+  request,
+  server,
 }: FinalizeDesktopEditSessionHandlerProps) => {
   const authorizedSession = await authorizeDesktopEditSession({
     sessionId,
@@ -120,6 +133,14 @@ export const finalizeDesktopEditSessionHandler = async ({
         });
       });
   };
+
+  const recordAuditEvent = createAuditRecorder({
+    organizationId: authorizedSession.value.organizationId,
+    workspaceId: authorizedSession.value.workspaceId,
+    userId: brandPersistedUserId(authorizedSession.value.userId),
+    request,
+    server,
+  });
 
   try {
     const result = await authorizedSession.value.scopedDb(async (tx) => {
@@ -196,6 +217,16 @@ export const finalizeDesktopEditSessionHandler = async ({
           })
           .where(eq(desktopEditSessions.id, editSession.id));
 
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.UPDATE,
+          resourceType: AUDIT_RESOURCE_TYPE.DESKTOP_EDIT_SESSION,
+          resourceId: editSession.id,
+          changes: {
+            status: { old: editSession.status, new: "cancelled" },
+          },
+          metadata: { reason: "no_checkpoint" },
+        });
+
         return {
           outcome: "no_changes",
         } as const;
@@ -243,12 +274,22 @@ export const finalizeDesktopEditSessionHandler = async ({
           })
           .where(eq(desktopEditSessions.id, editSession.id));
 
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.UPDATE,
+          resourceType: AUDIT_RESOURCE_TYPE.DESKTOP_EDIT_SESSION,
+          resourceId: editSession.id,
+          changes: {
+            status: { old: editSession.status, new: "cancelled" },
+          },
+          metadata: { reason: "base_version_diverged" },
+        });
+
         checkpointKeyToDelete = checkpointKey;
 
         return {
           error: {
             message:
-              "This document changed in Stella while you were editing. Your local copy is preserved.",
+              "This document changed in stella while you were editing. Your local copy is preserved.",
             statusCode: 409,
           },
         } as const;
@@ -305,6 +346,16 @@ export const finalizeDesktopEditSessionHandler = async ({
           })
           .where(eq(desktopEditSessions.id, editSession.id));
 
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.UPDATE,
+          resourceType: AUDIT_RESOURCE_TYPE.DESKTOP_EDIT_SESSION,
+          resourceId: editSession.id,
+          changes: {
+            status: { old: editSession.status, new: "cancelled" },
+          },
+          metadata: { reason: "checkpoint_matches_base" },
+        });
+
         checkpointKeyToDelete = checkpointKey;
 
         return {
@@ -345,7 +396,7 @@ export const finalizeDesktopEditSessionHandler = async ({
 
       const storedBytes = new Uint8Array(checkpointBuffer);
       const nextVersionId = createSafeId<"entityVersion">();
-      const sourceFileId = Bun.randomUUIDv7();
+      const sourceFileId = allocateFileObject();
       const sourceKey = createFileKey({
         fileId: sourceFileId,
         mimeType: DOCX_MIME_TYPE,
@@ -370,7 +421,7 @@ export const finalizeDesktopEditSessionHandler = async ({
         currentFields: baseVersion.fields,
         entityVersionId: nextVersionId,
         propertyId: editSession.propertyId,
-        replacementContent: {
+        replacementContent: fileContentWithMintedObject({
           encrypted: false,
           fileName: editSession.fileName,
           id: sourceFileId,
@@ -387,7 +438,7 @@ export const finalizeDesktopEditSessionHandler = async ({
           ...(editSession.checkpointScanWarnings !== null && {
             scanWarnings: editSession.checkpointScanWarnings,
           }),
-        },
+        }),
         workspaceId: authorizedSession.value.workspaceId,
       });
 
@@ -422,6 +473,50 @@ export const finalizeDesktopEditSessionHandler = async ({
           status: "finalized",
         })
         .where(eq(desktopEditSessions.id, editSession.id));
+
+      await recordAuditEvent(tx, [
+        {
+          action: AUDIT_ACTION.CREATE,
+          resourceType: AUDIT_RESOURCE_TYPE.ENTITY_VERSION,
+          resourceId: nextVersionId,
+          changes: {
+            created: {
+              old: null,
+              new: {
+                entityId: editSession.entityId,
+                versionNumber: nextVersionNumber,
+                fileName: editSession.fileName,
+                sha256Hex: editSession.checkpointSha256Hex,
+                sizeBytes: editSession.checkpointSizeBytes,
+              },
+            },
+          },
+          metadata: {
+            source: "desktop_edit_session",
+            desktopEditSessionId: editSession.id,
+          },
+        },
+        {
+          action: AUDIT_ACTION.UPDATE,
+          resourceType: AUDIT_RESOURCE_TYPE.ENTITY,
+          resourceId: editSession.entityId,
+          changes: {
+            currentVersionId: {
+              old: editSession.baseVersionId,
+              new: nextVersionId,
+            },
+          },
+        },
+        {
+          action: AUDIT_ACTION.UPDATE,
+          resourceType: AUDIT_RESOURCE_TYPE.DESKTOP_EDIT_SESSION,
+          resourceId: editSession.id,
+          changes: {
+            status: { old: editSession.status, new: "finalized" },
+            finalizedVersionId: { old: null, new: nextVersionId },
+          },
+        },
+      ]);
 
       checkpointKeyToDelete = checkpointKey;
 

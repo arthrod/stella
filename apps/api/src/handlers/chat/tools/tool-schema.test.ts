@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import type { SafeDb, ScopedDb } from "@/api/db";
 import { resolveToolWorkspaceIds } from "@/api/handlers/chat/tools/authorized-workspace-ids";
+import {
+  EXPAND_CHAT_HISTORY_TOOL_NAME,
+  SEARCH_CHAT_HISTORY_TOOL_NAME,
+} from "@/api/handlers/chat/tools/chat-history-tools";
 import { getChatTools } from "@/api/handlers/chat/tools/chat-tools";
 import { createChatRefRegistry } from "@/api/handlers/chat/tools/execute/ref-registry";
 import { getChatToolPolicy } from "@/api/handlers/chat/tools/tool-policy";
@@ -22,6 +26,7 @@ const workspaceId = toSafeId<"workspace">(
   "33333333-3333-4333-8333-333333333333",
 );
 const entityId = toSafeId<"entity">("44444444-4444-4444-8444-444444444444");
+const threadId = toSafeId<"chatThread">("55555555-5555-4555-8555-555555555555");
 
 const unusedScopedDb: ScopedDb = async () => {
   throw new Error("This test only constructs tool schemas.");
@@ -85,21 +90,25 @@ describe("chat tool schemas", () => {
     expect(JSON.stringify(tools)).not.toContain("acme-closing-strategy");
   });
 
-  test("chat tools expose readonly data through the Stella API", () => {
+  test("chat tools expose readonly data through the stella API", () => {
     const tools = getChatTools({
       organizationId,
       refRegistry: createChatRefRegistry(),
       safeDb: unusedSafeDb,
       scopedDb: unusedScopedDb,
+      threadId,
       userId,
       toolWorkspaceIds: resolveToolWorkspaceIds({
         pinnedIds: [],
         accessibleWorkspaceIds: [workspaceId],
       }),
       hasActiveFileChat: false,
+      webSearchEnabled: false,
     });
 
     expect(tools).toHaveProperty("ask-user");
+    expect(tools).toHaveProperty(SEARCH_CHAT_HISTORY_TOOL_NAME);
+    expect(tools).toHaveProperty(EXPAND_CHAT_HISTORY_TOOL_NAME);
     expect(tools).toHaveProperty("run-stella-query");
     expect(tools).toHaveProperty("create-document");
     expect(tools).toHaveProperty("update-entity-fields");
@@ -114,38 +123,39 @@ describe("chat tool schemas", () => {
       refRegistry: createChatRefRegistry(),
       safeDb: unusedSafeDb,
       scopedDb: unusedScopedDb,
+      threadId,
       userId,
       toolWorkspaceIds: resolveToolWorkspaceIds({
         pinnedIds: [],
         accessibleWorkspaceIds: [workspaceId],
       }),
       hasActiveFileChat: false,
+      webSearchEnabled: false,
     });
 
-    const aresLookup = tools["ares_lookup_company"];
-    const aresSearch = tools["ares_search_companies"];
+    const businessRegistryLookup = tools["business_registry_lookup"];
     const updateEntityFields = tools["update-entity-fields"];
     const createDocument = tools["create-document"];
     const runStellaQuery = tools["run-stella-query"];
+    const searchChatHistory = tools[SEARCH_CHAT_HISTORY_TOOL_NAME];
 
-    expect(aresLookup).toBeDefined();
-    expect(aresSearch).toBeDefined();
+    expect(businessRegistryLookup).toBeDefined();
     expect(updateEntityFields).toBeDefined();
     expect(createDocument).toBeDefined();
     expect(runStellaQuery).toBeDefined();
+    expect(searchChatHistory).toBeDefined();
 
-    if (!aresLookup || !aresSearch || !updateEntityFields || !createDocument) {
+    if (
+      !businessRegistryLookup ||
+      !updateEntityFields ||
+      !createDocument ||
+      !searchChatHistory
+    ) {
       throw new Error("Expected chat tools to be registered");
     }
 
-    expect(aresLookup.needsApproval).toBeUndefined();
-    expect(getChatToolPolicy(aresLookup)).toEqual({
-      kind: "public_official",
-      needsApproval: false,
-      requiresAnonymization: false,
-    });
-    expect(aresSearch.needsApproval).toBeUndefined();
-    expect(getChatToolPolicy(aresSearch)).toEqual({
+    expect(businessRegistryLookup.needsApproval).toBeUndefined();
+    expect(getChatToolPolicy(businessRegistryLookup)).toEqual({
       kind: "public_official",
       needsApproval: false,
       requiresAnonymization: false,
@@ -163,6 +173,11 @@ describe("chat tool schemas", () => {
       requiresAnonymization: false,
     });
     expect(runStellaQuery?.needsApproval).toBeUndefined();
+    expect(getChatToolPolicy(searchChatHistory)).toEqual({
+      kind: "internal",
+      needsApproval: false,
+      requiresAnonymization: false,
+    });
   });
 
   test("created document output includes the canonical entity mention", () => {

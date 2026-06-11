@@ -3,19 +3,23 @@ import { eq } from "drizzle-orm";
 
 import type { ScopedDb } from "@/api/db";
 import { entities, entityVersions, fields, workspaces } from "@/api/db/schema";
+import {
+  allocateFileObject,
+  fileContentWithMintedObject,
+} from "@/api/handlers/files/file-object-ids";
 import { pdfDerivativeStateForFile } from "@/api/handlers/files/gotenberg";
+import { thumbnailDerivativeStateForFile } from "@/api/handlers/files/image-derivative";
 import { createFileKey } from "@/api/handlers/files/utils";
 import { captureError } from "@/api/lib/analytics";
-import {
-  AUDIT_ACTION,
-  AUDIT_RESOURCE_TYPE,
-  writeAuditLog,
-} from "@/api/lib/audit-log";
-import type { AuditContext } from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
+import type { AuditRecorder } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { allocateEntityStamp } from "@/api/lib/document-counter";
-import { enqueuePdfDerivativeOrMarkFailed } from "@/api/lib/file-derivative-queue";
+import {
+  enqueueImageThumbnailOrMarkFailed,
+  enqueuePdfDerivativeOrMarkFailed,
+} from "@/api/lib/file-derivative-queue";
 import { LIMITS } from "@/api/lib/limits";
 import { getS3 } from "@/api/lib/s3";
 import { sanitizeFilename } from "@/api/lib/sanitize-filename";
@@ -51,10 +55,11 @@ type CreateEntityFromBufferInput = {
   organizationId: SafeId<"organization">;
   workspaceId: SafeId<"workspace">;
   userId: SafeId<"user">;
-  auditContext: AuditContext;
+  recordAuditEvent: AuditRecorder;
   buffer: Uint8Array | ArrayBuffer;
   fileName: string;
   mimeType: string;
+  scanWarnings?: string[] | undefined;
 };
 
 class EntityLimitError extends TaggedError("EntityLimitError")<{
@@ -68,6 +73,7 @@ class MissingFilePropertyError extends TaggedError("MissingFilePropertyError")<{
 export type CreateEntityFromBufferResult = Result<
   {
     entityId: SafeId<"entity">;
+    fieldId: SafeId<"field">;
     fileName: string;
   },
   EntityLimitError | MissingFilePropertyError
@@ -85,13 +91,14 @@ export const createEntityFromBuffer = async ({
   organizationId,
   workspaceId,
   userId,
-  auditContext,
+  recordAuditEvent,
   buffer,
   fileName: rawFileName,
   mimeType,
+  scanWarnings,
 }: CreateEntityFromBufferInput): Promise<CreateEntityFromBufferResult> => {
   const fileName = sanitizeFilenamePreservingExtension(rawFileName);
-  const fileId = Bun.randomUUIDv7();
+  const fileId = allocateFileObject();
   const s3Key = createFileKey({
     organizationId,
     workspaceId,
@@ -172,7 +179,7 @@ export const createEntityFromBuffer = async ({
         workspaceId,
         propertyId: fileProperty.id,
         entityVersionId,
-        content: {
+        content: fileContentWithMintedObject({
           type: "file",
           version: 1,
           id: fileId,
@@ -186,7 +193,13 @@ export const createEntityFromBuffer = async ({
             encrypted: false,
             mimeType,
           }),
-        },
+          thumbnailFileId: null,
+          thumbnailDerivative: thumbnailDerivativeStateForFile({
+            encrypted: false,
+            mimeType,
+          }),
+          ...(scanWarnings !== undefined && { scanWarnings }),
+        }),
       });
 
       await tx
@@ -194,27 +207,23 @@ export const createEntityFromBuffer = async ({
         .set({ lastActivityAt: new Date() })
         .where(eq(workspaces.id, workspaceId));
 
-      await writeAuditLog(
-        {
-          ...auditContext,
-          action: AUDIT_ACTION.CREATE,
-          resourceType: AUDIT_RESOURCE_TYPE.ENTITY,
-          resourceId: entityId,
-          changes: {
-            created: {
-              old: null,
-              new: {
-                kind: "document",
-                fileName,
-                mimeType,
-                sizeBytes: bytes.byteLength,
-                propertyId: fileProperty.id,
-              },
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.ENTITY,
+        resourceId: entityId,
+        changes: {
+          created: {
+            old: null,
+            new: {
+              kind: "document",
+              fileName,
+              mimeType,
+              sizeBytes: bytes.byteLength,
+              propertyId: fileProperty.id,
             },
           },
         },
-        tx,
-      );
+      });
     });
   } catch (error) {
     await Promise.all(s3Keys.map(async (k) => await getS3().delete(k)));
@@ -238,5 +247,15 @@ export const createEntityFromBuffer = async ({
     workspaceId,
   }).catch(captureError);
 
-  return Result.ok({ entityId, fileName });
+  enqueueImageThumbnailOrMarkFailed({
+    encrypted: false,
+    entityId,
+    fieldId,
+    mimeType,
+    organizationId,
+    userId,
+    workspaceId,
+  }).catch(captureError);
+
+  return Result.ok({ entityId, fieldId, fileName });
 };

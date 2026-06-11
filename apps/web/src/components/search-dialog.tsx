@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { UseMutationResult } from "@tanstack/react-query";
 import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
-import { useNavigate, useRouteContext } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   FileTextIcon,
@@ -13,6 +13,7 @@ import {
   LinkIcon,
   LoaderIcon,
   MessageSquareIcon,
+  MessagesSquareIcon,
   SquareCheckIcon,
   UserIcon,
   WandSparklesIcon,
@@ -40,10 +41,17 @@ import { Skeleton } from "@stll/ui/components/skeleton";
 import { stellaToast } from "@stll/ui/components/toast";
 
 import { DatePickerPopover } from "@/components/date-picker-popover";
+import { getChatHitRoute } from "@/components/search-dialog.logic";
 import { UserAvatar } from "@/components/user-avatar";
+import {
+  isPublicLawPreviewEnabled,
+  usePublicLawPreviewEnabled,
+} from "@/hooks/use-public-law-preview";
 import type { TranslationKey } from "@/i18n/types";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
+import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
+import { createCaseLawDecisionRouteParams } from "@/lib/case-law-route";
 import { toAPIError } from "@/lib/errors";
 import { resolveMatterColor } from "@/lib/matter-colors";
 import { toSafeId } from "@/lib/safe-id";
@@ -103,6 +111,7 @@ const KIND_ICONS = {
   task: SquareCheckIcon,
   message: MessageSquareIcon,
   link: LinkIcon,
+  chat: MessagesSquareIcon,
 } as const satisfies Record<GlobalSearchResultType, typeof FileTextIcon>;
 
 const KIND_TRANSLATION_KEYS = {
@@ -114,17 +123,19 @@ const KIND_TRANSLATION_KEYS = {
   task: "search.kinds.task",
   message: "search.kinds.message",
   link: "search.kinds.link",
+  chat: "search.kinds.chat",
 } as const satisfies Record<GlobalSearchResultType, TranslationKey>;
 
 const SEARCH_KIND_TYPES = [
   "matter",
   "contact",
-  // "case-law",
+  "case-law",
   "document",
   "folder",
   "task",
   "message",
   "link",
+  "chat",
 ] as const satisfies readonly GlobalSearchResultType[];
 
 const TIME_PRESET_TRANSLATION_KEYS = {
@@ -140,11 +151,13 @@ const isSearchKindOption = (
   switch (value) {
     case "matter":
     case "contact":
+    case "case-law":
     case "document":
     case "folder":
     case "task":
     case "message":
     case "link":
+    case "chat":
       return true;
     default:
       return false;
@@ -158,6 +171,11 @@ const compactMeta = (parts: readonly (string | null | undefined)[]): string =>
       return trimmed ? [trimmed] : [];
     })
     .join(" · ");
+
+const isAvailableSearchKind = (
+  type: GlobalSearchResultType,
+  includePublicLaw: boolean,
+): boolean => type !== "case-law" || includePublicLaw;
 
 const stripSearchMarkup = (value: string): string =>
   value.replaceAll("<mark>", " ").replaceAll("</mark>", " ").trim();
@@ -245,20 +263,14 @@ export const SearchDialog = ({
   const t = useTranslations();
   const locale = useLocale();
   const navigate = useNavigate();
-  const searchRecentsUserId = useRouteContext({
-    from: "/_protected",
-    select: (ctx) => ctx.user.id,
-  });
-  const searchRecentsOrganizationId = useRouteContext({
-    from: "/_protected",
-    select: (ctx) => ctx.user.activeOrganizationId,
-  });
+  const user = useAuthenticatedUser();
+  const publicLawPreviewEnabled = usePublicLawPreviewEnabled();
   const searchRecentsScope = useMemo(
     (): SearchRecentsScope => ({
-      organizationId: searchRecentsOrganizationId,
-      userId: searchRecentsUserId,
+      organizationId: user.activeOrganizationId,
+      userId: user.id,
     }),
-    [searchRecentsOrganizationId, searchRecentsUserId],
+    [user.activeOrganizationId, user.id],
   );
   const [resultsElement, setResultsElement] = useState<HTMLDivElement | null>(
     null,
@@ -297,11 +309,17 @@ export const SearchDialog = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: include searchQuery so each new query gets a fresh preset cutoff
   }, [filters.time, searchQuery]);
   const updatedTo = filterUpdatedTo(filters);
-  const selectedSearchTypes = filters.types.filter(isSearchKindOption);
+  const selectedSearchTypes = filters.types.filter(
+    (type) =>
+      isSearchKindOption(type) &&
+      isAvailableSearchKind(type, publicLawPreviewEnabled),
+  );
   const activeSearchTypes =
     selectedSearchTypes.length > 0
       ? selectedSearchTypes
-      : [...SEARCH_KIND_TYPES];
+      : SEARCH_KIND_TYPES.filter((type) =>
+          isAvailableSearchKind(type, publicLawPreviewEnabled),
+        );
 
   const {
     data,
@@ -667,9 +685,26 @@ export const SearchDialog = ({
     }
 
     if (hit.type === "case-law") {
+      if (!isPublicLawPreviewEnabled()) {
+        stellaToast.add({
+          title: t("common.comingSoon"),
+          type: "neutral",
+        });
+        return;
+      }
+
+      const slug =
+        "slug" in hit && typeof hit.slug === "string" ? hit.slug : null;
       await navigate({
-        to: "/knowledge/case/$decisionId",
-        params: { decisionId: hit.decisionId },
+        to: "/law/$country/cases/$court/$date/$slug",
+        params: createCaseLawDecisionRouteParams({
+          caseNumber: hit.caseNumber,
+          country: hit.country,
+          court: hit.court,
+          decisionDate: hit.decisionDate,
+          decisionId: hit.decisionId,
+          slug,
+        }),
         search: {
           ...(hit.headline && {
             q: extractHighlightedText(hit.headline),
@@ -684,6 +719,11 @@ export const SearchDialog = ({
         to: "/workspaces/$workspaceId",
         params: { workspaceId: hit.workspaceId },
       });
+      return;
+    }
+
+    if (hit.type === "chat") {
+      await navigate(getChatHitRoute(hit));
       return;
     }
 
@@ -860,6 +900,14 @@ export const SearchDialog = ({
                         buckets={mergeSelectedBuckets(
                           (facets?.type ?? []).flatMap((bucket) => {
                             if (!isSearchKindOption(bucket.value)) {
+                              return [];
+                            }
+                            if (
+                              !isAvailableSearchKind(
+                                bucket.value,
+                                publicLawPreviewEnabled,
+                              )
+                            ) {
                               return [];
                             }
                             return [
@@ -1612,6 +1660,8 @@ const SearchResultItem = ({
   } else if (hit.type === "case-law") {
     meta = "";
   } else if (hit.type === "matter") {
+    meta = compactMeta([hit.workspaceName, formatted]);
+  } else if (hit.type === "chat") {
     meta = compactMeta([hit.workspaceName, formatted]);
   } else {
     const lastEditedByName =

@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 
 import { NodeViewWrapper } from "@tiptap/react";
 import type { NodeViewProps } from "@tiptap/react";
-import { ClipboardPasteIcon, SparklesIcon, XIcon } from "lucide-react";
+import {
+  ClipboardPasteIcon,
+  SparklesIcon,
+  WandSparklesIcon,
+  XIcon,
+} from "lucide-react";
 import { useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
@@ -13,19 +18,54 @@ import {
 } from "@stll/ui/components/popover";
 import { cn } from "@stll/ui/lib/utils";
 
-import type { PastedTextSource } from "@/components/chat-pasted-text-extension";
+import type {
+  PastedTextAttrs,
+  PastedTextSource,
+} from "@/components/chat-pasted-text-extension";
 
 const CHIP_MAX_LABEL_WIDTH_CLASS = "max-w-48";
 
+const pickChipIcon = (source: PastedTextSource) => {
+  if (source === "skill") {
+    return WandSparklesIcon;
+  }
+  if (source === "prompt") {
+    return SparklesIcon;
+  }
+  return ClipboardPasteIcon;
+};
+
+const PASTED_TEXT_SOURCE_VALUES: ReadonlySet<string> = new Set([
+  "paste",
+  "prompt",
+  "skill",
+]);
+
+const isPastedTextSource = (value: unknown): value is PastedTextSource =>
+  typeof value === "string" && PASTED_TEXT_SOURCE_VALUES.has(value);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const readPastedTextAttrs = (value: unknown): PastedTextAttrs => {
+  if (!isRecord(value)) {
+    return { text: "", label: "", source: "paste" };
+  }
+
+  const text = value["text"];
+  const label = value["label"];
+  const source = value["source"];
+
+  return {
+    text: typeof text === "string" ? text : "",
+    label: typeof label === "string" ? label : "",
+    source: isPastedTextSource(source) ? source : "paste",
+  };
+};
+
 export const ChatPastedTextNode = (props: NodeViewProps) => {
   const t = useTranslations();
-  // SAFETY: attrs from our own pastedText node schema
-  // eslint-disable-next-line typescript/no-unsafe-type-assertion
-  const attrs = props.node.attrs as {
-    text: string;
-    label: string;
-    source: PastedTextSource;
-  };
+  const attrs = readPastedTextAttrs(props.node.attrs);
 
   // Local-state-only edits keep the textarea responsive on large
   // pastes; we commit back to the node attrs on blur (which fires
@@ -42,14 +82,14 @@ export const ChatPastedTextNode = (props: NodeViewProps) => {
   };
 
   const fallbackLabel =
-    attrs.source === "prompt"
+    attrs.source === "prompt" || attrs.source === "skill"
       ? t("chat.pastedText.fromPromptFallback")
       : t("chat.pastedText.fromClipboard", {
           count: attrs.text.length,
         });
   const chipLabel = attrs.label.length > 0 ? attrs.label : fallbackLabel;
 
-  const Icon = attrs.source === "prompt" ? SparklesIcon : ClipboardPasteIcon;
+  const Icon = pickChipIcon(attrs.source);
 
   return (
     <NodeViewWrapper className="inline" data-source={attrs.source}>
@@ -78,7 +118,7 @@ export const ChatPastedTextNode = (props: NodeViewProps) => {
                 {chipLabel}
               </span>
               <Button
-                aria-label={t("chat.pastedText.remove")}
+                aria-label={t("common.remove")}
                 className="size-5 p-0"
                 onClick={() => props.deleteNode()}
                 size="icon-xs"

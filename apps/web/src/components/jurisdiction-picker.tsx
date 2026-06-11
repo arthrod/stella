@@ -3,7 +3,12 @@ import { useMemo, useState } from "react";
 import { CheckIcon, SearchIcon, StarIcon } from "lucide-react";
 import { useLocale, useTranslations } from "use-intl";
 
-import { Input } from "@stll/ui/components/input";
+import type { CountryCode } from "@stll/country-codes";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@stll/ui/components/input-group";
 import { cn } from "@stll/ui/lib/utils";
 
 import { createCountryOptions, removeJurisdiction } from "@/lib/jurisdictions";
@@ -11,15 +16,17 @@ import type { PracticeJurisdiction } from "@/lib/jurisdictions";
 
 export const MAX_SELECTED_JURISDICTIONS = 12;
 
+const NO_SUGGESTED_COUNTRY_CODES: readonly CountryCode[] = [];
+
 type JurisdictionPickerProps = {
   selected: readonly PracticeJurisdiction[];
-  suggestedCountryCodes?: readonly string[];
+  suggestedCountryCodes?: readonly CountryCode[];
   onChange: (jurisdictions: PracticeJurisdiction[]) => void;
 };
 
 export const JurisdictionPicker = ({
   selected,
-  suggestedCountryCodes = [],
+  suggestedCountryCodes = NO_SUGGESTED_COUNTRY_CODES,
   onChange,
 }: JurisdictionPickerProps) => {
   const t = useTranslations();
@@ -59,7 +66,7 @@ export const JurisdictionPicker = ({
     );
   }, [countryOptions, locale, query, suggestedSet]);
 
-  const toggleCountry = (countryCode: string) => {
+  const toggleCountry = (countryCode: CountryCode) => {
     if (selectedSet.has(countryCode)) {
       onChange(removeJurisdiction(selected, countryCode));
       return;
@@ -78,7 +85,7 @@ export const JurisdictionPicker = ({
     ]);
   };
 
-  const makePrimary = (countryCode: string) => {
+  const makePrimary = (countryCode: CountryCode) => {
     onChange(
       selected.map((jurisdiction) => ({
         ...jurisdiction,
@@ -89,16 +96,17 @@ export const JurisdictionPicker = ({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="relative">
-        <SearchIcon className="text-muted-foreground pointer-events-none absolute start-3 top-1/2 size-4 -translate-y-1/2" />
-        <Input
+      <InputGroup>
+        <InputGroupAddon>
+          <SearchIcon className="text-muted-foreground" />
+        </InputGroupAddon>
+        <InputGroupInput
           aria-label={t("onboarding.jurisdictionSearchLabel")}
-          className="ps-9"
           onChange={(e) => setQuery(e.target.value)}
           placeholder={t("onboarding.jurisdictionSearchPlaceholder")}
           value={query}
         />
-      </div>
+      </InputGroup>
 
       <div className="border-border max-h-[310px] overflow-y-auto rounded-lg border">
         {filteredCountries.map((country) => {
@@ -135,14 +143,14 @@ export const JurisdictionPicker = ({
                   {isSelected && <CheckIcon className="size-3" />}
                 </span>
                 <span className="min-w-0 flex-1 truncate">{country.name}</span>
-                <span className="text-muted-foreground text-xs">
-                  {country.code}
-                </span>
                 {isSuggested && (
                   <span className="bg-muted text-muted-foreground rounded-full px-1.5 py-0.5 text-[10px]">
                     {t("onboarding.jurisdictionSuggested")}
                   </span>
                 )}
+                <span className="text-muted-foreground text-xs">
+                  {country.code}
+                </span>
               </button>
               {isSelected && selected.length > 1 && (
                 <button

@@ -6,22 +6,17 @@ import type { Static } from "elysia";
 import type { SafeDb, Transaction } from "@/api/db";
 import { entities, entityVersions, workspaces } from "@/api/db/schema";
 import { entityKindSchema } from "@/api/db/schema-validators";
+import { checkEntityCreateCapacityForInsert } from "@/api/handlers/uploads/entity-create";
 import { captureError } from "@/api/lib/analytics";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
-import {
-  AUDIT_ACTION,
-  AUDIT_RESOURCE_TYPE,
-  createAuditContext,
-  writeAuditLog,
-} from "@/api/lib/audit-log";
-import type { AuditContext } from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
+import type { AuditRecorder } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tSafeId } from "@/api/lib/custom-schema";
 import { allocateEntityStamp } from "@/api/lib/document-counter";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
-import { LIMITS } from "@/api/lib/limits";
 import { getSearchProvider } from "@/api/lib/search/provider";
 
 const createEntityBodySchema = t.Object({
@@ -36,24 +31,8 @@ type CreateEntitiesHandlerProps = {
   safeDb: SafeDb;
   workspaceId: SafeId<"workspace">;
   userId: SafeId<"user">;
-  auditContext: AuditContext;
+  recordAuditEvent: AuditRecorder;
   body: CreateEntityBodySchema;
-};
-
-const checkEntityLimit = async (
-  tx: Transaction,
-  workspaceId: SafeId<"workspace">,
-) => {
-  const totalEntities = await tx.$count(
-    entities,
-    eq(entities.workspaceId, workspaceId),
-  );
-
-  if (totalEntities >= LIMITS.entitiesCount) {
-    return Result.err("Entities limit reached");
-  }
-
-  return Result.ok({ maxEntitiesCount: LIMITS.entitiesCount - totalEntities });
 };
 
 const validateParentId = async (
@@ -86,7 +65,7 @@ const createEntitiesHandler = async function* ({
   safeDb,
   workspaceId,
   userId,
-  auditContext,
+  recordAuditEvent,
   body,
 }: CreateEntitiesHandlerProps) {
   const parentId = body.parentId ?? null;
@@ -107,12 +86,16 @@ const createEntitiesHandler = async function* ({
 
   const txResult = yield* Result.await(
     safeDb(async (tx) => {
-      const limitResult = await checkEntityLimit(tx, workspaceId);
-      if (Result.isError(limitResult)) {
+      const capacityResult = await checkEntityCreateCapacityForInsert({
+        tx,
+        workspaceId,
+        entityCount: 1,
+      });
+      if (Result.isError(capacityResult)) {
         return {
           ok: false as const,
           status: 400 as const,
-          message: limitResult.error,
+          message: "Entities limit reached",
         };
       }
 
@@ -162,21 +145,17 @@ const createEntitiesHandler = async function* ({
         .set({ lastActivityAt: new Date() })
         .where(eq(workspaces.id, workspaceId));
 
-      await writeAuditLog(
-        {
-          ...auditContext,
-          action: AUDIT_ACTION.CREATE,
-          resourceType: AUDIT_RESOURCE_TYPE.ENTITY,
-          resourceId: entityId,
-          changes: {
-            created: {
-              old: null,
-              new: { kind: effectiveKind, name, parentId },
-            },
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.ENTITY,
+        resourceId: entityId,
+        changes: {
+          created: {
+            old: null,
+            new: { kind: effectiveKind, name, parentId },
           },
         },
-        tx,
-      );
+      });
 
       return { ok: true as const, entityId };
     }),
@@ -200,26 +179,12 @@ const config = {
 
 const createEntities = createSafeHandler(
   config,
-  async function* ({
-    safeDb,
-    session,
-    workspaceId,
-    user,
-    request,
-    server,
-    body,
-  }) {
+  async function* ({ safeDb, workspaceId, user, body, recordAuditEvent }) {
     return yield* createEntitiesHandler({
       safeDb,
       workspaceId,
       userId: user.id,
-      auditContext: createAuditContext({
-        organizationId: session.activeOrganizationId,
-        workspaceId,
-        userId: user.id,
-        request,
-        server,
-      }),
+      recordAuditEvent,
       body,
     });
   },

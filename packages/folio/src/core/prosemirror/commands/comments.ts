@@ -4,7 +4,7 @@
  * PM commands for adding/removing comments and accepting/rejecting tracked changes.
  */
 
-import type { Mark } from "prosemirror-model";
+import type { Mark, Node as PMNode } from "prosemirror-model";
 import type { Command, EditorState } from "prosemirror-state";
 
 /**
@@ -98,10 +98,64 @@ function resolveChange(
     if (dispatch) {
       const tr = state.tr;
       const deleteRanges: { from: number; to: number }[] = [];
+      const pPrMarkOps: PPrMarkOp[] = [];
 
-      state.doc.nodesBetween(from, to, (node, pos) => {
-        if (!node.isText) {
-          return;
+      state.doc.nodesBetween(from, to, (node, pos): boolean => {
+        if (node.type.name === "paragraph") {
+          const op = collectPPrMarkOp(node, pos, from, to, mode, revisionSet);
+          if (op) {
+            pPrMarkOps.push(op);
+          }
+
+          // Process paragraph property changes (w:pPrChange)
+          const propertyChanges = node.attrs["_propertyChanges"] as
+            | {
+                info?: { id: number; author: string; date: string };
+                previousFormatting?: Record<string, unknown>;
+              }[]
+            | undefined;
+
+          if (
+            Array.isArray(propertyChanges) &&
+            propertyChanges.length > 0 &&
+            rangeCoversParagraphBoundary(from, to, pos, node)
+          ) {
+            const matches = propertyChanges.filter(
+              (c) =>
+                revisionSet === null || (c.info && revisionSet.has(c.info.id)),
+            );
+            if (matches.length > 0) {
+              const remaining = propertyChanges.filter(
+                (c) =>
+                  revisionSet !== null &&
+                  (!c.info || !revisionSet.has(c.info.id)),
+              );
+              const nextAttrs: Record<string, unknown> = {
+                ...node.attrs,
+                _propertyChanges: remaining.length > 0 ? remaining : null,
+              };
+              if (mode === "reject") {
+                for (const change of matches.toReversed()) {
+                  if (change.previousFormatting) {
+                    for (const [key, val] of Object.entries(
+                      change.previousFormatting,
+                    )) {
+                      nextAttrs[key] = val;
+                    }
+                  }
+                }
+              }
+              tr.setNodeMarkup(pos, undefined, nextAttrs);
+            }
+          }
+
+          return true;
+        }
+        // Text AND inline atoms (image, shape, hardBreak, tab) can carry
+        // tracked-change marks; widen the visitor so rejecting an inserted
+        // picture removes it like inserted text. eigenpal #641.
+        if (!node.isInline) {
+          return true;
         }
         const nodeEnd = pos + node.nodeSize;
         const rangeFrom = Math.max(from, pos);
@@ -119,10 +173,44 @@ function resolveChange(
             tr.removeMark(rangeFrom, rangeTo, mark);
           }
         }
+        return true;
       });
 
       for (const range of deleteRanges.toReversed()) {
         tr.delete(range.from, range.to);
+      }
+
+      // Process paragraph-mark ops from end → start so earlier positions stay
+      // valid as later paragraphs collapse. Map every position through the
+      // accumulated transaction so the inline deletes above don't desync the
+      // attr writes or joins below.
+      pPrMarkOps.sort((a, b) => b.paragraphPos - a.paragraphPos);
+      for (const op of pPrMarkOps) {
+        const mappedPos = tr.mapping.map(op.paragraphPos);
+        const paragraph = tr.doc.nodeAt(mappedPos);
+        if (!paragraph || paragraph.type.name !== "paragraph") {
+          continue;
+        }
+        if (op.action === "clear") {
+          tr.setNodeAttribute(mappedPos, "pPrMark", null);
+          continue;
+        }
+        const joinPos = mappedPos + paragraph.nodeSize;
+        if (joinPos >= tr.doc.content.size) {
+          // No next sibling to join with (paragraph terminates the doc).
+          // Leave the marker in place — Word treats this the same way.
+          continue;
+        }
+        try {
+          tr.join(joinPos);
+          // PM's `join` keeps the first paragraph's attrs, so the marker
+          // would survive an otherwise-resolved revision. Drop it now.
+          tr.setNodeAttribute(mappedPos, "pPrMark", null);
+        } catch {
+          // PM rejects the join if the two blocks aren't structurally
+          // compatible (e.g. paragraph followed by a table). Leaving the
+          // marker is the safe fallback.
+        }
       }
 
       if (tr.steps.length > 0) {
@@ -131,6 +219,194 @@ function resolveChange(
     }
     return true;
   };
+}
+
+type PPrMarkOp = {
+  paragraphPos: number;
+  action: "clear" | "join";
+};
+
+export type ParagraphBoundaryChange = {
+  from: number;
+  to: number;
+  type: "insertion" | "deletion";
+  author?: string;
+  date?: string;
+  revisionId?: number;
+};
+
+type RevisionInfoAttrs = {
+  id?: unknown;
+  author?: unknown;
+  date?: unknown;
+};
+
+type ParagraphPropertyChangeAttrs = {
+  info?: RevisionInfoAttrs;
+  previousFormatting?: Record<string, unknown> | null;
+};
+
+function collectPPrMarkOp(
+  node: { attrs: Record<string, unknown>; nodeSize: number },
+  pos: number,
+  from: number,
+  to: number,
+  mode: "accept" | "reject",
+  revisionSet: Set<number> | null,
+): PPrMarkOp | null {
+  if (!rangeCoversParagraphBoundary(from, to, pos, node)) {
+    return null;
+  }
+  const pPrMark = node.attrs["pPrMark"];
+  if (!isPPrMarkAttr(pPrMark)) {
+    return null;
+  }
+  if (revisionSet !== null && !revisionSet.has(pPrMark.info.id)) {
+    return null;
+  }
+  // accept-ins / reject-del keep the paragraph break (clear attr).
+  // reject-ins / accept-del remove the paragraph break (join with next).
+  const action: PPrMarkOp["action"] =
+    (pPrMark.kind === "ins") === (mode === "accept") ? "clear" : "join";
+  return { paragraphPos: pos, action };
+}
+
+function rangeCoversParagraphBoundary(
+  from: number,
+  to: number,
+  pos: number,
+  node: { nodeSize: number },
+): boolean {
+  const boundaryFrom = pos + node.nodeSize - 1;
+  const boundaryTo = pos + node.nodeSize;
+  return from <= boundaryFrom && to >= boundaryTo;
+}
+
+function isPPrMarkAttr(
+  value: unknown,
+): value is { kind: "ins" | "del"; info: { id: number } } {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const kind = (value as { kind?: unknown }).kind;
+  const info = (value as { info?: unknown }).info;
+  if (kind !== "ins" && kind !== "del") {
+    return false;
+  }
+  if (typeof info !== "object" || info === null) {
+    return false;
+  }
+  return typeof (info as { id?: unknown }).id === "number";
+}
+
+function readRevisionInfo(info: RevisionInfoAttrs | undefined): {
+  author?: string;
+  date?: string;
+  revisionId?: number;
+} {
+  const revision: { author?: string; date?: string; revisionId?: number } = {};
+  if (typeof info?.author === "string") {
+    revision.author = info.author;
+  }
+  if (typeof info?.date === "string") {
+    revision.date = info.date;
+  }
+  if (typeof info?.id === "number") {
+    revision.revisionId = info.id;
+  }
+  return revision;
+}
+
+function getListPropertyChangeType(
+  attrs: Record<string, unknown>,
+  change: ParagraphPropertyChangeAttrs,
+): ParagraphBoundaryChange["type"] | null {
+  const previousFormatting = change.previousFormatting;
+  if (
+    previousFormatting == null ||
+    !Object.hasOwn(previousFormatting, "numPr")
+  ) {
+    return null;
+  }
+
+  const currentNumPr = attrs["numPr"];
+  const previousNumPr = previousFormatting["numPr"];
+  if (previousNumPr == null && currentNumPr != null) {
+    return "insertion";
+  }
+  if (previousNumPr != null && currentNumPr == null) {
+    return "deletion";
+  }
+  if (!areNumPrValuesEqual(previousNumPr, currentNumPr)) {
+    return currentNumPr == null ? "deletion" : "insertion";
+  }
+  return null;
+}
+
+function areNumPrValuesEqual(left: unknown, right: unknown): boolean {
+  if (left == null || right == null) {
+    return left == right;
+  }
+  if (!isObjectRecord(left) || !isObjectRecord(right)) {
+    return Object.is(left, right);
+  }
+  return left["numId"] === right["numId"] && left["ilvl"] === right["ilvl"];
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function toParagraphBoundaryChange(
+  node: PMNode,
+  pos: number,
+  type: ParagraphBoundaryChange["type"],
+  info?: RevisionInfoAttrs,
+): ParagraphBoundaryChange {
+  return {
+    from: pos + node.nodeSize - 1,
+    to: pos + node.nodeSize,
+    type,
+    ...readRevisionInfo(info),
+  };
+}
+
+export function findParagraphBoundaryChangeAtPosition(
+  state: EditorState,
+  pos: number,
+): ParagraphBoundaryChange | null {
+  const $pos = state.doc.resolve(pos);
+  const node = $pos.parent;
+  if (node.type.name !== "paragraph") {
+    return null;
+  }
+
+  const paragraphPos = $pos.before($pos.depth);
+  const pPrMark = node.attrs["pPrMark"];
+  if (isPPrMarkAttr(pPrMark)) {
+    return toParagraphBoundaryChange(
+      node,
+      paragraphPos,
+      pPrMark.kind === "ins" ? "insertion" : "deletion",
+      pPrMark.info,
+    );
+  }
+
+  const propertyChanges = node.attrs["_propertyChanges"] as
+    | ParagraphPropertyChangeAttrs[]
+    | undefined;
+  if (!Array.isArray(propertyChanges)) {
+    return null;
+  }
+
+  for (const change of propertyChanges) {
+    const type = getListPropertyChangeType(node.attrs, change);
+    if (type) {
+      return toParagraphBoundaryChange(node, paragraphPos, type, change.info);
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -191,7 +467,9 @@ export function findAIEditRevisionRange(
   const range = { from: null as number | null, to: null as number | null };
 
   state.doc.descendants((node, pos) => {
-    if (!node.isText) {
+    // Widen from `isText` to `isInline` so an AI-edit revision on an inline
+    // atom (image, shape) shows up in the matched range. eigenpal #641.
+    if (!node.isInline) {
       return;
     }
     for (const mark of node.marks) {
@@ -315,7 +593,10 @@ export function findChangeAtPosition(
   });
 
   if (foundMark === undefined) {
-    return { from, to };
+    const paragraphChange = findParagraphBoundaryChangeAtPosition(state, from);
+    return paragraphChange
+      ? { from: paragraphChange.from, to: paragraphChange.to }
+      : { from, to };
   }
 
   // Expand to adjacent nodes carrying the *same* mark instance (matching
@@ -377,25 +658,29 @@ function expandTrackedChangeRange(
   fromHint: number,
   toHint: number,
 ): { from: number; to: number } {
+  const carriesSameInlineMark = (node: PMNode | null): node is PMNode =>
+    node?.isInline === true && node.marks.some((m) => m.eq(mark));
+
   // Resolve the boundary positions and hop outward through `nodeBefore`
-  // / `nodeAfter` while the neighbouring text node still carries the
+  // / `nodeAfter` while the neighbouring inline node still carries the
   // same mark instance. O(K) in the number of text nodes that make up
   // the span — `nodesBetween`-based fixed-point expansion is O(K²) and
   // re-walks the same subtree on every iteration.
   let from = fromHint;
   let to = toHint;
   let $from = state.doc.resolve(from);
-  while (
-    $from.nodeBefore?.isText &&
-    $from.nodeBefore.marks.some((m) => m.eq(mark))
-  ) {
-    from -= $from.nodeBefore.nodeSize;
+  let nodeBefore = $from.nodeBefore;
+  while (carriesSameInlineMark(nodeBefore)) {
+    from -= nodeBefore.nodeSize;
     $from = state.doc.resolve(from);
+    nodeBefore = $from.nodeBefore;
   }
   let $to = state.doc.resolve(to);
-  while ($to.nodeAfter?.isText && $to.nodeAfter.marks.some((m) => m.eq(mark))) {
-    to += $to.nodeAfter.nodeSize;
+  let nodeAfter = $to.nodeAfter;
+  while (carriesSameInlineMark(nodeAfter)) {
+    to += nodeAfter.nodeSize;
     $to = state.doc.resolve(to);
+    nodeAfter = $to.nodeAfter;
   }
   return { from, to };
 }
@@ -421,7 +706,10 @@ export function findNextChange(
     if (result.value) {
       return false;
     }
-    if (!node.isText) {
+    // Widen from `isText` to `isInline` so an image-only insertion / deletion
+    // appears in the find-next walk (an atomic image carries the mark itself,
+    // not as a text-node sibling). eigenpal #641.
+    if (!node.isInline) {
       return;
     }
     if (pos + node.nodeSize <= startPos) {
@@ -486,7 +774,9 @@ export function findPreviousChange(
   let resultMark: Mark | null = null;
 
   state.doc.descendants((node, pos) => {
-    if (!node.isText) {
+    // Widen from `isText` to `isInline` so an image-only change appears in
+    // the find-previous walk. eigenpal #641.
+    if (!node.isInline) {
       return;
     }
     if (pos >= startPos) {

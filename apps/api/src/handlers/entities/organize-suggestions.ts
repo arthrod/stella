@@ -1,5 +1,3 @@
-import type { GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
-import { valibotSchema } from "@ai-sdk/valibot";
 import { generateText, Output } from "ai";
 import { Result } from "better-result";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -17,10 +15,10 @@ import { aiHandlerError } from "@/api/lib/ai-error";
 import {
   getModelForRole,
   getModelInfoForRole,
-  getTemperatureForRole,
   requireAIAvailable,
 } from "@/api/lib/ai-models";
 import type { OrgAIConfig } from "@/api/lib/ai-models";
+import { strictOutputSchema } from "@/api/lib/ai-output-schema";
 import { captureError } from "@/api/lib/analytics";
 import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
 import { createSafeHandler } from "@/api/lib/api-handlers";
@@ -97,7 +95,9 @@ type OrganizeSuggestionsHandlerProps = {
   workspaceId: SafeId<"workspace">;
   organizationId: SafeId<"organization">;
   orgAIConfig: OrgAIConfig | null;
+  promptCachingEnabled: boolean;
   body: OrganizeSuggestionsBody;
+  userId: SafeId<"user">;
 };
 
 type EntitySummaryContext = {
@@ -162,7 +162,9 @@ const organizeSuggestionsHandler = async function* ({
   workspaceId,
   organizationId,
   orgAIConfig,
+  promptCachingEnabled,
   body,
+  userId,
 }: OrganizeSuggestionsHandlerProps) {
   yield* requireAIAvailable(orgAIConfig);
 
@@ -192,6 +194,9 @@ const organizeSuggestionsHandler = async function* ({
       organizationId,
       workspaceId,
       orgAIConfig,
+      promptCachingEnabled,
+      safeDb,
+      userId,
     });
 
     if (Result.isError(summariesResult)) {
@@ -228,6 +233,14 @@ const organizeSuggestionsHandler = async function* ({
   }
 
   const aiAnalytics = createAIAnalyticsCallbacks({
+    usageMetering: {
+      actionType: "chat",
+      organizationId,
+      safeDb,
+      serviceTier: "flex",
+      userId,
+      workspaceId,
+    },
     feature: "entities.organize-suggestions",
     modelRole: "fast",
     orgAIConfig,
@@ -245,8 +258,12 @@ const organizeSuggestionsHandler = async function* ({
   const result = await Result.tryPromise({
     try: async () =>
       await generateText({
-        model: getModelForRole("fast", orgAIConfig),
-        temperature: getTemperatureForRole("fast"),
+        model: getModelForRole("fast", orgAIConfig, {
+          promptCachingEnabled,
+          scopeKey: `${organizationId}:${workspaceId}:organize`,
+          organizationId,
+          serviceTier: "flex",
+        }),
         system: ORGANIZE_SYSTEM_PROMPT,
         prompt: JSON.stringify({
           locale: locale || null,
@@ -265,13 +282,12 @@ const organizeSuggestionsHandler = async function* ({
           })),
         }),
         output: Output.object({
-          schema: valibotSchema(suggestionsAIOutputSchema),
+          schema: strictOutputSchema(suggestionsAIOutputSchema),
         }),
         // 200 base + 200 per file (≈30-40 tokens per JSON suggestion plus
         // wrapping). Capped at 24 000 so a 100-file batch (~20 200) has
         // headroom for the model's slightly variable output sizes.
         maxOutputTokens: Math.min(24_000, 200 + body.files.length * 200),
-        providerOptions: googleMinimalThinking(),
         abortSignal: AbortSignal.timeout(60_000),
         ...aiAnalytics.stepCallbacks,
       }),
@@ -649,6 +665,9 @@ type GenerateMissingSummariesOptions = {
   organizationId: SafeId<"organization">;
   workspaceId: SafeId<"workspace">;
   orgAIConfig: OrgAIConfig | null;
+  promptCachingEnabled: boolean;
+  safeDb: SafeDb;
+  userId: SafeId<"user">;
 };
 
 const generateMissingSummaries = async ({
@@ -656,10 +675,21 @@ const generateMissingSummaries = async ({
   organizationId,
   workspaceId,
   orgAIConfig,
+  promptCachingEnabled,
+  safeDb,
+  userId,
 }: GenerateMissingSummariesOptions): Promise<
   Result<GeneratedSummary[], HandlerError>
 > => {
   const aiAnalytics = createAIAnalyticsCallbacks({
+    usageMetering: {
+      actionType: "chat",
+      organizationId,
+      safeDb,
+      serviceTier: "flex",
+      userId,
+      workspaceId,
+    },
     feature: "entities.version-summary",
     modelRole: "fast",
     orgAIConfig,
@@ -674,8 +704,12 @@ const generateMissingSummaries = async ({
   const result = await Result.tryPromise({
     try: async () =>
       await generateText({
-        model: getModelForRole("fast", orgAIConfig),
-        temperature: getTemperatureForRole("fast"),
+        model: getModelForRole("fast", orgAIConfig, {
+          promptCachingEnabled,
+          scopeKey: `${organizationId}:${workspaceId}:summaries`,
+          organizationId,
+          serviceTier: "flex",
+        }),
         system: SUMMARY_SYSTEM_PROMPT,
         prompt: JSON.stringify({
           files: contexts.map((context) => ({
@@ -686,13 +720,12 @@ const generateMissingSummaries = async ({
           })),
         }),
         output: Output.object({
-          schema: valibotSchema(generatedSummariesAISchema),
+          schema: strictOutputSchema(generatedSummariesAISchema),
         }),
         // Summaries can run longer than the suggestion JSON; allow a
         // bigger budget here. ~120 tokens per summary at 100 files puts
         // us around 12 200 tokens.
         maxOutputTokens: Math.min(24_000, 200 + contexts.length * 300),
-        providerOptions: googleMinimalThinking(),
         abortSignal: AbortSignal.timeout(60_000),
         ...aiAnalytics.stepCallbacks,
       }),
@@ -938,6 +971,8 @@ const persistGeneratedSummaries = async ({
   }
 
   return await safeDb(async (tx) => {
+    // audit: skip — derived AI summary cache keyed by source text hash;
+    // recomputable from version content, never surfaces to users directly
     await tx
       .insert(entityVersionAiSummaries)
       .values(values)
@@ -982,29 +1017,37 @@ const hashSummarySource = ({
   return hasher.digest("hex");
 };
 
-const googleMinimalThinking = () => ({
-  google: {
-    thinkingConfig: {
-      thinkingLevel: "minimal",
-      includeThoughts: false,
-    },
-  } satisfies GoogleGenerativeAIProviderOptions,
-});
-
 const config = {
   permissions: { workspace: ["read"] },
   body: organizeSuggestionsBodySchema,
+  // Folder-organisation is queued / "background"-shaped from the
+  // user's perspective; they kick it off and read results later.
+  requiresUsage: {
+    actionType: "chat",
+    serviceTier: "flex",
+    modelRole: "fast",
+  },
 } satisfies HandlerConfig;
 
 const organizeSuggestions = createSafeHandler(
   config,
-  async function* ({ safeDb, workspaceId, session, orgAIConfig, body }) {
+  async function* ({
+    safeDb,
+    workspaceId,
+    session,
+    orgAIConfig,
+    promptCachingEnabled,
+    body,
+    user,
+  }) {
     return yield* organizeSuggestionsHandler({
       safeDb,
       workspaceId,
       organizationId: session.activeOrganizationId,
       orgAIConfig,
+      promptCachingEnabled,
       body,
+      userId: user.id,
     });
   },
 );

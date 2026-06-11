@@ -1,10 +1,12 @@
-import { Result } from "better-result";
+import { panic, Result } from "better-result";
 import { and, eq } from "drizzle-orm";
 import { t } from "elysia";
 import type { Static } from "elysia";
 
 import type { SafeDb } from "@/api/db";
 import { clauseVariants } from "@/api/db/schema";
+import type { AuditRecorder, FieldDiffs } from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tDefaultVarchar } from "@/api/lib/custom-schema";
@@ -110,6 +112,7 @@ type CreateVariantProps = {
   organizationId: SafeId<"organization">;
   clauseId: SafeId<"clause">;
   body: CreateVariantBody;
+  recordAuditEvent: AuditRecorder;
 };
 
 export const createVariantHandler = async function* ({
@@ -117,6 +120,7 @@ export const createVariantHandler = async function* ({
   organizationId,
   clauseId,
   body,
+  recordAuditEvent,
 }: CreateVariantProps) {
   const clauseResult = await verifyClauseOwnership(
     safeDb,
@@ -149,9 +153,9 @@ export const createVariantHandler = async function* ({
     );
   }
 
-  const [inserted] = yield* Result.await(
-    safeDb((tx) =>
-      tx
+  const inserted = yield* Result.await(
+    safeDb(async (tx) => {
+      const [row] = await tx
         .insert(clauseVariants)
         .values({
           id: createSafeId<"clauseVariant">(),
@@ -165,9 +169,29 @@ export const createVariantHandler = async function* ({
           label: clauseVariants.label,
           sortOrder: clauseVariants.sortOrder,
           createdAt: clauseVariants.createdAt,
-        }),
-    ),
+        });
+
+      if (row) {
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.CREATE,
+          resourceType: AUDIT_RESOURCE_TYPE.CLAUSE_VARIANT,
+          resourceId: row.id,
+          changes: {
+            created: {
+              old: null,
+              new: { clauseId, label: row.label },
+            },
+          },
+        });
+      }
+
+      return row;
+    }),
   );
+
+  if (!inserted) {
+    panic("Failed to create clause variant");
+  }
 
   return Result.ok(inserted);
 };
@@ -180,6 +204,7 @@ type UpdateVariantProps = {
   clauseId: SafeId<"clause">;
   variantId: SafeId<"clauseVariant">;
   body: UpdateVariantBody;
+  recordAuditEvent: AuditRecorder;
 };
 
 export const updateVariantHandler = async function* ({
@@ -188,6 +213,7 @@ export const updateVariantHandler = async function* ({
   clauseId,
   variantId,
   body,
+  recordAuditEvent,
 }: UpdateVariantProps) {
   const clauseResult = await verifyClauseOwnership(
     safeDb,
@@ -213,7 +239,7 @@ export const updateVariantHandler = async function* ({
           clauseId: { eq: clauseId },
           organizationId: { eq: organizationId },
         },
-        columns: { id: true },
+        columns: { id: true, label: true, body: true, sortOrder: true },
       }),
     ),
   );
@@ -229,9 +255,9 @@ export const updateVariantHandler = async function* ({
     updatedAt: new Date(),
   };
 
-  const [updated] = yield* Result.await(
-    safeDb((tx) =>
-      tx
+  const updated = yield* Result.await(
+    safeDb(async (tx) => {
+      const [row] = await tx
         .update(clauseVariants)
         .set(updates)
         .where(
@@ -245,9 +271,33 @@ export const updateVariantHandler = async function* ({
           label: clauseVariants.label,
           sortOrder: clauseVariants.sortOrder,
           updatedAt: clauseVariants.updatedAt,
-        }),
-    ),
+        });
+
+      const changes: FieldDiffs = {};
+      for (const [key, newValue] of Object.entries(updates)) {
+        if (key === "updatedAt") {
+          continue;
+        }
+        const oldValue = (existing as Record<string, unknown>)[key];
+        if (oldValue !== newValue) {
+          changes[key] = { old: oldValue ?? null, new: newValue };
+        }
+      }
+
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.UPDATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CLAUSE_VARIANT,
+        resourceId: variantId,
+        changes,
+      });
+
+      return row;
+    }),
   );
+
+  if (!updated) {
+    panic("Failed to update clause variant");
+  }
 
   return Result.ok(updated);
 };
@@ -259,6 +309,7 @@ type DeleteVariantProps = {
   organizationId: SafeId<"organization">;
   clauseId: SafeId<"clause">;
   variantId: SafeId<"clauseVariant">;
+  recordAuditEvent: AuditRecorder;
 };
 
 export const deleteVariantHandler = async function* ({
@@ -266,6 +317,7 @@ export const deleteVariantHandler = async function* ({
   organizationId,
   clauseId,
   variantId,
+  recordAuditEvent,
 }: DeleteVariantProps) {
   const clauseResult = await verifyClauseOwnership(
     safeDb,
@@ -291,7 +343,7 @@ export const deleteVariantHandler = async function* ({
           clauseId: { eq: clauseId },
           organizationId: { eq: organizationId },
         },
-        columns: { id: true },
+        columns: { id: true, label: true },
       }),
     ),
   );
@@ -303,17 +355,29 @@ export const deleteVariantHandler = async function* ({
   }
 
   yield* Result.await(
-    safeDb((tx) =>
-      tx
+    safeDb(async (tx) => {
+      await tx
         .delete(clauseVariants)
         .where(
           and(
             eq(clauseVariants.id, variantId),
             eq(clauseVariants.clauseId, clauseId),
           ),
-        ),
-    ),
+        );
+
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.DELETE,
+        resourceType: AUDIT_RESOURCE_TYPE.CLAUSE_VARIANT,
+        resourceId: variantId,
+        changes: {
+          deleted: {
+            old: { clauseId, label: existing.label },
+            new: null,
+          },
+        },
+      });
+    }),
   );
 
-  return Result.ok(undefined);
+  return Result.ok({});
 };

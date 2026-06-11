@@ -5,19 +5,8 @@
  * Supports: richText, plainText, date, dropdown, comboBox, checkbox.
  */
 
+import { expectSdtAttrs } from "../../attrs";
 import { createNodeExtension } from "../create";
-
-type SdtAttrs = {
-  sdtType: string;
-  alias: string | null;
-  tag: string | null;
-  lock: string | null;
-  placeholder: string | null;
-  showingPlaceholder: boolean;
-  dateFormat: string | null;
-  listItems: string | null;
-  checked: string | boolean | null;
-};
 
 export const SdtExtension = createNodeExtension({
   name: "sdt",
@@ -41,8 +30,12 @@ export const SdtExtension = createNodeExtension({
       showingPlaceholder: { default: false },
       /** Date format for date controls */
       dateFormat: { default: null },
+      /** ISO 8601 bound date value (`w:date@w:fullDate`). */
+      dateValueISO: { default: null },
       /** Dropdown/combobox list items as JSON string */
       listItems: { default: null },
+      /** Selected dropdown / comboBox value (`w:dropDownList@w:lastValue`). */
+      dropdownLastValue: { default: null },
       /** Checkbox checked state */
       checked: { default: null },
     },
@@ -62,7 +55,9 @@ export const SdtExtension = createNodeExtension({
             placeholder: el.dataset["placeholder"] || null,
             showingPlaceholder: el.dataset["showingPlaceholder"] === "true",
             dateFormat: el.dataset["dateFormat"] || null,
+            dateValueISO: el.dataset["dateValueIso"] || null,
             listItems: el.dataset["listItems"] || null,
+            dropdownLastValue: el.dataset["dropdownLastValue"] || null,
             checked: (() => {
               if (el.dataset["checked"] === "true") {
                 return true;
@@ -77,7 +72,7 @@ export const SdtExtension = createNodeExtension({
       },
     ],
     toDOM(node) {
-      const attrs = node.attrs as SdtAttrs;
+      const attrs = expectSdtAttrs(node);
       const dataAttrs: Record<string, string> = {
         class: `docx-sdt docx-sdt-${attrs.sdtType}`,
         "data-sdt-type": attrs.sdtType,
@@ -101,10 +96,16 @@ export const SdtExtension = createNodeExtension({
       if (attrs.dateFormat) {
         dataAttrs["data-date-format"] = attrs.dateFormat;
       }
+      if (attrs.dateValueISO) {
+        dataAttrs["data-date-value-iso"] = attrs.dateValueISO;
+      }
       if (attrs.listItems) {
         dataAttrs["data-list-items"] = attrs.listItems;
       }
-      if (attrs.checked !== null) {
+      if (attrs.dropdownLastValue) {
+        dataAttrs["data-dropdown-last-value"] = attrs.dropdownLastValue;
+      }
+      if (attrs.checked !== undefined) {
         dataAttrs["data-checked"] = String(attrs.checked);
       }
 

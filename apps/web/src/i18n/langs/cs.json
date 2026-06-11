@@ -14,6 +14,7 @@
     }
   },
   "ai": {
+    "analyzeWithAI": "Analyzovat pomocí AI",
     "editWithAI": "Upravit pomocí AI",
     "keyRequired": {
       "cta": "Otevřít nastavení AI",
@@ -63,6 +64,7 @@
   "auth": {
     "betaNoticeBody": "Jako preventivní opatření během bety nenahrávejte citlivá, privilegovaná, osobní, nenahraditelná ani produkčně kritická data. Cloud je demonstrační služba.",
     "betaNoticeTitle": "Beta",
+    "checkSpamHint": "Pokud kód nevidíte, podívejte se do složky Spam.",
     "chooseOrganization": "Vyberte organizaci, ve které chcete pracovat",
     "codeSentAgain": "Poslali jsme nový kód.",
     "continueWithEmail": "Pokračovat",
@@ -71,8 +73,7 @@
     "createFirstOrganization": "Vytvořte svou první organizaci",
     "createOrganization": "Vytvořit organizaci",
     "createOrganizationButton": "Vytvořit organizaci",
-    "emailPlaceholder": "you@example.com",
-    "enterTheCode": "Zadejte kód",
+    "emailPlaceholder": "vy@priklad.cz",
     "headline": "Jasno v každém případě.",
     "invitation": {
       "declined": "Pozvánka odmítnuta",
@@ -94,7 +95,7 @@
     "signInWithEmail": "Přihlásit se e-mailem",
     "subtitle": "Dokumenty, judikatura i revize pod kontrolou. S pomocí AI.",
     "useDifferentEmail": "Použít jiný e-mail",
-    "weSentCodeTo": "Odeslali jsme kód na {email}"
+    "weSentCodeTo": "Kód jsme odeslali na {email}"
   },
   "billing": {
     "addEntry": "Přidat záznam",
@@ -108,17 +109,17 @@
       "active": "Aktivní",
       "activity": "Aktivita",
       "activityCode": "Kód aktivity",
-      "codeLabel": "Code",
+      "codeLabel": "Kód",
       "codeLabelField": "Označení",
       "createCode": "Vytvořit kód",
       "inactive": "Neaktivní",
       "manageCodes": "Správa kódů",
       "noCodesYet": "Zatím žádné fakturační kódy",
-      "task": "Task",
+      "task": "Úkol",
       "taskCode": "Kód úkolu"
     },
     "day": "Den",
-    "decimalHours": "({hours}h)",
+    "decimalHours": "({hours} h)",
     "deleteSelected": "Smazat vybrané",
     "duration": "Doba trvání",
     "editEntry": "Upravit záznam",
@@ -167,19 +168,19 @@
       "markPaid": "Označit jako zaplaceno",
       "noEntries": "K této faktuře nejsou přiřazeny žádné záznamy",
       "noInvoices": "Zatím žádné faktury",
-      "paidAt": "Paid at",
+      "paidAt": "Zaplaceno dne",
       "removeEntries": "Odebrat záznamy",
-      "send": "Send",
+      "send": "Odeslat",
       "statuses": {
         "draft": "Koncept",
         "finalized": "Finalizovaná",
-        "paid": "Paid",
+        "paid": "Zaplaceno",
         "sent": "Odeslaná",
-        "void": "Void"
+        "void": "Stornováno"
       },
       "totalAmount": "Celková částka",
       "totalEntries": "{count, plural, one {# záznam} few {# záznamy} other {# záznamů}}",
-      "void": "Void"
+      "void": "Stornovat"
     },
     "loading": "Načítání...",
     "markBillableSelected": "Označit jako fakturovatelné",
@@ -204,7 +205,7 @@
       "noRateTables": "Zatím žádné tabulky sazeb",
       "ongoing": "Průběžně",
       "override": "Přepsat",
-      "perHour": "/hr",
+      "perHour": "/h",
       "rateCount": "{count, plural, one {# sazba} few {# sazby} other {# sazeb}}",
       "rateEntries": "Položky sazeb",
       "rateResolved": "Sazba určena",
@@ -237,7 +238,6 @@
     "stopTimer": "Zastavit",
     "timerActive": "Časovač běží",
     "timesheets": "Výkazy práce",
-    "today": "Dnes",
     "total": "Celkem",
     "week": "Týden",
     "writeOff": "Odepsat"
@@ -246,7 +246,7 @@
     "analysis": {
       "categories": {
         "facts": "Skutkový stav",
-        "holding": "Výrok",
+        "holding": "Právní věta",
         "procedural-history": "Procesní historie",
         "reasoning": "Uvažování"
       }
@@ -254,13 +254,11 @@
     "analyzing": "Analyzuji...",
     "columns": {
       "caseNumber": "Spisová značka",
-      "country": "Stát",
       "court": "Soud"
     },
     "decisionNotFound": "Rozhodnutí nenalezeno",
     "emptyState": "Žádná rozhodnutí nenalezena. Nastavte zdroj a spusťte synchronizaci pro import judikatury.",
     "filters": {
-      "country": "Stát",
       "court": "Soud",
       "dateFrom": "Od",
       "dateTo": "Do",
@@ -273,9 +271,14 @@
       "dissent": "Disentní stanovisko",
       "footer": "Zápatí",
       "header": "Záhlaví",
-      "history": "Historie",
       "ruling": "Výrok",
       "unknown": "Ostatní"
+    },
+    "seo": {
+      "browse": "Procházet judikaturu",
+      "countries": "Země",
+      "courts": "Soudy",
+      "years": "Roky"
     },
     "sources": {
       "empty": "Žádné zdroje nejsou nakonfigurovány.",
@@ -300,6 +303,52 @@
       "statutes": "Dotčené předpisy",
       "viewOriginal": "Zobrazit zdroj"
     }
+  },
+  "catalogue": {
+    "addCustom": "Přidat vlastní",
+    "addCustomMcp": "Přidat integraci",
+    "addCustomSkill": "Přidat dovednost",
+    "by": "Od {author}",
+    "configuration": "Konfigurace",
+    "cost": {
+      "free": "Bezplatné",
+      "paid": "Placené"
+    },
+    "detailAuthMethod": "Autentizace",
+    "empty": "Žádné položky neodpovídají aktuálnímu filtru.",
+    "filter": {
+      "mcps": "Integrace",
+      "nativeTools": "Vždy dostupné",
+      "skills": "Dovednosti"
+    },
+    "filterHint": "Filtrováno: {codes}",
+    "firstParty": "stella",
+    "firstPartyTooltip": "Vytvořeno týmem stella",
+    "install": "Nainstalovat",
+    "installFailed": "Instalace selhala",
+    "installPack": "Nainstalovat {count, plural, one {# nástroj} few {# nástroje} other {# nástrojů}}",
+    "installed": "Nainstalováno: {name}",
+    "installedShort": "Nainstalováno",
+    "onboarding": {
+      "packTitle": "Doporučeno pro vaši jurisdikci"
+    },
+    "openHomepage": "Otevřít domovskou stránku",
+    "packDescription": "{count, plural, one {# nástroj} few {# nástroje} other {# nástrojů}} vybraných pro vaši praxi. Nainstalujte jedním kliknutím nebo vyberte níže.",
+    "packInstalled": "{count, plural, one {# nástroj nainstalován} few {# nástroje nainstalovány} other {# nástrojů nainstalováno}}",
+    "packPartial": "Nainstalováno {installed}, {failed} selhalo",
+    "recommended": "Doporučeno",
+    "removed": "Tento nástroj již není dostupný.",
+    "sectionOthers": "Ostatní",
+    "sectionRecommended": "Doporučené",
+    "settings": {
+      "packTitle": "Doporučený balík"
+    },
+    "setup": {
+      "account": "Účet",
+      "apiKey": "API klíč",
+      "none": "Bez nastavení"
+    },
+    "unavailable": "Zatím nedostupné"
   },
   "chat": {
     "acceptAllCount": "Přijmout vše ({count})",
@@ -330,32 +379,36 @@
       "denied": "Zamítnuto",
       "deny": "Zamítnout",
       "externalMcpDescription": "Odešlou se jen informace potřebné pro tento dotaz.",
-      "externalMcpQuestion": "Může Stella odeslat tento dotaz do {provider}?"
+      "externalMcpQuestion": "Může stella odeslat tento dotaz do {provider}?"
     },
     "askAnything": "Zeptejte se na cokoli",
     "askUser": {
       "custom": "Napsat vlastní",
       "default": "Výchozí",
+      "edit": "Upravit odpovědi",
+      "editWarning": "Opětovné spuštění zahodí navazující odpovědi v této konverzaci.",
       "noAnswer": "Bez odpovědi",
       "placeholder": "Vaše odpověď",
+      "rerun": "Spustit znovu odsud",
       "submit": "Odeslat odpovědi"
     },
     "attachFile": "Připojit soubor",
     "attachedImage": "Přiložený obrázek",
     "attachment": "Příloha",
+    "cancelQueuedMessage": "Zrušit zařazenou zprávu",
     "caseLawGreeting": "Zeptejte se na toto rozhodnutí — plný text je k dispozici.",
     "chatAbout": "Vložit do AI chatu",
     "contextPlaceholder": "Chat o {context}, / pro dovednosti, @ pro přidání kontextu",
     "createDocument": {
-      "continue": "Create document",
-      "created": "Document created",
-      "failedHeader": "Could not create document",
-      "headerReady": "Document ready",
-      "headerStreaming": "Document being created",
-      "openInFolio": "Open in editor",
-      "pickMatterPrompt": "Choose a matter to save this document into.",
-      "previewName": "Document: {name}",
-      "previewWaiting": "Waiting for content…"
+      "continue": "Vytvořit dokument",
+      "created": "Dokument vytvořen",
+      "failedHeader": "Dokument se nepodařilo vytvořit",
+      "headerReady": "Dokument připraven",
+      "headerStreaming": "Vytváří se dokument",
+      "openInFolio": "Otevřít v editoru",
+      "pickMatterPrompt": "Vyberte spis, do kterého se tento dokument uloží.",
+      "previewName": "Dokument: {name}",
+      "previewWaiting": "Čeká se na obsah…"
     },
     "deleteThread": "Smazat konverzaci",
     "documentView": {
@@ -392,14 +445,11 @@
     "maxAttachmentsReached": "Maximálně {count} souborů na zprávu",
     "mention": {
       "category": {
-        "clauses": "Klauzule",
         "contacts": "Kontakty",
         "entities": "V tomto spisu",
-        "matters": "Spisy",
         "templates": "Šablony"
       },
-      "loadError": "Nepodařilo se načíst entity",
-      "noResults": "Žádné odpovídající entity"
+      "loadError": "Nepodařilo se načíst entity"
     },
     "moveToMain": "Přesunout do hlavního zobrazení",
     "moveToSide": "Přesunout do bočního panelu",
@@ -413,30 +463,36 @@
     "pastedText": {
       "expand": "Zobrazit celý text",
       "fromClipboard": "Vloženo {count, plural, one {# znak} few {# znaky} other {# znaků}}",
-      "fromPromptFallback": "Dovednost",
-      "remove": "Odstranit"
+      "fromPromptFallback": "Dovednost"
     },
     "placeholder": "Zde napište svůj dotaz, / pro dovednosti, @ pro přidání kontextu",
     "prompts": {
       "noResults": "Žádné odpovídající dovednosti",
       "noShortcuts": "Zatím žádné dovednosti. Přidejte je v části Znalosti → Dovednosti.",
-      "scope": {
-        "private": "Vaše dovednosti",
-        "team": "Týmové dovednosti"
-      },
       "tryOne": "Začni s jedním z těchto"
     },
+    "queuedAttachmentCount": "{count, plural, one {# příloha} few {# přílohy} other {# příloh}}",
+    "queuedNotice": "Zařazeno — odešle se po dokončení aktuální odpovědi",
+    "recapLoading": "Shrnutí konverzace…",
     "removeSuggestion": "(odebrat)",
     "resend": "Odeslat znovu",
     "resizeThread": "Změnit velikost konverzace",
     "send": "Odeslat zprávu",
     "sendError": "Při odesílání zprávy došlo k problému. Pokud chyba přetrvává, kontaktujte podporu.",
-    "sendErrorAnonymizationBlocked": "Stella nedokázala anonymizovat jednu přílohu, takže se nic neodeslalo. Odeberte soubor, nebo odešlete zprávu bez anonymizace.",
-    "sendErrorInsufficientCredits": "AI poskytovatel potřebuje doplnit kredity. Požádejte správce pracovního prostoru o navýšení zůstatku.",
+    "sendErrorAnonymizationBlocked": "stella nedokázala anonymizovat jednu přílohu, takže se nic neodeslalo. Odeberte soubor, nebo odešlete zprávu bez anonymizace.",
+    "sendErrorLoopDetected": "Odpověď AI se příliš opakovala. Zkuste to znovu s užším požadavkem.",
+    "sendErrorModelUnavailable": "Nastavený AI model už není dostupný. Požádejte správce pracovního prostoru, aby model aktualizoval v nastavení organizace.",
+    "sendErrorProviderBilling": "Poskytovatel AI nahlásil problém s fakturací. Obraťte se na správce pracovního prostoru.",
     "sendErrorProviderUnavailable": "AI poskytovatel je dočasně nedostupný. Zkuste to prosím za chvíli znovu.",
-    "sendErrorQuotaExhausted": "Kvóta AI poskytovatele je vyčerpaná. Zkuste to za chvíli znovu nebo požádejte správce pracovního prostoru o navýšení plánu.",
+    "sendErrorQuotaExhausted": "Kvóta poskytovatele AI je vyčerpaná. Zkuste to za minutu znovu nebo se obraťte na správce pracovního prostoru.",
     "sendPrompt": "Odeslat zprávu",
     "sendWithoutAnonymization": "Odeslat bez anonymizace",
+    "skills": {
+      "scope": {
+        "private": "Vaše dovednosti",
+        "team": "Týmové dovednosti"
+      }
+    },
     "sources": "Zdroje:",
     "stopResponse": "Zastavit",
     "suggestionSeverity": {
@@ -450,7 +506,6 @@
       "stale": "Zastaralé"
     },
     "thinking": "Pracuji s kontextem",
-    "threads": "Historie",
     "tool": {
       "apply-active-docx-edits": "Připravuji úpravy dokumentu",
       "ares_lookup_company": "Hledám záznamy o firmě",
@@ -462,6 +517,7 @@
       "boe_get_law_structure": "Struktura normy BOE",
       "boe_search_legislation": "Vyhledávání v BOE",
       "borme_get_summary": "Denní souhrn BORME",
+      "business_registry_lookup": "Vyhledávání v obchodním rejstříku",
       "create-document": "Připravuji dokument",
       "describe-stella-api": "Připravuji vyhledání dat",
       "describe-stella-function": "Připravuji vyhledání dat",
@@ -473,15 +529,21 @@
       "docxInsertBeforeSummary": "Vložit text před {blockId}",
       "docxReplaceBlockSummary": "Nahradit {blockId}",
       "docxReplaceSummary": "Nahradit „{find}“ za „{replace}“",
+      "docxSignatureTableSummary": "Vložit podpisovou tabulku poblíž {blockId}",
       "execute-typescript": "Čtu data věci",
+      "expand-chat-history": "Čtení historie chatu",
+      "fetch_url": "Čtení stránky",
+      "infosoud_lookup_case": "Vyhledání spisu v InfoSoudu",
       "load-skill": "Čtu pokyny",
       "read-contact": "Čtení kontaktu",
       "read-content-across-matters": "Čtení obsahu napříč věcmi",
       "read-skill-resource": "Čtu pokyny",
-      "run-stella-query": "Čtu data věci",
+      "run-stella-query": "Čtu data spisu",
       "search-across-matters": "Vyhledávání napříč věcmi",
+      "search-chat-history": "Prohledávání historie chatu",
       "unknown": "Použití nástroje",
-      "update-entity-fields": "Aktualizace metadat"
+      "update-entity-fields": "Aktualizace metadat",
+      "web_search": "Vyhledávání na webu"
     },
     "toolCall": {
       "characterCount": "{count, plural, one {# znak} few {# znaky} other {# znaků}}",
@@ -493,13 +555,24 @@
       "toggleDetails": "Přepnout detaily"
     },
     "unsupportedFileType": "Nepodporovaný typ souboru",
-    "uploadFailed": "Zpracování souboru selhalo"
+    "uploadFailed": "Zpracování souboru selhalo",
+    "webSearch": {
+      "answer": "Shrnutí webového vyhledávání",
+      "answerDisclaimer": "Sestaveno z výsledků veřejného webu níže. Ověřte si je proti uvedeným zdrojům.",
+      "fetchedFrom": "z {source}",
+      "openSource": "Otevřít {source} na nové kartě",
+      "sources": "Zdroje",
+      "toggleDescription": "Umožnit modelu v této konverzaci vyhledávat na veřejném webu a číst stránky.",
+      "toggleLabel": "Vyhledávání na webu",
+      "toggleOff": "Vypnout vyhledávání na webu",
+      "toggleOn": "Zapnout vyhledávání na webu"
+    }
   },
   "clauses": {
     "addVariant": "Přidat variantu",
     "allClauses": "Všechny klauzule",
     "backToList": "Zpět na klauzule",
-    "body": "Body",
+    "body": "Text",
     "categories": "Kategorie",
     "categoryDeleteConfirm": "Klauzule v této kategorii budou označeny jako nekategorizované.",
     "categoryName": "Název kategorie",
@@ -523,7 +596,6 @@
     "editClause": "Upravit klauzuli",
     "export": "Exportovat",
     "exportFailed": "Export klauzulí se nezdařil",
-    "history": "Historie",
     "import": "Importovat",
     "importFailed": "Import klauzulí se nezdařil",
     "importResult": "{created, plural, one {# vytvořena} few {# vytvořeny} other {# vytvořeno}}, {skipped, plural, one {# přeskočena} few {# přeskočeny} other {# přeskočeno}}",
@@ -601,7 +673,7 @@
       "taxIdentificationNumber": "DIČ"
     },
     "cancel": "Zrušit",
-    "captions": "Captions",
+    "captions": "Titulky",
     "caseLaw": "Judikatura",
     "category": "Kategorie",
     "changeColor": "Změnit barvu",
@@ -620,6 +692,7 @@
     "copied": "Zkopírováno do schránky",
     "copy": "Kopírovat",
     "copyLink": "Kopírovat odkaz",
+    "country": "Stát",
     "createdAt": "Vytvořeno {date}",
     "currency": "Měna",
     "currentPage": "Aktuální stránka",
@@ -629,6 +702,7 @@
     "deleteConfirmDescription": "Opravdu chcete smazat „{name}“? Tuto akci nelze vrátit zpět.",
     "deletedCount": "{count, plural, one {# položka smazána} few {# položky smazány} other {# položek smazáno}}",
     "description": "Popis",
+    "details": "Detaily",
     "documentation": "Dokumentace",
     "done": "Hotovo",
     "download": "Stáhnout",
@@ -653,6 +727,43 @@
     "invoices": "Faktury",
     "kind": "Druh",
     "language": "Jazyk",
+    "languages": {
+      "AR": "arabština",
+      "BG": "bulharština",
+      "CS": "čeština",
+      "DA": "dánština",
+      "DE": "němčina",
+      "EL": "řečtina",
+      "EN-GB": "angličtina (britská)",
+      "EN-US": "angličtina (americká)",
+      "ES": "španělština",
+      "ES-419": "španělština (latinskoamerická)",
+      "ET": "estonština",
+      "FI": "finština",
+      "FR": "francouzština",
+      "HU": "maďarština",
+      "ID": "indonéština",
+      "IT": "italština",
+      "JA": "japonština",
+      "KO": "korejština",
+      "LT": "litevština",
+      "LV": "lotyština",
+      "NB": "norština (bokmål)",
+      "NL": "nizozemština",
+      "PL": "polština",
+      "PT-BR": "portugalština (brazilská)",
+      "PT-PT": "portugalština (evropská)",
+      "RO": "rumunština",
+      "RU": "ruština",
+      "SK": "slovenština",
+      "SL": "slovinština",
+      "SV": "švédština",
+      "TR": "turečtina",
+      "UK": "ukrajinština",
+      "ZH": "čínština (zjednodušená, ZH)",
+      "ZH-HANS": "čínština (zjednodušená)",
+      "ZH-HANT": "čínština (tradiční)"
+    },
     "loadMore": "Načíst další",
     "loading": "Načítám",
     "logTime": "Zaznamenat čas",
@@ -677,10 +788,10 @@
     "properties": "Vlastnosti",
     "reconnecting": "Obnovování spojení…",
     "reference": "Reference",
-    "remove": "Odstranit",
+    "remove": "Odebrat",
     "rename": "Přejmenovat",
     "required": "Povinné",
-    "retry": "Zkusit znovu",
+    "retry": "Spustit znovu",
     "role": "Role",
     "run": "Spustit",
     "save": "Uložit",
@@ -691,12 +802,15 @@
     "selectARole": "Vyberte roli",
     "sessions": "Sezení",
     "settings": "Nastavení",
+    "showAll": "Zobrazit vše",
+    "showLess": "Zobrazit méně",
     "showMore": "Zobrazit více",
     "signOut": "Odhlásit se",
     "somethingWentWrong": "Něco se pokazilo",
     "sort": "Řadit",
     "status": "Stav",
     "today": "Dnes",
+    "translate": "Přeložit",
     "tryAgain": "Zkusit znovu",
     "type": "Typ",
     "typeNameToConfirm": "Pro potvrzení napište název",
@@ -710,19 +824,23 @@
     "verify": "Ověřit"
   },
   "consent": {
-    "allow": "Allow",
-    "defaultClientName": "An application",
-    "deny": "Deny",
-    "description": "{clientName} wants to access your stella workspace",
-    "error": "Something went wrong. Please try again.",
-    "organization": "Organization",
-    "permissions": "This will allow the application to:",
-    "scopeProfile": "Access your profile information",
-    "scopeRead": "Read your documents, matters, and contacts",
-    "scopeReadAnonymized": "Read anonymized versions of your documents and matters",
-    "scopeSearch": "Search your documents and matters",
-    "scopeSearchAnonymized": "Search anonymized versions of your documents and matters",
-    "title": "Authorize access"
+    "allow": "Povolit",
+    "completeSetup": "Dokončit nastavení",
+    "defaultClientName": "Aplikace",
+    "deny": "Odepřít",
+    "description": "{clientName} žádá o přístup k vašemu workspace stella",
+    "error": "Něco se pokazilo. Zkuste to prosím znovu.",
+    "missingJurisdictions": "Vaše organizace stella zatím nemá nastavené jurisdikce, ve kterých působí. Dokud nastavení nedokončíte, nebudou některé nástroje závislé na jurisdikci dostupné.",
+    "permissions": "Tím aplikaci umožníte:",
+    "scopeExternalMcps": "Použití vašich připojených integrací",
+    "scopeOnboarding": "Nastavit jurisdikce, ve kterých vaše organizace působí",
+    "scopeProfile": "Přístup k informacím vašeho profilu",
+    "scopeRead": "Čtení vašich dokumentů, spisů a kontaktů",
+    "scopeReadAnonymized": "Čtení anonymizovaných verzí vašich dokumentů a spisů",
+    "scopeSearch": "Vyhledávání ve vašich dokumentech a spisech",
+    "scopeSearchAnonymized": "Vyhledávání v anonymizovaných verzích vašich dokumentů a spisů",
+    "scopeSkills": "Použití vašich uložených dovedností stella",
+    "title": "Autorizovat přístup"
   },
   "contacts": {
     "alsoPartyIn": "Také vystupuje jako strana v {count, plural, one {# dalším spisu} few {# dalších spisech} other {# dalších spisech}}",
@@ -802,7 +920,6 @@
       "bankAccounts": "Bankovní účty",
       "billingAddress": "Fakturační adresa",
       "billingAddressCity": "Město",
-      "billingAddressCountry": "Země",
       "billingAddressLine1": "Ulice",
       "billingAddressLine2": "Ulice 2",
       "billingAddressPostalCode": "PSČ",
@@ -844,13 +961,11 @@
     }
   },
   "docxReview": {
-    "accept": "Přijmout",
     "acceptAll": "Přijmout vše",
-    "allFilter": "Vše",
     "applyAs": "jako",
-    "applyDirect": "Napevno",
+    "applyDirect": "Bez režimu sledování změn",
     "applyMode": "Aplikovat jako:",
-    "applyTracked": "Sledované změny",
+    "applyTracked": "V režimu sledování změn",
     "areaUnspecified": "Nezařazeno",
     "byArea": "Podle oblasti",
     "bySeverity": "Podle závažnosti",
@@ -866,13 +981,11 @@
     "rejectAll": "Odmítnout vše",
     "revert": "Vrátit zpět",
     "reviewed": "projito",
-    "saveIdentity": "Uložit",
     "savingIdentity": "Ukládám…",
     "severityHigh": "Vysoká",
     "severityLow": "Nízká",
     "severityMedium": "Střední",
     "severityUnspecified": "Bez závažnosti",
-    "showHidden": "Zobrazit vše",
     "skipped": "Nelze použít: {reason}",
     "statusAccepted": "Přijato",
     "statusApplying": "Aplikuji změnu…",
@@ -902,6 +1015,7 @@
     "failedToDeleteContact": "Nepodařilo se smazat klienta",
     "failedToDeleteEntities": "Nepodařilo se smazat entity",
     "failedToDeleteProperty": "Nepodařilo se smazat vlastnost",
+    "failedToDeleteTemplate": "Nepodařilo se smazat šablonu",
     "failedToDeleteView": "Smazání zobrazení se nezdařilo",
     "failedToDeleteWorkspace": "Nepodařilo se smazat spis",
     "failedToDuplicateView": "Duplikování zobrazení se nezdařilo",
@@ -915,6 +1029,7 @@
     "failedToRenameWorkspace": "Nepodařilo se přejmenovat spis",
     "failedToReorderViews": "Změna pořadí zobrazení se nezdařila",
     "failedToResendInvitation": "Nepodařilo se znovu odeslat pozvánku",
+    "failedToSaveTemplate": "Nepodařilo se uložit šablonu",
     "failedToSelectOrganization": "Nepodařilo se vybrat organizaci",
     "failedToSendInvitation": "Nepodařilo se odeslat pozvánku",
     "failedToSendVerificationCode": "Nepodařilo se odeslat ověřovací kód",
@@ -940,28 +1055,27 @@
     "trigger": "Zpětná vazba"
   },
   "fileDetail": {
-    "base": "Base",
-    "cannotDeleteLastVersion": "Cannot delete the only remaining version",
+    "base": "Výchozí",
+    "cannotDeleteLastVersion": "Jedinou zbývající verzi nelze smazat",
     "changesDetected": "{count, plural, one {# změna} few {# změny} other {# změn}}",
     "changesSince": "Změny oproti {version}",
-    "compare": "Compare",
+    "compare": "Porovnat",
     "compareAcceptedChangesDescription": "Před porovnáním budeme se sledovanými změnami ve verzích {baseVersion} a {targetVersion} zacházet jako s přijatými. Ve výsledném náhledu sledovaných změn proto uvidíte jen rozdíl mezi finální podobou obou dokumentů.",
     "compareAcceptedChangesTitle": "Porovnání jako finálních verzí",
-    "compareTo": "Compare to",
-    "compareVersions": "{targetVersion} vs {baseVersion}",
+    "compareTo": "Porovnat s",
+    "compareVersions": "{targetVersion} vs. {baseVersion}",
     "compareWith": "Porovnat s…",
-    "confirmDeleteVersion": "This will permanently delete version {version}. This action cannot be undone.",
-    "current": "Current",
-    "deleteVersion": "Delete version",
-    "description": "Popis",
+    "confirmDeleteVersion": "Tímto trvale smažete verzi {version}. Tuto akci nelze vrátit zpět.",
+    "current": "Aktuální",
+    "deleteVersion": "Smazat verzi",
     "descriptionPlaceholder": "Přidejte poznámku k této verzi...",
     "downloadRedline": "Stáhnout redline",
-    "dropToUploadVersion": "Drop to upload as new version",
+    "dropToUploadVersion": "Přetažením nahrajete jako novou verzi",
     "editLatestVersionDescription": "Tato verze není aktuální. Pokud ji chcete upravovat v prohlížeči, nejdřív z ní vytvořte nejnovější verzi a potom ji odemkněte pro úpravy.",
     "editLatestVersionTitle": "Pro úpravy je potřeba nejnovější verze",
-    "generatingRedline": "Generating redline comparison...",
+    "generatingRedline": "Generuji porovnání redline…",
     "hideVersionList": "Skrýt historii verzí",
-    "inspectMode": "Inspect",
+    "inspectMode": "Prozkoumat",
     "label": "Označení",
     "labelPresets": {
       "counterpartyReview": "Revize protistrany",
@@ -970,18 +1084,18 @@
       "signed": "Podepsáno"
     },
     "makeCurrent": "Nastavit jako aktuální",
-    "noFileInVersion": "No file in this version",
+    "noFileInVersion": "V této verzi není žádný soubor",
     "noLabel": "Bez označení",
     "redlinePreview": "Sledované změny",
-    "removeLabel": "Odstranit označení",
-    "selectVersion": "Select a version",
+    "removeLabel": "Odebrat označení",
+    "selectVersion": "Vyberte verzi",
     "setLabel": "Nastavit označení",
     "showDiff": "Zobrazit rozdíl",
     "showVersionList": "Zobrazit historii verzí",
-    "uploadDate": "Upload date",
+    "uploadDate": "Datum nahrání",
     "uploadNewVersion": "Nahrát novou verzi",
-    "uploadedBy": "Uploaded by",
-    "version": "Version",
+    "uploadedBy": "Nahrál/a",
+    "version": "Verze",
     "versionHistory": "Historie verzí",
     "viewVersionHistory": "Zobrazit detail a historii",
     "viewing": "Zobrazeno",
@@ -1004,7 +1118,7 @@
     "bold": "Tučné",
     "boldShortcut": "Tučné (Ctrl+B)",
     "bulletList": "Odrážkový seznam",
-    "checkingDocxEditDescription": "Stella ještě ověřuje, jestli lze tento DOCX bezpečně upravovat. Zkuste to znovu, až se dokument načte.",
+    "checkingDocxEditDescription": "stella ještě ověřuje, jestli lze tento DOCX bezpečně upravovat. Zkuste to znovu, až se dokument načte.",
     "checkingDocxEditTitle": "Kontrola dokumentu",
     "comment": "Komentář",
     "comments": {
@@ -1019,6 +1133,9 @@
       "unknownAuthor": "Neznámý",
       "visibility": "Komentáře"
     },
+    "contentControlDateAriaLabel": "Vyberte datum",
+    "contentControlDropdownAriaLabel": "Možnosti rozbalovací nabídky",
+    "contentControlDropdownNoOptions": "Žádné možnosti",
     "copy": "Kopírovat",
     "copyLink": "Kopírovat odkaz",
     "cut": "Vyjmout",
@@ -1035,13 +1152,12 @@
     "doubleClickHeader": "Dvojklikem přidáte záhlaví",
     "editAuthRequired": "Před úpravou dokumentu obnovte Stellu a znovu se přihlaste.",
     "editDownloadFailed": "Dokument se nepodařilo stáhnout pro úpravy.",
-    "editFile": "Editovat",
     "editLink": "Upravit odkaz",
     "editOpenFailed": "Dokument se nepodařilo otevřít pro úpravy.",
     "editOpenFailedTitle": "DOCX se nepodařilo otevřít",
     "editPermissionDenied": "Nemáte oprávnění tento dokument upravovat.",
     "editSaveFailedTitle": "DOCX se nepodařilo uložit",
-    "editSessionTakenOver": "Tuto relaci úprav převzalo jiné okno.",
+    "editSessionTakenOver": "Tento dokument byl otevřen k úpravám v jiné kartě, okně nebo zařízení, takže byla tato relace ukončena. Neuložené místní změny zůstávají zachovány — otevřete dokument znovu a pokračujte.",
     "findReplace": {
       "close": "Zavřít hledání",
       "find": "Najít",
@@ -1066,6 +1182,7 @@
     "finishEditing": "Ukončit editaci",
     "fontColor": "Barva písma",
     "fontGroup": "Písmo",
+    "fontSize": "Velikost písma",
     "formattingToolbar": "Panel formátování",
     "hideDetails": "Skrýt podrobnosti",
     "historyGroup": "Historie",
@@ -1132,30 +1249,29 @@
   },
   "inspector": {
     "anonymization": {
-      "addAction": "Add",
-      "addPlaceholder": "Term to anonymize",
-      "contextMenuAddAction": "Anonymize selection",
-      "deleteAction": "Delete term",
+      "addPlaceholder": "Výraz k anonymizaci",
+      "contextMenuAddAction": "Anonymizovat výběr",
+      "deleteAction": "Smazat výraz",
       "detectedHeading": "Nalezeno v dokumentu ({count})",
-      "detectingMatches": "Detecting entities in this document…",
-      "emptyState": "No workspace-specific terms yet. Add one above.",
+      "detectingMatches": "Hledám údaje v tomto dokumentu…",
+      "emptyState": "Slovníček je zatím prázdný. Přidejte první výraz výše.",
       "ignoreAction": "Ignorovat v tomto dokumentu",
       "ignoreScopeAlways": "Vždy ignorovat",
       "ignoreScopeDocument": "Ignorovat v rámci tohoto spisu",
       "ignoreScopeMenuAriaLabel": "Rozsah ignorování",
       "ignoreScopeWorkspace": "Ignorovat v tomto spise",
-      "labelPickerAriaLabel": "Entity label",
-      "labelPickerEmpty": "No matching label.",
-      "labelPickerPlaceholder": "Label",
-      "matchCount": "{count} entities highlighted in this document.",
-      "matchedWorkspaceTermsHeading": "Matching workspace terms ({count})",
-      "noMatchesInDocument": "None of your workspace terms appear in this document.",
-      "openFullViewHint": "Otevřete soubor v plném zobrazení, abyste viděli anonymizační zvýraznění a počty nálezů v dokumentu.",
+      "labelPickerAriaLabel": "Štítek údaje",
+      "labelPickerEmpty": "Žádný odpovídající štítek.",
+      "labelPickerPlaceholder": "Štítek",
+      "matchCount": "V tomto dokumentu zvýrazněno {count} údajů.",
+      "matchedWorkspaceTermsHeading": "Výrazy ze slovníčku nalezené v dokumentu ({count})",
+      "noMatchesInDocument": "Žádný výraz ze slovníčku se v tomto dokumentu nevyskytuje.",
+      "openFullViewHint": "Otevřete soubor v plném zobrazení – uvidíte všechny nálezy zvýrazněné v textu a jejich počty.",
       "restoreAction": "Obnovit v tomto dokumentu",
-      "termAddedToast": "Added \"{value}\" to workspace anonymization terms.",
-      "termMatchCountAriaLabel": "Matched {count} times in this document.",
-      "title": "Anonymization vocabulary",
-      "workspaceTermsHeading": "Workspace terms ({count})"
+      "termAddedToast": "Výraz „{value}“ přidán do slovníčku pro anonymizaci.",
+      "termMatchCountAriaLabel": "V tomto dokumentu nalezeno {count}×.",
+      "title": "Slovníček pro anonymizaci",
+      "workspaceTermsHeading": "Slovníček pro anonymizaci ({count})"
     },
     "external": {
       "confirmDescription": "Chystáte se navštívit externí web.",
@@ -1165,8 +1281,7 @@
       "unavailable": "Odkazovaný web nepovoluje bezpečný náhled. Pokud nástroj vrátil text dokumentu, zobrazí se tady; jinak otevřete originál."
     },
     "facet": {
-      "anonymization": "Anonymization",
-      "preview": "Náhled",
+      "anonymization": "Anonymizace",
       "previewInFullViewToast": "Náhled je zde hlavní zobrazení. Klikni na tlačítko minimalizace pro zobrazení vedle metadat."
     },
     "hidePane": "Skrýt panel",
@@ -1183,7 +1298,7 @@
     "metadata": {
       "author": "Autor",
       "documentInfoHeading": "Informace o dokumentu",
-      "matterColumnsHeading": "Sloupce spisu",
+      "matterColumnsHeading": "Další informace",
       "updatedAt": "Aktualizováno",
       "version": "Verze",
       "versionCurrent": "v{version} (aktuální)"
@@ -1193,32 +1308,82 @@
   },
   "knowledge": {
     "agentSkills": {
+      "aiRewrite": "Přepsat pomocí AI",
+      "aiRewritePlaceholder": "Zpřesnit formulace; přidat krok pro citování zdrojů…",
+      "aiRewritePrompt": "Popište, jak tento soubor přepsat",
+      "aiRewriteRunning": "Přepisuji…",
+      "binaryPreviewUnsupported": "Náhled binárních souborů není podporován. Tento soubor upravíte opětovným nahráním balíčku dovednosti.",
       "builtInBadge": "Vestavěné",
       "builtInSection": "Vestavěné dovednosti",
       "chooseFile": "Vyberte soubor nebo ho sem přetáhněte",
+      "coaching": {
+        "publish": "Publish skill"
+      },
       "deleteConfirmDescription": "Dovednost „{name}“ bude z tohoto pracovního prostoru odebrána.",
       "deleteConfirmTitle": "Smazat dovednost?",
+      "deleteFile": "Smazat soubor",
+      "deleteFileConfirm": "Smazat soubor? Tuto akci nelze vrátit zpět.",
       "description": "Instalujte balíčky SKILL.md, které do chatu přidají specializované postupy a zdroje jen pro čtení.",
       "disableSkill": "Vypnout dovednost",
       "disabled": "Vypnuto",
+      "discardChanges": "Zahodit",
       "dropFile": "Přetáhněte sem SKILL.md nebo .zip",
+      "editSkill": "Upravit dovednost",
+      "editTitle": "Upravit dovednost",
       "emptyDescription": "Nahrajte soubor SKILL.md, zazipovanou složku dovednosti nebo importujte veřejnou URL dovednosti z GitHubu.",
       "emptyTitle": "Nainstalujte první dovednost",
       "enableSkill": "Zapnout dovednost",
       "enabled": "Zapnuto",
+      "fileExists": "Soubor s touto cestou již existuje",
+      "filesHeading": "Soubory",
+      "formBody": "Pokyny",
+      "formBodyHelp": "Pokyny v Markdownu, které agent čte při vyvolání dovednosti.",
+      "formDescription": "Popis",
+      "formName": "Název",
+      "formVersion": "Verze",
+      "formVersionPlaceholder": "1.0.0",
+      "generateAddResource": "Přidat soubor",
+      "generateDraft": "Navrhnout dovednost",
+      "generateExamplesLabel": "Příklady spouštěčů nebo scénářů (volitelné)",
+      "generateExamplesPlaceholder": "Když se uživatel zeptá na… Při kontrole smlouvy, která… ",
+      "generateFeedbackLabel": "Úpravy (volitelné)",
+      "generateFeedbackPlaceholder": "Zpřesnit podmínky spuštění; přidat krok o citování zdrojů.",
+      "generateHelp": "Popište dovednost, kterou chcete. Model navrhne SKILL.md, který si před instalací můžete prohlédnout a upravit.",
+      "generateIntentLabel": "Co má tato dovednost dělat?",
+      "generateIntentPlaceholder": "Dovednost, která shrne soudní rozhodnutí do krátkého přehledu s výrokem, odůvodněním a citací.",
+      "generateResourceContentPlaceholder": "Obsah tohoto souboru v Markdownu…",
+      "generateResourceDuplicatePathError": "Cesta každého doprovodného souboru musí být jedinečná.",
+      "generateResourcePathError": "Cesta musí začínat na references/, prompts/ nebo knowledge/ a končit na .md (malá písmena, číslice, pomlčky, tečky, podtržítka).",
+      "generateResourcesHelp": "Doplňkové soubory v Markdownu přibalené k SKILL.md.",
+      "generateResourcesLabel": "Doplňkové soubory",
+      "generateSkill": "Vygenerovat pomocí AI",
+      "generateTitle": "Vygenerovat dovednost pomocí AI",
+      "generating": "Generuji…",
+      "howItRuns": "How it runs",
       "importHelp": "Vložte přímou URL souboru SKILL.md, URL souboru na GitHubu nebo URL složky na GitHubu, která obsahuje SKILL.md.",
       "importSkill": "Importovat z URL",
       "importTitle": "Importovat dovednost",
+      "invalidPath": "Cesta smí obsahovat pouze malá písmena, číslice, tečky, pomlčky nebo podtržítka",
       "license": "Licence: {license}",
+      "newFile": "Nový soubor",
+      "newFileFilenamePlaceholder": "notes.md",
+      "newFilePathPlaceholder": "folder/notes.md",
+      "newFolder": "Nová složka",
+      "pdfPreviewSoon": "Náhled PDF bude k dispozici, jakmile budou podporovány binární zdroje dovedností.",
       "privateSection": "Vaše dovednosti",
+      "regenerate": "Vygenerovat znovu",
+      "renameFile": "Přejmenovat",
       "resources": "{count, plural, one {# zdroj} few {# zdroje} other {# zdrojů}}",
       "scope": "Viditelnost",
       "scopePrivate": "Jen já",
       "scopeTeam": "Všichni v organizaci",
+      "selectFileHint": "Select a file from the list to open it in the editor panel on the right.",
       "selectedFile": "Vybráno: {name}",
       "sourceUpload": "Nahráno",
       "sourceUrl": "Veřejná URL",
       "teamSection": "Týmové dovednosti",
+      "unsavedChanges": "Neuložené změny — zahodit?",
+      "uploadFile": "Nahrát soubor",
       "uploadHelp": "Použijte soubor SKILL.md nebo složku .zip obsahující SKILL.md a volitelné zdroje jen pro čtení.",
       "uploadSkill": "Nahrát dovednost",
       "uploadTitle": "Nahrát dovednost",
@@ -1228,7 +1393,7 @@
     "mcp": {
       "addAndConnect": "Přidat a připojit",
       "addServer": "Přidat server",
-      "addServerCardTitle": "Přidat nový MCP server",
+      "addServerCardTitle": "Přidat novou integraci",
       "auth": {
         "bearer": "Bearer token",
         "none": "Bez přihlášení",
@@ -1238,22 +1403,22 @@
       "connect": "Připojit",
       "connectedToast": "MCP připojeno",
       "connectedWithLastUsed": "Připojeno · naposledy použito {time}",
-      "description": "Správa externích MCP serverů, které mohou přidat nástroje do chatu. Tokeny se ukládají pro každého uživatele zvlášť.",
+      "description": "Správa integrací, které mohou přidat nástroje do chatu. Tokeny se ukládají pro každého uživatele zvlášť.",
       "detected": "Rozpoznáno: {authType}",
       "disable": "Vypnout",
       "disabled": "Připojeno · vypnuto",
       "disconnect": "Odpojit",
-      "emptyDescription": "Ověřené právní MCP konektory se zde zobrazí po zapnutí pro váš workspace.",
-      "emptyTitle": "Zatím žádné MCP konektory",
+      "emptyDescription": "Ověřené právní integrace se zde zobrazí po zapnutí pro váš pracovní prostor.",
+      "emptyTitle": "Zatím žádné integrace",
       "enable": "Zapnout",
-      "errorDescription": "Konektor se nepodařilo upravit.",
+      "errorDescription": "Integraci se nepodařilo upravit.",
       "errorTitle": "MCP selhalo",
-      "mcpExplainer": "MCP servery přidávají do chatu externí služby, se kterými může AI pracovat.",
+      "mcpExplainer": "Integrace připojují do chatu externí služby, se kterými může AI pracovat.",
       "namePlaceholder": "Zobrazovaný název",
       "needsReauth": "Vyžaduje opětovné připojení",
       "off": "Vypnuto",
       "on": "Zapnuto",
-      "otherTitle": "Ostatní konektory",
+      "otherTitle": "Ostatní integrace",
       "probe": "Ověřit",
       "recommendedBadge": "Doporučeno",
       "recommendedFor": "Doporučeno pro {jurisdictions}",
@@ -1273,69 +1438,97 @@
         "title": "Agenti"
       },
       "caseLaw": {
-        "description": "Rozhodnutí soudů a databáze judikatury",
-        "title": "Judikatura"
+        "description": "Rozhodnutí soudů a databáze judikatury"
       },
       "clauses": {
-        "description": "Knihovna vzorových ustanovení",
-        "title": "Vzorová ustanovení"
-      },
-      "connectors": {
-        "description": "Připojení stelly k externím nástrojům",
-        "title": "MCP"
+        "description": "Knihovna vzorových ustanovení"
       },
       "mcp": {
         "description": "Připojení stelly k externím nástrojům",
         "title": "MCP"
       },
       "prompts": {
-        "description": "Opakovaně použitelné instrukce dostupné přes / v chatu",
-        "title": "Prompty"
-      },
-      "skills": {
-        "description": "Specializované AI schopnosti pro konkrétní pracovní postupy",
+        "description": "Opakovaně použitelné dovednosti dostupné přes / v chatu",
         "title": "Dovednosti"
       },
       "templates": {
         "description": "Šablony dokumentů se zástupnými znaky",
         "title": "Šablony"
+      },
+      "tools": {
+        "description": "Dovednosti, integrace a vždy dostupné nástroje, které AI může použít v chatu",
+        "title": "Nástroje"
       }
     },
     "skills": {
-      "addShortcut": "Přidat prompt",
+      "addShortcut": "Přidat dovednost",
+      "blueprintGallery": {
+        "cards": {
+          "answerFromSources": {
+            "blurb": "Odpoví na otázku s oporou v autoritativních zdrojích.",
+            "inside": "hierarchie zdrojů · prompt pro rešerši",
+            "title": "Odpověď ze zdrojů"
+          },
+          "checkAgainstRules": {
+            "blurb": "Zkontroluje dokument a označí, co neprošlo, včetně citací.",
+            "inside": "reference podle jurisdikce · kontrolní seznam · kontrolní prompt",
+            "title": "Kontrola podle pravidel"
+          },
+          "intakeToDraft": {
+            "blurb": "Zeptá se na fakta a poté sepíše dokument.",
+            "inside": "rozhovor · vzorové dokumenty · prompt pro koncept",
+            "title": "Od podkladů k návrhu"
+          }
+        },
+        "insideLabel": "Uvnitř",
+        "startBlank": "Začít od nuly",
+        "startBlankHint": "Prázdná dovednost — když přesně víte, co chcete.",
+        "subtitle": "Vyberte výchozí podobu. Připravíme složky a provedeme vás jejich vyplněním.",
+        "title": "Jak má vaše dovednost fungovat?"
+      },
+      "commandConflict": "Dovednost s tímto / příkazem už existuje",
+      "commandHelp": "Napsáním v chatu spustíte tuto dovednost.",
+      "commandLabel": "Příkaz v chatu (volitelné)",
+      "commandPlaceholder": "např. shrnout",
+      "createTitle": "Nová dovednost",
       "defaultBadge": "Výchozí",
-      "deleteConfirmDescription": "Tento prompt bude trvale odstraněn.",
-      "deleteConfirmTitle": "Smazat prompt?",
-      "deleteShortcut": "Smazat prompt",
-      "editShortcut": "Upravit prompt",
-      "emptyDescription": "Vytvářejte opakovaně použitelné prompty pro práci, kterou váš tým opakuje, od shrnutí po první návrhy pokynů.",
-      "emptyState": "Žádné prompty. Přidejte první.",
-      "emptyTitle": "Vytvořte první prompt",
-      "emptyVideoLabel": "Přehled promptů",
+      "deleteConfirmDescription": "Tato dovednost bude trvale odstraněna.",
+      "deleteConfirmTitle": "Smazat dovednost?",
+      "deleteShortcut": "Smazat dovednost",
+      "editShortcut": "Upravit dovednost",
+      "emptyDescription": "Vytvářejte opakovaně použitelné dovednosti pro práci, kterou váš tým opakuje, od shrnutí po první návrhy pokynů.",
+      "emptyState": "Zatím žádné dovednosti. Přidejte první.",
+      "emptyTitle": "Vytvořte první dovednost",
+      "emptyVideoLabel": "Přehled dovedností",
       "errors": {
-        "commandConflict": "Prompt s tímto / názvem již existuje",
+        "commandConflict": "Dovednost s tímto / názvem již existuje",
         "commandInvalid": "Používejte pouze malá písmena, číslice, pomlčky a podtržítka",
-        "commandReserved": "\"/{command}\" je rezervovaný prompt"
+        "commandReserved": "\"/{command}\" je rezervovaná dovednost"
       },
       "form": {
-        "command": "Zkratka promptu",
-        "commandHint": "Název / promptu: pouze malá písmena, číslice, pomlčky a podtržítka",
+        "command": "Zkratka dovednosti",
+        "commandHint": "Název / dovednosti: pouze malá písmena, číslice, pomlčky a podtržítka",
         "commandPlaceholder": "např. shrnout",
         "commandPrefix": "/",
         "description": "Popis",
         "descriptionPlaceholder": "Stručný popis zobrazený ve výběru",
         "name": "Název",
         "namePlaceholder": "např. Shrnout dokument",
-        "prompt": "Prompt",
-        "promptPlaceholder": "Text vložený do kompozéru chatu při použití tohoto promptu",
+        "prompt": "Pokyny",
+        "promptPlaceholder": "Pokyny vložené do kompozéru chatu při použití této dovednosti",
         "scope": "Viditelnost",
         "scopePrivate": "Pouze já",
         "scopeTeam": "Všichni v organizaci"
       },
-      "privateSection": "Moje prompty",
-      "shadowed": "Překryto týmovým promptem",
-      "teamSection": "Týmové prompty"
+      "privateSection": "Vaše dovednosti",
+      "shadowed": "Překryto týmovou dovedností",
+      "teamSection": "Týmové dovednosti"
     }
+  },
+  "markdownEditor": {
+    "rawLabel": "Markdown source",
+    "showFormatted": "Formatted",
+    "showRaw": "Show raw"
   },
   "navigation": {
     "account": "Účet",
@@ -1369,7 +1562,30 @@
     "aiConfigFailed": "Nastavení AI se nepodařilo uložit. Můžete ho dokončit v nastavení.",
     "aiSubtitle": "Přineste si vlastní API klíč. Poskytovatele i modely můžete kdykoliv změnit.",
     "aiTitle": "Připojte svého poskytovatele AI",
+    "catalogueAlwaysOn": "Vždy zapnuto",
+    "catalogueClearSearch": "Vymazat hledání",
+    "catalogueCommunityHeading": "Ostatní",
+    "catalogueContinueWithCount": "{count, plural, one {Pokračovat s # nástrojem} few {Pokračovat se # nástroji} other {Pokračovat s # nástroji}}",
+    "catalogueDetailAbout": "O nástroji",
+    "catalogueDetailAuthor": "Autor",
+    "catalogueDetailCost": "Cena",
+    "catalogueDetailJurisdictions": "Jurisdikce",
+    "catalogueDetailLicense": "Licence",
+    "catalogueDetailSetup": "Nastavení",
+    "catalogueFootnote": "Vlastní nástroje můžete později vytvořit přímo v aplikaci, nebo <link>požádat o jejich přidání skrze GitHub</link>.",
+    "cataloguePartial": "Nainstalováno {installed}, {failed} selhalo",
+    "cataloguePreviewBaseline": "Vestavěné",
+    "cataloguePreviewCount": "{count, plural, =0 {Žádné schopnosti} one {# schopnost} few {# schopnosti} other {# schopností}}",
+    "cataloguePreviewEmpty": "Vyberte z doporučeného balíku nebo objevte další nástroje níže.",
+    "cataloguePreviewYourStack": "Vaše sada",
+    "catalogueProposeTool": "Navrhnout nový nástroj",
+    "catalogueSearchPlaceholder": "Hledat dovednosti a nástroje",
+    "catalogueSubtitle": "stella tyto nástroje může používat při odpovídání. Vyberte ty, které odpovídají vaší praxi; změnit je můžete kdykoli v nastavení.",
+    "catalogueThirdPartyConfirm": "Přesto přidat",
+    "catalogueThirdPartyDisclaimer": "Toto je kód třetí strany od {author}. stella jej nereviduje, neschvaluje ani neudržuje. Sami odpovídáte za ověření, že je vhodný pro vaši praxi a v souladu s pravidly vaší kanceláře. Přidáním přijímáte použití na vlastní riziko.",
+    "catalogueTitle": "Přizpůsobte si AI",
     "changeAnytime": "Toto nastavení lze změnit i kdykoliv později.",
+    "continue": "Pokračovat",
     "creating": {
       "ai": "Ukládáme nastavení AI...",
       "done": "Dokončujeme nastavení...",
@@ -1393,7 +1609,7 @@
     "jurisdictionSaveFailed": "Jurisdikce se nepodařilo uložit. Můžete je doplnit v nastavení.",
     "jurisdictionSearchLabel": "Hledat země",
     "jurisdictionSearchPlaceholder": "Hledat země",
-    "jurisdictionSubtitle": "Vyberte země, se kterými běžně pracujete. Stella podle toho přizpůsobí vaše prostředí.",
+    "jurisdictionSubtitle": "Vyberte země, se kterými běžně pracujete. stella podle toho přizpůsobí vaše prostředí.",
     "jurisdictionSuggested": "Doporučeno",
     "jurisdictionTitle": "Vyberte jurisdikce své praxe",
     "orgNameLabel": "Název týmu",
@@ -1402,6 +1618,7 @@
     "skipStep": "Přeskočit",
     "someInvitesFailed": "{count, plural, one {# pozvánka se nezdařila} few {# pozvánky se nezdařily} other {# pozvánek se nezdařilo}}",
     "stepAi": "AI",
+    "stepCatalogue": "Katalog",
     "stepDesktop": "Aplikace",
     "stepJurisdiction": "Jurisdikce",
     "stepOrganization": "Tým",
@@ -1425,7 +1642,7 @@
       "configure": "Konfigurovat",
       "credentialsPanel": "Klíč",
       "customModelBadge": "Vlastní · {provider}",
-      "customModelDescription": "Toto ID modelu není v katalogu Stella. Vybranému poskytovateli se předá přesně tak, jak je zadané.",
+      "customModelDescription": "Toto ID modelu není v katalogu stella. Vybranému poskytovateli se předá přesně tak, jak je zadané.",
       "customModelHint": "Žádná shoda v katalogu. Zadejte libovolné ID modelu; vlastní ID se uloží přesně tak, jak je napsané.",
       "dataRegion": "Region dat",
       "dataRegionDescription": "Volání AI poteče přes vybraný region kvůli suverenitě dat.",
@@ -1436,11 +1653,10 @@
       "description": "Připojte vlastní API klíč nebo zvolte region pro suverenitu dat.",
       "editProviders": "Upravit poskytovatele",
       "endpoint": "Endpoint",
-      "endpointDescription": "Použijte Azure OpenAI nebo Azure Foundry endpoint /openai/v1. Stella uloží normalizovaný endpoint.",
+      "endpointDescription": "Použijte Azure OpenAI nebo Azure Foundry endpoint /openai/v1. stella uloží normalizovaný endpoint.",
       "keepSavedKey": "Ponechat uložený klíč",
       "modelForRole": "Model pro roli {role}",
       "modelIdPlaceholder": "Hledat modely",
-      "modelRequired": "Povinné",
       "modelsDescription": "Pro každou kategorii AI vyberte poskytovatele a jeden nabízený multimodální model.",
       "modelsPanel": "Módy",
       "newApiKey": "Nový API klíč",
@@ -1455,7 +1671,7 @@
         "inMtok": "Vst/M",
         "model": "Model",
         "outMtok": "Výst/M",
-        "perCall": "/call",
+        "perCall": "/volání",
         "selectedHeading": "Vaše volba",
         "source": "pouze odhad",
         "title": "Ceny modelů",
@@ -1465,7 +1681,7 @@
       "providerForRole": "Poskytovatel pro {role}",
       "providerKeyInvalid": "{provider} odmítl klíč. Zkontrolujte ho před uložením.",
       "providerKeyInvalidShort": "Neplatný",
-      "providersDescription": "Přidejte přihlašovací údaje poskytovatelů, které má Stella používat.",
+      "providersDescription": "Přidejte přihlašovací údaje poskytovatelů, které má stella používat.",
       "providersPanel": "Poskytovatelé",
       "regions": {
         "ch": "Švýcarsko (europe-west6)",
@@ -1510,7 +1726,7 @@
       "paddingDescription": "Minimální počet číslic pro pořadové číslo",
       "pattern": "Vzor",
       "patternInvalidTokens": "Vzor obsahuje nerozpoznané tokeny",
-      "patternMustContainSeq": "Vzor musí obsahovat '{SEQ}'",
+      "patternMustContainSeq": "Vzor musí obsahovat '{'SEQ'}'",
       "patternRequired": "Vzor je povinný",
       "presets": {
         "custom": "Vlastní",
@@ -1519,7 +1735,7 @@
         "yearSequential": "Rok / průběžné (2026/001)"
       },
       "title": "Číslování spisů",
-      "tokenHelp": "Dostupné tokeny: '{SEQ}' (pořadí), '{YYYY}' (rok), '{YY}' (dvouciferný rok), '{MM}' (měsíc)"
+      "tokenHelp": "Dostupné tokeny: '{'SEQ'}' (pořadí), '{'YYYY'}' (rok), '{'YY'}' (dvouciferný rok), '{'MM'}' (měsíc)"
     },
     "members": {
       "changeRole": "Změnit roli",
@@ -1559,13 +1775,14 @@
     "escKey": "ESC",
     "kinds": {
       "caseLaw": "Judikatura",
+      "chat": "Chat",
       "contact": "Kontakt",
       "document": "Dokument",
       "folder": "Složka",
-      "link": "Link",
+      "link": "Odkaz",
       "matter": "Věc",
       "message": "Zpráva",
-      "task": "Task"
+      "task": "Úkol"
     },
     "metaSeparator": "{workspace} · {time}",
     "mimeType": "Typ souboru",
@@ -1590,9 +1807,9 @@
     }
   },
   "selfhost": {
-    "dismissUpdate": "Dismiss update notice",
-    "updateAvailable": "Stella v{latest} is available. You're running v{installed}.",
-    "viewReleaseNotes": "View release notes"
+    "dismissUpdate": "Zavřít oznámení o aktualizaci",
+    "updateAvailable": "Je dostupná stella v{latest}. Používáte v{installed}.",
+    "viewReleaseNotes": "Zobrazit poznámky k vydání"
   },
   "settings": {
     "account": {
@@ -1603,27 +1820,25 @@
       "desktopDownloadOtherMac": "Máte Windows? Stáhnout pro Windows",
       "desktopDownloadOtherWindows": "Nebo si stáhněte instalátor .msi pro IT spravovaná nasazení",
       "desktopDownloadWindows": "Stáhnout pro Windows",
-      "preferredName": "Preferred name",
-      "preferredNameDescription": "Used as the author for DOCX tracked changes and comments.",
-      "preferredNamePlaceholder": "Your name",
+      "preferredName": "Preferované jméno",
+      "preferredNameDescription": "Použije se jako autor u sledovaných změn a komentářů v DOCX.",
+      "preferredNamePlaceholder": "Vaše jméno",
       "profile": "Profil",
       "profileDescription": "Spravujte své osobní předvolby",
-      "sessions": "Relace",
-      "timezone": "Timezone",
-      "timezoneDescription": "Used for timestamps in notifications and emails",
-      "timezoneSaved": "Timezone updated",
+      "timezone": "Časové pásmo",
+      "timezoneDescription": "Použije se pro časové údaje v oznámeních a e-mailech",
+      "timezoneSaved": "Časové pásmo aktualizováno",
       "title": "Účet",
-      "wordEditIdentitySaved": "Word edit identity updated",
-      "wordEditShortcut": "Word edit shortcut",
-      "wordEditShortcutDescription": "Short tag for your initials on Word edits.",
-      "wordEditShortcutPlaceholder": "e.g. JK"
+      "wordEditIdentitySaved": "Identita pro úpravy ve Wordu aktualizována",
+      "wordEditShortcut": "Zkratka pro úpravy ve Wordu",
+      "wordEditShortcutDescription": "Krátká značka pro vaše iniciály u úprav ve Wordu.",
+      "wordEditShortcutPlaceholder": "např. JK"
     },
     "organization": {
       "activeMembers": "Aktivní členové",
       "ai": "Nastavení AI",
       "aiDescription": "Připojte vlastní API klíč nebo zvolte region pro suverenitu dat",
       "anonymization": {
-        "addAction": "Přidat",
         "addPlaceholder": "Pojem, který se má vždy maskovat (např. název firmy)",
         "deleteAction": "Smazat pojem",
         "description": "Spravujte firemní seznam pojmů, které anonymizační kanál vždy zamaskuje, a importujte výchozí seznam z CSV, TXT nebo JSON",
@@ -1646,17 +1861,46 @@
       "practiceJurisdictions": "Jurisdikce praxe",
       "profile": "Profil",
       "profileDescription": "Upravte název organizace",
-      "renameAction": "Rename",
-      "renameDescription": "Members will see the new name immediately.",
-      "renameTitle": "Rename organization",
-      "renameTypeToConfirm": "Type the new name to confirm: {name}",
-      "title": "Organizace"
-    },
-    "title": "Nastavení"
+      "promptCaching": {
+        "description": "Pokud je zapnuto, stella přidává cache značky tak, aby opakované AI dotazy nad stejným dokumentem nebo vláknem stály ~10× méně a byly rychlejší. Cachované prompty zůstávají u poskytovatele AI až 5 minut a jsou omezené na vaši organizaci. Vypnutí zastaví zasílání cache značek, ale poskytovatelé si mohou prompty stále cachovat oportunisticky — pouze smlouva Zero Data Retention s poskytovatelem zcela vypne cachování na straně serveru.",
+        "title": "Cachování promptů",
+        "toggleLabel": "Povolit cachování promptů u poskytovatelů AI"
+      },
+      "renameDescription": "Členové nový název uvidí okamžitě.",
+      "renameTitle": "Přejmenovat organizaci",
+      "renameTypeToConfirm": "Pro potvrzení napište nový název: {name}",
+      "usage": "Využití",
+      "usageDescription": "Limity využití a stav oprávnění pro tuto organizaci",
+      "usageEmptyDescription": "Nakonfigurujte oprávnění k využití, aby organizace mohla používat měřené funkce AI.",
+      "usageEmptyTitle": "Žádné oprávnění k využití",
+      "usageEndsOnTemplate": "Končí {date}",
+      "usageLimitAvailable": "K dispozici",
+      "usageLimitDescriptionEntitlementInactive": "Oprávnění organizace k využití je pozastavené nebo neaktivní. Zkontrolujte správu hostovaného využití nebo kontaktujte správce.",
+      "usageLimitDescriptionNoEntitlement": "Funkce AI vyžadují aktivní oprávnění k využití pro tuto organizaci.",
+      "usageLimitDescriptionUsageLimitExceeded": "Tuto akci nelze spustit při aktuálním stavu využití organizace.",
+      "usageLimitNeeded": "Potřeba",
+      "usageLimitNotNow": "Teď ne",
+      "usageLimitTitleEntitlementInactive": "Oprávnění k využití není aktivní",
+      "usageLimitTitleNoEntitlement": "Je vyžadováno oprávnění k využití",
+      "usageLimitTitleUsageLimitExceeded": "Limit využití AI byl dosažen",
+      "usageLoading": "Načítání…",
+      "usageManage": "Spravovat hostované využití",
+      "usageManageError": "Nepodařilo se otevřít správu hostovaného využití",
+      "usageManuallyManaged": "Spravováno ručně",
+      "usageSeats": "{count, plural, one {# místo} few {# místa} other {# míst}}",
+      "usageStatusActive": "Aktivní",
+      "usageStatusCancelled": "Zrušeno",
+      "usageStatusPastDue": "Po splatnosti",
+      "usageStatusPaused": "Pozastaveno",
+      "usageStatusTrialing": "Zkušební verze",
+      "usageUnitCount": "{count, plural, one {# jednotka} few {# jednotky} other {# jednotek}}",
+      "usageUnitsBalanceTemplate": "K dispozici je {remaining} jednotek",
+      "usageUnitsThisPeriod": "Jednotky využití za toto období"
+    }
   },
   "success": {
-    "aiConfigDeleted": "AI configuration removed",
-    "aiConfigUpdated": "AI configuration updated",
+    "aiConfigDeleted": "Nastavení AI odebráno",
+    "aiConfigUpdated": "Nastavení AI aktualizováno",
     "clientUpdated": "Klient aktualizován",
     "contactCreated": "Klient vytvořen",
     "contactDeleted": "Klient smazán",
@@ -1672,6 +1916,7 @@
     "otherSessionsRevoked": "Ostatní sezení odhlášena",
     "partyAdded": "Strana přidána",
     "partyRemoved": "Strana odebrána",
+    "promptCachingUpdated": "Předvolba cachování promptů aktualizována",
     "roleUpdated": "Role aktualizována",
     "sessionRevoked": "Sezení odhlášeno",
     "taskCreated": "Úkol vytvořen",
@@ -1733,10 +1978,10 @@
     "deleteCategory": "Smazat kategorii",
     "deleteFailed": "Nepodařilo se smazat šablonu",
     "directiveEach": "Smyčka: {expression}",
-    "directiveElse": "Else",
+    "directiveElse": "Jinak",
     "directiveElseIf": "Jinak pokud: {expression}",
     "directiveEndEach": "Konec smyčky",
-    "directiveEndIf": "End if",
+    "directiveEndIf": "Konec pokud",
     "directiveIf": "Pokud: {expression}",
     "discovering": "Analyzování...",
     "discoveryFailed": "Nepodařilo se analyzovat šablonu",
@@ -1759,7 +2004,6 @@
     "fillForm": "Vyplnit šablonu",
     "generate": "Vygenerovat dokument",
     "generating": "Generování...",
-    "history": "Historie",
     "inputTypes": {
       "boolean": "Ano / Ne",
       "date": "Datum",
@@ -1773,13 +2017,11 @@
     "newTemplate": "Nová šablona",
     "noTemplates": "Zatím žádné šablony",
     "pdfConversionFailed": "Převod na PDF se nezdařil",
-    "preview": "Náhled",
     "previewEmpty": "Žádný obsah k náhledu",
     "previewFailed": "Nepodařilo se vygenerovat náhled",
-    "previewFill": "Náhled",
     "previewFillLoading": "Generuji náhled…",
     "previewFillTitle": "Náhled vyplnění",
-    "previewSectionBody": "Body",
+    "previewSectionBody": "Tělo",
     "previewSectionFooter": "Zápatí",
     "previewSectionHeader": "Záhlaví",
     "renameFailed": "Přejmenování šablony se nezdařilo",
@@ -1805,7 +2047,42 @@
     "validationRequired": "Toto pole je povinné",
     "versionLabel": "Verze {version}",
     "versionsEmpty": "Žádná historie verzí",
-    "viewVersion": "View"
+    "viewVersion": "Zobrazit"
+  },
+  "translate": {
+    "dialog": {
+      "description": "Přeložte otevřený dokument pomocí DeepL. Přeložená kopie se uloží do tohoto spisu jako nový dokument.",
+      "noLanguagesFound": "Žádné jazyky nenalezeny",
+      "notConfigured": "DeepL není pro tuto organizaci nastaven. Pro povolení překladu přidejte v nastavení organizace API klíč DeepL.",
+      "selectPlaceholder": "Vyberte jazyk",
+      "targetLanguage": "Cílový jazyk",
+      "title": "Přeložit dokument",
+      "translating": "Překládání…"
+    },
+    "error": {
+      "title": "Překlad se nezdařil"
+    },
+    "settings": {
+      "apiKeyLabel": "API klíč",
+      "apiKeyPlaceholder": "00000000-0000-0000-0000-000000000000:fx",
+      "currentKey": "Uložený klíč",
+      "description": "Nastavte API klíč DeepL pro povolení překladu dokumentů. Podporovány jsou klíče Free i Pro.",
+      "remove": "Odebrat",
+      "removed": "Klíč DeepL odebrán",
+      "removedDescription": "Překlad je vypnutý, dokud nepřidáte nový klíč.",
+      "removing": "Odebírání…",
+      "save": "Uložit",
+      "saved": "Klíč DeepL uložen",
+      "savedDescription": "Překlady jsou nyní k dispozici.",
+      "saving": "Ukládání…",
+      "tierFree": "Free",
+      "tierPro": "Pro",
+      "title": "Překlad DeepL"
+    },
+    "success": {
+      "description": "Uloženo jako „{fileName}“",
+      "title": "Překlad je hotový"
+    }
   },
   "validation": {
     "organizationNameRequired": "Název organizace je povinný",
@@ -1821,6 +2098,7 @@
       "copied": "Zkopírováno do spisu",
       "copyOption": "Kopírovat (ponechat originál)",
       "description": "Zkopírovat nebo přesunout \"{name}\" do jiného spisu",
+      "descriptionCount": "Zkopírovat nebo přesunout {count, plural, one {# položku} few {# položky} other {# položek}} do jiného spisu",
       "menuItem": "Kopírovat/Přesunout do spisu",
       "moveButton": "Přesunout",
       "moveOption": "Přesunout (smazat originál)",
@@ -1868,7 +2146,7 @@
     "entitiesCount": "{count, plural, one {# položka} few {# položky} other {# položek}}",
     "exportToCsv": "Exportovat do CSV",
     "fields": {
-      "calculating": "Počítá se...",
+      "calculating": "Načítá se…",
       "currencyLabel": "Měna (nepovinné)",
       "currencyPlaceholder": "např. USD, EUR",
       "editFieldValue": "Upravit hodnotu pole",
@@ -1894,7 +2172,7 @@
         "openedDescription": "Word otevře lokální kopii. Po dokončení úprav se automaticky vytvoří nová revize.",
         "openedTitle": "Otevřeno ve stella desktop",
         "opening": "Otevírání...",
-        "releaseLock": "Release lock",
+        "releaseLock": "Uvolnit zámek",
         "sentDescription": "Čeká se, až Word otevře lokální kopii.",
         "sentTitle": "Odesláno do stella desktop",
         "takeoverNoResponse": "Žádná odpověď",
@@ -1902,7 +2180,7 @@
         "takeoverWaiting": "Čekání na odpověď",
         "takeoverWaitingDescription": "Žádáme {name} o uvolnění zámku...",
         "unavailableDescription": "Před použitím desktopových úprav spusťte stella desktop a nechte ho běžet.",
-        "unavailableTitle": "Stella desktop není k dispozici.",
+        "unavailableTitle": "stella desktop není k dispozici.",
         "updateRequiredDescription": "stella desktop vyžaduje aktualizaci. Proběhne automaticky po dokončení aktivních desktopových úprav; zkuste to znovu po restartu.",
         "updateRequiredTitle": "Aktualizujte stella desktop"
       },
@@ -1918,6 +2196,17 @@
       "uploading": "Nahrávání souborů",
       "uploadingDescription": "Nezavírejte tuto stránku, dokud nebudou soubory nahrány",
       "uploadingProgress": "{completed, number} z {total, number} nahráno",
+      "versionOrNewFile": {
+        "createNewOption": "Vytvořit nový soubor",
+        "description": "Přetáhli jste \"{fileName}\" na existující dokument.",
+        "extensionMismatch": "Neshodná přípona: očekáváno {expected}, dostáno {actual}",
+        "extensionMismatchError": "Přípona souboru neodpovídá existujícímu dokumentu",
+        "noExtension": "bez přípony",
+        "replaceOption": "Nahrát jako novou verzi",
+        "title": "Nahrát novou verzi nebo vložit jako nový soubor?"
+      },
+      "versionUploadFailed": "Nahrání verze selhalo",
+      "versionUploaded": "Nová verze nahrána",
       "xfaFormNotSupported": "Tento PDF obsahuje formulář XFA. Náhled nemusí zobrazit vše správně."
     },
     "filesystem": {
@@ -1929,6 +2218,51 @@
       "newSubfolder": "Nová podsložka",
       "noFilesYet": "Zatím žádné soubory",
       "version": "Verze"
+    },
+    "filters": {
+      "chips": {
+        "client": "{count, plural, one {Klient: # vybrán} few {Klienti: # vybráni} other {Klienti: # vybráno}}",
+        "createdAt": "Vytvořeno: {label}",
+        "items": "Položky: {label}",
+        "lastActivityAt": "Naposledy aktivní: {label}",
+        "lead": "Vedoucí: {label}",
+        "leadAny": "libovolný",
+        "leadNone": "žádný",
+        "team": "{count, plural, one {Tým: # vybrán} few {Tým: # vybráni} other {Tým: # vybráno}}"
+      },
+      "clear": "Zrušit filtr",
+      "clearAll": "Zrušit všechny filtry",
+      "date": {
+        "custom": "Vlastní rozsah…",
+        "customRange": "{from} – {to}",
+        "from": "Od {date}",
+        "last30d": "Posledních 30 dní",
+        "last7d": "Posledních 7 dní",
+        "thisMonth": "Tento měsíc",
+        "thisWeek": "Tento týden",
+        "to": "Do {date}"
+      },
+      "from": "Od",
+      "items": {
+        "between": "{from}–{to}",
+        "gte": "Min.",
+        "lte": "Max.",
+        "max": "≤ {value}",
+        "min": "≥ {value}"
+      },
+      "noMatches": "Žádné shody",
+      "searchClients": "Hledat klienty…",
+      "team": {
+        "filterAsLead": "Filtrovat podle vedoucího",
+        "hasLead": "Má vedoucího",
+        "lead": "Vedoucí",
+        "leadActive": "Vedoucí",
+        "leadInactive": "Nastavit vedoucího",
+        "members": "Členové",
+        "noLead": "Bez vedoucího",
+        "searchMembers": "Hledat členy…"
+      },
+      "to": "Do"
     },
     "generatingCitations": "Generování citací...",
     "importOrganizer": {
@@ -1955,7 +2289,6 @@
       "organized": "Soubory uspořádány",
       "regenerate": "Vygenerovat znovu",
       "reset": "Obnovit návrhy AI",
-      "retry": "Zkusit znovu",
       "selectedOfTotal": "{selected, number} / {total, number}",
       "summaryToMove": "k přesunutí",
       "summaryToRename": "k přejmenování",
@@ -1998,6 +2331,13 @@
       "usePropertyHint": "Použijte Druh, Autor nebo vlastnost s jednoduchým výběrem"
     },
     "lastActive": "Naposledy aktivní {time}",
+    "lead": "Vedoucí",
+    "leadEmpty": "Bez vedoucího",
+    "leadPicker": {
+      "noMatchingMembers": "Žádní odpovídající členové",
+      "placeholder": "Hledat členy…",
+      "title": "Nastavit vedoucího"
+    },
     "lockMatter": "Zamknout",
     "matterInfo": "Informace o spisu",
     "mattersCount": "{count, plural, one {# spis} few {# spisy} other {# spisů}}",
@@ -2075,12 +2415,11 @@
     },
     "pdf": {
       "adjustForDarkMode": "Přizpůsobit stránky pro tmavý režim",
-      "anonymizeSidebar": "Anonymization",
+      "anonymizeSidebar": "Anonymizace",
       "backToPeek": "Zpět do náhledu",
-      "entitySidebar": "Entity details",
+      "entitySidebar": "Detail údaje",
       "evidence": "Zdůvodnění",
       "fullView": "Plné zobrazení",
-      "goBack": "Zpět",
       "incorrectPassword": "Nesprávné heslo. Zkuste to znovu.",
       "nextPage": "Další strana",
       "openFullView": "Otevřít v plném zobrazení",
@@ -2090,8 +2429,8 @@
       "showOriginal": "Zobrazit původní stránky",
       "toggleSidebar": "Přepnout postranní panel",
       "unlock": "Odemknout",
-      "zoomIn": "Zoom in",
-      "zoomOut": "Zoom out"
+      "zoomIn": "Přiblížit",
+      "zoomOut": "Oddálit"
     },
     "possibleDuplicates": "Možné duplicity",
     "properties": {
@@ -2101,18 +2440,27 @@
       "addReadingSource": "přidat",
       "aiExtraction": "AI extrakce",
       "autoPromptFailed": "Prompt se nepodařilo vygenerovat.",
-      "chipDate": "Datum",
-      "chipMulti": "Více výběrů",
+      "bulk": {
+        "addAnother": "Přidat další sloupec",
+        "createFailed": "Sloupce se nepodařilo vytvořit",
+        "createMany": "Vytvořit {count} sloupců",
+        "createOne": "Vytvořit sloupec",
+        "createdMany": "Vytvořeno {count} sloupců",
+        "createdOne": "Sloupec vytvořen",
+        "promptPlaceholder": "Co má tento sloupec extrahovat? V dialogu sloupce použijte / a @.",
+        "title": "Přidat sloupce"
+      },
+      "chipManual": "Bez AI",
+      "chipMulti": "Štítky",
       "chipNumber": "Číslo",
-      "chipSingle": "Jeden výběr",
+      "chipSingle": "Štítek",
       "chipText": "Text",
-      "clip": "Clip",
+      "clip": "Oříznout",
       "composerTitle": "Co má stella najít?",
       "conditionSeparator": "A",
       "conditions": "Podmínky ({count})",
       "createColumn": "Vytvořit sloupec",
       "createOption": "Vytvořit \"{option}\"",
-      "date": "Datum",
       "defaultNames": {
         "file": "Vlastnost souboru",
         "multiSelect": "Vlastnost vícenásobného výběru",
@@ -2121,14 +2469,13 @@
       },
       "defaultPromptPrefix": "Najdi {propertyName} v ",
       "defaultPromptPropertyName": "informace",
-      "deleteProperty": "Smazat vlastnost",
-      "deletePropertyConfirmDescription": "Opravdu chcete smazat vlastnost \"{propertyName}\"? Tuto akci nelze vrátit.",
+      "deleteProperty": "Smazat sloupec",
+      "deletePropertyConfirmDescription": "Opravdu chcete smazat sloupec \"{propertyName}\"? Tuto akci nelze vrátit.",
       "documentsLabel": "Dokumenty",
       "editColumn": "Upravit sloupec",
       "editConditions": "Upravit podmínky",
       "editConditionsDescription": "Nastavte podmínky, za kterých se má tato vlastnost generovat.",
       "enterAValue": "Zadejte hodnotu",
-      "error": "Chyba",
       "extractEntityType": "Vytěžit informaci",
       "extractEntityTypeDescription": "Sloupec doplňovaný AI.",
       "extractionInstruction": "Instrukce pro AI",
@@ -2146,6 +2493,7 @@
       "int": "Celé číslo",
       "keepEmpty": "Ponechat prázdné",
       "manualColumn": "Manuální sloupec",
+      "markAllAsReviewed": "Označit vše jako zkontrolováno",
       "multiSelect": "Vícenásobný výběr",
       "nameProperty": "Vlastnost názvu",
       "newColumn": "Nový sloupec",
@@ -2161,11 +2509,11 @@
       "previewSkipped": "Na tomto dokumentu není žádný použitelný vstup.",
       "previewSubject": "Vyzkoušej na vzorku",
       "previewUnsupported": "Náhled není pro tento typ dokumentu podporovaný.",
-      "readingFrom": "Čte z",
+      "readingFrom": "AI čerpá informace z",
       "referencesItself": "Vlastnost odkazuje sama na sebe přes jiné vlastnosti",
+      "rerunColumn": "Spustit znovu sloupec",
       "resultType": "Typ výsledku",
-      "returnsLabel": "Vrací",
-      "saveChanges": "Uložit změny",
+      "returnsLabel": "Formát",
       "scopeFile": "Aktuální soubor",
       "scopeFileDescription": "Použít {property} a spustit tento soubor nyní.",
       "scopeFileUnavailable": "V tomto zobrazení není dostupný zdrojový soubor.",
@@ -2180,6 +2528,7 @@
       "sortAscendingDate": "Od nejstarších",
       "sortDescending": "Řadit sestupně",
       "sortDescendingDate": "Od nejnovějších",
+      "suggestWithAI": "Navrhnout pomocí AI",
       "text": "Text",
       "typeChangeWarning": "Stávající data se při uložení smažou a znovu spočítají.",
       "unnamedColumn": "tento sloupec",
@@ -2196,7 +2545,7 @@
       "parties": "Strany"
     },
     "table": {
-      "clearFlags": "Vymazat označení",
+      "clearFlags": "Odstranit označení",
       "flagCell": "Označit buňku",
       "flags": {
         "contradiction": "Rozpor",
@@ -2210,17 +2559,23 @@
         "verified": "Ověřeno",
         "verifiedDescription": "Ručně potvrzeno."
       },
+      "lock": {
+        "lock": "Zamknout buňku",
+        "locked": "Zamčeno",
+        "unlock": "Odemknout buňku"
+      },
       "reorderReadOnly": "Řádky tabulky se řídí aktuálním řazením",
       "tightContent": "Těsně",
       "wrapContent": "Obtékat text"
     },
     "tasksCount": "{count, plural, one {# položka agendy} few {# položky agendy} other {# položek agendy}}",
+    "team": "Tým",
     "tools": {
       "aiModel": "AI model",
       "manualInput": "Ručně"
     },
     "unarchiveMatter": "Obnovit z archivu",
-    "uploadDocuments": "Upload documents",
+    "uploadDocuments": "Nahrát dokumenty",
     "views": {
       "addFields": "Přidat pole",
       "aiGenerated": "Generováno AI",
@@ -2234,7 +2589,6 @@
         "noDates": "Nevybrána žádná vlastnost data",
         "showAdditionalDates": "Další datumy",
         "showBy": "Zobrazit podle",
-        "today": "Dnes",
         "updatedAt": "Naposledy aktualizováno",
         "week": "Týden",
         "year": "Rok"
@@ -2261,7 +2615,21 @@
         "timeline": "Časová osa"
       },
       "newView": "Nový {layout}",
+      "saveAsTemplate": "Uložit jako šablonu…",
       "selectProperty": "Vybrat vlastnost",
+      "templates": {
+        "created": "Šablona uložena",
+        "delete": "Smazat šablonu",
+        "deleteConfirmDescription": "Smazat šablonu „{name}“? Tuto akci nelze vrátit zpět.",
+        "deleted": "Šablona smazána",
+        "description": "Uložte si rozložení aktuálního pohledu jako šablonu pro opakované použití.",
+        "empty": "Žádné šablony. Uložte aktuální pohled jako první šablonu.",
+        "nameLabel": "Název šablony",
+        "namePlaceholder": "např. Aktivní spisy",
+        "save": "Uložit šablonu",
+        "title": "Šablony pohledů",
+        "use": "Použít šablonu"
+      },
       "timeline": {
         "day": "Den",
         "endDate": "Datum ukončení",
@@ -2271,13 +2639,25 @@
         "showTable": "Zobrazit tabulku",
         "startDate": "Datum zahájení",
         "week": "Týden"
-      }
+      },
+      "useTemplate": "Použít šablonu…"
     },
     "workflow": {
       "allManualInputsDescription": "Pro spuštění pracovního postupu přidejte alespoň jednu AI vlastnost",
       "allManualInputsTitle": "Všechny vlastnosti jsou ruční vstupy",
       "generate": "Generovat",
+      "largeRunPrompt": {
+        "description": "Do fronty se zařadí extrakce AI pro {count} entit. Spusťte ji jen tehdy, pokud chcete nyní zpracovat tolik souborů.",
+        "start": "Spustit extrakci",
+        "title": "Spustit extrakci AI?"
+      },
       "noFieldsToProcess": "Žádná pole ke zpracování",
+      "serviceTierPrompt": {
+        "description": "Tento pracovní postup zařadí AI extrakci pro {count} entit. Spusťte ji hned za standardní kredity, nebo použijte snížené kredity a počkejte déle.",
+        "flex": "Použít snížené kredity",
+        "standard": "Spustit hned",
+        "title": "Použít snížené kredity?"
+      },
       "someFieldsOutdatedDescription": "Aktualizujte pole jednoduchého a vícenásobného výběru tak, aby odpovídala možnostem vlastností",
       "someFieldsOutdatedTitle": "Některá pole jsou zastaralá",
       "startedSuccessfully": "Pracovní postup úspěšně spuštěn",

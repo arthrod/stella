@@ -9,6 +9,15 @@
  */
 
 import { getHeaderRowsHeight } from "../layout-engine/index";
+import { measuredLineContentOffset } from "../layout-engine/lineFlow";
+import { measureParagraph } from "../layout-engine/measure";
+import { measureRun } from "../layout-engine/measure/measureContainer";
+import type { FontStyle } from "../layout-engine/measure/measureContainer";
+import {
+  buildTableCellFloatingZones,
+  getTableCellContentWidth,
+  getTableCellFloatingImages,
+} from "../layout-engine/measure/tableCellFloating";
 import type {
   Layout,
   FlowBlock,
@@ -18,15 +27,17 @@ import type {
   ParagraphMeasure,
   MeasuredLine,
   TableBlock,
+  TableCell,
+  TableCellMeasure,
   TableFragment,
   TableMeasure,
   TextRun,
   TabRun,
+  MathRun,
   BlockId,
 } from "../layout-engine/types";
+import { inlineImageBoundingBox } from "../utils/rotationBoundingBox";
 import { getPageTop } from "./hitTest";
-import { measureRun } from "./measuring/measureContainer";
-import type { FontStyle } from "./measuring/measureContainer";
 
 // =============================================================================
 // TYPES
@@ -62,6 +73,9 @@ export type CaretPosition = {
   pageIndex: number;
 };
 
+const DEFAULT_TABLE_CELL_PADDING_LEFT = 7;
+const DEFAULT_TABLE_CELL_PADDING_TOP = 1;
+
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
@@ -86,11 +100,59 @@ function runToFontStyle(run: TextRun | TabRun): FontStyle {
   };
 }
 
+function mathRunToFontStyle(run: MathRun): FontStyle {
+  return {
+    fontFamily: run.fontFamily ?? "Cambria Math",
+    fontSize: run.fontSize ?? 11,
+    ...(run.bold !== undefined ? { bold: run.bold } : {}),
+    ...(run.italic !== undefined ? { italic: run.italic } : {}),
+    ...(run.letterSpacing !== undefined
+      ? { letterSpacing: run.letterSpacing }
+      : {}),
+    ...(run.horizontalScale !== undefined
+      ? { horizontalScale: run.horizontalScale }
+      : {}),
+  };
+}
+
 /**
  * Find a block by its ID.
  */
 function findBlockById(blocks: FlowBlock[], blockId: BlockId): number {
   return blocks.findIndex((block) => block.id === blockId);
+}
+
+function getCellContentOffsetY(
+  cell: TableCell,
+  cellMeasure: TableCellMeasure,
+  rowHeight: number,
+): number {
+  const padTop = cell.padding?.top ?? DEFAULT_TABLE_CELL_PADDING_TOP;
+  const spareHeight = Math.max(0, rowHeight - cellMeasure.height);
+  if (cell.verticalAlign === "bottom") {
+    return padTop + spareHeight;
+  }
+  if (cell.verticalAlign === "center") {
+    return padTop + spareHeight / 2;
+  }
+  return padTop;
+}
+
+function getCellContentOffsetX(cell: TableCell): number {
+  return cell.padding?.left ?? DEFAULT_TABLE_CELL_PADDING_LEFT;
+}
+
+function getMeasuredBlockHeight(measure: Measure | undefined): number {
+  if (!measure) {
+    return 0;
+  }
+  if ("totalHeight" in measure) {
+    return measure.totalHeight;
+  }
+  if ("height" in measure) {
+    return measure.height;
+  }
+  return 0;
 }
 
 /**
@@ -246,7 +308,10 @@ function charOffsetToX(
     }
 
     if (run.kind === "image") {
-      const imageWidth = run.width;
+      // Rotated inline images occupy their axis-aligned bbox width — use
+      // the same advance the painter does so selection rects line up with
+      // what the user sees (eigenpal #424).
+      const imageWidth = inlineImageBoundingBox(run).width;
       if (charsProcessed + 1 >= charOffset) {
         if (charOffset <= charsProcessed) {
           return x;
@@ -262,6 +327,22 @@ function charOffsetToX(
       if (charOffset <= charsProcessed) {
         return x;
       }
+      charsProcessed += 1;
+      continue;
+    }
+
+    if (run.kind === "math") {
+      const mathWidth = measureRun(
+        run.plainText,
+        mathRunToFontStyle(run),
+      ).width;
+      if (charsProcessed + 1 >= charOffset) {
+        if (charOffset <= charsProcessed) {
+          return x;
+        }
+        return x + mathWidth;
+      }
+      x += mathWidth;
       charsProcessed += 1;
       continue;
     }
@@ -292,21 +373,6 @@ function charOffsetToX(
   }
 
   return x;
-}
-
-/**
- * Calculate cumulative line height before a given line index.
- */
-function lineHeightBefore(
-  measure: ParagraphMeasure,
-  lineIndex: number,
-): number {
-  let height = 0;
-  for (let i = 0; i < lineIndex && i < measure.lines.length; i++) {
-    // SAFETY: i < measure.lines.length in for loop
-    height += measure.lines[i]!.lineHeight;
-  }
-  return height;
 }
 
 // =============================================================================
@@ -438,9 +504,11 @@ export function selectionToRects(
           }
 
           // Calculate line Y offset within fragment
-          const lineOffset =
-            lineHeightBefore(paragraphMeasure, index) -
-            lineHeightBefore(paragraphMeasure, paragraphFragment.fromLine);
+          const lineOffset = measuredLineContentOffset(
+            paragraphMeasure.lines,
+            paragraphFragment.fromLine,
+            index,
+          );
 
           // Create selection rectangle
           const rectX =
@@ -497,6 +565,8 @@ export function selectionToRects(
           if (!row || !rowMeasure) {
             continue;
           }
+          const clipTop = tableFragment.topClip ?? 0;
+          const clipBottom = tableFragment.bottomClip ?? rowMeasure.height;
 
           // Walk through cells
           let cellX = 0;
@@ -506,21 +576,50 @@ export function selectionToRects(
             if (!cell || !cellMeasure) {
               continue;
             }
+            const contentWidth = getTableCellContentWidth(cell, cellMeasure);
+            const floatingImages = getTableCellFloatingImages(
+              cell,
+              cellMeasure,
+              contentWidth,
+            );
+            const floatingZones = buildTableCellFloatingZones(
+              floatingImages,
+              contentWidth,
+            );
+            const contentOffsetX = getCellContentOffsetX(cell);
+            const contentOffsetY = getCellContentOffsetY(
+              cell,
+              cellMeasure,
+              rowMeasure.height,
+            );
 
             // Check each paragraph in the cell
+            let blockY = 0;
             for (let blockIdx = 0; blockIdx < cell.blocks.length; blockIdx++) {
               const cellBlock = cell.blocks[blockIdx];
               const cellBlockMeasure = cellMeasure.blocks[blockIdx];
 
               if (!cellBlock || cellBlock.kind !== "paragraph") {
+                blockY += getMeasuredBlockHeight(cellBlockMeasure);
                 continue;
               }
               if (!cellBlockMeasure || cellBlockMeasure.kind !== "paragraph") {
+                blockY += getMeasuredBlockHeight(cellBlockMeasure);
                 continue;
               }
 
               const paragraphBlock = cellBlock as ParagraphBlock;
-              const paragraphMeasure = cellBlockMeasure as ParagraphMeasure;
+              let paragraphMeasure = cellBlockMeasure as ParagraphMeasure;
+              if (floatingZones.length > 0) {
+                paragraphMeasure = measureParagraph(
+                  paragraphBlock,
+                  contentWidth,
+                  {
+                    floatingZones,
+                    paragraphYOffset: blockY,
+                  },
+                );
+              }
 
               // Find lines that intersect with selection
               const intersectingLines = findLinesInRange(
@@ -530,7 +629,6 @@ export function selectionToRects(
                 selTo,
               );
 
-              let blockY = 0;
               for (const { line, index } of intersectingLines) {
                 const range = computeLinePmRange(paragraphBlock, line);
                 if (range.pmStart === undefined || range.pmEnd === undefined) {
@@ -558,20 +656,35 @@ export function selectionToRects(
                   paragraphBlock,
                   line,
                   charOffsetFrom,
-                  cellMeasure.width,
+                  contentWidth,
                 );
                 const endX = charOffsetToX(
                   paragraphBlock,
                   line,
                   charOffsetTo,
-                  cellMeasure.width,
+                  contentWidth,
                 );
 
-                const lineY = lineHeightBefore(paragraphMeasure, index);
+                const lineY = measuredLineContentOffset(
+                  paragraphMeasure.lines,
+                  0,
+                  index,
+                );
+                const clippedLineY = contentOffsetY + blockY + lineY;
+                if (
+                  clippedLineY + line.lineHeight <= clipTop ||
+                  clippedLineY >= clipBottom
+                ) {
+                  continue;
+                }
 
                 rects.push({
-                  x: tableFragment.x + cellX + Math.min(startX, endX),
-                  y: tableFragment.y + rowY + blockY + lineY + pageTopY,
+                  x:
+                    tableFragment.x +
+                    cellX +
+                    contentOffsetX +
+                    Math.min(startX, endX),
+                  y: tableFragment.y + rowY + clippedLineY - clipTop + pageTopY,
                   width: Math.max(1, Math.abs(endX - startX)),
                   height: line.lineHeight,
                   pageIndex,
@@ -709,9 +822,11 @@ export function getCaretPosition(
             }
 
             // Calculate Y offset
-            const lineOffset =
-              lineHeightBefore(paragraphMeasure, lineIndex) -
-              lineHeightBefore(paragraphMeasure, paragraphFragment.fromLine);
+            const lineOffset = measuredLineContentOffset(
+              paragraphMeasure.lines,
+              paragraphFragment.fromLine,
+              lineIndex,
+            );
 
             return {
               x: fragment.x + indentLeft + alignmentOffset + x,

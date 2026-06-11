@@ -7,6 +7,7 @@
 
 import type { Node as PMNode, Mark } from "prosemirror-model";
 
+import { convertBulletToUnicode } from "../docx/bulletMarkers";
 import type {
   FlowBlock,
   ParagraphBlock,
@@ -24,10 +25,10 @@ import type {
   TextRun,
   TabRun,
   ImageRun,
-  LineBreakRun,
   FieldRun,
   RunFormatting,
   ParagraphAttrs,
+  SdtGroup,
   TabStop,
   FloatingTablePosition,
 } from "../layout-engine/types";
@@ -35,13 +36,38 @@ import {
   DEFAULT_TEXTBOX_MARGINS,
   DEFAULT_TEXTBOX_WIDTH,
 } from "../layout-engine/types";
+import {
+  expectBlockSdtAttrs,
+  expectCharacterSpacingMarkAttrs,
+  expectCommentMarkAttrs,
+  expectEmphasisMarkAttrs,
+  expectFieldAttrs,
+  expectFontFamilyMarkAttrs,
+  expectFontSizeMarkAttrs,
+  expectFootnoteRefMarkAttrs,
+  expectHighlightMarkAttrs,
+  expectHyperlinkMarkAttrs,
+  expectImageAttrs,
+  expectMathAttrs,
+  expectParagraphAttrs,
+  expectRunFormattingOverrideMarkAttrs,
+  expectRunShadingMarkAttrs,
+  expectTableAttrs,
+  expectTableCellAttrs,
+  expectTableRowAttrs,
+  expectTextBoxAttrs,
+  expectTextColorMarkAttrs,
+  expectTextEffectMarkAttrs,
+  expectTrackedChangeMarkAttrs,
+  expectUnderlineMarkAttrs,
+} from "../prosemirror/attrs";
+import { runShadingAttrsToShading } from "../prosemirror/conversion/runShadingMark";
+import type { RunFormattingOverrideAttrs } from "../prosemirror/schema/marks";
 import type {
-  TextColorAttrs,
-  UnderlineAttrs,
-  FontSizeAttrs,
-  FontFamilyAttrs,
-} from "../prosemirror/schema/marks";
-import type { ParagraphAttrs as PMParagraphAttrs } from "../prosemirror/schema/nodes";
+  ImageAttrs,
+  ParagraphAttrs as PMParagraphAttrs,
+} from "../prosemirror/schema/nodes";
+import { assertValidProseMirrorDocument } from "../prosemirror/validation";
 import type {
   ColorValue,
   Theme,
@@ -49,7 +75,9 @@ import type {
   NumberFormat,
   TextFormatting,
 } from "../types/document";
+import { NUMBER_FORMAT_VALUES } from "../types/documentEnumValues";
 import { resolveColor, resolveHighlightToCss } from "../utils/colorResolver";
+import { resolveShadingFill } from "../utils/formatToStyle";
 import {
   pointsToPixels,
   halfPointsToPixels,
@@ -74,6 +102,26 @@ export type ToFlowBlocksOptions = {
   listAbstractCounters?: Map<number, number[]>;
   /** Shared startOverride state for nested containers. */
   listSeenNumIds?: Set<string>;
+  /**
+   * Parallel counter state for the "original" (pre-revision) document, used to
+   * number tracked-deletion list items. Word numbers inserted and deleted list
+   * runs as if they never coexist: insertions get final-document numbering,
+   * deletions keep their original numbering. Without a separate stream a deleted
+   * item continues the counter of the inserted item before it (a, b → c, d, e
+   * instead of a, b and a, b, c). Normal items advance both streams.
+   */
+  originalListCounters?: Map<number, number[]>;
+  /** Latest concrete original-stream counters by abstract numbering definition. */
+  originalListAbstractCounters?: Map<number, number[]>;
+  /** Original-stream startOverride state. */
+  originalListSeenNumIds?: Set<string>;
+  /**
+   * Document-wide `w:defaultTabStop` (§17.6.13) in twips. Stamped onto
+   * every paragraph block so paragraph-local layout helpers (list marker
+   * tab-stop math) can read it without taking a `Document` reference.
+   * Defaults to the OOXML 720-twip value when absent.
+   */
+  defaultTabStopTwips?: number;
 };
 
 const DEFAULT_FONT = "Calibri";
@@ -182,17 +230,13 @@ function toLetter(value: number, upper: boolean): string {
   if (value <= 0) {
     return "";
   }
-  let remaining = value;
-  let output = "";
-  while (remaining > 0) {
-    const remainder = (remaining - 1) % 26;
-    output = String.fromCodePoint(65 + remainder) + output;
-    remaining = Math.floor((remaining - 1) / 26);
-  }
-  return upper ? output : output.toLowerCase();
+  const zeroBased = value - 1;
+  const baseCodePoint = upper ? 65 : 97;
+  const letter = String.fromCodePoint(baseCodePoint + (zeroBased % 26));
+  return letter.repeat(Math.floor(zeroBased / 26) + 1);
 }
 
-function formatCounter(
+export function formatCounter(
   value: number,
   format: NumberFormat | undefined,
 ): string {
@@ -221,7 +265,7 @@ function formatCounter(
   }
 }
 
-function resolveListTemplate(
+export function resolveListTemplate(
   template: string,
   counters: number[],
   levelFormats: NumberFormat[] | undefined,
@@ -250,6 +294,16 @@ function getLastListCounters(
   return lastCounters;
 }
 
+function applyMarkerAllCaps(
+  marker: string | null,
+  allCaps: boolean | undefined,
+): string | null {
+  if (marker === null || !allCaps) {
+    return marker;
+  }
+  return marker.toLocaleUpperCase();
+}
+
 function computeListMarker(
   pmAttrs: PMParagraphAttrs,
   listCounters: Map<number, number[]>,
@@ -273,7 +327,7 @@ function computeListMarker(
   }
 
   if (pmAttrs.listIsBullet) {
-    return pmAttrs.listMarker || "•";
+    return convertBulletToUnicode(pmAttrs.listMarker || "");
   }
 
   const level = pmAttrs.numPr?.ilvl ?? 0;
@@ -304,6 +358,14 @@ function computeListMarker(
   for (let i = level + 1; i < counters.length; i += 1) {
     counters[i] = 0;
   }
+  // Word's default LISTNUM field advances the counter at one ilvl deeper
+  // than the host paragraph. Carrying the consumed advances forward here
+  // means a later sibling at that depth (e.g. an OutNum3 "(b)" following an
+  // OutNum2 "(a)") picks up the next letter instead of restarting at "(a)".
+  const childAdvances = pmAttrs.listImplicitChildLevelAdvances ?? 0;
+  if (childAdvances > 0 && level + 1 < counters.length) {
+    counters[level + 1] = (counters[level + 1] ?? 0) + childAdvances;
+  }
   listCounters.set(numId, counters);
   if (abstractNumId !== undefined) {
     abstractCounters.set(abstractNumId, [...counters]);
@@ -322,6 +384,15 @@ function computeListMarker(
   }
   if (pmAttrs.listMarker) {
     return pmAttrs.listMarker;
+  }
+  // OOXML allows a list level to set lvlText="" with numFmt="none" to attach
+  // numbering metadata (counters, indents) without painting a marker — Word
+  // glossary/definition styles use this. An empty listMarker means the level
+  // explicitly opts out; synthesising a decimal counter here would forge a
+  // marker the source never authored.
+  const levelFormat = levelFormats?.[level] ?? pmAttrs.listNumFmt;
+  if (levelFormat === "none" || pmAttrs.listMarker === "") {
+    return null;
   }
   return formatNumberedMarker(counters, level);
 }
@@ -353,7 +424,7 @@ function extractRunFormatting(
         break;
 
       case "underline": {
-        const attrs = mark.attrs as UnderlineAttrs;
+        const attrs = expectUnderlineMarkAttrs(mark);
         if (attrs.style || attrs.color) {
           const underlineObj: { style?: string; color?: string } = {};
           if (attrs.style) {
@@ -374,7 +445,7 @@ function extractRunFormatting(
         break;
 
       case "textColor": {
-        const attrs = mark.attrs as TextColorAttrs;
+        const attrs = expectTextColorMarkAttrs(mark);
         if (attrs.themeColor || attrs.rgb) {
           const colorArg: ColorValue = {};
           if (attrs.rgb) {
@@ -399,19 +470,30 @@ function extractRunFormatting(
 
       case "highlight":
         formatting.highlight = resolveHighlightToCss(
-          mark.attrs["color"] as string,
+          expectHighlightMarkAttrs(mark).color,
         );
         break;
 
+      case "runShading": {
+        const shadingCss = resolveShadingFill(
+          runShadingAttrsToShading(expectRunShadingMarkAttrs(mark)),
+          theme,
+        );
+        if (shadingCss) {
+          formatting.shading = shadingCss;
+        }
+        break;
+      }
+
       case "fontSize": {
-        const attrs = mark.attrs as FontSizeAttrs;
+        const attrs = expectFontSizeMarkAttrs(mark);
         // Convert half-points to points
         formatting.fontSize = attrs.size / 2;
         break;
       }
 
       case "fontFamily": {
-        const attrs = mark.attrs as FontFamilyAttrs;
+        const attrs = expectFontFamilyMarkAttrs(mark);
         const font = attrs.ascii || attrs.hAnsi;
         if (font) {
           formatting.fontFamily = font;
@@ -420,22 +502,17 @@ function extractRunFormatting(
       }
 
       case "characterSpacing": {
-        const attrs = mark.attrs as {
-          spacing: number | null;
-          position: number | null;
-          scale: number | null;
-          kerning: number | null;
-        };
-        if (attrs.spacing != null && attrs.spacing !== 0) {
+        const attrs = expectCharacterSpacingMarkAttrs(mark);
+        if (attrs.spacing !== undefined && attrs.spacing !== 0) {
           formatting.letterSpacing = twipsToPixels(attrs.spacing);
         }
-        if (attrs.position != null && attrs.position !== 0) {
+        if (attrs.position !== undefined && attrs.position !== 0) {
           formatting.positionPx = halfPointsToPixels(attrs.position);
         }
-        if (attrs.scale != null && attrs.scale !== 100) {
+        if (attrs.scale !== undefined && attrs.scale !== 100) {
           formatting.horizontalScale = attrs.scale;
         }
-        if (attrs.kerning != null && attrs.kerning > 0) {
+        if (attrs.kerning !== undefined && attrs.kerning > 0) {
           formatting.kerningMinPt = halfPointsToPoints(attrs.kerning);
         }
         break;
@@ -457,6 +534,12 @@ function extractRunFormatting(
         formatting.imprint = true;
         break;
 
+      case "hidden":
+        // eigenpal #424 (w:vanish gap 9): mark surfaces RunFormatting.hidden
+        // so the painter can apply the dimmed dotted-underline treatment.
+        formatting.hidden = true;
+        break;
+
       case "textShadow":
         formatting.textShadow = true;
         break;
@@ -465,19 +548,25 @@ function extractRunFormatting(
         formatting.textOutline = true;
         break;
 
+      case "rtl":
+        formatting.rtl = true;
+        break;
+
+      case "textEffect":
+        // The textEffect mark schema rejects "none"; only animated variants
+        // ever reach this branch.
+        formatting.textEffect = expectTextEffectMarkAttrs(mark).effect;
+        break;
+
       case "runFormattingOverride":
-        applyRunFormattingOverrides(formatting, mark);
+        applyRunFormattingOverrides(
+          formatting,
+          expectRunFormattingOverrideMarkAttrs(mark),
+        );
         break;
 
       case "emphasisMark": {
-        const type = mark.attrs["type"] as string | undefined;
-        formatting.emphasisMark =
-          type === "dot" ||
-          type === "comma" ||
-          type === "circle" ||
-          type === "underDot"
-            ? type
-            : "dot";
+        formatting.emphasisMark = expectEmphasisMarkAttrs(mark).type ?? "dot";
         break;
       }
 
@@ -490,7 +579,7 @@ function extractRunFormatting(
         break;
 
       case "hyperlink": {
-        const attrs = mark.attrs as { href: string; tooltip?: string };
+        const attrs = expectHyperlinkMarkAttrs(mark);
         const link: RunFormatting["hyperlink"] & object = {
           href: attrs.href,
         };
@@ -502,7 +591,7 @@ function extractRunFormatting(
       }
 
       case "footnoteRef": {
-        const attrs = mark.attrs as { id: string | number; noteType?: string };
+        const attrs = expectFootnoteRefMarkAttrs(mark);
         const id =
           typeof attrs.id === "string"
             ? Number.parseInt(attrs.id, 10)
@@ -516,7 +605,7 @@ function extractRunFormatting(
       }
 
       case "comment": {
-        const commentId = mark.attrs["commentId"] as number;
+        const commentId = expectCommentMarkAttrs(mark).commentId;
         if (commentId) {
           if (!formatting.commentIds) {
             formatting.commentIds = [];
@@ -526,19 +615,27 @@ function extractRunFormatting(
         break;
       }
 
-      case "insertion":
+      case "insertion": {
+        const attrs = expectTrackedChangeMarkAttrs(mark);
         formatting.isInsertion = true;
-        formatting.changeAuthor = mark.attrs["author"] as string;
-        formatting.changeDate = mark.attrs["date"] as string;
-        formatting.changeRevisionId = mark.attrs["revisionId"] as number;
+        formatting.changeAuthor = attrs.author;
+        if (attrs.date !== undefined) {
+          formatting.changeDate = attrs.date;
+        }
+        formatting.changeRevisionId = attrs.revisionId;
         break;
+      }
 
-      case "deletion":
+      case "deletion": {
+        const attrs = expectTrackedChangeMarkAttrs(mark);
         formatting.isDeletion = true;
-        formatting.changeAuthor = mark.attrs["author"] as string;
-        formatting.changeDate = mark.attrs["date"] as string;
-        formatting.changeRevisionId = mark.attrs["revisionId"] as number;
+        formatting.changeAuthor = attrs.author;
+        if (attrs.date !== undefined) {
+          formatting.changeDate = attrs.date;
+        }
+        formatting.changeRevisionId = attrs.revisionId;
         break;
+      }
       default:
         break;
     }
@@ -584,37 +681,40 @@ function mergeRunFormatting(
 
 function applyRunFormattingOverrides(
   formatting: RunFormatting,
-  mark: Mark,
+  attrs: RunFormattingOverrideAttrs,
 ): void {
-  if (mark.attrs["bold"] === false) {
+  if (attrs.bold === false) {
     formatting.bold = false;
   }
-  if (mark.attrs["italic"] === false) {
+  if (attrs.italic === false) {
     formatting.italic = false;
   }
-  if (mark.attrs["underline"] === "none") {
+  if (attrs.underline === "none") {
     formatting.underline = false;
   }
-  if (mark.attrs["strike"] === false) {
+  if (attrs.strike === false) {
     formatting.strike = false;
   }
-  if (mark.attrs["allCaps"] === false) {
+  if (attrs.allCaps === false) {
     formatting.allCaps = false;
   }
-  if (mark.attrs["smallCaps"] === false) {
+  if (attrs.smallCaps === false) {
     formatting.smallCaps = false;
   }
-  if (mark.attrs["emboss"] === false) {
+  if (attrs.emboss === false) {
     formatting.emboss = false;
   }
-  if (mark.attrs["imprint"] === false) {
+  if (attrs.imprint === false) {
     formatting.imprint = false;
   }
-  if (mark.attrs["shadow"] === false) {
+  if (attrs.shadow === false) {
     formatting.textShadow = false;
   }
-  if (mark.attrs["outline"] === false) {
+  if (attrs.outline === false) {
     formatting.textOutline = false;
+  }
+  if (attrs.rtl === false) {
+    formatting.rtl = false;
   }
 }
 
@@ -735,48 +835,93 @@ function paragraphRunDefaults(
  * to satisfy exactOptionalPropertyTypes.
  */
 function buildImageRun(
-  attrs: Record<string, unknown>,
+  attrs: ImageAttrs,
   constrained: { width: number; height: number },
   pmStart: number,
   pmEnd: number,
+  // Tracked-change attrs lifted off the image node's PM marks. eigenpal #641.
+  trackedChange?: Pick<
+    RunFormatting,
+    | "isInsertion"
+    | "isDeletion"
+    | "changeAuthor"
+    | "changeDate"
+    | "changeRevisionId"
+  >,
 ): ImageRun {
   const run: ImageRun = {
     kind: "image",
-    src: attrs["src"] as string,
+    src: attrs.src,
     width: constrained.width,
     height: constrained.height,
     pmStart,
     pmEnd,
   };
-  if (attrs["alt"] !== undefined && attrs["alt"] !== null) {
-    run.alt = attrs["alt"] as string;
+  if (attrs.alt !== undefined) {
+    run.alt = attrs.alt;
   }
-  if (attrs["transform"] !== undefined && attrs["transform"] !== null) {
-    run.transform = attrs["transform"] as string;
+  if (attrs.transform !== undefined) {
+    run.transform = attrs.transform;
   }
-  if (attrs["wrapType"] !== undefined && attrs["wrapType"] !== null) {
-    run.wrapType = attrs["wrapType"] as string;
+  // eigenpal #424 (opacity render pipeline): copy opacity verbatim. PM
+  // schema defaults `opacity` to `null`, which survives the typed cast on
+  // ImageAttrs (`number | undefined`). Gate with `!= null` so the model
+  // never carries the schema sentinel.
+  if (attrs.opacity != null) {
+    run.opacity = attrs.opacity;
   }
-  if (attrs["displayMode"] !== undefined && attrs["displayMode"] !== null) {
-    run.displayMode = attrs["displayMode"] as "inline" | "block" | "float";
+  if (attrs.wrapType !== undefined) {
+    run.wrapType = attrs.wrapType;
   }
-  if (attrs["cssFloat"] !== undefined && attrs["cssFloat"] !== null) {
-    run.cssFloat = attrs["cssFloat"] as "left" | "right" | "none";
+  if (attrs.displayMode !== undefined) {
+    run.displayMode = attrs.displayMode;
   }
-  if (attrs["distTop"] !== undefined && attrs["distTop"] !== null) {
-    run.distTop = attrs["distTop"] as number;
+  if (attrs.cssFloat !== undefined) {
+    run.cssFloat = attrs.cssFloat;
   }
-  if (attrs["distBottom"] !== undefined && attrs["distBottom"] !== null) {
-    run.distBottom = attrs["distBottom"] as number;
+  if (attrs.distTop !== undefined) {
+    run.distTop = attrs.distTop;
   }
-  if (attrs["distLeft"] !== undefined && attrs["distLeft"] !== null) {
-    run.distLeft = attrs["distLeft"] as number;
+  if (attrs.distBottom !== undefined) {
+    run.distBottom = attrs.distBottom;
   }
-  if (attrs["distRight"] !== undefined && attrs["distRight"] !== null) {
-    run.distRight = attrs["distRight"] as number;
+  if (attrs.distLeft !== undefined) {
+    run.distLeft = attrs.distLeft;
   }
-  if (attrs["position"] !== undefined && attrs["position"] !== null) {
-    run.position = attrs["position"] as NonNullable<ImageRun["position"]>;
+  if (attrs.distRight !== undefined) {
+    run.distRight = attrs.distRight;
+  }
+  // eigenpal #424: pass crop fractions through to the painter so it can
+  // emit CSS clip-path. PM defaults are `null`; treat null as "not set".
+  if (attrs.cropTop != null) {
+    run.cropTop = attrs.cropTop;
+  }
+  if (attrs.cropRight != null) {
+    run.cropRight = attrs.cropRight;
+  }
+  if (attrs.cropBottom != null) {
+    run.cropBottom = attrs.cropBottom;
+  }
+  if (attrs.cropLeft != null) {
+    run.cropLeft = attrs.cropLeft;
+  }
+  if (attrs.position !== undefined) {
+    run.position = attrs.position;
+  }
+  if (trackedChange?.isInsertion) {
+    run.isInsertion = true;
+  }
+  if (trackedChange?.isDeletion) {
+    run.isDeletion = true;
+  }
+  if (trackedChange?.changeAuthor !== undefined) {
+    run.changeAuthor = trackedChange.changeAuthor;
+  }
+  if (trackedChange?.changeDate !== undefined) {
+    run.changeDate = trackedChange.changeDate;
+  }
+  if (trackedChange?.changeRevisionId !== undefined) {
+    run.changeRevisionId = trackedChange.changeRevisionId;
   }
   return run;
 }
@@ -817,20 +962,20 @@ function paragraphToRuns(
   const runs: Run[] = [];
   const offset = startPos + 1; // +1 for opening tag
   const theme = _options.theme;
-  const paraDefaults = paragraphRunDefaults(
-    node.attrs as PMParagraphAttrs,
-    theme,
-  );
-  const paragraphStyleId = (node.attrs as PMParagraphAttrs).styleId;
+  const pmAttrs = expectParagraphAttrs(node);
+  const paraDefaults = paragraphRunDefaults(pmAttrs, theme);
+  const paragraphStyleId = pmAttrs.styleId;
   const inTocParagraph =
     typeof paragraphStyleId === "string" && TOC_STYLE_ID.test(paragraphStyleId);
 
-  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
-  node.forEach((child, childOffset) => {
-    const childPos = offset + childOffset;
-
+  // Single dispatcher for one inline PM child. Recurses on `sdt` so nested
+  // content controls keep contributing runs at the right pmStart/pmEnd.
+  // Used for both the top-level paragraph iteration and the descent into
+  // SDT children — the previous SDT branch only handled text/hardBreak/
+  // tab/image and silently dropped fields, math, and nested SDTs even
+  // when the parser preserved them (see eigenpal #482).
+  function pushRunsForChild(child: PMNode, childPos: number): void {
     if (child.isText && child.text) {
-      // Text node - create text run
       const formatting = extractRunFormatting(child.marks, theme);
       if (inTocParagraph) {
         stripTocHyperlinkStyle(formatting);
@@ -843,16 +988,17 @@ function paragraphToRuns(
         pmEnd: childPos + child.nodeSize,
       };
       runs.push(run);
-    } else if (child.type.name === "hardBreak") {
-      // Line break
-      const run: LineBreakRun = {
+      return;
+    }
+    if (child.type.name === "hardBreak") {
+      runs.push({
         kind: "lineBreak",
         pmStart: childPos,
         pmEnd: childPos + child.nodeSize,
-      };
-      runs.push(run);
-    } else if (child.type.name === "tab") {
-      // Tab character
+      });
+      return;
+    }
+    if (child.type.name === "tab") {
       const formatting = extractRunFormatting(child.marks, theme);
       const run: TabRun = {
         kind: "tab",
@@ -861,31 +1007,39 @@ function paragraphToRuns(
         pmEnd: childPos + child.nodeSize,
       };
       runs.push(run);
-    } else if (child.type.name === "image") {
-      // Image within paragraph
-      const attrs = child.attrs;
+      return;
+    }
+    if (child.type.name === "image") {
+      const attrs = expectImageAttrs(child);
       const constrained = constrainImageToPage(
-        (attrs["width"] as number) || 100,
-        (attrs["height"] as number) || 100,
+        attrs.width || 100,
+        attrs.height || 100,
         _options.pageContentHeight,
       );
+      // Lift tracked-change marks off the image node so an inserted/deleted
+      // picture paints in the revision colour and resolves with the rest of
+      // the change. eigenpal #641.
+      const trackedFmt = extractRunFormatting(child.marks, theme);
       const run = buildImageRun(
         attrs,
         constrained,
         childPos,
         childPos + child.nodeSize,
+        trackedFmt,
       );
       runs.push(run);
-    } else if (child.type.name === "field") {
-      // Field node — convert to FieldRun for render-time substitution.
-      //
-      // Marks on the field node (bold/italic/underline applied to the field
-      // result inside `<w:fldChar separate>...</w:fldChar end>`) must
-      // propagate to the run formatting, otherwise complex REF fields whose
-      // visible text was authored as underlined (e.g. cross-references like
-      // "Exhibit A" / "Section 1.3" in NVCA-style templates) render with no
-      // underline. Reuse the same extractor text runs use.
-      const ft = child.attrs["fieldType"] as string;
+      return;
+    }
+    if (child.type.name === "field") {
+      // Marks on the field node (bold/italic/underline applied to the
+      // field result inside `<w:fldChar separate>...</w:fldChar end>`)
+      // must propagate to the run formatting, otherwise complex REF
+      // fields whose visible text was authored as underlined (e.g.
+      // cross-references like "Exhibit A" / "Section 1.3" in NVCA-style
+      // templates) render with no underline. Reuse the same extractor
+      // text runs use.
+      const attrs = expectFieldAttrs(child);
+      const ft = attrs.fieldType;
       let mappedType: FieldRun["fieldType"] = "OTHER";
       if (ft === "PAGE") {
         mappedType = "PAGE";
@@ -907,74 +1061,43 @@ function paragraphToRuns(
       const run: FieldRun = {
         kind: "field",
         fieldType: mappedType,
-        fallback: (child.attrs["displayText"] as string) || "",
+        instruction: attrs.instruction,
+        fallback: attrs.displayText || "",
+        ...(attrs.fldLock ? { fldLock: true } : {}),
         pmStart: childPos,
         pmEnd: childPos + child.nodeSize,
         ...fieldFormatting,
       };
       runs.push(run);
-    } else if (child.type.name === "math") {
-      // Math node — render as plain text fallback in layout
-      const text = (child.attrs["plainText"] as string) || "[equation]";
-      const run: TextRun = {
-        kind: "text",
-        text,
+      return;
+    }
+    if (child.type.name === "math") {
+      const attrs = expectMathAttrs(child);
+      const plainText = attrs.plainText || "[equation]";
+      runs.push({
+        kind: "math",
+        display: attrs.display ?? "inline",
+        ommlXml: attrs.ommlXml,
+        plainText,
         italic: true,
         fontFamily: "Cambria Math",
         pmStart: childPos,
         pmEnd: childPos + child.nodeSize,
-      };
-      runs.push(run);
-    } else if (child.type.name === "sdt") {
-      // SDT (Structured Document Tag / content control) — inline wrapper node.
-      // Descend into its children to extract the actual text runs.
+      });
+      return;
+    }
+    if (child.type.name === "sdt") {
       const sdtInnerOffset = childPos + 1; // +1 for opening tag
       // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
       child.forEach((sdtChild, sdtChildOffset) => {
-        const sdtChildPos = sdtInnerOffset + sdtChildOffset;
-        if (sdtChild.isText && sdtChild.text) {
-          const formatting = extractRunFormatting(sdtChild.marks, theme);
-          const run: TextRun = {
-            kind: "text",
-            text: sdtChild.text,
-            ...mergeRunFormatting(paraDefaults, formatting),
-            pmStart: sdtChildPos,
-            pmEnd: sdtChildPos + sdtChild.nodeSize,
-          };
-          runs.push(run);
-        } else if (sdtChild.type.name === "hardBreak") {
-          const run: LineBreakRun = {
-            kind: "lineBreak",
-            pmStart: sdtChildPos,
-            pmEnd: sdtChildPos + sdtChild.nodeSize,
-          };
-          runs.push(run);
-        } else if (sdtChild.type.name === "tab") {
-          const formatting = extractRunFormatting(sdtChild.marks, theme);
-          const run: TabRun = {
-            kind: "tab",
-            ...mergeRunFormatting(paraDefaults, formatting),
-            pmStart: sdtChildPos,
-            pmEnd: sdtChildPos + sdtChild.nodeSize,
-          };
-          runs.push(run);
-        } else if (sdtChild.type.name === "image") {
-          const attrs = sdtChild.attrs;
-          const sdtConstrained = constrainImageToPage(
-            (attrs["width"] as number) || 100,
-            (attrs["height"] as number) || 100,
-            _options.pageContentHeight,
-          );
-          const run = buildImageRun(
-            attrs,
-            sdtConstrained,
-            sdtChildPos,
-            sdtChildPos + sdtChild.nodeSize,
-          );
-          runs.push(run);
-        }
+        pushRunsForChild(sdtChild, sdtInnerOffset + sdtChildOffset);
       });
     }
+  }
+
+  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
+  node.forEach((child, childOffset) => {
+    pushRunsForChild(child, offset + childOffset);
   });
 
   return runs;
@@ -983,12 +1106,279 @@ function paragraphToRuns(
 /**
  * Convert PM paragraph attrs to layout engine paragraph attrs.
  */
+type ListMarkerRevision = NonNullable<ParagraphAttrs["listMarkerRevision"]>;
+
+type ListPropertyChange = {
+  info?: { id?: unknown; author?: unknown; date?: unknown };
+  previousFormatting?: Record<string, unknown> | null;
+};
+
+function toListMarkerRevision(
+  kind: ListMarkerRevision["kind"],
+  info: ListPropertyChange["info"],
+): ListMarkerRevision {
+  const revision: ListMarkerRevision = { kind };
+  if (typeof info?.author === "string") {
+    revision.author = info.author;
+  }
+  if (typeof info?.date === "string") {
+    revision.date = info.date;
+  }
+  if (typeof info?.id === "number") {
+    revision.revisionId = info.id;
+  }
+  return revision;
+}
+
+function isAddedNumberingChange(
+  change: ListPropertyChange,
+): change is ListPropertyChange & {
+  previousFormatting: Record<string, unknown>;
+} {
+  const previousFormatting = change.previousFormatting;
+  return (
+    previousFormatting != null &&
+    Object.hasOwn(previousFormatting, "numPr") &&
+    previousFormatting["numPr"] == null
+  );
+}
+
+function isRemovedNumberingChange(
+  change: ListPropertyChange,
+): change is ListPropertyChange & {
+  previousFormatting: Record<string, unknown>;
+} {
+  const previousFormatting = change.previousFormatting;
+  return (
+    previousFormatting != null &&
+    Object.hasOwn(previousFormatting, "numPr") &&
+    isListNumPr(previousFormatting["numPr"])
+  );
+}
+
+function isChangedNumberingChange(
+  currentNumPr: NonNullable<PMParagraphAttrs["numPr"]>,
+  change: ListPropertyChange,
+): change is ListPropertyChange & {
+  previousFormatting: Record<string, unknown>;
+} {
+  const previousFormatting = change.previousFormatting;
+  return (
+    previousFormatting != null &&
+    Object.hasOwn(previousFormatting, "numPr") &&
+    isListNumPr(previousFormatting["numPr"]) &&
+    !areListNumPrEqual(previousFormatting["numPr"], currentNumPr)
+  );
+}
+
+function areListNumPrEqual(
+  left: NonNullable<PMParagraphAttrs["numPr"]>,
+  right: NonNullable<PMParagraphAttrs["numPr"]>,
+): boolean {
+  return left.numId === right.numId && left.ilvl === right.ilvl;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isListNumPr(
+  value: unknown,
+): value is NonNullable<PMParagraphAttrs["numPr"]> {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const numId = value["numId"];
+  const ilvl = value["ilvl"];
+  return (
+    (numId === undefined || typeof numId === "number") &&
+    (ilvl === undefined || typeof ilvl === "number")
+  );
+}
+
+function isNumberFormat(value: unknown): value is NumberFormat {
+  return NUMBER_FORMAT_VALUES.some((format) => format === value);
+}
+
+function readNumberFormats(value: unknown): NumberFormat[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const formats: NumberFormat[] = [];
+  for (const item of value) {
+    if (!isNumberFormat(item)) {
+      return undefined;
+    }
+    formats.push(item);
+  }
+  return formats;
+}
+
+function readListMarkerSuffix(
+  value: unknown,
+): PMParagraphAttrs["listMarkerSuffix"] | undefined {
+  if (value === "tab" || value === "space" || value === "nothing") {
+    return value;
+  }
+  return undefined;
+}
+
+function toPreviousListAttrs(
+  previousFormatting: Record<string, unknown>,
+): PMParagraphAttrs {
+  const attrs: PMParagraphAttrs = {};
+  const numPr = previousFormatting["numPr"];
+  if (isListNumPr(numPr)) {
+    attrs.numPr = numPr;
+  }
+
+  const listIsBullet = previousFormatting["listIsBullet"];
+  if (typeof listIsBullet === "boolean") {
+    attrs.listIsBullet = listIsBullet;
+  }
+
+  const listIsLegal = previousFormatting["listIsLegal"];
+  if (typeof listIsLegal === "boolean") {
+    attrs.listIsLegal = listIsLegal;
+  }
+
+  const listMarker = previousFormatting["listMarker"];
+  if (typeof listMarker === "string") {
+    attrs.listMarker = listMarker;
+  }
+
+  const listNumFmt = previousFormatting["listNumFmt"];
+  if (isNumberFormat(listNumFmt)) {
+    attrs.listNumFmt = listNumFmt;
+  }
+
+  const listLevelNumFmts = readNumberFormats(
+    previousFormatting["listLevelNumFmts"],
+  );
+  if (listLevelNumFmts) {
+    attrs.listLevelNumFmts = listLevelNumFmts;
+  }
+
+  const listAbstractNumId = previousFormatting["listAbstractNumId"];
+  if (typeof listAbstractNumId === "number") {
+    attrs.listAbstractNumId = listAbstractNumId;
+  }
+
+  const listStartOverride = previousFormatting["listStartOverride"];
+  if (typeof listStartOverride === "number") {
+    attrs.listStartOverride = listStartOverride;
+  }
+
+  const listMarkerHidden = previousFormatting["listMarkerHidden"];
+  if (typeof listMarkerHidden === "boolean") {
+    attrs.listMarkerHidden = listMarkerHidden;
+  }
+
+  const listMarkerFontFamily = previousFormatting["listMarkerFontFamily"];
+  if (typeof listMarkerFontFamily === "string") {
+    attrs.listMarkerFontFamily = listMarkerFontFamily;
+  }
+
+  const listMarkerFontSize = previousFormatting["listMarkerFontSize"];
+  if (typeof listMarkerFontSize === "number") {
+    attrs.listMarkerFontSize = listMarkerFontSize;
+  }
+
+  const listMarkerSuffix = readListMarkerSuffix(
+    previousFormatting["listMarkerSuffix"],
+  );
+  if (listMarkerSuffix) {
+    attrs.listMarkerSuffix = listMarkerSuffix;
+  }
+
+  return attrs;
+}
+
+function resolveDeletedListMarker(
+  previousListAttrs: PMParagraphAttrs,
+  listCounters: Map<number, number[]> | undefined,
+  listAbstractCounters: Map<number, number[]> | undefined,
+  listSeenNumIds: Set<string> | undefined,
+): string | null {
+  if (listCounters && previousListAttrs.numPr) {
+    // Advance the original counter stream in place (no clone): a
+    // removed-numbering deletion occupied a number in the pre-revision
+    // document, so it must progress the counter exactly like a deleted list
+    // item — otherwise a following deletion on the same numId reuses it.
+    const marker = computeListMarker(
+      previousListAttrs,
+      listCounters,
+      listAbstractCounters ?? new Map<number, number[]>(),
+      listSeenNumIds ?? new Set<string>(),
+    );
+    if (marker) {
+      return marker;
+    }
+  }
+
+  if (previousListAttrs.listMarker) {
+    return previousListAttrs.listIsBullet
+      ? convertBulletToUnicode(previousListAttrs.listMarker)
+      : previousListAttrs.listMarker;
+  }
+
+  if (previousListAttrs.listIsBullet) {
+    return "\u2022";
+  }
+
+  return null;
+}
+
+function applyDeletedListMarkerAttrs(
+  attrs: ParagraphAttrs,
+  change: ListPropertyChange & {
+    previousFormatting: Record<string, unknown>;
+  },
+  listCounters: Map<number, number[]> | undefined,
+  listAbstractCounters: Map<number, number[]> | undefined,
+  listSeenNumIds: Set<string> | undefined,
+): void {
+  const previousListAttrs = toPreviousListAttrs(change.previousFormatting);
+  const marker = resolveDeletedListMarker(
+    previousListAttrs,
+    listCounters,
+    listAbstractCounters,
+    listSeenNumIds,
+  );
+  if (!marker) {
+    return;
+  }
+
+  attrs.listMarker = marker;
+  attrs.listMarkerRevision = toListMarkerRevision("del", change.info);
+  if (previousListAttrs.listIsBullet !== undefined) {
+    attrs.listIsBullet = previousListAttrs.listIsBullet;
+  }
+  if (previousListAttrs.listMarkerHidden !== undefined) {
+    attrs.listMarkerHidden = previousListAttrs.listMarkerHidden;
+  }
+  if (previousListAttrs.listMarkerFontFamily) {
+    attrs.listMarkerFontFamily = previousListAttrs.listMarkerFontFamily;
+  }
+  if (previousListAttrs.listMarkerFontSize) {
+    attrs.listMarkerFontSize = previousListAttrs.listMarkerFontSize;
+  }
+  if (previousListAttrs.listMarkerSuffix) {
+    attrs.listMarkerSuffix = previousListAttrs.listMarkerSuffix;
+  }
+}
+
 function convertParagraphAttrs(
   pmAttrs: PMParagraphAttrs,
   theme?: Theme | null,
   listCounters?: Map<number, number[]>,
   listAbstractCounters?: Map<number, number[]>,
   listSeenNumIds?: Set<string>,
+  defaultTabStopTwips?: number,
+  originalListCounters?: Map<number, number[]>,
+  originalListAbstractCounters?: Map<number, number[]>,
+  originalListSeenNumIds?: Set<string>,
 ): ParagraphAttrs {
   const attrs: ParagraphAttrs = {};
 
@@ -1214,6 +1604,11 @@ function convertParagraphAttrs(
   }
 
   // List properties
+  const pPrChange = pmAttrs._propertyChanges as ListPropertyChange[] | null;
+  const propertyChanges = Array.isArray(pPrChange) ? pPrChange : [];
+  let changedNumberingChange:
+    | (ListPropertyChange & { previousFormatting: Record<string, unknown> })
+    | undefined;
   if (pmAttrs.numPr) {
     const numPr: ParagraphAttrs["numPr"] & object = {};
     if (pmAttrs.numPr.numId !== undefined) {
@@ -1223,19 +1618,105 @@ function convertParagraphAttrs(
       numPr.ilvl = pmAttrs.numPr.ilvl;
     }
     attrs.numPr = numPr;
+
+    if (pmAttrs.pPrMark?.kind === "del") {
+      attrs.listMarkerRevision = toListMarkerRevision(
+        "del",
+        pmAttrs.pPrMark.info,
+      );
+    } else if (pmAttrs.pPrMark?.kind === "ins") {
+      attrs.listMarkerRevision = toListMarkerRevision(
+        "ins",
+        pmAttrs.pPrMark.info,
+      );
+    } else {
+      const numberingAddedChange = propertyChanges.find(isAddedNumberingChange);
+      const currentNumPr = pmAttrs.numPr;
+      changedNumberingChange = propertyChanges.find(
+        (
+          change,
+        ): change is ListPropertyChange & {
+          previousFormatting: Record<string, unknown>;
+        } => isChangedNumberingChange(currentNumPr, change),
+      );
+      const numberingInsertionChange =
+        numberingAddedChange ?? changedNumberingChange;
+      if (numberingInsertionChange) {
+        attrs.listMarkerRevision = toListMarkerRevision(
+          "ins",
+          numberingInsertionChange.info,
+        );
+      }
+    }
   }
-  const resolvedMarker = listCounters
-    ? computeListMarker(
-        pmAttrs,
-        listCounters,
-        listAbstractCounters ?? new Map(),
-        listSeenNumIds ?? new Set(),
-      )
-    : null;
+  // Tracked-deletion list items number off a separate "original" stream so the
+  // inserted list (a, b) and the deleted list (a, b, c) restart independently
+  // instead of running one shared counter (a, b, c, d, e). Insertions and normal
+  // items use the final stream; normal items also advance the original stream so
+  // a later deleted sibling continues from the surviving count (Word parity).
+  const useOriginalStream =
+    attrs.listMarkerRevision?.kind === "del" &&
+    originalListCounters !== undefined;
+  const streamCounters = useOriginalStream
+    ? originalListCounters
+    : listCounters;
+  const streamAbstractCounters = useOriginalStream
+    ? originalListAbstractCounters
+    : listAbstractCounters;
+  const streamSeenNumIds = useOriginalStream
+    ? originalListSeenNumIds
+    : listSeenNumIds;
+  const resolvedMarker = applyMarkerAllCaps(
+    streamCounters
+      ? computeListMarker(
+          pmAttrs,
+          streamCounters,
+          streamAbstractCounters ?? new Map(),
+          streamSeenNumIds ?? new Set(),
+        )
+      : null,
+    pmAttrs.listMarkerAllCaps,
+  );
+  const numberedNumId = pmAttrs.numPr?.numId;
+  if (
+    attrs.listMarkerRevision === undefined &&
+    !pmAttrs.listIsBullet &&
+    originalListCounters !== undefined &&
+    numberedNumId !== undefined &&
+    numberedNumId !== 0
+  ) {
+    computeListMarker(
+      pmAttrs,
+      originalListCounters,
+      originalListAbstractCounters ?? new Map(),
+      originalListSeenNumIds ?? new Set(),
+    );
+  } else if (
+    changedNumberingChange !== undefined &&
+    originalListCounters !== undefined
+  ) {
+    // Changed numbering is shown as an insertion of the new numId, but in the
+    // pre-revision document the paragraph sat under its PREVIOUS numId. Advance
+    // that original stream so a later deletion on the old numId continues from
+    // the right count instead of reusing this item's number.
+    const previousListAttrs = toPreviousListAttrs(
+      changedNumberingChange.previousFormatting,
+    );
+    if (previousListAttrs.numPr && !previousListAttrs.listIsBullet) {
+      computeListMarker(
+        previousListAttrs,
+        originalListCounters,
+        originalListAbstractCounters ?? new Map(),
+        originalListSeenNumIds ?? new Set(),
+      );
+    }
+  }
   if (resolvedMarker !== null) {
     attrs.listMarker = resolvedMarker;
   } else if (pmAttrs.listMarker) {
-    attrs.listMarker = pmAttrs.listMarker;
+    attrs.listMarker = pmAttrs.listIsBullet
+      ? convertBulletToUnicode(pmAttrs.listMarker)
+      : pmAttrs.listMarker;
   }
   if (pmAttrs.listIsBullet !== undefined) {
     attrs.listIsBullet = pmAttrs.listIsBullet;
@@ -1248,6 +1729,33 @@ function convertParagraphAttrs(
   }
   if (pmAttrs.listMarkerFontSize) {
     attrs.listMarkerFontSize = pmAttrs.listMarkerFontSize;
+  }
+  if (pmAttrs.listMarkerSuffix) {
+    attrs.listMarkerSuffix = pmAttrs.listMarkerSuffix;
+  }
+  if (pmAttrs.listMarkerSecondSlotOffsetTwips !== undefined) {
+    attrs.listMarkerSecondSlotOffsetTwips =
+      pmAttrs.listMarkerSecondSlotOffsetTwips;
+  }
+  if (!pmAttrs.numPr) {
+    const numberingRemovedChange = propertyChanges.find(
+      isRemovedNumberingChange,
+    );
+    if (numberingRemovedChange) {
+      // Number removed-numbering deletions off the original stream too (like
+      // deleted list items): the struck-through marker must reflect the
+      // pre-revision number, not the final counter that insertions advanced.
+      applyDeletedListMarkerAttrs(
+        attrs,
+        numberingRemovedChange,
+        originalListCounters,
+        originalListAbstractCounters,
+        originalListSeenNumIds,
+      );
+    }
+  }
+  if (defaultTabStopTwips !== undefined) {
+    attrs.defaultTabStopTwips = defaultTabStopTwips;
   }
 
   // Default font for empty paragraph measurement (from style's rPr / pPr/rPr)
@@ -1304,7 +1812,7 @@ function convertParagraph(
   startPos: number,
   options: ToFlowBlocksOptions,
 ): ParagraphBlock {
-  const pmAttrs = node.attrs as PMParagraphAttrs;
+  const pmAttrs = expectParagraphAttrs(node);
   const runs = paragraphToRuns(node, startPos, options);
   const attrs = convertParagraphAttrs(
     pmAttrs,
@@ -1312,13 +1820,22 @@ function convertParagraph(
     options.listCounters,
     options.listAbstractCounters,
     options.listSeenNumIds,
+    options.defaultTabStopTwips,
+    options.originalListCounters,
+    options.originalListAbstractCounters,
+    options.originalListSeenNumIds,
   );
+
+  const bookmarkNames = pmAttrs.bookmarks?.map((b) => b.name);
 
   return {
     kind: "paragraph",
     id: nextBlockId(),
     runs,
     attrs,
+    ...(bookmarkNames && bookmarkNames.length > 0
+      ? { bookmarks: bookmarkNames }
+      : {}),
     pmStart: startPos,
     pmEnd: startPos + node.nodeSize,
   };
@@ -1392,23 +1909,24 @@ export function convertBorderSpecToLayout(
  * Borders are full BorderSpec objects with style/size/color.
  */
 function extractCellBorders(
-  attrs: Record<string, unknown>,
+  borders:
+    | Record<
+        string,
+        {
+          style?: string;
+          size?: number;
+          color?: {
+            rgb?: string;
+            themeColor?: string;
+            themeTint?: string;
+            themeShade?: string;
+          };
+        }
+      >
+    | null
+    | undefined,
   theme?: Theme | null,
 ): CellBorders | undefined {
-  const borders = attrs["borders"] as Record<
-    string,
-    {
-      style?: string;
-      size?: number;
-      color?: {
-        rgb?: string;
-        themeColor?: string;
-        themeTint?: string;
-        themeShade?: string;
-      };
-    }
-  > | null;
-
   if (!borders) {
     return undefined;
   }
@@ -1455,13 +1973,11 @@ function convertTableCell(
     offset += child.nodeSize;
   });
 
-  const attrs = node.attrs;
+  const attrs = expectTableCellAttrs(node);
 
   // Convert cell margins (twips) to pixel padding
   // OOXML TableNormal defaults: top=0, bottom=0, left=108 twips (~7px), right=108 twips (~7px)
-  const margins = attrs["margins"] as
-    | { top?: number; bottom?: number; left?: number; right?: number }
-    | undefined;
+  const margins = attrs.margins;
   const resolvePaddingSide = (
     side: TablePaddingSide,
     cellTwips: number | undefined,
@@ -1492,25 +2008,25 @@ function convertTableCell(
   const cell: TableCell = {
     id: nextBlockId(),
     blocks,
-    colSpan: attrs["colspan"] as number,
-    rowSpan: attrs["rowspan"] as number,
+    colSpan: attrs.colspan,
+    rowSpan: attrs.rowspan,
     padding,
   };
-  if (attrs["width"]) {
-    cell.width = twipsToPixels(attrs["width"] as number);
+  if (attrs.width) {
+    cell.width = twipsToPixels(attrs.width);
   }
-  if (attrs["verticalAlign"]) {
-    cell.verticalAlign = attrs["verticalAlign"] as "top" | "center" | "bottom";
+  if (attrs.verticalAlign) {
+    cell.verticalAlign = attrs.verticalAlign;
   }
-  if (attrs["backgroundColor"]) {
-    cell.background = `#${attrs["backgroundColor"]}`;
+  if (attrs.backgroundColor) {
+    cell.background = `#${attrs.backgroundColor}`;
   }
-  const cellBorders = extractCellBorders(
-    attrs as Record<string, unknown>,
-    options.theme,
-  );
+  const cellBorders = extractCellBorders(attrs.borders, options.theme);
   if (cellBorders) {
     cell.borders = cellBorders;
+  }
+  if (attrs.noWrap) {
+    cell.noWrap = true;
   }
   return cell;
 }
@@ -1540,19 +2056,19 @@ function convertTableRow(
     offset += child.nodeSize;
   });
 
-  const attrs = node.attrs;
+  const attrs = expectTableRowAttrs(node);
   const row: TableRow = {
     id: nextBlockId(),
     cells,
   };
-  if (attrs["height"]) {
-    row.height = twipsToPixels(attrs["height"] as number);
+  if (attrs.height) {
+    row.height = twipsToPixels(attrs.height);
   }
-  if (attrs["heightRule"]) {
-    row.heightRule = attrs["heightRule"] as "auto" | "atLeast" | "exact";
+  if (attrs.heightRule) {
+    row.heightRule = attrs.heightRule;
   }
-  if (attrs["isHeader"]) {
-    row.isHeader = attrs["isHeader"] as boolean;
+  if (attrs.isHeader) {
+    row.isHeader = attrs.isHeader;
   }
   return row;
 }
@@ -1567,9 +2083,8 @@ function convertTable(
 ): TableBlock {
   const rows: TableRow[] = [];
   let offset = startPos + 1; // +1 for opening tag
-  const tableCellMargins = node.attrs["cellMargins"] as
-    | { top?: number; bottom?: number; left?: number; right?: number }
-    | undefined;
+  const attrs = expectTableAttrs(node);
+  const tableCellMargins = attrs.cellMargins;
 
   // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
   node.forEach((child) => {
@@ -1580,11 +2095,11 @@ function convertTable(
   });
 
   // Extract columnWidths from node attributes and convert from twips to pixels
-  const columnWidthsTwips = node.attrs["columnWidths"] as number[] | undefined;
+  const columnWidthsTwips = attrs.columnWidths;
   let columnWidths = columnWidthsTwips?.map(twipsToPixels);
 
-  const width = node.attrs["width"] as number | undefined;
-  const widthType = node.attrs["widthType"] as string | undefined;
+  const width = attrs.width;
+  const widthType = attrs.widthType;
 
   // Fallback: compute column widths from first row cell widths if table attr is missing
   if (!columnWidths && rows.length > 0) {
@@ -1598,14 +2113,10 @@ function convertTable(
   }
 
   // Extract justification
-  const justification = node.attrs["justification"] as
-    | "left"
-    | "center"
-    | "right"
-    | undefined;
+  const justification = attrs.justification;
 
   // Extract table indent from _originalFormatting (w:tblInd)
-  const originalFormatting = node.attrs["_originalFormatting"] as
+  const originalFormatting = attrs._originalFormatting as
     | { indent?: { value: number; type: string } }
     | undefined;
   const indentPx =
@@ -1614,7 +2125,7 @@ function convertTable(
       ? twipsToPixels(originalFormatting.indent.value)
       : undefined;
 
-  const floating = node.attrs["floating"] as
+  const floating = attrs.floating as
     | {
         horzAnchor?: "margin" | "page" | "text";
         vertAnchor?: "margin" | "page" | "text";
@@ -1707,8 +2218,8 @@ function convertImage(
   startPos: number,
   pageContentHeight?: number,
 ): ImageBlock {
-  const attrs = node.attrs;
-  const wrapType = attrs["wrapType"] as string | undefined;
+  const attrs = expectImageAttrs(node);
+  const wrapType = attrs.wrapType;
 
   // Only anchor images with 'behind' or 'inFront' wrap types
   // Other wrap types (square, tight, through, topAndBottom) need text wrapping
@@ -1716,41 +2227,60 @@ function convertImage(
   const shouldAnchor = wrapType === "behind" || wrapType === "inFront";
 
   const constrained = constrainImageToPage(
-    (attrs["width"] as number) || 100,
-    (attrs["height"] as number) || 100,
+    attrs.width || 100,
+    attrs.height || 100,
     pageContentHeight,
   );
 
   const imgBlock: ImageBlock = {
     kind: "image",
     id: nextBlockId(),
-    src: attrs["src"] as string,
+    src: attrs.src,
     width: constrained.width,
     height: constrained.height,
     pmStart: startPos,
     pmEnd: startPos + node.nodeSize,
   };
-  if (attrs["alt"]) {
-    imgBlock.alt = attrs["alt"] as string;
+  if (attrs.alt) {
+    imgBlock.alt = attrs.alt;
   }
-  if (attrs["transform"]) {
-    imgBlock.transform = attrs["transform"] as string;
+  if (attrs.transform) {
+    imgBlock.transform = attrs.transform;
+  }
+  // eigenpal #424 (opacity render pipeline). `!= null` so PM's null schema
+  // default doesn't leak into ImageBlock.opacity (`number | undefined`).
+  if (attrs.opacity != null) {
+    imgBlock.opacity = attrs.opacity;
   }
   if (shouldAnchor) {
     const anchor: NonNullable<ImageBlock["anchor"]> = {
       isAnchored: true,
       behindDoc: wrapType === "behind",
     };
-    if (attrs["distLeft"] !== undefined && attrs["distLeft"] !== null) {
-      anchor.offsetH = attrs["distLeft"] as number;
+    if (attrs.distLeft !== undefined) {
+      anchor.offsetH = attrs.distLeft;
     }
-    if (attrs["distTop"] !== undefined && attrs["distTop"] !== null) {
-      anchor.offsetV = attrs["distTop"] as number;
+    if (attrs.distTop !== undefined) {
+      anchor.offsetV = attrs.distTop;
     }
     imgBlock.anchor = anchor;
   }
-  if (attrs["hlinkHref"]) {
-    imgBlock.hlinkHref = attrs["hlinkHref"] as string;
+  if (attrs.hlinkHref) {
+    imgBlock.hlinkHref = attrs.hlinkHref;
+  }
+  // eigenpal #424: thread wp:srcRect crop fractions to the floating-image
+  // block so renderers can apply clip-path consistently across paths.
+  if (attrs.cropTop != null) {
+    imgBlock.cropTop = attrs.cropTop;
+  }
+  if (attrs.cropRight != null) {
+    imgBlock.cropRight = attrs.cropRight;
+  }
+  if (attrs.cropBottom != null) {
+    imgBlock.cropBottom = attrs.cropBottom;
+  }
+  if (attrs.cropLeft != null) {
+    imgBlock.cropLeft = attrs.cropLeft;
   }
   return imgBlock;
 }
@@ -1763,7 +2293,7 @@ function convertTextBoxNode(
   startPos: number,
   opts: ToFlowBlocksOptions,
 ): TextBoxBlock {
-  const attrs = node.attrs;
+  const attrs = expectTextBoxAttrs(node);
   const contentBlocks: ParagraphBlock[] = [];
 
   // Convert child paragraphs inside the text box
@@ -1778,39 +2308,60 @@ function convertTextBoxNode(
   const textBox: TextBoxBlock = {
     kind: "textBox",
     id: nextBlockId(),
-    width: (attrs["width"] as number | undefined) ?? DEFAULT_TEXTBOX_WIDTH,
+    width: attrs.width ?? DEFAULT_TEXTBOX_WIDTH,
     margins: {
-      top:
-        (attrs["marginTop"] as number | undefined) ??
-        DEFAULT_TEXTBOX_MARGINS.top,
-      bottom:
-        (attrs["marginBottom"] as number | undefined) ??
-        DEFAULT_TEXTBOX_MARGINS.bottom,
-      left:
-        (attrs["marginLeft"] as number | undefined) ??
-        DEFAULT_TEXTBOX_MARGINS.left,
-      right:
-        (attrs["marginRight"] as number | undefined) ??
-        DEFAULT_TEXTBOX_MARGINS.right,
+      top: attrs.marginTop ?? DEFAULT_TEXTBOX_MARGINS.top,
+      bottom: attrs.marginBottom ?? DEFAULT_TEXTBOX_MARGINS.bottom,
+      left: attrs.marginLeft ?? DEFAULT_TEXTBOX_MARGINS.left,
+      right: attrs.marginRight ?? DEFAULT_TEXTBOX_MARGINS.right,
     },
     content: contentBlocks,
     pmStart: startPos,
     pmEnd: startPos + node.nodeSize,
   };
-  if (attrs["height"] != null) {
-    textBox.height = attrs["height"] as number;
+  if (attrs.height !== undefined) {
+    textBox.height = attrs.height;
   }
-  if (attrs["fillColor"] != null) {
-    textBox.fillColor = attrs["fillColor"] as string;
+  if (attrs.fillColor !== undefined) {
+    textBox.fillColor = attrs.fillColor;
   }
-  if (attrs["outlineWidth"] != null) {
-    textBox.outlineWidth = attrs["outlineWidth"] as number;
+  if (attrs.outlineWidth !== undefined) {
+    textBox.outlineWidth = attrs.outlineWidth;
   }
-  if (attrs["outlineColor"] != null) {
-    textBox.outlineColor = attrs["outlineColor"] as string;
+  if (attrs.outlineColor !== undefined) {
+    textBox.outlineColor = attrs.outlineColor;
   }
-  if (attrs["outlineStyle"] != null) {
-    textBox.outlineStyle = attrs["outlineStyle"] as string;
+  if (attrs.outlineStyle !== undefined) {
+    textBox.outlineStyle = attrs.outlineStyle;
+  }
+  // Carry anchored-textbox wrap attributes through so the page renderer can
+  // build exclusion rects (eigenpal #474).
+  if (attrs.displayMode !== undefined) {
+    textBox.displayMode = attrs.displayMode;
+  }
+  if (attrs.cssFloat !== undefined) {
+    textBox.cssFloat = attrs.cssFloat;
+  }
+  if (attrs.wrapType !== undefined) {
+    textBox.wrapType = attrs.wrapType;
+  }
+  if (attrs.wrapText !== undefined) {
+    textBox.wrapText = attrs.wrapText;
+  }
+  if (attrs.distTop !== undefined) {
+    textBox.distTop = attrs.distTop;
+  }
+  if (attrs.distBottom !== undefined) {
+    textBox.distBottom = attrs.distBottom;
+  }
+  if (attrs.distLeft !== undefined) {
+    textBox.distLeft = attrs.distLeft;
+  }
+  if (attrs.distRight !== undefined) {
+    textBox.distRight = attrs.distRight;
+  }
+  if (attrs.position !== undefined) {
+    textBox.position = attrs.position;
   }
   return textBox;
 }
@@ -1825,6 +2376,11 @@ export function toFlowBlocks(
   doc: PMNode,
   options: ToFlowBlocksOptions = {},
 ): FlowBlock[] {
+  assertValidProseMirrorDocument(
+    doc,
+    "Cannot layout invalid ProseMirror document",
+  );
+
   resetBlockIdCounter();
 
   const opts: ToFlowBlocksOptions = {
@@ -1835,10 +2391,16 @@ export function toFlowBlocks(
     listAbstractCounters:
       options.listAbstractCounters ?? new Map<number, number[]>(),
     listSeenNumIds: options.listSeenNumIds ?? new Set<string>(),
+    originalListCounters:
+      options.originalListCounters ?? new Map<number, number[]>(),
+    originalListAbstractCounters:
+      options.originalListAbstractCounters ?? new Map<number, number[]>(),
+    originalListSeenNumIds: options.originalListSeenNumIds ?? new Set<string>(),
   };
 
   const blocks: FlowBlock[] = [];
-  const offset = 0; // Start at document beginning
+  const offset = 0; // Start at document beginning; kept for clarity.
+  void offset;
   let lastSectionMarginsTwips = {
     top: 1440,
     bottom: 1440,
@@ -1846,16 +2408,135 @@ export function toFlowBlocks(
     right: 1440,
   };
 
-  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
-  doc.forEach((node, nodeOffset) => {
-    const pos = offset + nodeOffset;
+  let sdtSeq = 0;
+  const sdtStack: SdtGroup[] = [];
+
+  /**
+   * Stamp the active SDT stack (outer→inner) onto every block produced by the
+   * current call. ParagraphBlock/TableBlock accept `sdtGroups`; section breaks
+   * and page breaks deliberately do not — they bracket layout, not content.
+   */
+  const tagBlockWithSdtStack = (block: FlowBlock): void => {
+    if (sdtStack.length === 0) {
+      return;
+    }
+    if (block.kind === "paragraph" || block.kind === "table") {
+      block.sdtGroups = [...sdtStack];
+    }
+  };
+
+  const trackedPush = (block: FlowBlock): void => {
+    tagBlockWithSdtStack(block);
+    blocks.push(block);
+  };
+
+  // Refactored visit-style traversal so blockSdt can recurse into its
+  // children without duplicating the per-block conversion code.
+  const visit = (node: PMNode, pos: number): void => {
+    switch (node.type.name) {
+      case "blockSdt": {
+        const attrs = expectBlockSdtAttrs(node);
+        sdtSeq += 1;
+        const group: SdtGroup = {
+          id: `sdt-${sdtSeq}`,
+          pmPos: pos,
+          sdtType: attrs.sdtType,
+        };
+        if (attrs.alias) {
+          group.alias = attrs.alias;
+        }
+        if (attrs.tag) {
+          group.tag = attrs.tag;
+        }
+        if (typeof attrs.id === "number") {
+          group.sdtId = attrs.id;
+        }
+        if (attrs.lock) {
+          group.lock = attrs.lock;
+        }
+        if (attrs.showingPlaceholder) {
+          group.showingPlaceholder = true;
+        }
+        if (typeof attrs.checked === "boolean") {
+          group.checked = attrs.checked;
+        }
+        if (attrs.dateFormat) {
+          group.dateFormat = attrs.dateFormat;
+        }
+        if (attrs.listItems) {
+          group.listItemsJson = attrs.listItems;
+        }
+
+        sdtStack.push(group);
+        const startIndex = blocks.length;
+        let childOffset = pos + 1; // skip the blockSdt opening token
+        for (let i = 0; i < node.childCount; i += 1) {
+          const child = node.child(i);
+          visit(child, childOffset);
+          childOffset += child.nodeSize;
+        }
+        sdtStack.pop();
+        // Stamp first/middle/last/only on the innermost group of each block
+        // that was emitted inside this SDT so the painter chrome continues
+        // visually across the block sequence. Only paragraph/table blocks
+        // carry sdtGroups; section breaks etc. were skipped at tag time.
+        const groupBlocks: (ParagraphBlock | TableBlock)[] = [];
+        for (let i = startIndex; i < blocks.length; i += 1) {
+          const b = blocks[i];
+          if (b && (b.kind === "paragraph" || b.kind === "table")) {
+            groupBlocks.push(b);
+          }
+        }
+        // We're finalizing the SDT that `group` represents — locate that
+        // entry by `pmPos` instead of always taking `at(-1)`. For blocks
+        // that sit inside an inner SDT, `at(-1)` is the inner group, and
+        // overwriting it would clobber the inner SDT's first/middle/last
+        // markers when the outer iterates the same range later. Matching
+        // by pmPos keeps the inner positions intact.
+        const ourPmPos = group.pmPos;
+        for (let i = 0; i < groupBlocks.length; i += 1) {
+          const b = groupBlocks[i];
+          if (!b || !b.sdtGroups) {
+            continue;
+          }
+          const idx = b.sdtGroups.findIndex((g) => g.pmPos === ourPmPos);
+          if (idx === -1) {
+            continue;
+          }
+          let position: NonNullable<SdtGroup["position"]>;
+          if (groupBlocks.length === 1) {
+            position = "only";
+          } else if (i === 0) {
+            position = "first";
+          } else if (i === groupBlocks.length - 1) {
+            position = "last";
+          } else {
+            position = "middle";
+          }
+          // Replace just the entry for this SDT, leaving inner/outer
+          // sibling entries untouched. (SdtGroup objects are shared
+          // across blocks of the same group; copy-on-write here keeps
+          // the other blocks' references stable.)
+          const next = [...b.sdtGroups];
+          const existing = next[idx];
+          if (!existing) {
+            continue;
+          }
+          next[idx] = { ...existing, position };
+          b.sdtGroups = next;
+        }
+        return;
+      }
+      default:
+        break;
+    }
 
     switch (node.type.name) {
       case "paragraph": {
         const block = convertParagraph(node, pos, opts);
-        const pmAttrs = node.attrs as PMParagraphAttrs;
+        const pmAttrs = expectParagraphAttrs(node);
 
-        blocks.push(block);
+        trackedPush(block);
 
         // Emit section break block if this paragraph ends a section
         const secProps = pmAttrs._sectionProperties as
@@ -1900,6 +2581,16 @@ export function toFlowBlocks(
                 left: twipsToPixels(lastSectionMarginsTwips.left),
                 right: twipsToPixels(lastSectionMarginsTwips.right),
               };
+              if (secProps.headerDistance !== undefined) {
+                sectionBreak.margins.header = twipsToPixels(
+                  secProps.headerDistance,
+                );
+              }
+              if (secProps.footerDistance !== undefined) {
+                sectionBreak.margins.footer = twipsToPixels(
+                  secProps.footerDistance,
+                );
+              }
             }
             // Populate columns
             const colCount = secProps.columnCount ?? 1;
@@ -1916,22 +2607,22 @@ export function toFlowBlocks(
             }
           }
 
-          blocks.push(sectionBreak);
+          trackedPush(sectionBreak);
         }
         break;
       }
 
       case "table":
-        blocks.push(convertTable(node, pos, opts));
+        trackedPush(convertTable(node, pos, opts));
         break;
 
       case "image":
         // Standalone image block (if not inline)
-        blocks.push(convertImage(node, pos, opts.pageContentHeight));
+        trackedPush(convertImage(node, pos, opts.pageContentHeight));
         break;
 
       case "textBox":
-        blocks.push(convertTextBoxNode(node, pos, opts));
+        trackedPush(convertTextBoxNode(node, pos, opts));
         break;
 
       case "horizontalRule":
@@ -1942,12 +2633,17 @@ export function toFlowBlocks(
           pmStart: pos,
           pmEnd: pos + node.nodeSize,
         };
-        blocks.push(pb);
+        trackedPush(pb);
         break;
       }
       default:
         break;
     }
+  };
+
+  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
+  doc.forEach((node, nodeOffset) => {
+    visit(node, offset + nodeOffset);
   });
 
   return mergeRunInParagraphs(blocks);
@@ -1971,6 +2667,29 @@ export function toFlowBlocks(
  * preserve runInWithNext only when the second paragraph itself has
  * specVanish).
  */
+function sdtGroupStacksEqual(
+  a: SdtGroup[] | undefined,
+  b: SdtGroup[] | undefined,
+): boolean {
+  // pmPos is unique per SDT instance within a single toFlowBlocks call, so
+  // comparing the pmPos stacks is enough to tell "same membership" vs.
+  // "different membership" without copying the rest of the group payload.
+  const lenA = a?.length ?? 0;
+  const lenB = b?.length ?? 0;
+  if (lenA !== lenB) {
+    return false;
+  }
+  if (lenA === 0) {
+    return true;
+  }
+  for (let i = 0; i < lenA; i++) {
+    if (a?.[i]?.pmPos !== b?.[i]?.pmPos) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function mergeRunInParagraphs(blocks: FlowBlock[]): FlowBlock[] {
   const out: FlowBlock[] = [];
   for (let i = 0; i < blocks.length; i++) {
@@ -1995,6 +2714,15 @@ function mergeRunInParagraphs(blocks: FlowBlock[]): FlowBlock[] {
       }
       const a = current as ParagraphBlock;
       const b = next as ParagraphBlock;
+      // Stop merging when the two paragraphs sit in different SDT stacks.
+      // The merged ParagraphBlock would inherit only `a`'s sdtGroups via
+      // spread, so a `<w:specVanish/>` adjacent to a paragraph across an
+      // SDT boundary would either claim outside text as part of the SDT
+      // or strip SDT membership from inside text — chrome and widget
+      // click targets would line up against the wrong content range.
+      if (!sdtGroupStacksEqual(a.sdtGroups, b.sdtGroups)) {
+        break;
+      }
       const mergedAttrs: ParagraphAttrs = { ...a.attrs };
       // Heading typically has no spaceAfter; the body's spaceAfter
       // governs the merged paragraph's trailing gap.

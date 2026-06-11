@@ -1,8 +1,9 @@
-import { useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 
 import {
   useInfiniteQuery,
+  useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -18,6 +19,7 @@ import {
   MessageSquareIcon,
   Minimize2Icon,
   PinIcon,
+  PlusIcon,
 } from "lucide-react";
 import { useTranslations } from "use-intl";
 
@@ -30,8 +32,11 @@ import { ChatMatterPicker } from "@/components/chat/chat-matter-picker";
 import { useAIKeyGate } from "@/components/require-ai-key";
 import { StellaMark } from "@/components/stella-mark";
 import Tooltip from "@/components/tooltip";
+import { usePermissions } from "@/hooks/use-permissions";
 import { useI18nStore } from "@/i18n/i18n-store";
+import { useAnalytics } from "@/lib/analytics/provider";
 import { ChatAnonymizationLayer } from "@/lib/anonymize/use-chat-anonymization-layer";
+import { api } from "@/lib/api";
 import {
   getChatSendMode,
   useChatAnonymized,
@@ -39,12 +44,16 @@ import {
 } from "@/lib/chat-anonymized-store";
 import type { ChatThreadRef } from "@/lib/chat-thread-ref";
 import { createChatThreadId } from "@/lib/chat-thread-ref";
+import { useChatWebSearchPreferenceStore } from "@/lib/chat-web-search-store";
+import { toAPIError } from "@/lib/errors";
 import { resolveMatterColor } from "@/lib/matter-colors";
 import { usePinnedStore } from "@/lib/pinned-store";
 import type { ChatPrompt } from "@/lib/prompts/types";
 import { useSavedPrompts } from "@/lib/prompts/use-saved-prompts";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { toSafeId } from "@/lib/safe-id";
 import { ChatAnonymizedToggle } from "@/routes/_protected.chat/-components/chat-anonymized-toggle";
+import { ChatWebSearchToggle } from "@/routes/_protected.chat/-components/chat-web-search-toggle";
 import { ThreadsSheet } from "@/routes/_protected.chat/-components/threads-sheet";
 import { useChatUserContext } from "@/routes/_protected.chat/-hooks/use-chat-user-context";
 import { buildChatRequestMessage } from "@/routes/_protected.chat/-lib/build-chat-request-message";
@@ -55,7 +64,9 @@ import {
   mergeGroupedChatThreadPages,
 } from "@/routes/_protected.chat/-queries";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
+import { MatterContextMenu } from "@/routes/_protected.workspaces/-components/matter-context-menu";
 import { workspacesNavigationOptions } from "@/routes/_protected.workspaces/-queries";
+import { useCreateMatterStore } from "@/routes/_protected.workspaces/-store/create-matter-store";
 
 export const Route = createFileRoute("/_protected/chat/")({
   component: ChatIndex,
@@ -79,6 +90,8 @@ function ChatIndex() {
   const controller = useChatEditor({ threadRef });
   const prompts = useSavedPrompts();
   const pinnedOrder = usePinnedStore((s) => s.pinnedOrder);
+  const canCreateMatter = usePermissions({ workspace: ["create"] });
+  const openCreateMatter = useCreateMatterStore((s) => s.openDialog);
   const activeOrganizationId = protectedRouteApi.useRouteContext({
     select: (ctx) => ctx.user.activeOrganizationId,
   });
@@ -99,6 +112,111 @@ function ChatIndex() {
   const openInspectorChat = useInspectorStore((s) => s.openChat);
   const [contextMatterIds, setContextMatterIds] = useState<string[]>([]);
   const getContextMatterIds = useEffectEvent(() => contextMatterIds);
+  // Standalone, non-suspense fetch of the draft thread metadata.
+  // We deliberately don't reuse `chatThreadOptions` here because that
+  // helper instantiates a stateful `Chat<>` inside its queryFn on
+  // every miss; doing so on the chat-home render path froze the
+  // tab. We only need `webSearchAvailable` + `webSearchEnabled`,
+  // so a plain GET against the messages endpoint is enough.
+  // Key shape mirrors `chatKeys.thread` up to position 4 so
+  // `invalidateChatThread({ queryClient, threadRef })` (fired by
+  // <ChatWebSearchToggle> on every PATCH) refetches us. Without
+  // that match the toggle would flip server-side but the local
+  // `webSearchEnabled` shown by this query would stay stale.
+  const { data: chatDraftMeta } = useQuery({
+    queryKey: [
+      "chat",
+      activeOrganizationId,
+      "thread",
+      "global",
+      threadIdRef.current,
+      "draftMeta",
+    ] as const,
+    staleTime: Number.POSITIVE_INFINITY,
+    queryFn: async () => {
+      const response = await api.chat
+        .threads({ threadId: toSafeId<"chatThread">(threadIdRef.current) })
+        .messages.get({ query: { allowMissingThread: true } });
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+      return {
+        webSearchAvailable: response.data.webSearchAvailable,
+        webSearchEnabled: response.data.webSearchEnabled,
+      };
+    },
+  });
+
+  // Mirror the per-thread seeding from ChatThreadPage: if the user
+  // previously enabled web search and the draft thread doesn't have
+  // it on, PATCH it on. Marks seeded only on success so a transient
+  // failure can retry on the next render.
+  const enabledPreference = useChatWebSearchPreferenceStore(
+    (state) => state.enabledPreference,
+  );
+  const analytics = useAnalytics();
+  const { mutate: seedDraftWebSearch } = useMutation({
+    mutationFn: async () => {
+      const response = await api.chat
+        .threads({ threadId: toSafeId<"chatThread">(threadIdRef.current) })
+        .patch({ webSearchEnabled: true }, { query: {} });
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+      return response.data;
+    },
+    onError: (error) => {
+      analytics.captureError(error);
+    },
+  });
+  const seededDraftRef = useRef<string | null>(null);
+  const seedingDraftRef = useRef<string | null>(null);
+  useEffect(() => {
+    const threadId = threadIdRef.current;
+    if (
+      seededDraftRef.current === threadId ||
+      seedingDraftRef.current === threadId
+    ) {
+      return;
+    }
+    if (
+      enabledPreference &&
+      chatDraftMeta?.webSearchAvailable &&
+      !chatDraftMeta.webSearchEnabled
+    ) {
+      seedingDraftRef.current = threadId;
+      seedDraftWebSearch(undefined, {
+        onSuccess: () => {
+          if (seedingDraftRef.current === threadId) {
+            seedingDraftRef.current = null;
+          }
+          seededDraftRef.current = threadId;
+          void queryClient.invalidateQueries({
+            queryKey: [
+              "chat",
+              activeOrganizationId,
+              "thread",
+              "global",
+              threadId,
+              "draftMeta",
+            ] as const,
+          });
+        },
+        onError: () => {
+          if (seedingDraftRef.current === threadId) {
+            seedingDraftRef.current = null;
+          }
+        },
+      });
+    }
+  }, [
+    activeOrganizationId,
+    chatDraftMeta?.webSearchAvailable,
+    chatDraftMeta?.webSearchEnabled,
+    enabledPreference,
+    queryClient,
+    seedDraftWebSearch,
+  ]);
 
   const pinnedMatters = useMemo(() => {
     const workspaceById = new Map<string, PinnedMatter>();
@@ -108,6 +226,7 @@ function ChatIndex() {
         id: workspace.id,
         lastActivityAt: workspace.lastActivityAt,
         name: workspace.name,
+        client: workspace.client,
       });
     }
     const matters: PinnedMatter[] = [];
@@ -134,6 +253,7 @@ function ChatIndex() {
           id: workspace.id,
           lastActivityAt: workspace.lastActivityAt,
           name: workspace.name,
+          client: workspace.client,
         })),
     [workspaces],
   );
@@ -144,6 +264,7 @@ function ChatIndex() {
     pinnedMatters.length > 0
       ? t("chat.landing.pinnedMatters")
       : t("chat.landing.lastAccessedMatters");
+  const MattersHeadingIcon = pinnedMatters.length > 0 ? PinIcon : LayersIcon;
 
   const recentChats = useMemo(() => {
     const threads: RecentChat[] = [];
@@ -197,6 +318,12 @@ function ChatIndex() {
           onChange={setContextMatterIds}
         />
         <div className="flex items-center gap-1">
+          {chatDraftMeta?.webSearchAvailable && (
+            <ChatWebSearchToggle
+              enabled={chatDraftMeta.webSearchEnabled}
+              threadRef={threadRef}
+            />
+          )}
           <ChatAnonymizedToggle enabled={anonymized} onChange={setAnonymized} />
           <Tooltip
             content={t("chat.moveToSide")}
@@ -215,7 +342,7 @@ function ChatIndex() {
               <StellaMark className="size-7" />
             </div>
             <p className="text-foreground max-w-md text-center text-lg font-medium">
-              {t("chat.greetingSubtitle")}
+              {t("chat.greeting")}
             </p>
           </div>
           <div className="w-full">
@@ -237,19 +364,21 @@ function ChatIndex() {
                 // reads the *same* cached instance, so kicking off
                 // `sendMessage` here lets the thread page observe
                 // the in-flight stream as soon as it mounts.
-                const message = await buildChatRequestMessage(draft);
-                const { chat } = await queryClient.ensureQueryData(
-                  chatThreadOptions({
-                    activeOrganizationId,
-                    key: threadRef,
-                    context: {
-                      allowMissingThread: true,
-                      getUserContext,
-                      getContextMatterIds,
-                      getSendMode,
-                    },
-                  }),
-                );
+                const [message, { chat }] = await Promise.all([
+                  buildChatRequestMessage(draft),
+                  queryClient.ensureQueryData(
+                    chatThreadOptions({
+                      activeOrganizationId,
+                      key: threadRef,
+                      context: {
+                        allowMissingThread: true,
+                        getUserContext,
+                        getContextMatterIds,
+                        getSendMode,
+                      },
+                    }),
+                  ),
+                ]);
 
                 // Fire-and-forget: don't block navigation on the
                 // streaming response. The thread page picks up the
@@ -273,7 +402,7 @@ function ChatIndex() {
                 className="text-muted-foreground hover:text-foreground focus-visible:ring-ring flex items-center gap-2 rounded-md px-1 text-xs font-semibold tracking-widest uppercase transition-colors outline-none focus-visible:ring-2"
                 to="/workspaces"
               >
-                <PinIcon className="size-4" />
+                <MattersHeadingIcon className="size-4" />
                 {mattersHeading}
               </Link>
             }
@@ -282,28 +411,52 @@ function ChatIndex() {
               visibleMatters.map((matter) => {
                 const matterColor = resolveMatterColor(matter.id, matter.color);
                 return (
-                  <Link
-                    className="group hover:bg-accent/50 focus-visible:ring-ring rounded-md px-2 py-1.5 text-start transition-colors outline-none focus-visible:ring-2"
+                  <MatterContextMenu
+                    className="contents"
                     key={matter.id}
-                    params={{ workspaceId: matter.id }}
-                    to="/workspaces/$workspaceId"
+                    target={{
+                      id: matter.id,
+                      name: matter.name,
+                      color: matter.color,
+                      client: matter.client,
+                    }}
                   >
-                    <LandingItemText
-                      icon={
-                        <LayersIcon
-                          className="size-4"
-                          style={{ color: matterColor }}
-                        />
-                      }
-                      iconTone="matter"
-                      meta={formatRelativeTime(matter.lastActivityAt, lang)}
-                      title={matter.name}
-                    />
-                  </Link>
+                    <Link
+                      className="group hover:bg-accent/50 focus-visible:ring-ring rounded-md px-2 py-1.5 text-start transition-colors outline-none focus-visible:ring-2"
+                      params={{ workspaceId: matter.id }}
+                      to="/workspaces/$workspaceId"
+                    >
+                      <LandingItemText
+                        icon={
+                          <LayersIcon
+                            className="size-4"
+                            style={{ color: matterColor }}
+                          />
+                        }
+                        iconTone="matter"
+                        meta={formatRelativeTime(matter.lastActivityAt, lang)}
+                        title={matter.name}
+                      />
+                    </Link>
+                  </MatterContextMenu>
                 );
               })
             ) : (
-              <LandingEmpty>{t("chat.landing.noMatters")}</LandingEmpty>
+              <LandingEmpty>
+                <div className="flex flex-col items-start gap-2.5">
+                  {t("chat.landing.noMatters")}
+                  {canCreateMatter && (
+                    <Button
+                      onClick={() => openCreateMatter()}
+                      size="sm"
+                      variant="outline"
+                    >
+                      <PlusIcon className="size-4" />
+                      {t("workspaces.createNewWorkspace")}
+                    </Button>
+                  )}
+                </div>
+              </LandingEmpty>
             )}
           </LandingSection>
           <LandingSection
@@ -388,6 +541,8 @@ type PinnedMatter = {
   id: string;
   lastActivityAt: string | Date;
   name: string;
+  /** Drives the right-click menu's add-member affordance and header. */
+  client: { displayName: string } | null;
 };
 
 type RecentChat =

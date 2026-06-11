@@ -14,7 +14,9 @@ import {
 } from "@/api/handlers/mcp-connectors/oauth";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
+import { refreshCachedMcpToolsForConnection } from "@/api/lib/mcp-upstream/connections";
 import { brandPersistedUserId } from "@/api/lib/safe-id-boundaries";
 
 const STATE_TTL_MS = 10 * 60 * 1000;
@@ -61,7 +63,7 @@ const redirect = (input: CallbackRedirectInput) =>
 
 const mcpOAuthCallback = createSafeRootHandler(
   config,
-  async function* ({ query: input, safeDb, session, user }) {
+  async function* ({ query: input, safeDb, session, user, recordAuditEvent }) {
     if (!input.code || !input.state) {
       return Result.ok(redirect({ status: "error", reason: "missing-code" }));
     }
@@ -105,6 +107,7 @@ const mcpOAuthCallback = createSafeRootHandler(
           redirect({ status: "error", reason: "user-mismatch" }),
         );
       }
+      const connectorSlug = row.connector.slug;
 
       const client = yield* Result.await(
         safeDb((tx) =>
@@ -174,7 +177,7 @@ const mcpOAuthCallback = createSafeRootHandler(
           })
         : null;
 
-      yield* Result.await(
+      const saved = yield* Result.await(
         safeDb(
           async (tx) =>
             await tx.transaction(async (innerTx) => {
@@ -184,7 +187,7 @@ const mcpOAuthCallback = createSafeRootHandler(
               await innerTx
                 .delete(mcpOAuthState)
                 .where(lt(mcpOAuthState.createdAt, cutoff));
-              await innerTx
+              const rows = await innerTx
                 .insert(mcpUserConnections)
                 .values({
                   organizationId: row.organizationId,
@@ -220,18 +223,42 @@ const mcpOAuthCallback = createSafeRootHandler(
                     resourceUrl: row.resourceUrl,
                     authorizationServerUrl: row.authorizationServerUrl,
                     expiresAt: tokenExpiresAt(token.value),
+                    cachedTools: null,
+                    cachedToolsRefreshedAt: null,
                     status: "connected",
                     enabled: true,
                     updatedAt: new Date(),
                   },
-                });
+                })
+                .returning({ id: mcpUserConnections.id });
+              await recordAuditEvent(innerTx, {
+                action: AUDIT_ACTION.UPDATE,
+                resourceType: AUDIT_RESOURCE_TYPE.ORGANIZATION_SETTINGS,
+                resourceId: row.connectorId,
+                workspaceId: null,
+                metadata: {
+                  connectorId: row.connectorId,
+                  connectorSlug,
+                  connectionUserId: rowUserId,
+                  operation: "mcp_oauth_connect",
+                },
+              });
+              return rows;
             }),
         ),
       );
 
-      return Result.ok(
-        redirect({ status: "connected", slug: row.connector.slug }),
-      );
+      const connection = saved.at(0);
+      if (connection) {
+        await refreshCachedMcpToolsForConnection({
+          connectionId: connection.id,
+          organizationId: session.activeOrganizationId,
+          safeDb,
+          userId: user.id,
+        });
+      }
+
+      return Result.ok(redirect({ status: "connected", slug: connectorSlug }));
     } catch (error) {
       if (HandlerError.is(error)) {
         return Result.ok(

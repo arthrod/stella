@@ -6,7 +6,14 @@
  * to the extension system (extensions/marks/).
  */
 
-import type { UnderlineStyle, ThemeColorSlot } from "../../types/document";
+import type { ShadingProperties } from "../../types/colors";
+import type {
+  EmphasisMark,
+  TextEffect,
+  TextFormatting,
+  ThemeColorSlot,
+  UnderlineStyle,
+} from "../../types/document";
 
 /**
  * Text color mark attributes
@@ -24,6 +31,10 @@ export type TextColorAttrs = {
 export type UnderlineAttrs = {
   style?: UnderlineStyle;
   color?: TextColorAttrs;
+};
+
+export type StrikeAttrs = {
+  double?: boolean;
 };
 
 /**
@@ -47,6 +58,79 @@ export type FontFamilyAttrs = {
   csTheme?: string;
 };
 
+export type HighlightAttrs = {
+  color: NonNullable<TextFormatting["highlight"]>;
+};
+
+/**
+ * Run-level shading mark attributes (w:shd). Carries the shading FILL as a
+ * flattened ColorValue (mirroring TextColorAttrs) plus the pattern. The default
+ * `clear` pattern is never stored (absence ⇒ the fill renders as a solid
+ * background and re-serializes to `w:val="clear"`); only non-clear patterns
+ * (`pct*`, stripes) are carried for export fidelity (`solid` is flattened into
+ * the fill). `patternColor` is the pattern foreground rgb (`w:shd w:color`),
+ * carried so a non-clear pattern's color survives export.
+ */
+export type RunShadingAttrs = TextColorAttrs & {
+  pattern?: NonNullable<ShadingProperties["pattern"]>;
+  patternColor?: string;
+};
+
+export type CharacterSpacingAttrs = {
+  spacing?: number;
+  position?: number;
+  scale?: number;
+  kerning?: number;
+};
+
+export type EmphasisMarkAttrs = {
+  type?: Exclude<EmphasisMark, "none">;
+};
+
+/**
+ * Text effect mark attributes (w:effect). The "none" sentinel is never marked;
+ * absence of the mark is the no-effect state.
+ */
+export type TextEffectAttrs = {
+  effect: Exclude<TextEffect, "none">;
+};
+
+export type FootnoteRefAttrs = {
+  id: string | number;
+  noteType?: "footnote" | "endnote";
+};
+
+export type CommentAttrs = {
+  commentId: number;
+};
+
+export type TrackedChangeMarkAttrs = {
+  revisionId: number;
+  author: string;
+  date?: string;
+  moveKind?: "moveTo" | "moveFrom";
+};
+
+export type RunFormattingOverrideAttrs = {
+  [K in keyof Pick<
+    TextFormatting,
+    | "bold"
+    | "italic"
+    | "strike"
+    | "doubleStrike"
+    | "allCaps"
+    | "smallCaps"
+    | "hidden"
+    | "emboss"
+    | "imprint"
+    | "shadow"
+    | "outline"
+    | "rtl"
+  >]?: false;
+} & {
+  underline?: "none";
+};
+
 /**
  * Hyperlink mark attributes
  */
@@ -54,4 +138,5 @@ export type HyperlinkAttrs = {
   href: string;
   tooltip?: string;
   rId?: string;
+  _docxHyperlinkIndex?: number;
 };

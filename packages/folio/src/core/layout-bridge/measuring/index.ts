@@ -1,11 +1,16 @@
 /**
- * Text Measurement Module
+ * Layout measurement — back-compat barrel.
  *
- * Provides text measurement utilities for the layout engine.
- * Uses Canvas API for accurate, cached measurements.
+ * The implementation moved to `layout-engine/measure/` so the painter can
+ * consume measurement helpers without importing across the layer boundary
+ * (the painter is downstream of the engine; it was importing from the
+ * bridge before this barrel was introduced). The bridge continues to expose
+ * the same names so existing call sites need no change.
+ *
+ * See `__tests__/layer-boundaries.test.ts` and the `folio-layer-boundaries`
+ * lint rule for the enforcement.
  */
 
-// Core measurement functions
 export {
   getCanvasContext,
   resetCanvasContext,
@@ -16,52 +21,66 @@ export {
   measureRun,
   findCharacterAtX,
   getXForCharacter,
-  // Unit conversions
   twipsToPx,
   pxToTwips,
   ptToPx,
   pxToPt,
   halfPtToPx,
   pxToHalfPt,
-  // Types
   type FontStyle,
   type FontMetrics,
   type TextMeasurement,
   type RunMeasurement,
-} from "./measureContainer";
+} from "../../layout-engine/measure/measureContainer";
 
-// Paragraph measurement
 export {
   measureParagraph,
   measureParagraphs,
   getRunCharWidths,
   clampFloatingWrapMargins,
+  findClearLineY,
+  MIN_WRAP_SEGMENT_WIDTH,
   type FloatingImageZone,
   type MeasureParagraphOptions,
-} from "./measureParagraph";
+} from "../../layout-engine/measure/measureParagraph";
 
-// Caching utilities
 export {
-  // Text width cache
+  rectsToFloatingZones,
+  getFloatingMargins,
+  getFloatingAvailableWidth,
+  type FloatingExclusionRect,
+  type FloatingLineMargins,
+  type FloatingLineSegmentZone,
+  type WrapTextDirection,
+} from "../../layout-engine/measure/floatingZones";
+
+export {
   getCachedTextWidth,
   setCachedTextWidth,
   clearTextWidthCache,
   setTextCacheSize,
   getTextCacheSize,
-  // Font metrics cache
   getCachedFontMetrics,
   setCachedFontMetrics,
   clearFontMetricsCache,
   setFontCacheSize,
   getFontCacheSize,
-  // Paragraph measure cache
   hashParagraphBlock,
   getCachedParagraphMeasure,
   setCachedParagraphMeasure,
   clearParagraphMeasureCache,
   setParagraphCacheSize,
   getParagraphCacheSize,
-  // Global cache management
   clearAllCaches,
   getTotalCacheSize,
-} from "./cache";
+} from "../../layout-engine/measure/cache";
+
+// Feature-flag accessors for the measurement subsystem. Host apps
+// install the bag before mounting `DocxEditor`; measurement code reads
+// it on demand. All flags default OFF, so callers who never set the
+// bag see identical behaviour to before any of this code existed.
+export {
+  isWorkerFontMetricsEnabled,
+  setFolioMeasurementFlags,
+  type FolioMeasurementFeatureFlags,
+} from "../../layout-engine/measure/featureFlags";

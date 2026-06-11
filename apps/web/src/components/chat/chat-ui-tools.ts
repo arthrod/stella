@@ -3,6 +3,8 @@
  * source of truth) and provides frontend-only helpers.
  */
 
+import { panic } from "better-result";
+
 import type { ChatMessage, ChatPart, ChatUITools } from "@stll/api/types";
 
 import type { TranslationKey } from "@/i18n/types";
@@ -43,14 +45,14 @@ export type ActiveDocxEditApprovalPart = Extract<
 export type AskUserInput = SharedChatUITools["ask-user"]["input"];
 type PublicOfficialToolName = Extract<
   BuiltInApprovalToolName,
-  | "ares_lookup_company"
-  | "ares_search_companies"
   | "boe_find_related_laws"
   | "boe_get_law"
   | "boe_get_law_block"
   | "boe_get_law_structure"
   | "boe_search_legislation"
   | "borme_get_summary"
+  | "business_registry_lookup"
+  | "infosoud_lookup_case"
 >;
 const RUNNING_TOOL_STATES = {
   "input-available": true,
@@ -63,8 +65,6 @@ const USER_INPUT_TOOL_TYPES = {
 
 const CHAT_TOOL_TITLE_KEYS = {
   "apply-active-docx-edits": "chat.tool.apply-active-docx-edits",
-  ares_lookup_company: "chat.tool.ares_lookup_company",
-  ares_search_companies: "chat.tool.ares_search_companies",
   "ask-user": "chat.tool.ask-user",
   boe_find_related_laws: "chat.tool.boe_find_related_laws",
   boe_get_law: "chat.tool.boe_get_law",
@@ -72,15 +72,27 @@ const CHAT_TOOL_TITLE_KEYS = {
   boe_get_law_structure: "chat.tool.boe_get_law_structure",
   boe_search_legislation: "chat.tool.boe_search_legislation",
   borme_get_summary: "chat.tool.borme_get_summary",
+  business_registry_lookup: "chat.tool.business_registry_lookup",
   "create-document": "chat.tool.create-document",
   "describe-stella-api": "chat.tool.describe-stella-api",
+  "expand-chat-history": "chat.tool.expand-chat-history",
+  fetch_url: "chat.tool.fetch_url",
+  infosoud_lookup_case: "chat.tool.infosoud_lookup_case",
   "run-stella-query": "chat.tool.run-stella-query",
   "load-skill": "chat.tool.load-skill",
   "read-skill-resource": "chat.tool.read-skill-resource",
+  "search-chat-history": "chat.tool.search-chat-history",
   "update-entity-fields": "chat.tool.update-entity-fields",
+  web_search: "chat.tool.web_search",
 } as const satisfies Record<keyof ChatUITools, TranslationKey>;
 
+// Tools that used to be registered but were replaced by the unified
+// `business_registry_lookup` (or removed for other reasons). Keep
+// title keys around so historical chat history still renders with a
+// recognisable label rather than the generic "unknown" fallback.
 const LEGACY_CHAT_TOOL_TITLE_KEYS = {
+  ares_lookup_company: "chat.tool.ares_lookup_company",
+  ares_search_companies: "chat.tool.ares_search_companies",
   "describe-stella-function": "chat.tool.describe-stella-function",
   "execute-typescript": "chat.tool.execute-typescript",
   "read-contact": "chat.tool.read-contact",
@@ -97,14 +109,14 @@ const UNKNOWN_CHAT_TOOL_TITLE_KEY =
   "chat.tool.unknown" satisfies TranslationKey;
 
 const PUBLIC_OFFICIAL_CHAT_TOOL_NAMES = {
-  ares_lookup_company: true,
-  ares_search_companies: true,
   boe_find_related_laws: true,
   boe_get_law: true,
   boe_get_law_block: true,
   boe_get_law_structure: true,
   boe_search_legislation: true,
   borme_get_summary: true,
+  business_registry_lookup: true,
+  infosoud_lookup_case: true,
 } as const satisfies Record<PublicOfficialToolName, true>;
 
 export const isExternalMcpToolName = (
@@ -218,7 +230,7 @@ export const getApprovalToolName = (
     return toolName;
   }
 
-  throw new Error("Unsupported approval tool");
+  return panic("Unsupported approval tool");
 };
 
 /** Check if a tool part has an approval field (approval flow). */

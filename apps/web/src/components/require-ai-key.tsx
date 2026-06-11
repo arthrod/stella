@@ -9,7 +9,7 @@ import {
 } from "react";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useRouteContext } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { panic } from "better-result";
 import { useTranslations } from "use-intl";
 
@@ -36,6 +36,7 @@ import {
   providerDraftsFromStoredProviders,
   roleModelsFromOverrideModels,
   serializeOverrideModels,
+  serializeProviderDrafts,
 } from "@/components/ai-config-role-models.logic";
 import type {
   ModelSelection,
@@ -45,6 +46,7 @@ import type {
 } from "@/components/ai-config-role-models.logic";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
+import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { toAPIError } from "@/lib/errors";
 import {
   aiAvailabilityOptions,
@@ -65,10 +67,7 @@ const AIAvailabilityContext = createContext<AIAvailabilityContextValue | null>(
 export function AIAvailabilityProvider({ children }: PropsWithChildren) {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
-  const activeOrganizationId = useRouteContext({
-    from: "/_protected",
-    select: (ctx) => ctx.user.activeOrganizationId,
-  });
+  const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
   const availabilityOptions = useMemo(
     () => aiAvailabilityOptions({ organizationId: activeOrganizationId }),
     [activeOrganizationId],
@@ -136,10 +135,7 @@ export const useAIKeyGate = () => {
  * BYOK or the instance has provisioned keys.
  */
 export function useAIAvailable(): boolean {
-  const activeOrganizationId = useRouteContext({
-    from: "/_protected",
-    select: (ctx) => ctx.user.activeOrganizationId,
-  });
+  const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
   const { data, isError } = useQuery(
     aiAvailabilityOptions({ organizationId: activeOrganizationId }),
   );
@@ -156,10 +152,7 @@ export function useAIAvailable(): boolean {
  */
 export function RequireAIKey({ children }: PropsWithChildren) {
   const t = useTranslations();
-  const activeOrganizationId = useRouteContext({
-    from: "/_protected",
-    select: (ctx) => ctx.user.activeOrganizationId,
-  });
+  const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
   const { data, isFetching, isPending, isError } = useQuery(
     aiAvailabilityOptions({ organizationId: activeOrganizationId }),
   );
@@ -218,10 +211,7 @@ export function AIKeyRequiredDialog({
   const tSuccess = useTranslations("success");
   const analytics = useAnalytics();
   const queryClient = useQueryClient();
-  const activeOrganizationId = useRouteContext({
-    from: "/_protected",
-    select: (ctx) => ctx.user.activeOrganizationId,
-  });
+  const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
   const { data: config } = useQuery(
     aiConfigOptions({ organizationId: activeOrganizationId }),
   );
@@ -284,25 +274,14 @@ export function AIKeyRequiredDialog({
         roleModels,
       });
       if (!overrideModels) {
-        throw new Error(tOrganization("aiConfig.selectModelForEachRole"));
+        // The Configure button is disabled when `canSave` is false, which
+        // checks the same `serializeOverrideModels(...) !== null` invariant.
+        // The inline message at the field below renders the translated text.
+        panic("ai-config save fired with no valid override models");
       }
 
       const response = await api["organization-settings"]["ai-config"].post({
-        providers: providers.map((providerDraft) => ({
-          provider: providerDraft.provider,
-          ...(providerDraft.apiKey.trim()
-            ? { apiKey: providerDraft.apiKey.trim() }
-            : {}),
-          ...(providerDraft.provider === "azure_foundry"
-            ? {
-                endpoint: providerDraft.endpoint.trim(),
-                ...(providerDraft.apiVersion
-                  ? { apiVersion: providerDraft.apiVersion }
-                  : {}),
-              }
-            : {}),
-          region: providerDraft.region,
-        })),
+        providers: serializeProviderDrafts(providers),
         overrideModels,
       });
 

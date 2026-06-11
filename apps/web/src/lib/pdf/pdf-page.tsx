@@ -1,5 +1,5 @@
 import { Suspense, use, useDeferredValue } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 import { Result } from "better-result";
 import { useShallow } from "zustand/react/shallow";
@@ -57,14 +57,12 @@ export const PDFPage = ({ pageId, renderOverlay, fallback }: PDFPageProps) => {
       }}
       {...{ [PAGE_ID_ATTRIBUTE]: pageId }}
       className="relative mx-auto border-transparent"
-      style={
-        {
-          "--total-scale-factor": "var(--scale-factor)",
-          backgroundColor: "var(--document-preview-page, var(--background))",
-          width: `round(down, var(--total-scale-factor) * ${page.originalWidth}px, var(--scale-round-x))`,
-          height: `round(down, var(--total-scale-factor) * ${page.originalHeight}px, var(--scale-round-y))`,
-        } as CSSProperties
-      }
+      style={{
+        "--total-scale-factor": "var(--scale-factor)",
+        backgroundColor: "var(--document-preview-page, var(--background))",
+        width: `round(down, var(--total-scale-factor) * ${page.originalWidth}px, var(--scale-round-x))`,
+        height: `round(down, var(--total-scale-factor) * ${page.originalHeight}px, var(--scale-round-y))`,
+      }}
     >
       <PDFErrorBoundary fallback={fallback?.error ?? null}>
         <Suspense fallback={fallback?.suspense ?? <PDFPageSkeleton />}>
@@ -136,7 +134,7 @@ const PDFPageContent = ({ pageId, renderPromise }: PDFPageContentProps) => {
             el.innerHTML = "";
           };
         }}
-        className="[&_br]:absolute [&_br]:z-1 [&_br]:origin-top-left [&_br]:cursor-text [&_br]:whitespace-pre [&_br]:text-transparent [&_br::selection]:bg-transparent [&_span]:absolute [&_span]:z-1 [&_span]:origin-top-left [&_span]:cursor-text [&_span]:whitespace-pre [&_span]:text-transparent [&_span::selection]:bg-indigo-600/25"
+        className="[&_span::selection]:bg-foreground/25 [&_br]:absolute [&_br]:z-1 [&_br]:origin-top-left [&_br]:cursor-text [&_br]:whitespace-pre [&_br]:text-transparent [&_br::selection]:bg-transparent [&_span]:absolute [&_span]:z-1 [&_span]:origin-top-left [&_span]:cursor-text [&_span]:whitespace-pre [&_span]:text-transparent"
       />
     </>
   );

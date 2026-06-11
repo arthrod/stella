@@ -1,57 +1,19 @@
-import type { PropsWithChildren } from "react";
-
-import { HotkeysProvider } from "@tanstack/react-hotkeys";
 import { QueryClient } from "@tanstack/react-query";
 import { createRouter } from "@tanstack/react-router";
 import { setupRouterSsrQueryIntegration } from "@tanstack/react-router-ssr-query";
 import { enableMapSet } from "immer";
-import { IntlProvider } from "use-intl";
-
-import { ToastProvider } from "@stll/ui/components/toast";
-import { TooltipProvider } from "@stll/ui/components/tooltip";
 
 import {
   DefaultErrorComponent,
   DefaultNotFoundComponent,
   DefaultPendingComponent,
 } from "@/components/route-components";
-import { ThemeProvider } from "@/components/theme-provider";
-import { useI18nStore } from "@/i18n/i18n-store";
-import type Messages from "@/i18n/langs/messages.gen";
-import {
-  AnalyticsProvider,
-  createAnalyticsValue,
-} from "@/lib/analytics/provider";
+import { createAnalyticsValue } from "@/lib/analytics/provider";
 import { STALE_TIME } from "@/lib/consts";
 import { installPDFDocumentCleanup } from "@/lib/pdf/hooks/use-pdf-document";
 import { routeTree } from "@/routeTree.gen";
 
 enableMapSet();
-
-const I18nProvider = ({ children }: PropsWithChildren) => {
-  const lang = useI18nStore((s) => s.lang);
-  const messages = useI18nStore((s) => s.messages);
-  const isLoaded = useI18nStore((s) => s.isLoaded);
-
-  if (!isLoaded) {
-    return <DefaultPendingComponent />;
-  }
-
-  return (
-    <IntlProvider
-      locale={lang}
-      // SAFETY: locale JSON files are shape-checked in i18n-store.ts;
-      // this cast is only at the provider boundary because use-intl's
-      // Messages type preserves English literal message values while
-      // translated locale JSONs necessarily contain different strings.
-      // eslint-disable-next-line typescript/no-unsafe-type-assertion
-      messages={messages as Messages}
-      timeZone={Intl.DateTimeFormat().resolvedOptions().timeZone}
-    >
-      {children}
-    </IntlProvider>
-  );
-};
 
 export function getRouter() {
   const analyticsValue = createAnalyticsValue();
@@ -67,35 +29,21 @@ export function getRouter() {
   const router = createRouter({
     routeTree,
     defaultPreload: "intent",
-    context: { queryClient },
-    scrollRestoration: true,
+    context: { analyticsValue, queryClient },
+    // Keep browser scroll restoration after hydration, but avoid rendering
+    // TanStack's restoration sibling during server streaming for client-only
+    // top-level routes.
+    scrollRestoration: !import.meta.env.SSR,
     defaultNotFoundComponent: DefaultNotFoundComponent,
     defaultErrorComponent: DefaultErrorComponent,
     defaultPendingComponent: DefaultPendingComponent,
     // Don't flash the pending spinner on fast navigations. Routes
-    // that resolve in under 200ms never show a loading state; when
-    // the spinner does appear, keep it visible for at least 500ms
+    // that resolve in under 500ms never show a loading state; when
+    // the spinner does appear, keep it visible for at least 300ms
     // to avoid flicker when the loader completes just after the
     // threshold.
-    defaultPendingMs: 200,
-    defaultPendingMinMs: 500,
-    Wrap: ({ children }) => (
-      <AnalyticsProvider value={analyticsValue}>
-        <I18nProvider>
-          <HotkeysProvider
-            defaultOptions={{
-              hotkey: { conflictBehavior: "allow" },
-            }}
-          >
-            <ThemeProvider>
-              <TooltipProvider>
-                <ToastProvider>{children}</ToastProvider>
-              </TooltipProvider>
-            </ThemeProvider>
-          </HotkeysProvider>
-        </I18nProvider>
-      </AnalyticsProvider>
-    ),
+    defaultPendingMs: 500,
+    defaultPendingMinMs: 300,
   });
 
   router.subscribe("onResolved", ({ toLocation }) => {
@@ -107,6 +55,7 @@ export function getRouter() {
   setupRouterSsrQueryIntegration({
     router,
     queryClient,
+    wrapQueryClient: false,
   });
 
   return router;

@@ -14,161 +14,74 @@
  * - "mistral": Mistral AI (MISTRAL_API_KEY)
  * - "openai_compatible": Any OpenAI-compatible endpoint
  *   (OPENAI_API_KEY + AI_PROVIDER_BASE_URL)
+ * - "huggingface": HuggingFace Inference Endpoint (OpenAI-compatible)
+ *   (HUGGINGFACE_API_KEY + HUGGINGFACE_BASE_URL)
  *
  * When AI_PROVIDER is not set, auto-detects from available
- * API keys: OPENROUTER → Google → OpenAI → Azure → Anthropic → Mistral.
+ * API keys: OPENROUTER → Google → OpenAI → Azure → Anthropic →
+ * Mistral → HuggingFace.
  */
 
 import { anthropic, createAnthropic } from "@ai-sdk/anthropic";
 import { createAzure } from "@ai-sdk/azure";
 import { devToolsMiddleware } from "@ai-sdk/devtools";
 import { createGoogleGenerativeAI, google } from "@ai-sdk/google";
+import type { GoogleLanguageModelOptions } from "@ai-sdk/google";
 import { createVertex } from "@ai-sdk/google-vertex";
 import { createMistral, mistral } from "@ai-sdk/mistral";
 import { createOpenAI, openai } from "@ai-sdk/openai";
+import type { OpenAILanguageModelChatOptions } from "@ai-sdk/openai";
+import { APICallError } from "@ai-sdk/provider";
+import type {
+  JSONObject,
+  LanguageModelV3GenerateResult,
+  LanguageModelV3StreamPart,
+  LanguageModelV3StreamResult,
+  SharedV3ProviderMetadata,
+} from "@ai-sdk/provider";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { wrapLanguageModel } from "ai";
-import type { LanguageModel } from "ai";
+import { defaultSettingsMiddleware, wrapLanguageModel } from "ai";
+import type { LanguageModel, LanguageModelMiddleware } from "ai";
 import { panic, Result } from "better-result";
 
+import {
+  AI_PROVIDERS,
+  ANTHROPIC_ADAPTIVE_THINKING_MODELS,
+  ANTHROPIC_FIXED_SAMPLING_MODELS,
+  BYOK_MODEL_OPTIONS,
+  DEFAULT_MODELS,
+} from "@stll/ai-catalog";
+import type { AIProvider, BYOKProvider, ModelRole } from "@stll/ai-catalog";
+
+import type { UsageServiceTier } from "@/api/db/schema";
 import { env } from "@/api/env";
 import {
   AZURE_FOUNDRY_DEFAULT_API_VERSION,
   normalizeAzureFoundryBaseURL,
 } from "@/api/lib/azure-foundry";
+import type { SafeId } from "@/api/lib/branded-types";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 
-// -- Types ------------------------------------------------------
+// -- Catalog ----------------------------------------------------
 
-/**
- * Logical model roles. Call sites declare *what* they need,
- * not *which* model to use.
- *
- * - fast: classification, extraction, short generation
- * - chat: conversational with tool use and streaming
- * - reasoning: complex multi-step legal analysis
- * - pdf: native PDF/image understanding
- */
-export type ModelRole = "fast" | "chat" | "reasoning" | "pdf";
-
-export const MODEL_ROLES = [
-  "fast",
-  "chat",
-  "reasoning",
-  "pdf",
-] as const satisfies readonly ModelRole[];
-
-export const AI_PROVIDERS = [
-  "google",
-  "openrouter",
-  "openai",
-  "azure_foundry",
-  "anthropic",
-  "mistral",
-  "openai_compatible",
-] as const;
-
-export type AIProvider = (typeof AI_PROVIDERS)[number];
+// Roles, providers, per-role defaults, BYOK options, and the
+// adaptive-thinking set are the single source of truth in
+// @stll/ai-catalog, shared with the BYOK settings UI in apps/web so the
+// picker can never offer a model the API rejects. Re-exported here so
+// existing `@/api/lib/ai-models` consumers keep their imports.
+export { AI_PROVIDERS, BYOK_MODEL_OPTIONS, DEFAULT_MODELS };
+export { MODEL_ROLES } from "@stll/ai-catalog";
+export type { AIProvider, BYOKProvider, ModelRole };
 
 const AI_PROVIDER_VALUES = new Set<string>(AI_PROVIDERS);
 
 const isAIProvider = (value: string): value is AIProvider =>
   AI_PROVIDER_VALUES.has(value);
 
-// -- Default model IDs per provider -----------------------------
-
-export const DEFAULT_MODELS = {
-  google: {
-    fast: "gemini-3.1-flash-lite-preview",
-    chat: "gemini-3.5-flash",
-    reasoning: "gemini-3.1-pro-preview",
-    pdf: "gemini-3.5-flash",
-  },
-  openrouter: {
-    fast: "google/gemini-3.1-flash-lite-preview",
-    chat: "google/gemini-3.5-flash",
-    reasoning: "google/gemini-3.1-pro-preview",
-    pdf: "google/gemini-3.5-flash",
-  },
-  openai: {
-    fast: "gpt-5.4-nano",
-    chat: "gpt-5.4-mini",
-    reasoning: "gpt-5.4",
-    pdf: "gpt-5.4",
-  },
-  azure_foundry: {
-    fast: "gpt-5.4-nano",
-    chat: "gpt-5.4-mini",
-    reasoning: "gpt-5.4",
-    pdf: "gpt-5.4",
-  },
-  anthropic: {
-    fast: "claude-haiku-4-5-20251001",
-    chat: "claude-sonnet-4-6",
-    reasoning: "claude-sonnet-4-6",
-    pdf: "claude-sonnet-4-6",
-  },
-  mistral: {
-    fast: "mistral-small-latest",
-    chat: "mistral-large-latest",
-    reasoning: "magistral-medium-latest",
-    pdf: "mistral-large-latest",
-  },
-  openai_compatible: {
-    fast: "default",
-    chat: "default",
-    reasoning: "default",
-    pdf: "default",
-  },
-} as const satisfies Record<AIProvider, Record<ModelRole, string>>;
-
-/**
- * BYOK-offered model IDs per provider. Server-side allowlist
- * mirroring the picker catalog in
- * apps/web/src/components/ai-config-role-models.logic.ts —
- * keep the two in sync. The frontend list is not a security
- * boundary; this is what the API will accept.
- *
- * Limited to providers BYOK supports (no openai_compatible).
- */
-export const BYOK_MODEL_OPTIONS = {
-  google: [
-    "gemini-3.1-pro-preview",
-    "gemini-3.5-flash",
-    "gemini-3.1-flash-lite-preview",
-  ],
-  anthropic: [
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-    "claude-opus-4-6",
-    "claude-haiku-4-5-20251001",
-  ],
-  mistral: [
-    "mistral-medium-3-5",
-    "mistral-large-latest",
-    "mistral-small-latest",
-    "magistral-medium-latest",
-    "magistral-small-latest",
-  ],
-  openai: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.2"],
-  azure_foundry: [],
-  openrouter: [
-    "google/gemini-3.1-pro-preview",
-    "google/gemini-3.5-flash",
-    "google/gemini-3.1-flash-lite-preview",
-    "anthropic/claude-opus-4.5",
-    "anthropic/claude-sonnet-4.5",
-    "openai/gpt-5.4",
-    "openai/gpt-5.4-mini",
-  ],
-} as const satisfies Record<
-  Exclude<AIProvider, "openai_compatible">,
-  readonly string[]
->;
-
-export type BYOKProvider = keyof typeof BYOK_MODEL_OPTIONS;
-
-const CUSTOM_BYOK_MODEL_PROVIDERS = new Set<BYOKProvider>(["azure_foundry"]);
+const CUSTOM_BYOK_MODEL_PROVIDERS = new Set<BYOKProvider>([
+  "azure_foundry",
+  "huggingface",
+]);
 
 export const isBYOKProvider = (
   provider: AIProvider,
@@ -189,6 +102,11 @@ export const isAllowedBYOKModel = (
 };
 
 export type DataRegion = "eu" | "global" | "ch";
+export type AIRequestServiceTier = UsageServiceTier;
+export const STELLA_PROVIDER_METADATA_KEY = "stella";
+export const SERVICE_TIER_PROVIDER_METADATA_KEY = "effectiveServiceTier";
+export const FALLBACK_FROM_SERVICE_TIER_PROVIDER_METADATA_KEY =
+  "fallbackFromServiceTier";
 
 /**
  * Providers that support regional endpoint routing.
@@ -228,10 +146,62 @@ const TEMPERATURE_PER_ROLE = {
 export const getTemperatureForRole = (role: ModelRole): number =>
   TEMPERATURE_PER_ROLE[role];
 
+// -- Prompt caching ---------------------------------------------
+
+/**
+ * Whether stella may annotate this AI request with prompt-cache
+ * markers. `reason: "org-disabled"` means the org turned the
+ * setting off; future variants (e.g. ZDR) compose into the
+ * disabled case.
+ *
+ * When `enabled`, `scopeKey` carries an optional stable string
+ * used as the OpenAI `promptCacheKey` (cache-shard routing) and
+ * surfaces in telemetry. `null` means no routing key; opportunistic
+ * caching only.
+ */
+export type CachingDecision =
+  | { enabled: false; reason: "org-disabled" }
+  | { enabled: true; ttl: "5m"; scopeKey: string | null };
+
+const TTL_BY_ROLE = {
+  fast: "5m",
+  chat: "5m",
+  reasoning: "5m",
+  pdf: "5m",
+} as const satisfies Record<ModelRole, "5m">;
+
+export const resolveCaching = ({
+  promptCachingEnabled,
+  role,
+  scopeKey,
+}: {
+  promptCachingEnabled: boolean;
+  role: ModelRole;
+  scopeKey: string | null;
+}): CachingDecision => {
+  if (!promptCachingEnabled) {
+    return { enabled: false, reason: "org-disabled" };
+  }
+  return { enabled: true, ttl: TTL_BY_ROLE[role], scopeKey };
+};
+
 // -- Provider resolution ----------------------------------------
 
 type WrappableLanguageModel = Parameters<typeof wrapLanguageModel>[0]["model"];
 type ModelFactory = (modelId: string) => WrappableLanguageModel;
+
+let mockModelFactory: ModelFactory | undefined;
+
+/**
+ * Swap in a stub language model for every provider and role. Only the
+ * dev/test preload (`src/dev/register-mock-ai.ts`) calls this when
+ * `USE_MOCK_AI` is set, mirroring `registerBatchGenerator`: keeping the
+ * mock implementation out of this production module keeps `ai/test`
+ * out of the compiled binary and the production dependency graph.
+ */
+export const registerMockModelFactory = (factory: ModelFactory): void => {
+  mockModelFactory = factory;
+};
 
 type ModelFactoryOptions = {
   provider: AIProvider;
@@ -244,6 +214,12 @@ type ModelFactoryOptions = {
 const resolveProvider = (): AIProvider => {
   if (env.AI_PROVIDER) {
     return env.AI_PROVIDER;
+  }
+  // With a registered mock, every provider resolves to the same stub
+  // model, so a synthetic default lets USE_MOCK_AI work without any
+  // provider key configured.
+  if (env.USE_MOCK_AI && mockModelFactory) {
+    return "google";
   }
   if (env.OPENROUTER_API_KEY) {
     return "openrouter";
@@ -263,12 +239,16 @@ const resolveProvider = (): AIProvider => {
   if (env.MISTRAL_API_KEY) {
     return "mistral";
   }
+  if (env.HUGGINGFACE_API_KEY && env.HUGGINGFACE_BASE_URL) {
+    return "huggingface";
+  }
 
   return panic(
     "No AI provider configured. Set AI_PROVIDER or " +
       "provide at least one API key: " +
       "GOOGLE_GENERATIVE_AI_API_KEY, OPENROUTER_API_KEY, " +
-      "OPENAI_API_KEY, AZURE_API_KEY, ANTHROPIC_API_KEY, or MISTRAL_API_KEY.",
+      "OPENAI_API_KEY, AZURE_API_KEY, ANTHROPIC_API_KEY, MISTRAL_API_KEY, " +
+      "or HUGGINGFACE_API_KEY (with HUGGINGFACE_BASE_URL).",
   );
 };
 
@@ -302,6 +282,8 @@ const hasInstanceProviderCredentials = (provider: AIProvider): boolean => {
       return !!env.MISTRAL_API_KEY;
     case "openai_compatible":
       return !!(env.OPENAI_API_KEY && env.AI_PROVIDER_BASE_URL);
+    case "huggingface":
+      return !!(env.HUGGINGFACE_API_KEY && env.HUGGINGFACE_BASE_URL);
     default: {
       const _exhaustive: never = provider;
       return _exhaustive;
@@ -395,6 +377,9 @@ const createModelFactory = ({
   region,
   apiVersion,
 }: ModelFactoryOptions): ModelFactory => {
+  if (env.USE_MOCK_AI && mockModelFactory) {
+    return mockModelFactory;
+  }
   switch (provider) {
     case "google": {
       // Regional routing: use Vertex AI with location.
@@ -503,6 +488,22 @@ const createModelFactory = ({
       const client = createOpenAI({
         baseURL: url,
         apiKey: key,
+        name: "huggingface",
+      });
+      return (id) => client(id);
+    }
+    case "huggingface": {
+      const key =
+        apiKey ??
+        env.HUGGINGFACE_API_KEY ??
+        panic("HUGGINGFACE_API_KEY required for huggingface");
+      const url =
+        baseURL ??
+        env.HUGGINGFACE_BASE_URL ??
+        panic("HUGGINGFACE_BASE_URL required for huggingface");
+      const client = createOpenAI({
+        baseURL: url,
+        apiKey: key,
       });
       return (id) => client(id);
     }
@@ -542,7 +543,7 @@ export type OrgAIConfig = {
 };
 
 export type StandardOrgAIProviderConfig = {
-  provider: Exclude<AIProvider, "azure_foundry">;
+  provider: Exclude<AIProvider, "azure_foundry" | "huggingface">;
   /** Decrypted API key. */
   apiKey: string;
   /**
@@ -562,9 +563,21 @@ export type AzureFoundryOrgAIProviderConfig = {
   apiVersion?: string | undefined;
 };
 
+export type HuggingFaceOrgAIProviderConfig = {
+  provider: "huggingface";
+  /** Decrypted API key (HF user token or Inference Endpoint token). */
+  apiKey: string;
+  /**
+   * OpenAI-compatible base URL of the Inference Endpoint
+   * (e.g. https://<id>.endpoints.huggingface.cloud/v1).
+   */
+  baseURL: string;
+};
+
 export type OrgAIProviderConfig =
   | StandardOrgAIProviderConfig
-  | AzureFoundryOrgAIProviderConfig;
+  | AzureFoundryOrgAIProviderConfig
+  | HuggingFaceOrgAIProviderConfig;
 
 export type OrgAIModelSelection = {
   provider: AIProvider;
@@ -610,11 +623,17 @@ const byokCacheKey = (config: OrgAIProviderConfig): string => {
   const hasher = new Bun.CryptoHasher("sha256");
   hasher.update(config.provider);
   hasher.update(config.apiKey);
-  if (config.provider === "azure_foundry") {
-    hasher.update(config.baseURL);
-    hasher.update(resolveAzureApiVersion(config.apiVersion));
-  } else {
-    hasher.update(config.region ?? "global");
+  switch (config.provider) {
+    case "azure_foundry":
+      hasher.update(config.baseURL);
+      hasher.update(resolveAzureApiVersion(config.apiVersion));
+      break;
+    case "huggingface":
+      hasher.update(config.baseURL);
+      break;
+    default:
+      hasher.update(config.region ?? "global");
+      break;
   }
   const hash = hasher.digest("hex").slice(0, 16);
   return `${config.provider}:${hash}`;
@@ -636,12 +655,26 @@ const getCachedFactory = (config: OrgAIProviderConfig): ModelFactory => {
   const factory = createModelFactory({
     provider: config.provider,
     apiKey: config.apiKey,
-    ...(config.provider === "azure_foundry"
-      ? { baseURL: config.baseURL, apiVersion: config.apiVersion }
-      : { region: config.region }),
+    ...factoryExtras(config),
   });
   byokCache.set(key, factory);
   return factory;
+};
+
+type FactoryExtras = Pick<
+  ModelFactoryOptions,
+  "baseURL" | "apiVersion" | "region"
+>;
+
+const factoryExtras = (config: OrgAIProviderConfig): FactoryExtras => {
+  switch (config.provider) {
+    case "azure_foundry":
+      return { baseURL: config.baseURL, apiVersion: config.apiVersion };
+    case "huggingface":
+      return { baseURL: config.baseURL };
+    default:
+      return { region: config.region };
+  }
 };
 
 // -- Instance-level singleton (lazy) ----------------------------
@@ -670,17 +703,783 @@ const MODEL_OVERRIDES = {
 
 const isAIDevToolsEnabled = (): boolean => env.AI_DEVTOOLS_ENABLED;
 
-const withLocalAIDevTools = (model: WrappableLanguageModel): LanguageModel => {
-  if (!isAIDevToolsEnabled()) {
-    return model;
+type SingleMiddleware = LanguageModelMiddleware;
+
+const PROVIDER_CACHE_KEY_MAX = 64;
+
+const hashScopeKey = (raw: string): string =>
+  new Bun.CryptoHasher("sha256")
+    .update(raw)
+    .digest("hex")
+    .slice(0, PROVIDER_CACHE_KEY_MAX);
+
+type CallOptions = Parameters<
+  NonNullable<LanguageModelMiddleware["transformParams"]>
+>[0]["params"];
+type ProviderOptionsMap = NonNullable<CallOptions["providerOptions"]>;
+type ProviderOptionsValue = ProviderOptionsMap[string];
+
+const omitKey = (
+  entry: ProviderOptionsValue,
+  key: string,
+): ProviderOptionsValue => {
+  if (!(key in entry)) {
+    return entry;
+  }
+  const { [key]: _omitted, ...rest } = entry;
+  return rest;
+};
+
+const stripCacheMarkersFromProviderOptions = (
+  providerOptions: ProviderOptionsMap | undefined,
+): ProviderOptionsMap | undefined => {
+  if (providerOptions === undefined) {
+    return providerOptions;
+  }
+  const next: ProviderOptionsMap = { ...providerOptions };
+  const anthropicEntry = next["anthropic"];
+  if (anthropicEntry !== undefined) {
+    next["anthropic"] = omitKey(anthropicEntry, "cacheControl");
+  }
+  const openaiEntry = next["openai"];
+  if (openaiEntry !== undefined) {
+    next["openai"] = omitKey(openaiEntry, "promptCacheKey");
+  }
+  const googleEntry = next["google"];
+  if (googleEntry !== undefined) {
+    next["google"] = omitKey(googleEntry, "cachedContent");
+  }
+  return next;
+};
+
+type PromptMessage = CallOptions["prompt"][number];
+
+const stripCacheMarkersFromPrompt = (
+  prompt: CallOptions["prompt"],
+): CallOptions["prompt"] =>
+  prompt.map((message): PromptMessage => {
+    const cleanedProviderOptions = stripCacheMarkersFromProviderOptions(
+      message.providerOptions,
+    );
+    const providerOptionsPatch =
+      cleanedProviderOptions !== undefined
+        ? { providerOptions: cleanedProviderOptions }
+        : {};
+    if (message.role === "system" || typeof message.content === "string") {
+      return { ...message, ...providerOptionsPatch };
+    }
+    if (message.role === "user") {
+      return {
+        ...message,
+        ...providerOptionsPatch,
+        content: message.content.map((part) => {
+          const cleaned = stripCacheMarkersFromProviderOptions(
+            part.providerOptions,
+          );
+          return cleaned === undefined
+            ? part
+            : { ...part, providerOptions: cleaned };
+        }),
+      };
+    }
+    if (message.role === "assistant") {
+      return {
+        ...message,
+        ...providerOptionsPatch,
+        content: message.content.map((part) => {
+          const cleaned = stripCacheMarkersFromProviderOptions(
+            part.providerOptions,
+          );
+          return cleaned === undefined
+            ? part
+            : { ...part, providerOptions: cleaned };
+        }),
+      };
+    }
+    return {
+      ...message,
+      ...providerOptionsPatch,
+      content: message.content.map((part) => {
+        const cleaned = stripCacheMarkersFromProviderOptions(
+          part.providerOptions,
+        );
+        return cleaned === undefined
+          ? part
+          : { ...part, providerOptions: cleaned };
+      }),
+    };
+  });
+
+const markAnthropicSystemEphemeral = (
+  prompt: CallOptions["prompt"],
+): CallOptions["prompt"] =>
+  prompt.map((message) => {
+    if (message.role !== "system") {
+      return message;
+    }
+    const existingMessageOptions = message.providerOptions ?? {};
+    const existingAnthropic = existingMessageOptions["anthropic"] ?? {};
+    if (existingAnthropic["cacheControl"] !== undefined) {
+      return message;
+    }
+    return {
+      ...message,
+      providerOptions: {
+        ...existingMessageOptions,
+        anthropic: {
+          ...existingAnthropic,
+          cacheControl: { type: "ephemeral" },
+        },
+      },
+    };
+  });
+
+const computeCachingParams = (
+  params: CallOptions,
+  provider: AIProvider,
+  decision: CachingDecision,
+): CallOptions => {
+  // OFF: strip every cache marker the caller may have set so the
+  // wire payload carries no caching state regardless of provider.
+  if (!decision.enabled) {
+    const strippedPrompt = stripCacheMarkersFromPrompt(params.prompt);
+    const strippedProviderOptions = stripCacheMarkersFromProviderOptions(
+      params.providerOptions,
+    );
+    return {
+      ...params,
+      prompt: strippedPrompt,
+      ...(strippedProviderOptions !== undefined
+        ? { providerOptions: strippedProviderOptions }
+        : {}),
+    };
+  }
+
+  // ON: preserve caller-placed breakpoints (e.g. `markCacheBreakpoint`
+  // on the document content in workflow extraction) and only add
+  // baseline markers — Anthropic system cacheControl if absent,
+  // OpenAI promptCacheKey derived from scopeKey.
+  let nextPrompt = params.prompt;
+  let nextProviderOptions = params.providerOptions;
+
+  if (provider === "anthropic") {
+    nextPrompt = markAnthropicSystemEphemeral(params.prompt);
+  }
+
+  if (
+    (provider === "openai" || provider === "azure_foundry") &&
+    decision.scopeKey !== null
+  ) {
+    const existingOpenai = nextProviderOptions?.["openai"] ?? {};
+    nextProviderOptions = {
+      ...nextProviderOptions,
+      openai: {
+        ...existingOpenai,
+        promptCacheKey: hashScopeKey(decision.scopeKey),
+      },
+    };
+  }
+
+  return {
+    ...params,
+    prompt: nextPrompt,
+    ...(nextProviderOptions !== undefined
+      ? { providerOptions: nextProviderOptions }
+      : {}),
+  };
+};
+
+const cachingMiddleware = (
+  provider: AIProvider,
+  decision: CachingDecision,
+): SingleMiddleware => ({
+  specificationVersion: "v3",
+  transformParams: async ({ params }) =>
+    await Promise.resolve(computeCachingParams(params, provider, decision)),
+});
+
+// -- Provider service tier routing ------------------------------
+
+export type ServiceTierProviderTarget =
+  | "google_gemini_api"
+  | "google_vertex"
+  | "openai"
+  | "none";
+
+const GOOGLE_GEMINI_FLEX_TIER = "flex" satisfies NonNullable<
+  GoogleLanguageModelOptions["serviceTier"]
+>;
+const GOOGLE_GEMINI_STANDARD_TIER = "standard" satisfies NonNullable<
+  GoogleLanguageModelOptions["serviceTier"]
+>;
+const GOOGLE_VERTEX_FLEX_SHARED_REQUEST_TYPE = "flex" satisfies NonNullable<
+  GoogleLanguageModelOptions["sharedRequestType"]
+>;
+const GOOGLE_VERTEX_SHARED_REQUEST_TYPE = "shared" satisfies NonNullable<
+  GoogleLanguageModelOptions["requestType"]
+>;
+const OPENAI_FLEX_TIER = "flex" satisfies NonNullable<
+  OpenAILanguageModelChatOptions["serviceTier"]
+>;
+const OPENAI_STANDARD_TIER = "default" satisfies NonNullable<
+  OpenAILanguageModelChatOptions["serviceTier"]
+>;
+
+type GoogleGeminiServiceTierOptions = Pick<
+  GoogleLanguageModelOptions,
+  "serviceTier"
+>;
+type GoogleVertexServiceTierOptions = Pick<
+  GoogleLanguageModelOptions,
+  "requestType" | "sharedRequestType"
+>;
+type OpenAIServiceTierOptions = Pick<
+  OpenAILanguageModelChatOptions,
+  "serviceTier"
+>;
+
+const providerTargetForConfig = (
+  config: OrgAIProviderConfig,
+): ServiceTierProviderTarget => {
+  if (
+    config.provider === "azure_foundry" ||
+    config.provider === "huggingface"
+  ) {
+    return providerTargetForProvider({ provider: config.provider });
+  }
+
+  return providerTargetForProvider({
+    provider: config.provider,
+    region: config.region,
+  });
+};
+
+const providerTargetForProvider = ({
+  provider,
+  region,
+}: {
+  provider: AIProvider;
+  region?: DataRegion | undefined;
+}): ServiceTierProviderTarget => {
+  if (provider === "google") {
+    return region && region !== "global"
+      ? "google_vertex"
+      : "google_gemini_api";
+  }
+  if (provider === "openai") {
+    return "openai";
+  }
+  return "none";
+};
+
+const providerTargetForInstanceProvider = (
+  provider: AIProvider,
+): ServiceTierProviderTarget => providerTargetForProvider({ provider });
+
+const isDeferredServiceTier = (serviceTier: AIRequestServiceTier): boolean =>
+  serviceTier === "flex" || serviceTier === "batch";
+
+export const resolveEffectiveServiceTierForProvider = ({
+  provider,
+  region,
+  serviceTier,
+}: {
+  provider: AIProvider;
+  region?: DataRegion | undefined;
+  serviceTier: AIRequestServiceTier;
+}): AIRequestServiceTier => {
+  if (!isDeferredServiceTier(serviceTier)) {
+    return serviceTier;
+  }
+
+  const target = providerTargetForProvider({ provider, region });
+  return target === "none" ? "standard" : serviceTier;
+};
+
+const mergeProviderOptionPatch = (
+  providerOptions: ProviderOptionsMap | undefined,
+  providerKey: string,
+  patch: ProviderOptionsValue,
+): ProviderOptionsMap => {
+  const existing = providerOptions?.[providerKey] ?? {};
+  return {
+    ...providerOptions,
+    [providerKey]: {
+      ...existing,
+      ...patch,
+    },
+  };
+};
+
+export const resolveServiceTierProviderOptions = ({
+  target,
+  serviceTier,
+}: {
+  target: ServiceTierProviderTarget;
+  serviceTier: AIRequestServiceTier;
+}): ProviderOptionsMap | undefined => {
+  if (target === "google_gemini_api") {
+    const googleOptions = {
+      serviceTier: isDeferredServiceTier(serviceTier)
+        ? GOOGLE_GEMINI_FLEX_TIER
+        : GOOGLE_GEMINI_STANDARD_TIER,
+    } satisfies GoogleGeminiServiceTierOptions;
+
+    return {
+      google: googleOptions,
+    };
+  }
+
+  if (target === "google_vertex") {
+    if (!isDeferredServiceTier(serviceTier)) {
+      return undefined;
+    }
+    const vertexOptions = {
+      sharedRequestType: GOOGLE_VERTEX_FLEX_SHARED_REQUEST_TYPE,
+      requestType: GOOGLE_VERTEX_SHARED_REQUEST_TYPE,
+    } satisfies GoogleVertexServiceTierOptions;
+
+    return {
+      vertex: vertexOptions,
+    };
+  }
+
+  if (target === "openai") {
+    const openaiOptions = {
+      serviceTier: isDeferredServiceTier(serviceTier)
+        ? OPENAI_FLEX_TIER
+        : OPENAI_STANDARD_TIER,
+    } satisfies OpenAIServiceTierOptions;
+
+    return {
+      openai: openaiOptions,
+    };
+  }
+
+  return undefined;
+};
+
+const computeServiceTierParams = (
+  params: CallOptions,
+  target: ServiceTierProviderTarget,
+  serviceTier: AIRequestServiceTier,
+): CallOptions => {
+  const providerOptionsPatch = resolveServiceTierProviderOptions({
+    target,
+    serviceTier,
+  });
+  if (providerOptionsPatch === undefined) {
+    return params;
+  }
+
+  let nextProviderOptions: ProviderOptionsMap = params.providerOptions ?? {};
+  for (const [providerKey, patch] of Object.entries(providerOptionsPatch)) {
+    nextProviderOptions = mergeProviderOptionPatch(
+      nextProviderOptions,
+      providerKey,
+      patch,
+    );
+  }
+
+  return {
+    ...params,
+    providerOptions: nextProviderOptions,
+  };
+};
+
+const computeStandardFallbackServiceTierParams = (
+  params: CallOptions,
+  target: ServiceTierProviderTarget,
+): CallOptions => {
+  if (target === "google_vertex") {
+    const vertexOptions = params.providerOptions?.["vertex"];
+    if (vertexOptions === undefined) {
+      return params;
+    }
+
+    const {
+      sharedRequestType: _sharedRequestType,
+      requestType: _requestType,
+      ...standardVertexOptions
+    } = vertexOptions;
+    return {
+      ...params,
+      providerOptions: {
+        ...params.providerOptions,
+        vertex: standardVertexOptions,
+      },
+    };
+  }
+
+  return computeServiceTierParams(params, target, "standard");
+};
+
+const isServiceTierFallbackError = (error: unknown): boolean =>
+  APICallError.isInstance(error) &&
+  error.isRetryable &&
+  error.statusCode !== undefined;
+
+const shouldRetryWithStandardServiceTier = ({
+  error,
+  serviceTier,
+  target,
+}: {
+  error: unknown;
+  serviceTier: AIRequestServiceTier;
+  target: ServiceTierProviderTarget;
+}): boolean =>
+  target !== "none" &&
+  isDeferredServiceTier(serviceTier) &&
+  isServiceTierFallbackError(error);
+
+const buildServiceTierFallbackMetadata = (
+  fallbackFromServiceTier: AIRequestServiceTier,
+): SharedV3ProviderMetadata => ({
+  [STELLA_PROVIDER_METADATA_KEY]: {
+    [SERVICE_TIER_PROVIDER_METADATA_KEY]: "standard",
+    [FALLBACK_FROM_SERVICE_TIER_PROVIDER_METADATA_KEY]: fallbackFromServiceTier,
+  },
+});
+
+const mergeProviderMetadata = (
+  providerMetadata: SharedV3ProviderMetadata | undefined,
+  patch: SharedV3ProviderMetadata,
+): SharedV3ProviderMetadata => {
+  const next: SharedV3ProviderMetadata = { ...providerMetadata };
+
+  for (const [providerKey, providerPatch] of Object.entries(patch)) {
+    next[providerKey] = {
+      ...providerMetadata?.[providerKey],
+      ...providerPatch,
+    };
+  }
+
+  return next;
+};
+
+const markServiceTierFallbackGenerateResult = (
+  result: LanguageModelV3GenerateResult,
+  fallbackFromServiceTier: AIRequestServiceTier,
+): LanguageModelV3GenerateResult => ({
+  ...result,
+  providerMetadata: mergeProviderMetadata(
+    result.providerMetadata,
+    buildServiceTierFallbackMetadata(fallbackFromServiceTier),
+  ),
+});
+
+const markServiceTierFallbackStreamResult = (
+  result: LanguageModelV3StreamResult,
+  fallbackFromServiceTier: AIRequestServiceTier,
+): LanguageModelV3StreamResult => ({
+  ...result,
+  stream: result.stream.pipeThrough(
+    new TransformStream<LanguageModelV3StreamPart, LanguageModelV3StreamPart>({
+      transform: (chunk, controller) => {
+        if (chunk.type !== "finish") {
+          controller.enqueue(chunk);
+          return;
+        }
+
+        controller.enqueue({
+          ...chunk,
+          providerMetadata: mergeProviderMetadata(
+            chunk.providerMetadata,
+            buildServiceTierFallbackMetadata(fallbackFromServiceTier),
+          ),
+        });
+      },
+    }),
+  ),
+});
+
+export const createServiceTierMiddleware = (
+  target: ServiceTierProviderTarget,
+  serviceTier: AIRequestServiceTier,
+  {
+    allowFallbackToStandard = true,
+  }: { allowFallbackToStandard?: boolean } = {},
+): SingleMiddleware => ({
+  specificationVersion: "v3",
+  transformParams: async ({ params }) =>
+    await Promise.resolve(
+      computeServiceTierParams(params, target, serviceTier),
+    ),
+  wrapGenerate: async ({ doGenerate, model, params }) => {
+    try {
+      return await doGenerate();
+    } catch (error) {
+      if (
+        !allowFallbackToStandard ||
+        !shouldRetryWithStandardServiceTier({ error, serviceTier, target })
+      ) {
+        throw error;
+      }
+
+      return markServiceTierFallbackGenerateResult(
+        await model.doGenerate(
+          computeStandardFallbackServiceTierParams(params, target),
+        ),
+        serviceTier,
+      );
+    }
+  },
+  wrapStream: async ({ doStream, model, params }) => {
+    try {
+      return await doStream();
+    } catch (error) {
+      if (
+        !allowFallbackToStandard ||
+        !shouldRetryWithStandardServiceTier({ error, serviceTier, target })
+      ) {
+        throw error;
+      }
+
+      return markServiceTierFallbackStreamResult(
+        await model.doStream(
+          computeStandardFallbackServiceTierParams(params, target),
+        ),
+        serviceTier,
+      );
+    }
+  },
+});
+
+// -- Default settings -------------------------------------------
+
+/**
+ * Anthropic recommends an opaque hash for `metadata.user_id`
+ * rather than the raw organisation id. Truncated SHA-256 keeps
+ * the value stable per org without leaking the safe id verbatim.
+ */
+const hashOrgId = (orgId: SafeId<"organization">): string =>
+  new Bun.CryptoHasher("sha256").update(orgId).digest("hex").slice(0, 16);
+
+/**
+ * Sensible Google `safetySettings` baseline for legal-document
+ * workloads. The default Gemini thresholds occasionally refuse
+ * benign legal content (defamation discussions, criminal-case
+ * summaries); raising the threshold avoids surprise refusals
+ * while still blocking the worst categories at HIGH.
+ */
+const GOOGLE_SAFETY_SETTINGS_BASELINE = [
+  { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_ONLY_HIGH" },
+  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_ONLY_HIGH" },
+  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_ONLY_HIGH" },
+  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_ONLY_HIGH" },
+];
+
+type Settings = Parameters<typeof defaultSettingsMiddleware>[0]["settings"];
+
+type DefaultsBuilderParams = {
+  role: ModelRole;
+  orgId: SafeId<"organization"> | null;
+  modelId: string;
+};
+
+type DefaultsBuilder = (params: DefaultsBuilderParams) => Settings;
+
+const googleDefaults: DefaultsBuilder = ({ role }) => ({
+  temperature: TEMPERATURE_PER_ROLE[role],
+  providerOptions: {
+    google: {
+      thinkingConfig: {
+        thinkingLevel: role === "reasoning" ? "high" : "minimal",
+        includeThoughts: false,
+      },
+      safetySettings: GOOGLE_SAFETY_SETTINGS_BASELINE,
+    },
+  },
+});
+
+const buildAnthropicMetadata = (
+  orgId: SafeId<"organization"> | null,
+): { metadata: { userId: string } } | Record<string, never> =>
+  orgId === null ? {} : { metadata: { userId: hashOrgId(orgId) } };
+
+// `temperature?: never` makes it a compile error to set temperature
+// here. Anthropic rejects custom temperature when extended thinking
+// is enabled on Claude pre-Opus-4.7 (incl. stella's default
+// sonnet-4-6 for the reasoning role); the provider's built-in
+// default (1) is what the API requires when thinking is on.
+type AnthropicReasoningSettings = Omit<Settings, "temperature"> & {
+  temperature?: never;
+};
+
+const ANTHROPIC_LEGACY_THINKING_BUDGET_TOKENS = 10_000;
+
+const supportsAnthropicAdaptiveThinking = (modelId: string): boolean =>
+  ANTHROPIC_ADAPTIVE_THINKING_MODELS.some((supportedModelId) =>
+    modelId.includes(supportedModelId),
+  );
+
+const rejectsAnthropicSamplingParams = (modelId: string): boolean =>
+  ANTHROPIC_FIXED_SAMPLING_MODELS.some((fixedModelId) =>
+    modelId.includes(fixedModelId),
+  );
+
+const anthropicThinkingForModel = (modelId: string): JSONObject =>
+  supportsAnthropicAdaptiveThinking(modelId)
+    ? { type: "adaptive" }
+    : {
+        type: "enabled",
+        budgetTokens: ANTHROPIC_LEGACY_THINKING_BUDGET_TOKENS,
+      };
+
+const anthropicReasoningDefaults = (
+  orgId: SafeId<"organization"> | null,
+  modelId: string,
+): AnthropicReasoningSettings => {
+  // AI SDK source: adaptive thinking is supported on Claude
+  // sonnet-4-6, opus-4-6, opus-4-7, opus-4-8; earlier 4.5 models
+  // use the budget-based `type: "enabled"` form.
+  const anthropicOptions: JSONObject = {
+    ...buildAnthropicMetadata(orgId),
+    thinking: anthropicThinkingForModel(modelId),
+  };
+  return { providerOptions: { anthropic: anthropicOptions } };
+};
+
+const anthropicNonReasoningDefaults = (
+  role: Exclude<ModelRole, "reasoning">,
+  orgId: SafeId<"organization"> | null,
+): Settings => {
+  const settings: Settings = { temperature: TEMPERATURE_PER_ROLE[role] };
+  if (orgId !== null) {
+    const anthropicOptions: JSONObject = buildAnthropicMetadata(orgId);
+    settings.providerOptions = { anthropic: anthropicOptions };
+  }
+  return settings;
+};
+
+const anthropicDefaults: DefaultsBuilder = ({ role, orgId, modelId }) =>
+  role === "reasoning"
+    ? anthropicReasoningDefaults(orgId, modelId)
+    : anthropicNonReasoningDefaults(role, orgId);
+
+const openaiDefaults: DefaultsBuilder = ({ role }) => {
+  const settings: Settings = { temperature: TEMPERATURE_PER_ROLE[role] };
+  if (role === "reasoning") {
+    settings.providerOptions = { openai: { reasoningEffort: "medium" } };
+  }
+  return settings;
+};
+
+// Azure's AI SDK provider registers under `azure.*` (not `openai.*`),
+// and the property name is `reasoningEffort` (camelCase, not snake).
+const azureFoundryDefaults: DefaultsBuilder = ({ role }) => {
+  const settings: Settings = { temperature: TEMPERATURE_PER_ROLE[role] };
+  if (role === "reasoning") {
+    settings.providerOptions = { azure: { reasoningEffort: "medium" } };
+  }
+  return settings;
+};
+
+const bareTemperatureDefaults: DefaultsBuilder = ({ role }) => ({
+  temperature: TEMPERATURE_PER_ROLE[role],
+});
+
+// `satisfies Record<AIProvider, ...>` makes adding a new provider to
+// AI_PROVIDERS a compile error here, so no provider can silently
+// fall through to a generic default that ignores its own knobs.
+const DEFAULTS_BUILDERS = {
+  google: googleDefaults,
+  anthropic: anthropicDefaults,
+  openai: openaiDefaults,
+  azure_foundry: azureFoundryDefaults,
+  openrouter: bareTemperatureDefaults,
+  mistral: bareTemperatureDefaults,
+  openai_compatible: bareTemperatureDefaults,
+  huggingface: bareTemperatureDefaults,
+} as const satisfies Record<AIProvider, DefaultsBuilder>;
+
+type DefaultsForRoleParams = DefaultsBuilderParams & {
+  provider: AIProvider;
+};
+
+export const defaultsForRole = ({
+  role,
+  provider,
+  orgId,
+  modelId,
+}: DefaultsForRoleParams): Settings =>
+  DEFAULTS_BUILDERS[provider]({ role, orgId, modelId });
+
+// Fable 5 and Opus 4.7+ reject sampling overrides with a 400 on every
+// request shape; they always run with provider-side defaults. Stripping
+// in middleware (after the role defaults merge) covers both the role
+// defaults and explicit call-site values, so no caller can reintroduce
+// a sampling parameter for these models.
+const fixedSamplingMiddleware: SingleMiddleware = {
+  specificationVersion: "v3",
+  transformParams: async ({ params }) => {
+    const {
+      temperature: _temperature,
+      topP: _topP,
+      topK: _topK,
+      ...rest
+    } = params;
+    return await Promise.resolve(rest);
+  },
+};
+
+const withInstrumentation = (
+  model: WrappableLanguageModel,
+  ctx: {
+    provider: AIProvider;
+    decision: CachingDecision;
+    role: ModelRole;
+    modelId: string;
+    organizationId: SafeId<"organization"> | null;
+    serviceTier: AIRequestServiceTier;
+    serviceTierTarget: ServiceTierProviderTarget;
+    allowServiceTierFallback: boolean;
+  },
+): LanguageModel => {
+  const middlewares: SingleMiddleware[] = [
+    defaultSettingsMiddleware({
+      settings: defaultsForRole({
+        role: ctx.role,
+        provider: ctx.provider,
+        orgId: ctx.organizationId,
+        modelId: ctx.modelId,
+      }),
+    }),
+  ];
+  if (
+    ctx.provider === "anthropic" &&
+    rejectsAnthropicSamplingParams(ctx.modelId)
+  ) {
+    middlewares.push(fixedSamplingMiddleware);
+  }
+  middlewares.push(
+    cachingMiddleware(ctx.provider, ctx.decision),
+    createServiceTierMiddleware(ctx.serviceTierTarget, ctx.serviceTier, {
+      allowFallbackToStandard: ctx.allowServiceTierFallback,
+    }),
+  );
+  if (isAIDevToolsEnabled()) {
+    middlewares.push(devToolsMiddleware());
   }
   return wrapLanguageModel({
     model,
-    middleware: devToolsMiddleware(),
+    middleware: middlewares,
   });
 };
 
 // -- Public API -------------------------------------------------
+
+const providerRegion = (
+  config: OrgAIProviderConfig,
+): DataRegion | undefined => {
+  switch (config.provider) {
+    case "azure_foundry":
+    case "huggingface":
+      return undefined;
+    default:
+      return config.region;
+  }
+};
 
 const getPrimaryOrgProvider = (config: OrgAIConfig): OrgAIProviderConfig =>
   config.providers.at(0) ?? panic("Org AI config has no configured providers");
@@ -697,6 +1496,30 @@ const getOrgProviderConfig = (
 ): OrgAIProviderConfig =>
   findOrgProviderConfig(config, provider) ??
   panic(`Org AI config has no ${provider} provider`);
+
+export const isDeferredServiceTierAvailableForRole = (
+  role: ModelRole,
+  orgConfig: OrgAIConfig | null | undefined,
+): boolean => {
+  if (orgConfig) {
+    const selection = orgConfig.overrideModels[role];
+    const providerConfig = getOrgProviderConfig(orgConfig, selection.provider);
+    return providerTargetForConfig(providerConfig) !== "none";
+  }
+
+  return (
+    hasInstanceProvider() &&
+    providerTargetForInstanceProvider(getActiveProvider()) !== "none"
+  );
+};
+
+type AIModelRequestOptions = {
+  promptCachingEnabled: boolean;
+  scopeKey: string | null;
+  organizationId: SafeId<"organization"> | null;
+  serviceTier: AIRequestServiceTier;
+  allowServiceTierFallback?: boolean;
+};
 
 export const validateDevModelOverride = (
   modelId: string,
@@ -748,15 +1571,33 @@ export const validateDevModelOverride = (
  */
 export const getModelForRole = (
   role: ModelRole,
-  orgConfig?: OrgAIConfig | null,
+  orgConfig: OrgAIConfig | null | undefined,
+  options: AIModelRequestOptions,
 ): LanguageModel => {
+  const {
+    promptCachingEnabled,
+    scopeKey,
+    organizationId,
+    serviceTier,
+    allowServiceTierFallback = true,
+  } = options;
   // BYOK path: org selects a model for each role through
   // one of its configured provider credentials.
   if (orgConfig) {
     const selection = orgConfig.overrideModels[role];
     const providerConfig = getOrgProviderConfig(orgConfig, selection.provider);
     const factory = getCachedFactory(providerConfig);
-    return withLocalAIDevTools(factory(selection.modelId));
+    const decision = resolveCaching({ promptCachingEnabled, role, scopeKey });
+    return withInstrumentation(factory(selection.modelId), {
+      provider: providerConfig.provider,
+      decision,
+      role,
+      modelId: selection.modelId,
+      organizationId,
+      serviceTier,
+      serviceTierTarget: providerTargetForConfig(providerConfig),
+      allowServiceTierFallback,
+    });
   }
 
   // Default instance path. requireAIAvailable() gates the entry
@@ -771,9 +1612,19 @@ export const getModelForRole = (
   if (!hasInstanceProvider()) {
     throw byokRoleNotConfiguredError(role);
   }
-  const modelId =
-    MODEL_OVERRIDES[role] ?? DEFAULT_MODELS[getActiveProvider()][role];
-  return withLocalAIDevTools(getInstanceFactory()(modelId));
+  const provider = getActiveProvider();
+  const modelId = MODEL_OVERRIDES[role] ?? DEFAULT_MODELS[provider][role];
+  const decision = resolveCaching({ promptCachingEnabled, role, scopeKey });
+  return withInstrumentation(getInstanceFactory()(modelId), {
+    provider,
+    decision,
+    role,
+    modelId,
+    organizationId,
+    serviceTier,
+    serviceTierTarget: providerTargetForInstanceProvider(provider),
+    allowServiceTierFallback,
+  });
 };
 
 const byokRoleNotConfiguredError = (role: ModelRole): HandlerError =>
@@ -796,10 +1647,7 @@ export const getModelInfoForRole = (
       keySource: "byok",
       provider: providerConfig.provider,
       modelId: selection.modelId,
-      region:
-        providerConfig.provider === "azure_foundry"
-          ? undefined
-          : providerConfig.region,
+      region: providerRegion(providerConfig),
     };
   }
 
@@ -824,10 +1672,7 @@ export const getModelInfoById = (
       keySource: "byok",
       provider: providerConfig.provider,
       modelId: override.modelId,
-      region:
-        providerConfig.provider === "azure_foundry"
-          ? undefined
-          : providerConfig.region,
+      region: providerRegion(providerConfig),
     };
   }
 
@@ -848,21 +1693,61 @@ export const getModelInfoById = (
  */
 export const getModelById = (
   modelId: string,
-  orgConfig?: OrgAIConfig | null,
+  orgConfig: OrgAIConfig | null | undefined,
+  options: AIModelRequestOptions & { role: ModelRole },
 ): LanguageModel => {
   const override = decodeModelOverride(modelId);
+  const {
+    promptCachingEnabled,
+    scopeKey,
+    role,
+    organizationId,
+    serviceTier,
+    allowServiceTierFallback = true,
+  } = options;
+  const decision = resolveCaching({ promptCachingEnabled, role, scopeKey });
   if (orgConfig) {
     const providerConfig = override.provider
       ? getOrgProviderConfig(orgConfig, override.provider)
       : getPrimaryOrgProvider(orgConfig);
-    return withLocalAIDevTools(
+    return withInstrumentation(
       getCachedFactory(providerConfig)(override.modelId),
+      {
+        provider: providerConfig.provider,
+        decision,
+        role,
+        modelId: override.modelId,
+        organizationId,
+        serviceTier,
+        serviceTierTarget: providerTargetForConfig(providerConfig),
+        allowServiceTierFallback,
+      },
     );
   }
   if (override.provider) {
-    return withLocalAIDevTools(
+    return withInstrumentation(
       createModelFactory({ provider: override.provider })(override.modelId),
+      {
+        provider: override.provider,
+        decision,
+        role,
+        modelId: override.modelId,
+        organizationId,
+        serviceTier,
+        serviceTierTarget: providerTargetForInstanceProvider(override.provider),
+        allowServiceTierFallback,
+      },
     );
   }
-  return withLocalAIDevTools(getInstanceFactory()(override.modelId));
+  const provider = getActiveProvider();
+  return withInstrumentation(getInstanceFactory()(override.modelId), {
+    provider,
+    decision,
+    role,
+    modelId: override.modelId,
+    organizationId,
+    serviceTier,
+    serviceTierTarget: providerTargetForInstanceProvider(provider),
+    allowServiceTierFallback,
+  });
 };

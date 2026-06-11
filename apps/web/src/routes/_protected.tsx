@@ -41,8 +41,12 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { AppBreadcrumbs } from "@/components/breadcrumbs/app-breadcrumbs";
 import { ChatEditorProvider } from "@/components/chat-editor-provider";
 import { ChatMentionProviders } from "@/components/chat-mention-providers";
+import {
+  initializeInspectorTabBroadcast,
+  useInspectorStore,
+} from "@/components/inspector/inspector-store";
+import type { InspectorTab } from "@/components/inspector/inspector-store";
 import { AIAvailabilityProvider } from "@/components/require-ai-key";
-import { DefaultPendingComponent } from "@/components/route-components";
 import { SelfhostUpdateBanner } from "@/components/selfhost-update-banner";
 import { ShortcutHintsOverlay } from "@/components/shortcut-hints-overlay";
 import {
@@ -52,6 +56,7 @@ import {
   useSidebar,
 } from "@/components/sidebar";
 import { getAnalytics } from "@/lib/analytics/provider";
+import { AuthenticatedUserProvider } from "@/lib/authenticated-user-context";
 import {
   SIDE_RAIL_ICON_BUTTON_SIZE,
   SIDE_RAIL_WIDTH,
@@ -61,23 +66,17 @@ import { HOTKEYS } from "@/lib/hotkeys";
 import { resolveMatterColor } from "@/lib/matter-colors";
 import { usePinnedStore } from "@/lib/pinned-store";
 import { prefetchNonCriticalQuery } from "@/lib/react-query";
+import { loadAuthContext } from "@/routes/-auth-context";
 import { roleOptions } from "@/routes/-queries";
 import { useGlobalChatMentionRegistration } from "@/routes/_protected.chat/-hooks/use-global-chat-mention-registration";
-import { CaseSearchTrigger } from "@/routes/_protected.knowledge/case/-components/case-viewer/case-search-trigger";
-import { DecisionMetadataSheet } from "@/routes/_protected.knowledge/case/-components/case-viewer/decision-metadata-sheet";
-import {
-  initializeInspectorTabBroadcast,
-  useInspectorStore,
-} from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
-import type { InspectorTab } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
 import { CreateMatterDialog } from "@/routes/_protected.workspaces/-components/create-matter-dialog";
 import { workspaceOptions } from "@/routes/_protected.workspaces/-queries";
 
 const LazyInspectorPanel = lazy(
   async () =>
-    await import("@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-panel").then(
-      (m) => ({ default: m.InspectorPanel }),
-    ),
+    await import("@/components/inspector/inspector-panel").then((m) => ({
+      default: m.InspectorPanel,
+    })),
 );
 
 // Visual shell for the inspector rail while the panel chunk is
@@ -116,15 +115,18 @@ const InspectorRailFallback = () => (
 );
 
 export const Route = createFileRoute("/_protected")({
-  beforeLoad: ({ context, location }) => {
-    if (!context.session || !context.user) {
+  ssr: false,
+  beforeLoad: async ({ context, location }) => {
+    const authContext = await loadAuthContext(context.queryClient);
+
+    if (!authContext.session || !authContext.user) {
       throw redirect({
         to: "/auth",
         search: { redirectTo: location.pathname },
       });
     }
 
-    if (!context.session.activeOrganizationId) {
+    if (!authContext.session.activeOrganizationId) {
       throw redirect({ to: "/auth/organization", replace: true });
     }
 
@@ -144,26 +146,30 @@ export const Route = createFileRoute("/_protected")({
     // sidebar renders. The store's `init` is idempotent (skips when
     // the same userId is already loaded), so re-runs on navigation
     // cost nothing and a render-time effect is unnecessary.
-    usePinnedStore.getState().init(context.session.userId);
+    usePinnedStore.getState().init(authContext.session.userId);
 
     return {
       user: {
-        id: context.session.userId,
-        activeOrganizationId: context.session.activeOrganizationId,
-        name: context.user.name || undefined,
-        email: context.user.email,
-        image: context.user.image,
-        preferredName: context.user.preferredName,
-        timezoneId: context.user.timezoneId,
-        wordEditShortcut: context.user.wordEditShortcut,
+        id: authContext.session.userId,
+        activeOrganizationId: authContext.session.activeOrganizationId,
+        name: authContext.user.name || undefined,
+        email: authContext.user.email,
+        image: authContext.user.image,
+        preferredName: authContext.user.preferredName,
+        timezoneId: authContext.user.timezoneId,
+        wordEditShortcut: authContext.user.wordEditShortcut,
       },
     };
   },
   component: ProtectedComponent,
-  pendingComponent: () => <DefaultPendingComponent className="h-dvh" />,
+  // This subtree is private and client-only. Rendering a loading
+  // shell in SSR gives no SEO value and currently trips React's
+  // streamed Suspense boundary path under Bun in CI.
+  pendingComponent: () => null,
 });
 
 function ProtectedComponent() {
+  const analyticsUser = Route.useRouteContext({ select: (ctx) => ctx.user });
   const inspectorBroadcastUserId = Route.useRouteContext({
     select: (ctx) => ctx.user.id,
   });
@@ -175,12 +181,6 @@ function ProtectedComponent() {
     shouldThrow: false,
   });
   const activeWorkspaceId = workspaceMatch?.params.workspaceId;
-
-  const decisionMatch = useMatch({
-    from: "/_protected/knowledge/case/$decisionId",
-    shouldThrow: false,
-  });
-  const activeDecisionId = decisionMatch?.params.decisionId;
 
   useEffect(
     () =>
@@ -212,50 +212,23 @@ function ProtectedComponent() {
   }, [activeWorkspaceId]);
   useHotkey(HOTKEYS.TOGGLE_CHAT, handleToggleInspectorHotkey);
 
-  // Auto-open a chat tab grounded in the active case-law decision —
-  // mirrors the legacy right-panel-chat behaviour where landing on a
-  // decision page opened a chat about it. Fires once per decision so
-  // re-renders don't reopen a tab the user just closed; resets when
-  // the user navigates to a different decision or away from the
-  // case-law route. Inside a matter the chat is workspace-scoped and
-  // seeded with that matter's contextMatterIds; outside a matter the
-  // tab is global and only carries the decision context.
-  const lastAutoOpenedDecisionRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!activeDecisionId) {
-      lastAutoOpenedDecisionRef.current = null;
-      return;
-    }
-    if (lastAutoOpenedDecisionRef.current === activeDecisionId) {
-      return;
-    }
-    lastAutoOpenedDecisionRef.current = activeDecisionId;
-    useInspectorStore.getState().openChat(
-      activeWorkspaceId === undefined
-        ? { activeDecisionId }
-        : {
-            workspaceId: activeWorkspaceId,
-            contextMatterIds: [activeWorkspaceId],
-            activeDecisionId,
-          },
-    );
-  }, [activeDecisionId, activeWorkspaceId]);
-
   return (
-    <SidebarProvider>
-      <ChatMentionProviders>
-        <AIAvailabilityProvider>
-          <ChatEditorProvider>
-            <GlobalChatMentionRegistration />
-            <AppSidebar />
-            <CreateMatterDialog />
-            <ProtectedContent decisionId={activeDecisionId} />
-            <WorkspaceInspectorSidePanel />
-            <ShortcutHintsOverlay />
-          </ChatEditorProvider>
-        </AIAvailabilityProvider>
-      </ChatMentionProviders>
-    </SidebarProvider>
+    <AuthenticatedUserProvider user={analyticsUser}>
+      <SidebarProvider>
+        <ChatMentionProviders>
+          <AIAvailabilityProvider>
+            <ChatEditorProvider>
+              <GlobalChatMentionRegistration />
+              <AppSidebar />
+              <CreateMatterDialog />
+              <ProtectedContent />
+              <WorkspaceInspectorSidePanel />
+              <ShortcutHintsOverlay />
+            </ChatEditorProvider>
+          </AIAvailabilityProvider>
+        </ChatMentionProviders>
+      </SidebarProvider>
+    </AuthenticatedUserProvider>
   );
 }
 
@@ -265,13 +238,7 @@ function GlobalChatMentionRegistration() {
   return null;
 }
 
-type ProtectedContentProps = {
-  decisionId: string | undefined;
-};
-
-function ProtectedContent({
-  decisionId: activeDecisionId,
-}: ProtectedContentProps) {
+function ProtectedContent() {
   const t = useTranslations();
   const { isMobile } = useSidebar();
   const togglePin = usePinnedStore((s) => s.togglePin);
@@ -391,12 +358,6 @@ function ProtectedContent({
               style={matterColor ? { color: matterColor } : undefined}
             />
           </Button>
-        </>
-      )}
-      {activeDecisionId && (
-        <>
-          <CaseSearchTrigger />
-          <DecisionMetadataSheet decisionId={activeDecisionId} />
         </>
       )}
       {canShowInspectorButton && (

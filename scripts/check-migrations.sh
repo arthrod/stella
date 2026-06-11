@@ -91,9 +91,61 @@ is_schema_file() {
   return 1
 }
 
+schema_file_has_migration_relevant_diff() {
+  local changed_file="$1"
+
+  # Type-only import ownership changes do not alter the generated DDL.
+  bun -e '
+    const { spawnSync } = require("node:child_process");
+    const fs = require("node:fs");
+
+    const baseRef = process.argv.at(1);
+    const changedFile = process.argv.at(2);
+
+    const stripTypeOnlyImports = (source) => {
+      const keptLines = [];
+      let inTypeImport = false;
+
+      for (const line of source.split("\n")) {
+        const startsTypeImport = line.trimStart().startsWith("import type ");
+        if (!inTypeImport && startsTypeImport) {
+          inTypeImport = !line.includes(";");
+          continue;
+        }
+
+        if (inTypeImport) {
+          inTypeImport = !line.includes(";");
+          continue;
+        }
+
+        keptLines.push(line);
+      }
+
+      return keptLines.join("\n");
+    };
+
+    const currentSource = fs.readFileSync(changedFile, "utf8");
+    const baseSource = spawnSync("git", ["show", `${baseRef}:${changedFile}`], {
+      encoding: "utf8",
+    });
+
+    if (baseSource.status !== 0) {
+      process.exit(0);
+    }
+
+    process.exit(
+      stripTypeOnlyImports(currentSource) === stripTypeOnlyImports(baseSource.stdout)
+        ? 1
+        : 0,
+    );
+  ' "$BASE_REF" "$changed_file"
+}
+
 while IFS= read -r file; do
   if is_schema_file "$file"; then
-    SCHEMA_CHANGED=true
+    if schema_file_has_migration_relevant_diff "$file"; then
+      SCHEMA_CHANGED=true
+    fi
     continue
   fi
 
@@ -121,6 +173,15 @@ fi
 if [[ -d apps/api/drizzle ]]; then
   if [[ "${#MIGRATION_SQL_FILES[@]}" -gt 0 ]]; then
     bun scripts/check-migration-safety.ts "${MIGRATION_SQL_FILES[@]}"
+
+    # Lock-safety linting (rule set configured in .squawk.toml). Destructive
+    # changes are covered separately by check-migration-safety.ts above.
+    bun squawk "${MIGRATION_SQL_FILES[@]}" || {
+      echo "ERROR: squawk found DDL in the changed migrations that is unsafe to apply under load." >&2
+      echo "Rewrite the statement (rule docs: https://squawkhq.com/docs/rules), or suppress a" >&2
+      echo "reviewed finding with '-- squawk-ignore <rule-name>' on the line above the statement." >&2
+      exit 1
+    }
   fi
 
   (cd apps/api && bun --bun drizzle-kit check)

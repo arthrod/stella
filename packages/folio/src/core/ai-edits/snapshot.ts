@@ -1,5 +1,6 @@
 import type { Mark, Node as PMNode } from "prosemirror-model";
 
+import { deriveBlockId } from "../types/block-id";
 import { buildCleanBlockText } from "./clean-text";
 import type {
   FolioAIBlock,
@@ -26,6 +27,7 @@ export const createFolioAIEditSnapshot = (doc: PMNode): FolioAIEditSnapshot => {
     anchor: Omit<FolioAIBlockAnchor, "hashOccurrenceCount">;
   }[] = [];
   const hashCounts = new Map<string, number>();
+  const usedBlockIds = new Set<string>();
 
   let blockIndex = 0;
   doc.descendants((node, pos) => {
@@ -49,9 +51,31 @@ export const createFolioAIEditSnapshot = (doc: PMNode): FolioAIEditSnapshot => {
     const textHash = hashFolioAIBlockText(normalizedText);
     hashCounts.set(textHash, (hashCounts.get(textHash) ?? 0) + 1);
 
-    const id = `b-${String(++blockIndex).padStart(4, "0")}`;
+    // Use the paragraph's Word `w14:paraId` (allocated by
+    // `ParaIdAllocatorExtension` if the parsed DOCX didn't have one)
+    // as the canonical block id everywhere: AI prompts, chip hrefs
+    // (`#folio:<paraId>`), apply-tool blockIds, scrollToBlock. ParaIds
+    // are stable across structural edits — no more "this chip points
+    // at the wrong paragraph after an insertion-above" surprise.
+    //
+    // Shared with `apps/api/.../docx-blocks.ts` via `deriveBlockId`,
+    // so a server-emitted citation id is always one of the two shapes
+    // this snapshot produces (paraId verbatim or `seq-NNNN`).
+    blockIndex++;
+    const paraIdAttr: unknown = node.attrs["paraId"];
+    const paraId =
+      typeof paraIdAttr === "string" && paraIdAttr.length > 0
+        ? paraIdAttr
+        : null;
+    const id = deriveBlockId({
+      paraId,
+      index: blockIndex,
+      taken: usedBlockIds,
+    });
+    usedBlockIds.add(id);
     const kind = getBlockKind(node);
     const displayLabel = getDisplayLabel(node);
+    const styleId = getStyleId(node);
     const previewRuns = getPreviewRuns(node);
 
     draftBlocks.push({
@@ -60,6 +84,7 @@ export const createFolioAIEditSnapshot = (doc: PMNode): FolioAIEditSnapshot => {
         kind,
         text,
         ...(displayLabel !== undefined && { displayLabel }),
+        ...(styleId !== undefined && { styleId }),
         ...(previewRuns !== undefined && { previewRuns }),
       },
       anchor: {
@@ -116,6 +141,13 @@ const getDisplayLabel = (node: PMNode): string | undefined => {
   }
 
   return undefined;
+};
+
+const getStyleId = (node: PMNode): string | undefined => {
+  const styleId: unknown = node.attrs["styleId"];
+  return typeof styleId === "string" && styleId.length > 0
+    ? styleId
+    : undefined;
 };
 
 type PreviewRunStyle = Omit<FolioAIBlockPreviewRun, "text">;

@@ -5,6 +5,7 @@ import { toSafeId } from "@/api/lib/branded-types";
 import { DOCX_REVIEW_MARKUP_EXAMPLES } from "@/api/lib/docx-review-markup";
 
 import {
+  appendAnonymizedModeHintToChatSafePrompt,
   appendActiveFilePromptIfEntityExists,
   buildChatPromptCacheKey,
   buildGlobalPrompt,
@@ -13,6 +14,11 @@ import {
   buildWorkspacePromptParts,
   buildWorkspacePromptText,
   extractTitle,
+} from "./chat-prompt";
+import type {
+  ChatCacheStablePrefix,
+  ChatSafePrompt,
+  ChatUntrustedPromptSuffix,
 } from "./chat-prompt";
 import type { ChatMessage } from "./types";
 
@@ -45,7 +51,7 @@ describe("chat prompt builders", () => {
     expect(prompt).not.toContain("Status");
   });
 
-  test("system prompts include a compact Stella API catalog", () => {
+  test("system prompts include a compact stella API catalog", () => {
     const refRegistry = createChatRefRegistry();
     const workspacePrompt = buildWorkspacePromptText({
       entityCount: 1,
@@ -61,12 +67,14 @@ describe("chat prompt builders", () => {
 
     for (const prompt of [workspacePrompt, globalPrompt]) {
       expect(prompt).toContain("ASK-USER BOUNDARY");
-      expect(prompt).toContain("Never use `ask-user` to ask for permission");
-      expect(prompt).toContain("For Stella data reads, use the Stella API");
+      expect(prompt).toContain(
+        "Never use it to request tool-call permission or consent",
+      );
+      expect(prompt).toContain("For stella data reads, use the stella API");
       expect(prompt).toContain("describe-stella-api");
       expect(prompt).toContain("run-stella-query");
       expect(prompt).toContain("result.items");
-      expect(prompt).toContain("Available Stella read functions");
+      expect(prompt).toContain("Available stella read functions");
       expect(prompt).toContain("read.listContacts({");
       expect(prompt).toContain("read.getMatterEntityContents({");
       expect(prompt).toContain("DOCX REVIEW TAGS");
@@ -80,7 +88,7 @@ describe("chat prompt builders", () => {
     }
   });
 
-  test("does not include UI locale in the prompt", () => {
+  test("renders UI locale as a BCP-47 cue so the model anchors language to it", () => {
     const prompt = buildUserContextBlock({
       locale: "cs",
       timezone: "Europe/Prague",
@@ -88,9 +96,8 @@ describe("chat prompt builders", () => {
     });
 
     expect(prompt).toContain("User registered as: Jan Kubica");
+    expect(prompt).toContain("User UI language (BCP-47): cs");
     expect(prompt).toContain("Current date/time:");
-    expect(prompt).not.toContain("UX language:");
-    expect(prompt).not.toContain("cs");
   });
 
   test("keeps the cache-stable prefix independent from volatile user context", () => {
@@ -119,6 +126,47 @@ describe("chat prompt builders", () => {
     expect(buildChatPromptCacheKey(first.cacheStablePrefix)).toBe(
       buildChatPromptCacheKey(second.cacheStablePrefix),
     );
+  });
+
+  test("brands assembled prompt parts at compile time", () => {
+    const prompt = buildGlobalPromptParts({
+      skillMetadata: SKILL_METADATA,
+      userContext: null,
+    });
+    const acceptsCacheStablePrefix = (value: ChatCacheStablePrefix) => value;
+    const acceptsSafePrompt = (value: ChatSafePrompt) => value;
+    const acceptsUntrustedSuffix = (value: ChatUntrustedPromptSuffix) => value;
+
+    expect(acceptsCacheStablePrefix(prompt.cacheStablePrefix)).toBe(
+      prompt.cacheStablePrefix,
+    );
+    expect(acceptsSafePrompt(prompt.safePrompt)).toBe(prompt.safePrompt);
+    expect(acceptsUntrustedSuffix(prompt.untrustedSuffix)).toBe(
+      prompt.untrustedSuffix,
+    );
+
+    // @ts-expect-error plain strings must not be accepted as cache-stable prefixes
+    buildChatPromptCacheKey("raw prompt text");
+    // @ts-expect-error prompt parts are not interchangeable
+    acceptsSafePrompt(prompt.untrustedSuffix);
+    // @ts-expect-error prompt parts are not interchangeable
+    acceptsUntrustedSuffix(prompt.safePrompt);
+  });
+
+  test("keeps anonymized-mode guidance in the safe prompt half", () => {
+    const prompt = buildGlobalPromptParts({
+      skillMetadata: SKILL_METADATA,
+      userContext: null,
+    });
+    const extended = appendAnonymizedModeHintToChatSafePrompt(
+      prompt.safePrompt,
+    );
+    const acceptsSafePrompt = (value: ChatSafePrompt) => value;
+
+    expect(acceptsSafePrompt(extended)).toBe(extended);
+    expect(extended).toContain(prompt.safePrompt);
+    expect(extended).toContain("ANONYMIZED MODE");
+    expect(extended).toContain("External (non-stella) tools");
   });
 
   test("routes installed skill metadata through the untrusted suffix", () => {
@@ -176,7 +224,7 @@ describe("chat prompt builders", () => {
       userContext: null,
     });
 
-    expect(prompt.cacheStablePrefix).not.toContain("Available Stella skills");
+    expect(prompt.cacheStablePrefix).not.toContain("Available stella skills");
     expect(prompt.cacheStablePrefix).not.toContain("\n\n\n\n");
     expect(prompt.fullPrompt).not.toContain("\n\n\n\n");
   });
@@ -224,6 +272,7 @@ describe("chat prompt builders", () => {
               displayLabel: "7.1",
               id: "b-1",
               kind: "paragraph",
+              styleId: "ClauseHeading1",
               text: "David Cuketa r.č.: DOPLNIT nar. 32.5.1990 bytem: xxx",
             },
           ],
@@ -244,6 +293,7 @@ describe("chat prompt builders", () => {
     // since the prompt was scrubbed of locale-specific examples.
     expect(prompt).toContain("confirms an earlier proposal");
     expect(prompt).toContain('"blockId":"b-1"');
+    expect(prompt).toContain('"styleId":"ClauseHeading1"');
     expect(prompt).toContain("David Cuketa");
     expect(prompt).toContain(
       "only ids that appear in `applied` represent actual document changes",

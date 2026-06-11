@@ -23,13 +23,29 @@ import React, {
   useImperativeHandle,
 } from "react";
 import type { CSSProperties, Ref } from "react";
+import { createPortal, flushSync } from "react-dom";
 
+import type { Mark, Node as PMNode } from "prosemirror-model";
 import { NodeSelection, TextSelection } from "prosemirror-state";
 import type { EditorState, Transaction, Plugin } from "prosemirror-state";
-import type { CellSelection } from "prosemirror-tables";
+import { CellSelection } from "prosemirror-tables";
 import type { EditorView } from "prosemirror-view";
 
+import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
+
+import { HiddenHeaderFooterPMs } from "../components/HiddenHeaderFooterPMs";
+import type { HiddenHeaderFooterPMsRef } from "../components/HiddenHeaderFooterPMs";
 import { getFootnoteText } from "../core/docx/footnoteParser";
+import { buildBookmarkPageMap } from "../core/fields/bookmarkPages";
+import { buildBookmarkText } from "../core/fields/bookmarkText";
+import {
+  buildHeaderFooterFieldValues,
+  fieldValuesEqual,
+  resolveFieldValues,
+} from "../core/fields/resolveFieldValues";
+import type { HeaderFooterFieldInputs } from "../core/fields/resolveFieldValues";
+import { buildSectionPageCounts } from "../core/fields/sectionPageCounts";
+import { buildSeqValues } from "../core/fields/seqValues";
 import { clickToPosition } from "../core/layout-bridge/clickToPosition";
 import { clickToPositionDom } from "../core/layout-bridge/clickToPositionDom";
 import {
@@ -39,71 +55,100 @@ import {
   findBodyPmSpans,
 } from "../core/layout-bridge/findBodyPmSpans";
 import {
+  clickToPositionInHfSlot,
+  findHfCaretSpan,
+  findHfPmSpans,
+  findHfSlotForTarget,
+} from "../core/layout-bridge/findHfPmSpans";
+import {
+  FOOTNOTE_ENTRY_MARGIN_BOTTOM,
   collectFootnoteRefs,
   buildFootnoteContentMap,
 } from "../core/layout-bridge/footnoteLayout";
-import { convertHeaderFooterToContent } from "../core/layout-bridge/headerFooterLayout";
-import type { HeaderFooterMetrics } from "../core/layout-bridge/headerFooterLayout";
+import type { MeasureBlocksFn } from "../core/layout-bridge/footnoteLayout";
+import {
+  convertHeaderFooterPmDocToContent,
+  convertHeaderFooterToContent,
+} from "../core/layout-bridge/headerFooterLayout";
+import type {
+  ConvertHeaderFooterOptions,
+  HeaderFooterMetrics,
+} from "../core/layout-bridge/headerFooterLayout";
 import {
   hitTestFragment,
   hitTestTableCell,
   getPageTop,
 } from "../core/layout-bridge/hitTest";
 import {
-  measureParagraph,
   resetCanvasContext,
   clearAllCaches,
-  getCachedParagraphMeasure,
-  setCachedParagraphMeasure,
 } from "../core/layout-bridge/measuring";
-import type { FloatingImageZone } from "../core/layout-bridge/measuring";
-import {
-  selectionToRects,
-  getCaretPosition,
-} from "../core/layout-bridge/selectionRects";
 import type {
   SelectionRect,
   CaretPosition,
 } from "../core/layout-bridge/selectionRects";
+import type * as SelectionGeometry from "../core/layout-bridge/selectionRects";
 // Layout bridge
 import { toFlowBlocks } from "../core/layout-bridge/toFlowBlocks";
 import type { ToFlowBlocksOptions } from "../core/layout-bridge/toFlowBlocks";
 // Layout engine
 import { layoutDocument } from "../core/layout-engine";
 import type { ColumnLayout, SectionLayoutConfig } from "../core/layout-engine";
+import {
+  recordLayoutComplete,
+  recordLayoutError,
+  recordLayoutPhase,
+} from "../core/layout-engine/layoutInstrumentation";
+import type {
+  LayoutPhase,
+  LayoutRunReason,
+} from "../core/layout-engine/layoutInstrumentation";
+import {
+  measureBlocks,
+  measureSingleBlockWithoutFloatingZones,
+} from "../core/layout-engine/measure/measureBlocks";
 import type {
   Layout,
   FlowBlock,
   Measure,
-  ParagraphBlock,
   TableBlock,
-  TableCell,
   TableMeasure,
-  TableCellMeasure,
-  ImageBlock,
-  ImageRun,
   PageMargins,
   SectionBreakBlock,
-  TextBoxBlock,
   FootnoteContent,
+  PageHeaderFooterRefs,
 } from "../core/layout-engine/types";
-import { DEFAULT_TEXTBOX_MARGINS } from "../core/layout-engine/types";
 // Layout painter
 import { LayoutPainter } from "../core/layout-painter";
 import type { BlockLookup } from "../core/layout-painter";
 import {
   findPageShellForPmPos,
+  PAINTER_PAINTED_EVENT,
   renderPages,
 } from "../core/layout-painter/renderPage";
 import type {
+  HeaderFooterContent,
   RenderPageOptions,
   FootnoteRenderItem,
 } from "../core/layout-painter/renderPage";
 // Table commands (for quick-action insert buttons)
 import { addRowBelow, addColumnRight } from "../core/prosemirror";
+import {
+  expectFontFamilyMarkAttrs,
+  expectImageAttrs,
+  expectTableAttrs,
+  expectTableCellAttrs,
+  mergeImageAttrs,
+  mergeTableAttrs,
+  mergeTableCellAttrs,
+  mergeTableRowAttrs,
+} from "../core/prosemirror/attrs";
 import type { ExtensionManager } from "../core/prosemirror/extensions/ExtensionManager";
 import { anonymizationDecorationsKey } from "../core/prosemirror/plugins/anonymizationDecorations";
 import type { AnonymizationMatch } from "../core/prosemirror/plugins/anonymizationDecorations";
+import { autocompleteSuggestionKey } from "../core/prosemirror/plugins/autocompleteSuggestion";
+import type { AutocompleteSuggestionState } from "../core/prosemirror/plugins/autocompleteSuggestion";
+import type { ImagePositionAttrs } from "../core/prosemirror/schema/nodes";
 import type { Footnote } from "../core/types/content";
 // Types
 import type {
@@ -112,20 +157,29 @@ import type {
   StyleDefinitions,
   SectionProperties,
   HeaderFooter,
+  Watermark,
+  TextFormatting,
 } from "../core/types/document";
 import {
   closestHtmlElement,
   htmlQueryAll,
   queryHtmlElement,
 } from "../core/utils/domGuards";
+import { getDocumentWatermark } from "../core/watermark";
 // Internal components
 import { AnonymizationRectsOverlay } from "./AnonymizationRectsOverlay";
 import type { AnonymizationRectGroup } from "./AnonymizationRectsOverlay";
+import { AutocompleteCaretOverlay } from "./AutocompleteCaretOverlay";
+import type { AutocompleteCaretRect } from "./AutocompleteCaretOverlay";
 import {
   computeFirstPageHeaderFooterMarginExtender,
   computeHeaderFooterMarginExtender,
+  extendSectionBreakMargins,
 } from "./headerFooterMargins";
-import { HiddenProseMirror } from "./HiddenProseMirror";
+import {
+  createHiddenEditorState,
+  HiddenProseMirror,
+} from "./HiddenProseMirror";
 import type {
   HiddenProseMirrorCollaboration,
   HiddenProseMirrorRemoteSelection,
@@ -138,18 +192,21 @@ import {
   tryBuildIncrementalMeasures,
 } from "./incrementalMeasure";
 import type { DirtyRange } from "./incrementalMeasure";
-import {
-  recordLayoutComplete,
-  recordMeasureBlock,
-} from "./layoutInstrumentation";
 // Selection sync
 import { LayoutSelectionGate } from "./LayoutSelectionGate";
 import { isReadOnlyEditKey } from "./readOnlyEditAttempt";
 import {
   getPageScrollTarget,
   isValidPmScrollPosition,
+  prefersReducedMotionBehavior,
 } from "./scrollNavigation";
-import { computePerBlockWidths } from "./sectionBlockWidths";
+import { computePerBlockMeasureInputs } from "./sectionBlockWidths";
+import {
+  DEFAULT_PAGE_HEIGHT_PX,
+  getMargins,
+  getPageSize,
+  twipsToPixels,
+} from "./sectionGeometry";
 import { SelectionOverlay } from "./SelectionOverlay";
 import { getTransactionDirtyRange } from "./transactionDirtyRange";
 import { useDragAutoScroll } from "./useDragAutoScroll";
@@ -177,6 +234,15 @@ export type PagedEditorProps = {
   firstPageHeaderContent?: HeaderFooter | null;
   /** Footer content for first page only (when titlePg is set). */
   firstPageFooterContent?: HeaderFooter | null;
+  /**
+   * Relationship ids for the displayed HF slots — used by the painter to
+   * emit `data-rid` on `.layout-page-header` / `.layout-page-footer` and
+   * by the layout pipeline to look up persistent hidden HF EditorViews.
+   */
+  headerContentRId?: string | null;
+  footerContentRId?: string | null;
+  firstPageHeaderContentRId?: string | null;
+  firstPageFooterContentRId?: string | null;
   /** Whether the editor is read-only. */
   readOnly?: boolean;
   /** Gap between pages in pixels. */
@@ -204,17 +270,19 @@ export type PagedEditorProps = {
     to: number;
     text: string;
   }) => void;
+  /** Callback when the hidden body EditorView is created or destroyed. */
+  onEditorViewReady?: (view: EditorView | null) => void;
   /** External ProseMirror plugins. */
   externalPlugins?: Plugin[];
   /** Optional Yjs collaboration owner for the hidden ProseMirror state. */
   collaboration?: HiddenProseMirrorCollaboration | undefined;
   /** Extension manager for plugins/schema/commands (optional — falls back to default) */
   extensionManager?: ExtensionManager;
-  /** Callback when header or footer is double-clicked for editing. */
-  onHeaderFooterDoubleClick?: (
-    position: "header" | "footer",
-    pageNumber?: number,
-  ) => void;
+  /** Callback when header or footer is double-clicked for editing. Pass
+   * `undefined` to disable header/footer editing entirely. */
+  onHeaderFooterDoubleClick?:
+    | ((position: "header" | "footer", pageNumber?: number) => void)
+    | undefined;
   /** Active header/footer editing mode (dims body, intercepts body clicks). */
   hfEditMode?: "header" | "footer" | null;
   /** Called when user clicks the body area while in HF editing mode. */
@@ -274,6 +342,18 @@ export type PagedEditorRef = {
   getState(): EditorState | null;
   /** Get the ProseMirror EditorView. */
   getView(): EditorView | null;
+  /**
+   * Look up the persistent hidden HF EditorView by `rId`. Returns null when
+   * the slot isn't mounted (e.g. document has no HF for that rId, or the
+   * hidden host hasn't mounted yet).
+   */
+  getHfView(rId: string): EditorView | null;
+  /**
+   * Force-create the hidden editor view if it has been deferred.
+   * Use from surfaces that need a live view before any user
+   * interaction (e.g. AI chat reading a snapshot of the doc).
+   */
+  ensureView(options?: { focus?: boolean }): void;
   /** Focus the editor. */
   focus(): void;
   /** Blur the editor. */
@@ -300,23 +380,45 @@ export type PagedEditorRef = {
   scrollToPosition(pmPos: number): void;
   /** Scroll the visible pages to bring a page into view. */
   scrollToPage(pageNumber: number): void;
+  /** Resolve the page number (1-indexed) that contains the given PM position,
+   *  or null if no layout is available yet. Works for unrendered pages too via
+   *  the page shell map. */
+  getPageNumberForPmPos(pmPos: number): number | null;
+};
+
+type PendingHiddenEditorSelection =
+  | { type: "node"; pos: number }
+  | { type: "text"; anchor: number; head?: number };
+
+type QueuedHiddenEditorInput =
+  | { type: "text"; text: string }
+  | { type: "keydown"; eventInit: KeyboardEventInit };
+
+type EnsureHiddenEditorViewOptions = {
+  focus?: boolean;
+  sync?: boolean;
+};
+
+type TextInputHandler<TView> = (
+  view: TView,
+  from: number,
+  to: number,
+  text: string,
+  defaultTransaction: () => Transaction,
+) => unknown;
+
+type TextInputDispatchTarget<TView> = {
+  dispatch(tr: Transaction): void;
+  someProp(
+    propName: "handleTextInput",
+    f: (handler: TextInputHandler<TView>) => unknown,
+  ): unknown;
+  state: EditorState;
 };
 
 // =============================================================================
 // CONSTANTS
 // =============================================================================
-
-// Default page size (US Letter at 96 DPI)
-const DEFAULT_PAGE_WIDTH = 816;
-const DEFAULT_PAGE_HEIGHT = 1056;
-
-// Default margins (1 inch at 96 DPI)
-const DEFAULT_MARGINS: PageMargins = {
-  top: 96,
-  right: 96,
-  bottom: 96,
-  left: 96,
-};
 
 export const DEFAULT_PAGE_GAP = 24;
 const COMMENTS_SIDEBAR_SCROLL_GUTTER = 304;
@@ -328,11 +430,115 @@ const TABLE_INSERT_EDGE_PROXIMITY = 30;
 const TABLE_INSERT_HIDE_DELAY = 200;
 /** Delay before converting PM state back to the Folio document model. */
 const DOCUMENT_CHANGE_NOTIFY_DELAY = 250;
+/** Short window for coalescing rapid typing transactions into one visual layout. */
+const TRANSACTION_LAYOUT_DEBOUNCE_MS = 32;
+/** Upper bound for how long visible layout can trail the hidden editor. */
+const TRANSACTION_LAYOUT_MAX_DELAY_MS = 96;
 /** Keep the visual caret hidden briefly while typed content relayouts. */
 const SELECTION_REVEAL_AFTER_INPUT_DELAY = 120;
-
 // Stable empty array to avoid re-creating on each render
 const EMPTY_PLUGINS: Plugin[] = [];
+
+const DEFERRED_KEYDOWN_REPLAY_KEYS = new Set([
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "Backspace",
+  "Delete",
+  "End",
+  "Enter",
+  "Home",
+  "PageDown",
+  "PageUp",
+  "Tab",
+]);
+const DEFERRED_MODIFIER_KEYDOWN_REPLAY_KEYS = new Set([
+  "a",
+  "b",
+  "i",
+  "u",
+  "v",
+  "x",
+  "y",
+  "z",
+]);
+
+const isPlainTextInputEvent = (event: React.KeyboardEvent): boolean =>
+  event.key.length === 1 &&
+  !event.altKey &&
+  !event.ctrlKey &&
+  !event.metaKey &&
+  !event.nativeEvent.isComposing;
+
+type DeferredEditorKeyDownEvent = {
+  altKey: boolean;
+  ctrlKey: boolean;
+  key: string;
+  metaKey: boolean;
+  nativeEvent: {
+    isComposing: boolean;
+  };
+};
+
+export const isDeferredEditorKeyDown = (
+  event: DeferredEditorKeyDownEvent,
+): boolean => {
+  if (event.nativeEvent.isComposing) {
+    return true;
+  }
+
+  if (DEFERRED_KEYDOWN_REPLAY_KEYS.has(event.key)) {
+    return true;
+  }
+
+  if (event.metaKey || event.ctrlKey) {
+    return DEFERRED_MODIFIER_KEYDOWN_REPLAY_KEYS.has(event.key.toLowerCase());
+  }
+
+  return isReadOnlyEditKey(event);
+};
+
+const toDeferredKeyboardEventInit = (
+  event: React.KeyboardEvent,
+): KeyboardEventInit => ({
+  altKey: event.altKey,
+  bubbles: true,
+  cancelable: true,
+  code: event.code,
+  composed: true,
+  ctrlKey: event.ctrlKey,
+  isComposing: event.nativeEvent.isComposing,
+  key: event.key,
+  location: event.location,
+  metaKey: event.metaKey,
+  repeat: event.repeat,
+  shiftKey: event.shiftKey,
+});
+
+const replayDeferredKeyDown = (
+  view: EditorView,
+  eventInit: KeyboardEventInit,
+) => {
+  view.dom.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+};
+
+export const dispatchEditorTextInput = <
+  TView extends TextInputDispatchTarget<TView>,
+>(
+  view: TView,
+  text: string,
+) => {
+  const { from, to } = view.state.selection;
+  const defaultTransaction = () => view.state.tr.insertText(text, from, to);
+  const handled = view.someProp("handleTextInput", (handler) =>
+    handler(view, from, to, text, defaultTransaction),
+  );
+
+  if (!handled) {
+    view.dispatch(defaultTransaction());
+  }
+};
 
 /**
  * Get the zero-based page index for a node by climbing to its
@@ -392,6 +598,419 @@ type RemoteSelectionOverlayProps = {
   zoom: number;
 };
 
+type SelectionGeometryModule = typeof SelectionGeometry;
+
+let selectionGeometryPromise: Promise<SelectionGeometryModule> | null = null;
+
+const loadSelectionGeometry = (): Promise<SelectionGeometryModule> => {
+  selectionGeometryPromise ??=
+    import("../core/layout-bridge/selectionRects").catch((error: unknown) => {
+      selectionGeometryPromise = null;
+      throw error;
+    });
+
+  return selectionGeometryPromise;
+};
+
+// HF caret overlay — minimal "paint the caret + selection rects for the
+// currently focused HF PM" implementation. Re-runs the DOM lookup on each
+// painter:painted event and whenever the selection changes.
+type HfCaretSelection = {
+  rId: string;
+  kind: "header" | "footer";
+  from: number;
+  to: number;
+  /**
+   * Page number (1-indexed) the user clicked/typed into. When a shared HF
+   * rId is painted on multiple pages, the caret + range rects must scope to
+   * the page the user is actually editing — otherwise the lookup picks the
+   * first matching slot and the caret appears on page 1 while the user is
+   * typing on page 5 (Codex #487 P2: 21:28 review).
+   */
+  pageNumber?: number;
+};
+
+function HfCaretOverlay({
+  selection,
+  pagesContainer,
+  zoom,
+}: {
+  selection: HfCaretSelection;
+  pagesContainer: HTMLDivElement | null;
+  zoom: number;
+}) {
+  const [caret, setCaret] = useState<{
+    x: number;
+    y: number;
+    height: number;
+  } | null>(null);
+  const [rangeRects, setRangeRects] = useState<
+    { x: number; y: number; width: number; height: number }[]
+  >([]);
+
+  useEffect(() => {
+    if (!pagesContainer) {
+      return;
+    }
+    const recompute = () => {
+      const cr = pagesContainer.getBoundingClientRect();
+      // getBoundingClientRect reports post-transform viewport pixels;
+      // the caret divs live inside pagesContainer where CSS lengths
+      // get scaled by the viewport's `transform: scale(zoom)`. At
+      // 1.5× a 100px text offset would land at 150px on screen if
+      // written through unchanged, but writing it as CSS lets the
+      // parent transform scale it AGAIN to 225px — so divide every
+      // delta by zoom before passing to style (Codex #487 P2: 22:16).
+      const zoomDivisor = zoom !== 0 ? zoom : 1;
+      // Scope every lookup to the specific painted page the user is
+      // editing. When a default HF rId is shared across N pages we'd
+      // otherwise paint the caret on the first matching slot (page 1)
+      // even if the user is typing on page 5 (Codex #487 P2: 21:28).
+      const pageScope: ParentNode = selection.pageNumber
+        ? (pagesContainer.querySelector(
+            `.layout-page[data-page-number="${selection.pageNumber}"]`,
+          ) ?? pagesContainer)
+        : pagesContainer;
+      const collapsed = selection.from === selection.to;
+      if (collapsed) {
+        // Use findHfCaretSpan so a caret at the end of a run / paragraph
+        // (selection.from == span's data-pm-end) still finds a span to
+        // anchor to — exact data-pm-start matching alone would lose the
+        // caret as soon as the user typed to the end of their text
+        // (Codex #487 P2: 20:32 review).
+        const hit = findHfCaretSpan(
+          pageScope,
+          selection.kind,
+          selection.rId,
+          selection.from,
+        );
+        if (!hit) {
+          setCaret(null);
+          setRangeRects([]);
+          return;
+        }
+        const ar = hit.element.getBoundingClientRect();
+        // Default fallback uses the span edge findHfCaretSpan returned —
+        // safe for atom spans (images, breaks) that lack a text node.
+        // For text-bearing spans, sample the *exact* visual position
+        // via a collapsed Range at (selection.from - pmStart) inside
+        // the text node. The Range API returns the caret rect in
+        // visual (direction-aware) coordinates so it lands on the
+        // correct side of the run in RTL / bidi headers / footers as
+        // well as the middle of mid-span LTR runs (Codex #487 P2:
+        // 22:38 + 22:58 reviews).
+        let absX = hit.edge === "right" ? ar.right : ar.left;
+        let absY = ar.top;
+        let absHeight = ar.height || 16;
+        const pmStartStr = hit.element.dataset["pmStart"];
+        const pmEndStr = hit.element.dataset["pmEnd"];
+        const pmStart = pmStartStr
+          ? Number.parseInt(pmStartStr, 10)
+          : Number.NaN;
+        const pmEnd = pmEndStr ? Number.parseInt(pmEndStr, 10) : Number.NaN;
+        const textNode = hit.element.firstChild;
+        if (
+          textNode &&
+          textNode.nodeType === Node.TEXT_NODE &&
+          Number.isFinite(pmStart) &&
+          Number.isFinite(pmEnd)
+        ) {
+          const textContent = textNode.textContent ?? "";
+          const charOffset = Math.min(
+            Math.max(0, selection.from - pmStart),
+            textContent.length,
+          );
+          const ownerDoc = hit.element.ownerDocument;
+          const range = ownerDoc.createRange();
+          range.setStart(textNode, charOffset);
+          range.setEnd(textNode, charOffset);
+          const rRect = range.getBoundingClientRect();
+          if (rRect.height > 0 || rRect.width > 0 || rRect.left > 0) {
+            absX = rRect.left;
+            absY = rRect.top;
+            absHeight = rRect.height || absHeight;
+          }
+        }
+        setCaret({
+          x: (absX - cr.left) / zoomDivisor,
+          y: (absY - cr.top) / zoomDivisor,
+          height: absHeight / zoomDivisor,
+        });
+        setRangeRects([]);
+        return;
+      }
+      // Range selection — walk every painted pm span inside the slot
+      // and project the union of those whose [pmStart,pmEnd] intersect
+      // [from,to). The painter emits one span per run so this is good
+      // enough for single-line and multi-line highlights without doing
+      // glyph-level math (Word's selection model is paragraph-line-based
+      // — same convention).
+      const spans = findHfPmSpans(pageScope, selection.kind, selection.rId);
+      const rects: { x: number; y: number; width: number; height: number }[] =
+        [];
+      for (const span of spans) {
+        const spanStart = Number.parseInt(span.dataset["pmStart"] ?? "", 10);
+        const spanEnd = Number.parseInt(span.dataset["pmEnd"] ?? "", 10);
+        if (!Number.isFinite(spanStart) || !Number.isFinite(spanEnd)) {
+          continue;
+        }
+        if (spanEnd <= selection.from || spanStart >= selection.to) {
+          continue;
+        }
+        // For text-bearing spans, clip the highlight to the selected
+        // sub-range with the Range API instead of using the whole span
+        // bounding box. Without this a partial selection inside a run
+        // (double-clicking a word, dragging a few characters) painted
+        // the entire run as selected (Codex #487 P2: 22:38 review).
+        const textNode = span.firstChild;
+        if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+          const textContent = textNode.textContent ?? "";
+          const startChar = Math.max(0, selection.from - spanStart);
+          const endChar = Math.min(
+            textContent.length,
+            selection.to - spanStart,
+          );
+          if (startChar < endChar) {
+            const ownerDoc = span.ownerDocument;
+            const range = ownerDoc.createRange();
+            range.setStart(textNode, startChar);
+            range.setEnd(textNode, endChar);
+            for (const cRect of Array.from(range.getClientRects())) {
+              rects.push({
+                x: (cRect.left - cr.left) / zoomDivisor,
+                y: (cRect.top - cr.top) / zoomDivisor,
+                width: cRect.width / zoomDivisor,
+                height: cRect.height / zoomDivisor,
+              });
+            }
+            continue;
+          }
+        }
+        // No text node (atom inline, image, etc.) — fall back to the
+        // span's full bounding rect; selection of the atom still paints
+        // visibly.
+        const r = span.getBoundingClientRect();
+        rects.push({
+          x: (r.left - cr.left) / zoomDivisor,
+          y: (r.top - cr.top) / zoomDivisor,
+          width: r.width / zoomDivisor,
+          height: r.height / zoomDivisor,
+        });
+      }
+      setRangeRects(rects);
+      setCaret(null);
+    };
+    recompute();
+    const onPainted = () => recompute();
+    pagesContainer.addEventListener(PAINTER_PAINTED_EVENT, onPainted);
+    return () => {
+      pagesContainer.removeEventListener(PAINTER_PAINTED_EVENT, onPainted);
+    };
+    // Destructure selection so the effect only re-runs when a field
+    // actually changes; otherwise every handleHfPmTransaction-driven
+    // setHfCaretSelection allocates a new object and we'd churn the
+    // DOM lookup + getBoundingClientRect chain on every keystroke.
+  }, [
+    selection.rId,
+    selection.kind,
+    selection.from,
+    selection.to,
+    selection.pageNumber,
+    pagesContainer,
+    zoom,
+  ]);
+
+  if (!pagesContainer) {
+    return null;
+  }
+  // Portal into pagesContainer so the absolute-positioned caret + rects
+  // share the same containing block as the painted spans we measured
+  // against. Previously the JSX rendered as siblings of pagesContainer
+  // inside .paged-editor__viewport, which has VIEWPORT_PADDING_TOP +
+  // a scale transform applied — HF carets/rects drifted above the
+  // painted slot. Portalling restores positional alignment without
+  // changing the coordinate math.
+  return createPortal(
+    <>
+      {rangeRects.map((r, i) => (
+        <div
+          key={`hf-sel-${i}-${r.x}-${r.y}-${r.width}`}
+          data-testid="hf-selection-rect"
+          style={{
+            position: "absolute",
+            left: r.x,
+            top: r.y,
+            width: r.width,
+            height: r.height,
+            backgroundColor: "var(--doc-selection, rgba(66, 133, 244, 0.3))",
+            pointerEvents: "none",
+            zIndex: 10,
+          }}
+        />
+      ))}
+      {caret && (
+        <div
+          data-testid="hf-caret"
+          style={{
+            position: "absolute",
+            left: caret.x,
+            top: caret.y,
+            width: 2,
+            height: caret.height,
+            backgroundColor: "var(--doc-canvas-text, #000)",
+            pointerEvents: "none",
+            zIndex: 11,
+            animation: "folio-caret-blink 1060ms steps(1, end) infinite",
+          }}
+        />
+      )}
+    </>,
+    pagesContainer,
+  );
+}
+
+// Source HeaderFooterContent for the painter from either a persistent hidden
+// HF EditorView (preferred — keeps the painter in lockstep with live PM edits)
+// or the HeaderFooter document blocks (fallback before the view mounts).
+// `rId` is stamped on the result so the painter emits `data-rid` and the
+// pointer pipeline can route clicks back to the matching EditorView.
+function renderHfFromContentOrPm(
+  hf: HeaderFooter | null | undefined,
+  rId: string | null | undefined,
+  hfPMs: HiddenHeaderFooterPMsRef | null,
+  contentWidth: number,
+  metrics: HeaderFooterMetrics,
+  options: ConvertHeaderFooterOptions,
+): HeaderFooterContent | undefined {
+  if (!hf) {
+    return undefined;
+  }
+  const optsWithRId: ConvertHeaderFooterOptions = rId
+    ? { ...options, rId }
+    : options;
+  const view = rId ? hfPMs?.getView(rId) : null;
+  if (view) {
+    return convertHeaderFooterPmDocToContent(
+      view.state.doc,
+      contentWidth,
+      metrics,
+      optsWithRId,
+    );
+  }
+  return convertHeaderFooterToContent(hf, contentWidth, metrics, optsWithRId);
+}
+
+function renderHeaderFooterContentByRId(
+  source: Map<string, HeaderFooter> | undefined,
+  hfPMs: HiddenHeaderFooterPMsRef | null,
+  contentWidth: number,
+  metrics: HeaderFooterMetrics,
+  options: ConvertHeaderFooterOptions,
+): Map<string, HeaderFooterContent> | undefined {
+  if (!source || source.size === 0) {
+    return undefined;
+  }
+  const rendered = new Map<string, HeaderFooterContent>();
+  for (const [rId, hf] of source) {
+    const content = renderHfFromContentOrPm(
+      hf,
+      rId,
+      hfPMs,
+      contentWidth,
+      metrics,
+      options,
+    );
+    if (content) {
+      rendered.set(rId, content);
+    }
+  }
+  return rendered.size > 0 ? rendered : undefined;
+}
+
+function getSectionHeaderFooterRefs(
+  documentModel: Document | null | undefined,
+): PageHeaderFooterRefs[] | undefined {
+  const body = documentModel?.package.document;
+  if (!body) {
+    return undefined;
+  }
+  const sections = body.sections;
+  if (sections && sections.length > 0) {
+    return sections.map((section) =>
+      getHeaderFooterRefsFromSectionProperties(section.properties),
+    );
+  }
+  const finalProps = body.finalSectionProperties;
+  if (!finalProps) {
+    return undefined;
+  }
+  return [getHeaderFooterRefsFromSectionProperties(finalProps)];
+}
+
+function getHeaderFooterRefsFromSectionProperties(
+  props: SectionProperties,
+): PageHeaderFooterRefs {
+  const refs: PageHeaderFooterRefs = {};
+  if (props.titlePg !== undefined) {
+    refs.titlePg = props.titlePg;
+  }
+  for (const ref of props.headerReferences ?? []) {
+    if (ref.type === "default") {
+      refs.headerDefault = ref.rId;
+    } else if (ref.type === "first") {
+      refs.headerFirst = ref.rId;
+    } else {
+      refs.headerEven = ref.rId;
+    }
+  }
+  for (const ref of props.footerReferences ?? []) {
+    if (ref.type === "default") {
+      refs.footerDefault = ref.rId;
+    } else if (ref.type === "first") {
+      refs.footerFirst = ref.rId;
+    } else {
+      refs.footerEven = ref.rId;
+    }
+  }
+  return refs;
+}
+
+type LayoutInputSignatureOptions = {
+  columns: ColumnLayout | undefined;
+  contentWidth: number;
+  defaultTabStop: number | undefined;
+  firstPageFooterContent: HeaderFooter | null | undefined;
+  firstPageHeaderContent: HeaderFooter | null | undefined;
+  footerContent: HeaderFooter | null | undefined;
+  headerContent: HeaderFooter | null | undefined;
+  // Active rId per HF slot. Switching to a different HF part with
+  // identical content + height previously left the layout signature
+  // unchanged so the painter incremental path skipped repaint and the
+  // old `data-rid` lingered in the DOM, routing clicks to a stale HF
+  // view (Codex #487 P2: 22:48 review). Including the rId guarantees a
+  // relayout when the slot's owning rId changes even if the rendered
+  // content is byte-equivalent.
+  headerContentRId: string | null | undefined;
+  footerContentRId: string | null | undefined;
+  firstPageHeaderContentRId: string | null | undefined;
+  firstPageFooterContentRId: string | null | undefined;
+  sectionHeaderFooterRefs: PageHeaderFooterRefs[] | undefined;
+  margins: PageMargins;
+  pageGap: number;
+  pageSize: { h: number; w: number };
+  sectionProperties: SectionProperties | null | undefined;
+  styles: StyleDefinitions | null | undefined;
+  theme: Theme | null | undefined;
+};
+
+type PendingLayoutRequest = {
+  dirtyRange: DirtyRange | null;
+  firstScheduledAt: number;
+  rafId: number | null;
+  state: EditorState;
+  timerId: number | null;
+};
+
 const getPageOverlayOffset = (pagesContainer: HTMLDivElement, zoom: number) => {
   const overlay = pagesContainer.parentElement?.querySelector(
     '[data-testid="selection-overlay"]',
@@ -409,6 +1028,339 @@ const getPageOverlayOffset = (pagesContainer: HTMLDivElement, zoom: number) => {
   };
 };
 
+function buildLayoutInputSignature(
+  options: LayoutInputSignatureOptions,
+): string {
+  return stableJsonStringify(options);
+}
+
+function stableJsonStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, nestedValue: unknown) => {
+    if (nestedValue instanceof Map) {
+      return Array.from(nestedValue.entries());
+    }
+    return nestedValue;
+  });
+}
+
+function getDocumentFontSet(): FontFaceSet | null {
+  if (typeof document === "undefined" || !("fonts" in document)) {
+    return null;
+  }
+  return document.fonts;
+}
+
+function documentFontsAreLoaded(): boolean {
+  const fontSet = getDocumentFontSet();
+  return !fontSet || fontSet.status === "loaded";
+}
+
+const INITIAL_LAYOUT_FONT_TIMEOUT_MS = 2000;
+const INITIAL_FONT_READY_SUPPRESSION_MS = 250;
+const DEFAULT_LAYOUT_FONT_FAMILY = "Calibri";
+const OFFICE_FONT_FAMILY_MAP: Record<string, string> = {
+  Arial: "Arimo",
+  Calibri: "Carlito",
+  Cambria: "Caladea",
+  "Times New Roman": "Tinos",
+  "Courier New": "Cousine",
+};
+const CSS_GENERIC_FONT_FAMILIES = new Set([
+  "serif",
+  "sans-serif",
+  "monospace",
+  "cursive",
+  "fantasy",
+  "system-ui",
+]);
+const LAYOUT_FONT_DESCRIPTORS = [
+  { style: "normal", weight: 400 },
+  { style: "italic", weight: 400 },
+  { style: "normal", weight: 700 },
+  { style: "italic", weight: 700 },
+] as const;
+const REGULAR_LAYOUT_FONT_DESCRIPTOR = LAYOUT_FONT_DESCRIPTORS[0];
+
+export type LayoutFontFace = {
+  family: string;
+  style: (typeof LAYOUT_FONT_DESCRIPTORS)[number]["style"];
+  weight: (typeof LAYOUT_FONT_DESCRIPTORS)[number]["weight"];
+};
+
+function waitForInitialLayoutFonts(
+  documentModel: Document | null,
+  pmDoc: EditorState["doc"],
+): Promise<boolean> {
+  const fontSet = getDocumentFontSet();
+  if (!fontSet) {
+    return Promise.resolve(true);
+  }
+
+  const loadChecks: string[] = [];
+  for (const face of collectInitialLayoutFontFaces(documentModel, pmDoc)) {
+    loadChecks.push(
+      `${face.style} ${face.weight} 16px "${escapeCssFontFamily(face.family)}"`,
+    );
+  }
+
+  const loadFonts = Promise.allSettled(
+    loadChecks.map((check) => fontSet.load(check)),
+  )
+    .then(() => fontSet.ready)
+    .then(() => true);
+  return Promise.race([
+    loadFonts,
+    new Promise<boolean>((resolve) => {
+      window.setTimeout(() => resolve(false), INITIAL_LAYOUT_FONT_TIMEOUT_MS);
+    }),
+  ]);
+}
+
+export function collectInitialLayoutFontFamilies(
+  documentModel: Document | null,
+  pmDoc: EditorState["doc"],
+): Set<string> {
+  return new Set(
+    collectInitialLayoutFontFaces(documentModel, pmDoc).map(
+      ({ family }) => family,
+    ),
+  );
+}
+
+export function collectInitialLayoutFontFaces(
+  documentModel: Document | null,
+  pmDoc: EditorState["doc"],
+): LayoutFontFace[] {
+  const faces = new Map<string, LayoutFontFace>();
+  addLayoutFontFamilyFace(
+    faces,
+    DEFAULT_LAYOUT_FONT_FAMILY,
+    REGULAR_LAYOUT_FONT_DESCRIPTOR,
+  );
+
+  for (const family of documentModel?.requiredFonts ?? []) {
+    addLayoutFontFamilyFace(faces, family, REGULAR_LAYOUT_FONT_DESCRIPTOR);
+  }
+
+  addLayoutFontFamilyFace(
+    faces,
+    documentModel?.package.theme?.fontScheme?.majorFont?.latin,
+    REGULAR_LAYOUT_FONT_DESCRIPTOR,
+  );
+  addLayoutFontFamilyFace(
+    faces,
+    documentModel?.package.theme?.fontScheme?.minorFont?.latin,
+    REGULAR_LAYOUT_FONT_DESCRIPTOR,
+  );
+  addTextFormattingFontFaces(
+    faces,
+    documentModel?.package.styles?.docDefaults?.rPr,
+  );
+  for (const style of documentModel?.package.styles?.styles ?? []) {
+    addTextFormattingFontFaces(faces, style.rPr);
+  }
+
+  collectProseMirrorFontFaces(faces, pmDoc, undefined);
+
+  return Array.from(faces.values());
+}
+
+function addTextFormattingFontFaces(
+  faces: Map<string, LayoutFontFace>,
+  formatting: TextFormatting | undefined,
+): void {
+  addLayoutFontFamilyFace(
+    faces,
+    formatting?.fontFamily,
+    layoutDescriptorFromFormatting(formatting),
+  );
+}
+
+function collectProseMirrorFontFaces(
+  faces: Map<string, LayoutFontFace>,
+  node: PMNode,
+  inheritedTextFormatting: TextFormatting | undefined,
+): void {
+  const paragraphDefaults = readParagraphDefaultTextFormatting(node);
+  const textFormatting = paragraphDefaults ?? inheritedTextFormatting;
+  if (paragraphDefaults) {
+    addTextFormattingFontFaces(faces, paragraphDefaults);
+  }
+
+  if (node.attrs["listMarkerFontFamily"]) {
+    addLayoutFontFamilyFace(
+      faces,
+      node.attrs["listMarkerFontFamily"],
+      REGULAR_LAYOUT_FONT_DESCRIPTOR,
+    );
+  }
+
+  if (node.isText) {
+    const descriptor = layoutDescriptorFromFormattingAndMarks(
+      textFormatting,
+      node.marks,
+    );
+    const markFontFamily = readFontFamilyMarkAttrs(node.marks);
+    addLayoutFontFamilyFace(
+      faces,
+      markFontFamily ??
+        textFormatting?.fontFamily ??
+        DEFAULT_LAYOUT_FONT_FAMILY,
+      descriptor,
+    );
+  }
+
+  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
+  node.forEach((child) => {
+    collectProseMirrorFontFaces(faces, child, textFormatting);
+  });
+}
+
+function readParagraphDefaultTextFormatting(
+  node: PMNode,
+): TextFormatting | undefined {
+  const value = node.attrs["defaultTextFormatting"];
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  return value as TextFormatting;
+}
+
+function readFontFamilyMarkAttrs(marks: readonly Mark[]): unknown {
+  for (const mark of marks) {
+    if (mark.type.name === "fontFamily") {
+      return expectFontFamilyMarkAttrs(mark);
+    }
+  }
+  return undefined;
+}
+
+function layoutDescriptorFromFormatting(
+  formatting: Pick<TextFormatting, "bold" | "italic"> | undefined,
+): Omit<LayoutFontFace, "family"> {
+  return {
+    style: formatting?.italic ? "italic" : "normal",
+    weight: formatting?.bold ? 700 : 400,
+  };
+}
+
+function layoutDescriptorFromFormattingAndMarks(
+  formatting: Pick<TextFormatting, "bold" | "italic"> | undefined,
+  marks: readonly Mark[],
+): Omit<LayoutFontFace, "family"> {
+  let bold = formatting?.bold === true;
+  let italic = formatting?.italic === true;
+
+  for (const mark of marks) {
+    if (mark.type.name === "bold") {
+      bold = true;
+    }
+    if (mark.type.name === "italic") {
+      italic = true;
+    }
+  }
+
+  return {
+    style: italic ? "italic" : "normal",
+    weight: bold ? 700 : 400,
+  };
+}
+
+function addLayoutFontFamilyFace(
+  faces: Map<string, LayoutFontFace>,
+  value: unknown,
+  descriptor: Omit<LayoutFontFace, "family">,
+): void {
+  if (typeof value === "string") {
+    addLayoutFontFamilyNameFace(faces, value, descriptor);
+    return;
+  }
+
+  if (!value || typeof value !== "object") {
+    return;
+  }
+
+  const fontFamily = value as { ascii?: unknown; hAnsi?: unknown };
+  addLayoutFontFamilyFace(faces, fontFamily.ascii, descriptor);
+  addLayoutFontFamilyFace(faces, fontFamily.hAnsi, descriptor);
+}
+
+function addLayoutFontFamilyNameFace(
+  faces: Map<string, LayoutFontFace>,
+  family: string,
+  descriptor: Omit<LayoutFontFace, "family">,
+): void {
+  const normalized = family.trim();
+  if (!normalized || CSS_GENERIC_FONT_FAMILIES.has(normalized)) {
+    return;
+  }
+
+  addLayoutFontFace(faces, normalized, descriptor);
+  const mappedFamily = OFFICE_FONT_FAMILY_MAP[normalized];
+  if (mappedFamily) {
+    addLayoutFontFace(faces, mappedFamily, descriptor);
+  }
+}
+
+function addLayoutFontFace(
+  faces: Map<string, LayoutFontFace>,
+  family: string,
+  descriptor: Omit<LayoutFontFace, "family">,
+): void {
+  faces.set(`${family}|${descriptor.style}|${descriptor.weight}`, {
+    family,
+    ...descriptor,
+  });
+}
+
+function escapeCssFontFamily(family: string): string {
+  return family.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"');
+}
+
+function describeInvalidHighlightMarks(doc: EditorState["doc"]): string {
+  const invalidHighlights: string[] = [];
+  const validHighlightColors = new Set([
+    "black",
+    "blue",
+    "cyan",
+    "darkBlue",
+    "darkCyan",
+    "darkGray",
+    "darkGreen",
+    "darkMagenta",
+    "darkRed",
+    "darkYellow",
+    "green",
+    "lightGray",
+    "magenta",
+    "none",
+    "red",
+    "white",
+    "yellow",
+  ]);
+
+  const visit = (node: EditorState["doc"], path: string): void => {
+    for (const [index, mark] of node.marks.entries()) {
+      if (
+        mark.type.name === "highlight" &&
+        !validHighlightColors.has(String(mark.attrs["color"]))
+      ) {
+        invalidHighlights.push(
+          `${path}.marks[${index}]=${JSON.stringify(mark.attrs)}`,
+        );
+      }
+    }
+
+    // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
+    node.forEach((child, _offset, index) => {
+      visit(child, `${path}.content[${index}]`);
+    });
+  };
+
+  visit(doc, "doc");
+  return invalidHighlights.join("; ");
+}
+
 const RemoteSelectionOverlay = ({
   blocks,
   layout,
@@ -417,43 +1369,91 @@ const RemoteSelectionOverlay = ({
   remoteSelection,
   zoom,
 }: RemoteSelectionOverlayProps) => {
-  if (!pagesContainer) {
-    return null;
-  }
+  const [geometry, setGeometry] = useState<{
+    caretPosition: CaretPosition | null;
+    selectionRects: SelectionRect[];
+  } | null>(null);
 
-  const offset = getPageOverlayOffset(pagesContainer, zoom);
-  if (!offset) {
-    return null;
-  }
+  useEffect(() => {
+    if (!pagesContainer) {
+      setGeometry(null);
+      return undefined;
+    }
 
-  const from = Math.min(remoteSelection.anchor, remoteSelection.head);
-  const to = Math.max(remoteSelection.anchor, remoteSelection.head);
-  const selectionRects = selectionToRects(
-    layout,
+    const offset = getPageOverlayOffset(pagesContainer, zoom);
+    if (!offset) {
+      setGeometry(null);
+      return undefined;
+    }
+
+    let cancelled = false;
+    void loadSelectionGeometry().then(
+      ({ getCaretPosition, selectionToRects }) => {
+        if (cancelled) {
+          return undefined;
+        }
+
+        const from = Math.min(remoteSelection.anchor, remoteSelection.head);
+        const to = Math.max(remoteSelection.anchor, remoteSelection.head);
+        const nextSelectionRects = selectionToRects(
+          layout,
+          blocks,
+          measures,
+          from,
+          to,
+        ).map((rect) => ({
+          height: rect.height,
+          pageIndex: rect.pageIndex,
+          width: rect.width,
+          x: rect.x + offset.x,
+          y: rect.y + offset.y,
+        }));
+        const caretBase = getCaretPosition(
+          layout,
+          blocks,
+          measures,
+          remoteSelection.head,
+        );
+        const caretPosition = caretBase
+          ? {
+              ...caretBase,
+              x: caretBase.x + offset.x,
+              y: caretBase.y + offset.y,
+            }
+          : null;
+
+        setGeometry({
+          caretPosition,
+          selectionRects: nextSelectionRects,
+        });
+        return undefined;
+      },
+      () => {
+        if (!cancelled) {
+          setGeometry(null);
+        }
+        return undefined;
+      },
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
     blocks,
-    measures,
-    from,
-    to,
-  ).map((rect) => ({
-    height: rect.height,
-    pageIndex: rect.pageIndex,
-    width: rect.width,
-    x: rect.x + offset.x,
-    y: rect.y + offset.y,
-  }));
-  const caretBase = getCaretPosition(
     layout,
-    blocks,
     measures,
+    pagesContainer,
+    remoteSelection.anchor,
     remoteSelection.head,
-  );
-  const caretPosition = caretBase
-    ? {
-        ...caretBase,
-        x: caretBase.x + offset.x,
-        y: caretBase.y + offset.y,
-      }
-    : null;
+    zoom,
+  ]);
+
+  if (!geometry) {
+    return null;
+  }
+
+  const { caretPosition, selectionRects } = geometry;
 
   return (
     <>
@@ -501,19 +1501,20 @@ const pagesContainerStyles: CSSProperties = {
  * Returns a Map of "comment-{id}" / "revision-{revisionId}" → scroll-container Y.
  */
 function computeAnchorPositions(
-  pmView: EditorView | null,
+  state: EditorState | null,
   layout: Layout,
   blocks: FlowBlock[],
   measures: Measure[],
   _renderedPageGap: number,
   options: { includeRevisions: boolean },
+  getCaretPosition: SelectionGeometryModule["getCaretPosition"],
 ): Map<string, number> {
   const positions = new Map<string, number>();
-  if (!pmView?.state) {
+  if (!state) {
     return positions;
   }
 
-  const { doc: pmDoc, schema } = pmView.state;
+  const { doc: pmDoc, schema } = state;
   const commentType = schema.marks["comment"];
   const insertionType = options.includeRevisions
     ? schema.marks["insertion"]
@@ -627,61 +1628,25 @@ function getTableRowOffset(
   return offsetY;
 }
 
-/**
- * Convert twips to pixels (1 twip = 1/20 point, 96 pixels per inch).
- */
-function twipsToPixels(twips: number): number {
-  return Math.round((twips / 1440) * 96);
+function pageMarginsEqual(left: PageMargins, right: PageMargins): boolean {
+  return (
+    left.top === right.top &&
+    left.right === right.right &&
+    left.bottom === right.bottom &&
+    left.left === right.left &&
+    left.header === right.header &&
+    left.footer === right.footer
+  );
 }
 
-/**
- * Extract page size from section properties or use defaults.
- */
-function getPageSize(sectionProps: SectionProperties | null | undefined): {
-  w: number;
-  h: number;
-} {
-  return {
-    w: sectionProps?.pageWidth
-      ? twipsToPixels(sectionProps.pageWidth)
-      : DEFAULT_PAGE_WIDTH,
-    h: sectionProps?.pageHeight
-      ? twipsToPixels(sectionProps.pageHeight)
-      : DEFAULT_PAGE_HEIGHT,
-  };
-}
-
-/**
- * Extract margins from section properties or use defaults.
- */
-function getMargins(
-  sectionProps: SectionProperties | null | undefined,
-): PageMargins {
-  const top = sectionProps?.marginTop
-    ? twipsToPixels(sectionProps.marginTop)
-    : DEFAULT_MARGINS.top;
-  const bottom = sectionProps?.marginBottom
-    ? twipsToPixels(sectionProps.marginBottom)
-    : DEFAULT_MARGINS.bottom;
-
-  return {
-    top,
-    right: sectionProps?.marginRight
-      ? twipsToPixels(sectionProps.marginRight)
-      : DEFAULT_MARGINS.right,
-    bottom,
-    left: sectionProps?.marginLeft
-      ? twipsToPixels(sectionProps.marginLeft)
-      : DEFAULT_MARGINS.left,
-    // Header/footer distances - where the header/footer content starts
-    // Default to 0.5 inch (48px at 96 DPI) if not specified
-    header: sectionProps?.headerDistance
-      ? twipsToPixels(sectionProps.headerDistance)
-      : 48,
-    footer: sectionProps?.footerDistance
-      ? twipsToPixels(sectionProps.footerDistance)
-      : 48,
-  };
+function optionalPageMarginsEqual(
+  left: PageMargins | undefined,
+  right: PageMargins | undefined,
+): boolean {
+  if (left === undefined || right === undefined) {
+    return left === right;
+  }
+  return pageMarginsEqual(left, right);
 }
 
 /**
@@ -706,703 +1671,6 @@ function getColumns(
     cols.separator = sectionProps.separator;
   }
   return cols;
-}
-
-/**
- * Check if an image run is a *text-wrapping* floating image — it
- * occupies an exclusion zone the body text should flow around.
- *
- * `wrapType: "behind"` and `wrapType: "inFront"` are anchored
- * (out-of-flow) but Word's wrapNone semantics put them behind /
- * over the text without shrinking the body. They render as
- * `displayMode: "float"` in the prose model so the painter knows
- * they're out of normal flow, but `extractFloatingZones` must skip
- * them — including them here would make the line breaker wrap text
- * around a background letterhead or a foreground overlay (Codex
- * PR #258 review).
- */
-function isFloatingImageRun(run: ImageRun): boolean {
-  const wrapType = run.wrapType;
-  const displayMode = run.displayMode;
-
-  // wrapNone (behind / inFront): never an exclusion zone, regardless
-  // of displayMode.
-  if (wrapType === "behind" || wrapType === "inFront") {
-    return false;
-  }
-
-  // Floating images have specific wrap types that allow text to flow around them
-  if (wrapType && ["square", "tight", "through"].includes(wrapType)) {
-    return true;
-  }
-
-  // Or explicit float display mode (only when no wrapNone semantics —
-  // already filtered above).
-  if (displayMode === "float") {
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * EMU to pixels conversion
- */
-function emuToPixels(emu: number | undefined): number {
-  if (emu === undefined) {
-    return 0;
-  }
-  return Math.round((emu * 96) / 914_400);
-}
-
-function resolveTableWidthPx(
-  width: number | undefined,
-  widthType: string | undefined,
-  contentWidth: number,
-): number | undefined {
-  if (!width) {
-    return undefined;
-  }
-  if (widthType === "pct") {
-    // width is in 50ths of a percent (5000 = 100%)
-    return (contentWidth * width) / 5000;
-  }
-  if (widthType === "dxa" || !widthType || widthType === "auto") {
-    return Math.round((width / 20) * 1.333);
-  }
-  return undefined;
-}
-
-function isInlineFlowImageRun(run: ImageRun): boolean {
-  if (run.displayMode === "float") {
-    return false;
-  }
-
-  if (
-    run.wrapType === "square" ||
-    run.wrapType === "tight" ||
-    run.wrapType === "through" ||
-    run.wrapType === "behind" ||
-    run.wrapType === "inFront"
-  ) {
-    return false;
-  }
-
-  if (run.displayMode === "block" || run.wrapType === "topAndBottom") {
-    return false;
-  }
-
-  return true;
-}
-
-export function measureTableCellBlockVisualHeight(
-  block: FlowBlock,
-  blockMeasure: Measure,
-): number {
-  if (block.kind !== "paragraph" || blockMeasure.kind !== "paragraph") {
-    if ("totalHeight" in blockMeasure) {
-      return blockMeasure.totalHeight;
-    }
-    if ("height" in blockMeasure) {
-      return blockMeasure.height;
-    }
-    return 0;
-  }
-
-  const paragraphBlock = block;
-  const paragraphMeasure = blockMeasure;
-  const nonEmptyRuns = paragraphBlock.runs.filter(
-    (run) =>
-      run.kind !== "text" ||
-      run.text.replace(/\u00a0/gu, " ").trim().length > 0,
-  );
-  if (paragraphMeasure.lines.length !== 1 || nonEmptyRuns.length === 0) {
-    return paragraphMeasure.totalHeight;
-  }
-
-  const inlineImageRuns: ImageRun[] = [];
-  for (const run of nonEmptyRuns) {
-    if (run.kind !== "image" || !isInlineFlowImageRun(run)) {
-      return paragraphMeasure.totalHeight;
-    }
-    inlineImageRuns.push(run);
-  }
-
-  let maxImageHeight = 0;
-  for (const run of inlineImageRuns) {
-    maxImageHeight = Math.max(maxImageHeight, run.height);
-  }
-  const spacingBefore = paragraphBlock.attrs?.spacing?.before ?? 0;
-  const spacingAfter = paragraphBlock.attrs?.spacing?.after ?? 0;
-
-  return spacingBefore + maxImageHeight + spacingAfter;
-}
-
-function getTableCellVerticalBorderHeight(cell: TableCell | undefined): number {
-  const top = cell?.borders?.top?.width ?? 0;
-  const bottom = cell?.borders?.bottom?.width ?? 0;
-  return top + bottom;
-}
-
-export function measureTableBlock(
-  tableBlock: TableBlock,
-  contentWidth: number,
-): TableMeasure {
-  const DEFAULT_CELL_PADDING_X = 7; // Word default: 108 twips ≈ 7px
-  const DEFAULT_CELL_PADDING_Y = 0; // OOXML/TableNormal default: top=0, bottom=0
-
-  // columnWidths are already in pixels (converted in toFlowBlocks)
-  let columnWidths = tableBlock.columnWidths ?? [];
-  const explicitWidthPx = resolveTableWidthPx(
-    tableBlock.width,
-    tableBlock.widthType,
-    contentWidth,
-  );
-
-  if (columnWidths.length === 0 && tableBlock.rows.length > 0) {
-    // Determine total columns from first row's colSpans
-    const colCount = tableBlock.rows[0]!.cells.reduce(
-      // SAFETY: rows.length > 0
-      (sum, cell) => sum + (cell.colSpan ?? 1),
-      0,
-    );
-    const totalWidth = explicitWidthPx ?? contentWidth;
-    const equalWidth = totalWidth / Math.max(1, colCount);
-    columnWidths = Array.from({ length: colCount }, () => equalWidth);
-  } else if (columnWidths.length > 0 && explicitWidthPx) {
-    const totalWidth = columnWidths.reduce((sum, w) => sum + w, 0);
-    if (totalWidth > 0 && Math.abs(totalWidth - explicitWidthPx) > 1) {
-      const scale = explicitWidthPx / totalWidth;
-      columnWidths = columnWidths.map((w) => w * scale);
-    }
-  }
-
-  // Build a map of columns occupied by spanning cells from previous rows.
-  // Without this, cells in rows with vertical merges get the wrong column width.
-  const occupiedColumnsPerRow = new Map<number, Set<number>>();
-  for (let rowIdx = 0; rowIdx < tableBlock.rows.length; rowIdx++) {
-    const row = tableBlock.rows[rowIdx];
-    if (!row) {
-      continue;
-    }
-    let colIdx = 0;
-    const occupied = occupiedColumnsPerRow.get(rowIdx) ?? new Set<number>();
-    while (occupied.has(colIdx)) {
-      colIdx++;
-    }
-
-    for (const cell of row.cells) {
-      const colSpan = cell.colSpan ?? 1;
-      const rowSpan = cell.rowSpan ?? 1;
-
-      if (rowSpan > 1) {
-        for (let r = rowIdx + 1; r < rowIdx + rowSpan; r++) {
-          if (!occupiedColumnsPerRow.has(r)) {
-            occupiedColumnsPerRow.set(r, new Set());
-          }
-          const occSet = occupiedColumnsPerRow.get(r)!;
-          for (let c = 0; c < colSpan; c++) {
-            occSet.add(colIdx + c);
-          }
-        }
-      }
-
-      colIdx += colSpan;
-      while (occupied.has(colIdx)) {
-        colIdx++;
-      }
-    }
-  }
-
-  // Calculate cell widths based on colSpan and columnWidths,
-  // skipping columns occupied by spanning cells from previous rows.
-  const rows = tableBlock.rows.map((row, rowIdx) => {
-    let columnIndex = 0;
-    const occupied = occupiedColumnsPerRow.get(rowIdx) ?? new Set<number>();
-    while (occupied.has(columnIndex)) {
-      columnIndex++;
-    }
-
-    return {
-      cells: row.cells.map((cell) => {
-        const colSpan = cell.colSpan ?? 1;
-        // Calculate cell width as sum of spanned columns
-        let cellWidth = 0;
-        for (
-          let c = 0;
-          c < colSpan && columnIndex + c < columnWidths.length;
-          c++
-        ) {
-          cellWidth += columnWidths[columnIndex + c] ?? 0;
-        }
-        // Fallback to cell.width or default if columnWidths not available
-        if (cellWidth === 0) {
-          cellWidth = cell.width ?? 100;
-        }
-        columnIndex += colSpan;
-        while (occupied.has(columnIndex)) {
-          columnIndex++;
-        }
-
-        const padLeft = cell.padding?.left ?? DEFAULT_CELL_PADDING_X;
-        const padRight = cell.padding?.right ?? DEFAULT_CELL_PADDING_X;
-        const cellContentWidth = Math.max(1, cellWidth - padLeft - padRight);
-        const cellMeasure: TableCellMeasure = {
-          blocks: cell.blocks.map((b) => measureBlock(b, cellContentWidth)),
-          width: cellWidth,
-          height: 0, // Calculated below
-        };
-        if (cell.colSpan !== undefined) {
-          cellMeasure.colSpan = cell.colSpan;
-        }
-        if (cell.rowSpan !== undefined) {
-          cellMeasure.rowSpan = cell.rowSpan;
-        }
-        return cellMeasure;
-      }),
-      height: 0,
-    };
-  });
-
-  // Calculate cell heights, respecting explicit row height rules
-  for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
-    const row = rows[rowIdx]!; // SAFETY: rowIdx < rows.length
-    const sourceRowCells = tableBlock.rows[rowIdx]?.cells;
-    let maxHeight = 0;
-    let maxVerticalBorderHeight = 0;
-    for (let cellIdx = 0; cellIdx < row.cells.length; cellIdx++) {
-      const cell = row.cells[cellIdx]!; // SAFETY: cellIdx < row.cells.length
-      const sourceCell = sourceRowCells?.[cellIdx];
-      cell.height = 0;
-      for (let blockIdx = 0; blockIdx < cell.blocks.length; blockIdx++) {
-        const sourceBlock = sourceCell?.blocks[blockIdx];
-        const blockMeasure = cell.blocks[blockIdx];
-        if (!sourceBlock || !blockMeasure) {
-          continue;
-        }
-        cell.height += measureTableCellBlockVisualHeight(
-          sourceBlock,
-          blockMeasure,
-        );
-      }
-      const padTop = sourceCell?.padding?.top ?? DEFAULT_CELL_PADDING_Y;
-      const padBottom = sourceCell?.padding?.bottom ?? DEFAULT_CELL_PADDING_Y;
-      cell.height += padTop + padBottom;
-      maxHeight = Math.max(maxHeight, cell.height);
-      maxVerticalBorderHeight = Math.max(
-        maxVerticalBorderHeight,
-        getTableCellVerticalBorderHeight(sourceCell),
-      );
-    }
-
-    // Apply heightRule from the source row
-    const sourceRow = tableBlock.rows[rowIdx];
-    const explicitHeight = sourceRow?.height;
-    const heightRule = sourceRow?.heightRule;
-
-    if (explicitHeight && heightRule === "exact") {
-      row.height = explicitHeight;
-    } else if (explicitHeight) {
-      // Both 'atLeast' and 'auto' (OOXML default) treat the value as minimum height.
-      // ECMA-376 §17.4.81: when hRule is absent or "auto", val is the minimum row height.
-      row.height = Math.max(
-        maxHeight + maxVerticalBorderHeight,
-        explicitHeight,
-      );
-    } else {
-      // No explicit height — use content height directly.
-      row.height = maxHeight + maxVerticalBorderHeight;
-    }
-  }
-
-  const totalHeight = rows.reduce((h, r) => h + r.height, 0);
-  const totalWidth =
-    columnWidths.reduce((w, cw) => w + cw, 0) ||
-    explicitWidthPx ||
-    contentWidth;
-
-  return {
-    kind: "table",
-    rows,
-    columnWidths,
-    totalWidth,
-    totalHeight,
-  };
-}
-
-/**
- * Extract floating image exclusion zones from all blocks.
- * Called before measurement to determine line width reductions.
- *
- * For images with vertical align="top" relative to margin, they're at Y=0.
- * The exclusion zones define the areas where text lines need reduced widths.
- */
-/**
- * Extended floating zone info that includes anchor block index
- */
-type FloatingZoneWithAnchor = {
-  /** Block index where this floating image is anchored */
-  anchorBlockIndex: number;
-  /** If true, zone is positioned relative to margin/page and applies to all blocks */
-  isMarginRelative?: boolean;
-} & FloatingImageZone;
-
-function extractFloatingZones(
-  blocks: FlowBlock[],
-  contentWidth: number,
-): FloatingZoneWithAnchor[] {
-  const zones: FloatingZoneWithAnchor[] = [];
-
-  for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
-    const block = blocks[blockIndex]!; // SAFETY: blockIndex < blocks.length
-    if (block.kind !== "paragraph") {
-      continue;
-    }
-
-    const paragraphBlock = block as ParagraphBlock;
-
-    for (const run of paragraphBlock.runs) {
-      if (run.kind !== "image") {
-        continue;
-      }
-      const imgRun = run as ImageRun;
-
-      if (!isFloatingImageRun(imgRun)) {
-        continue;
-      }
-
-      // Calculate Y position based on vertical alignment
-      let topY = 0;
-      const position = imgRun.position;
-      const distTop = imgRun.distTop ?? 0;
-      const distBottom = imgRun.distBottom ?? 0;
-      const distLeft = imgRun.distLeft ?? 12;
-      const distRight = imgRun.distRight ?? 12;
-
-      if (position?.vertical) {
-        const v = position.vertical;
-        if (v.align === "top" && v.relativeTo === "margin") {
-          // Image at top of content area
-          topY = 0;
-        } else if (v.posOffset !== undefined) {
-          topY = emuToPixels(v.posOffset);
-        }
-        // Other cases (paragraph-relative) are harder to handle without knowing paragraph positions
-      }
-
-      const bottomY = topY + imgRun.height;
-
-      // Calculate margins based on horizontal position
-      let leftMargin = 0;
-      let rightMargin = 0;
-
-      if (position?.horizontal) {
-        const h = position.horizontal;
-        if (h.align === "left") {
-          // Image on left - text needs left margin
-          leftMargin = imgRun.width + distRight;
-        } else if (h.align === "right") {
-          // Image on right - text needs right margin
-          rightMargin = imgRun.width + distLeft;
-        } else if (h.posOffset !== undefined) {
-          const x = emuToPixels(h.posOffset);
-          if (x < contentWidth / 2) {
-            leftMargin = x + imgRun.width + distRight;
-          } else {
-            rightMargin = contentWidth - x + distLeft;
-          }
-        }
-      } else if (imgRun.cssFloat === "left") {
-        leftMargin = imgRun.width + distRight;
-      } else if (imgRun.cssFloat === "right") {
-        rightMargin = imgRun.width + distLeft;
-      }
-
-      if (leftMargin > 0 || rightMargin > 0) {
-        // Images positioned relative to margin/page apply globally (before their anchor paragraph)
-        const isMarginRelative =
-          position?.vertical?.relativeTo === "margin" ||
-          position?.vertical?.relativeTo === "page";
-        zones.push({
-          leftMargin,
-          rightMargin,
-          topY: topY - distTop,
-          bottomY: bottomY + distBottom,
-          anchorBlockIndex: blockIndex,
-          isMarginRelative,
-        });
-      }
-    }
-  }
-
-  // Floating tables (block-level) - treat them as exclusion zones for subsequent text
-  for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
-    const block = blocks[blockIndex]!; // SAFETY: blockIndex < blocks.length
-    if (block.kind !== "table") {
-      continue;
-    }
-
-    const tableBlock = block as TableBlock;
-    const floating = tableBlock.floating;
-    if (!floating) {
-      continue;
-    }
-
-    const tableMeasure = measureTableBlock(tableBlock, contentWidth);
-    const tableWidth = tableMeasure.totalWidth;
-    const tableHeight = tableMeasure.totalHeight;
-
-    const distLeft = floating.leftFromText ?? 12;
-    const distRight = floating.rightFromText ?? 12;
-    const distTop = floating.topFromText ?? 0;
-    const distBottom = floating.bottomFromText ?? 0;
-
-    let leftMargin = 0;
-    let rightMargin = 0;
-
-    // Determine horizontal position relative to content area
-    let x = 0;
-    if (floating.tblpX !== undefined) {
-      x = floating.tblpX;
-    } else if (floating.tblpXSpec) {
-      if (floating.tblpXSpec === "left" || floating.tblpXSpec === "inside") {
-        x = 0;
-      } else if (
-        floating.tblpXSpec === "right" ||
-        floating.tblpXSpec === "outside"
-      ) {
-        x = contentWidth - tableWidth;
-      } else {
-        x = (contentWidth - tableWidth) / 2;
-      }
-    } else if (tableBlock.justification === "center") {
-      x = (contentWidth - tableWidth) / 2;
-    } else if (tableBlock.justification === "right") {
-      x = contentWidth - tableWidth;
-    }
-
-    if (x < contentWidth / 2) {
-      leftMargin = x + tableWidth + distRight;
-    } else {
-      rightMargin = contentWidth - x + distLeft;
-    }
-
-    const topY = floating.tblpY ?? 0;
-    const bottomY = topY + tableHeight;
-
-    zones.push({
-      leftMargin,
-      rightMargin,
-      topY: topY - distTop,
-      bottomY: bottomY + distBottom,
-      anchorBlockIndex: blockIndex,
-    });
-  }
-
-  return zones;
-}
-
-/**
- * Measure a block based on its type.
- */
-function measureBlock(
-  block: FlowBlock,
-  contentWidth: number,
-  floatingZones?: FloatingImageZone[],
-  cumulativeY?: number,
-): Measure {
-  switch (block.kind) {
-    case "paragraph": {
-      const pBlock = block as ParagraphBlock;
-
-      // Cache paragraph measurements when no floating zones affect this block.
-      // Safe because without floating zones the result depends only on content
-      // and contentWidth (both captured in the cache key). When floating zones
-      // ARE present, we always measure fresh since zones depend on inter-block
-      // layout context (cumulative Y, neighboring floating tables/images).
-      if (!floatingZones || floatingZones.length === 0) {
-        const cached = getCachedParagraphMeasure(pBlock, contentWidth);
-        if (cached) {
-          return cached;
-        }
-      }
-
-      const measureOpts: Parameters<typeof measureParagraph>[2] = {
-        paragraphYOffset: cumulativeY ?? 0,
-      };
-      if (floatingZones) {
-        measureOpts.floatingZones = floatingZones;
-      }
-      const result = measureParagraph(pBlock, contentWidth, measureOpts);
-
-      if (!floatingZones || floatingZones.length === 0) {
-        setCachedParagraphMeasure(pBlock, contentWidth, result);
-      }
-
-      return result;
-    }
-
-    case "table": {
-      return measureTableBlock(block as TableBlock, contentWidth);
-    }
-
-    case "image": {
-      const imageBlock = block as ImageBlock;
-      return {
-        kind: "image",
-        width: imageBlock.width,
-        height: imageBlock.height,
-      };
-    }
-
-    case "textBox": {
-      const tb = block as TextBoxBlock;
-      const margins = tb.margins ?? DEFAULT_TEXTBOX_MARGINS;
-      const innerWidth = tb.width - margins.left - margins.right;
-      const innerMeasures = tb.content.map((p) =>
-        measureParagraph(p, innerWidth),
-      );
-      const contentHeight = innerMeasures.reduce(
-        (sum, m) => sum + m.totalHeight,
-        0,
-      );
-      const totalHeight =
-        tb.height ?? contentHeight + margins.top + margins.bottom;
-      return {
-        kind: "textBox" as const,
-        width: tb.width,
-        height: totalHeight,
-        innerMeasures,
-      };
-    }
-
-    case "pageBreak":
-      return { kind: "pageBreak" };
-
-    case "columnBreak":
-      return { kind: "columnBreak" };
-
-    case "sectionBreak":
-      return { kind: "sectionBreak" };
-
-    default:
-      // Unknown block type - return empty paragraph measure
-      return {
-        kind: "paragraph",
-        lines: [],
-        totalHeight: 0,
-      };
-  }
-}
-
-/**
- * Measure all blocks with floating image support.
- *
- * Pre-scans all blocks to find floating images and creates exclusion zones.
- * Then measures each block, passing the zones so paragraphs can calculate
- * per-line widths based on vertical overlap with floating images.
- */
-function measureBlocks(
-  blocks: FlowBlock[],
-  contentWidth: number | number[],
-): Measure[] {
-  const defaultWidth = Array.isArray(contentWidth)
-    ? (contentWidth[0] ?? 0)
-    : contentWidth;
-  // Pre-extract floating image exclusion zones with anchor block indices
-  const floatingZonesWithAnchors = extractFloatingZones(blocks, defaultWidth);
-
-  // Margin-relative zones (positioned relative to page/margin) on the same vertical
-  // position are likely on the same page. Group them and activate all from the earliest
-  // anchor so text wraps around ALL images from the first paragraph onward.
-  // e.g. left-aligned and right-aligned images at margin top should both affect text
-  // starting from the first anchor paragraph, not just the one containing each image.
-  const marginRelative = floatingZonesWithAnchors.filter(
-    (z) => z.isMarginRelative,
-  );
-  const paragraphRelative = floatingZonesWithAnchors.filter(
-    (z) => !z.isMarginRelative,
-  );
-
-  // Group margin-relative zones by topY and move all to earliest anchor in group
-  const marginByTopY = new Map<number, FloatingZoneWithAnchor[]>();
-  for (const z of marginRelative) {
-    const group = marginByTopY.get(z.topY) ?? [];
-    group.push(z);
-    marginByTopY.set(z.topY, group);
-  }
-
-  const adjustedZones: FloatingZoneWithAnchor[] = [...paragraphRelative];
-  for (const group of marginByTopY.values()) {
-    const minAnchor = Math.min(...group.map((z) => z.anchorBlockIndex));
-    for (const z of group) {
-      adjustedZones.push({ ...z, anchorBlockIndex: minAnchor });
-    }
-  }
-
-  // Group zones by effective anchor block index
-  const zonesByAnchor = new Map<number, FloatingImageZone[]>();
-  for (const z of adjustedZones) {
-    const existing = zonesByAnchor.get(z.anchorBlockIndex) ?? [];
-    existing.push({
-      leftMargin: z.leftMargin,
-      rightMargin: z.rightMargin,
-      topY: z.topY,
-      bottomY: z.bottomY,
-    });
-    zonesByAnchor.set(z.anchorBlockIndex, existing);
-  }
-
-  const anchorIndices = new Set(adjustedZones.map((z) => z.anchorBlockIndex));
-
-  // Track cumulative Y position for floating zone overlap calculation
-  // Resets when we reach a block with floating images (establishing local page coords)
-  let cumulativeY = 0;
-  let activeZones: FloatingImageZone[] = [];
-
-  return blocks.map((block, blockIndex) => {
-    recordMeasureBlock(blockIndex, block);
-
-    // Check if this block is an anchor for floating images
-    // If so, reset cumulative Y and replace active zones (old zones from previous
-    // anchors are invalid after the Y reset since their topY/bottomY are in the old
-    // coordinate system)
-    if (anchorIndices.has(blockIndex)) {
-      cumulativeY = 0;
-      activeZones = zonesByAnchor.get(blockIndex) ?? [];
-    }
-
-    const zones = activeZones.length > 0 ? activeZones : undefined;
-
-    try {
-      const blockWidth = Array.isArray(contentWidth)
-        ? (contentWidth[blockIndex] ?? defaultWidth)
-        : contentWidth;
-      const measure = measureBlock(block, blockWidth, zones, cumulativeY);
-
-      // Update cumulative Y for next block
-      if (
-        "totalHeight" in measure &&
-        !(block.kind === "table" && (block as TableBlock).floating)
-      ) {
-        cumulativeY += measure.totalHeight;
-      }
-
-      return measure;
-    } catch {
-      // Return a minimal measure so we don't crash the entire layout
-      return { totalHeight: 20 } as Measure;
-    }
-  });
-}
-
-function measureSingleBlockWithoutFloatingZones(
-  block: FlowBlock,
-  blockWidth: number,
-  blockIndex: number,
-): Measure {
-  recordMeasureBlock(blockIndex, block);
-  return measureBlock(block, blockWidth);
 }
 
 // =============================================================================
@@ -1487,6 +1755,10 @@ export function PagedEditor(
     footerContent,
     firstPageHeaderContent,
     firstPageFooterContent,
+    headerContentRId,
+    footerContentRId,
+    firstPageHeaderContentRId,
+    firstPageFooterContentRId,
     readOnly = false,
     pageGap = DEFAULT_PAGE_GAP,
     zoom = 1,
@@ -1494,6 +1766,7 @@ export function PagedEditor(
     onReadOnlyEditAttempt,
     onSelectionChange,
     onSelectionTextChange,
+    onEditorViewReady,
     externalPlugins = EMPTY_PLUGINS,
     collaboration,
     extensionManager,
@@ -1528,6 +1801,7 @@ export function PagedEditor(
   const containerRef = useRef<HTMLDivElement>(null);
   const pagesContainerRef = useRef<HTMLDivElement>(null);
   const hiddenPMRef = useRef<HiddenProseMirrorRef>(null);
+  const hfPMsRef = useRef<HiddenHeaderFooterPMsRef>(null);
   const painterRef = useRef<LayoutPainter | null>(null);
 
   // Visual line navigation (ArrowUp/ArrowDown with sticky X)
@@ -1541,6 +1815,7 @@ export function PagedEditor(
   // when parent passes unstable callback references
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onSelectionTextChangeRef = useRef(onSelectionTextChange);
+  const onEditorViewReadyRef = useRef(onEditorViewReady);
   const onDocumentChangeRef = useRef(onDocumentChange);
   const onTotalPagesChangeRef = useRef(onTotalPagesChange);
   const lastTotalPagesRef = useRef<number | null>(null);
@@ -1548,6 +1823,7 @@ export function PagedEditor(
   // Keep refs in sync with latest props
   onSelectionChangeRef.current = onSelectionChange;
   onSelectionTextChangeRef.current = onSelectionTextChange;
+  onEditorViewReadyRef.current = onEditorViewReady;
   onDocumentChangeRef.current = onDocumentChange;
   onTotalPagesChangeRef.current = onTotalPagesChange;
 
@@ -1555,11 +1831,29 @@ export function PagedEditor(
   const [layout, setLayout] = useState<Layout | null>(null);
   const [blocks, setBlocks] = useState<FlowBlock[]>([]);
   const [measures, setMeasures] = useState<Measure[]>([]);
+  const [shouldCreateHiddenEditorView, setShouldCreateHiddenEditorView] =
+    useState(() => collaboration !== undefined);
+  const shouldFocusHiddenEditorOnReadyRef = useRef(collaboration !== undefined);
+  const [precomputedInitialState, setPrecomputedInitialState] =
+    useState<EditorState | null>(null);
   const layoutArtifactsRef = useRef<{
     blocks: FlowBlock[];
     blockWidths: number[];
     measures: Measure[];
   } | null>(null);
+  const precomputedInitialStateRef = useRef<EditorState | null>(null);
+  const precomputedInitialDocumentRef = useRef<Document | null>(null);
+  const preHiddenInitialLayoutDoneRef = useRef(false);
+  const pendingHiddenEditorSelectionRef =
+    useRef<PendingHiddenEditorSelection | null>(null);
+  const queuedInputBeforeHiddenEditorRef = useRef<QueuedHiddenEditorInput[]>(
+    [],
+  );
+  const lastLayoutEditorStateRef = useRef<EditorState | null>(null);
+  const lastLaidOutPmDocRef = useRef<EditorState["doc"] | null>(null);
+  const lastLayoutUsedLoadedFontsRef = useRef(false);
+  const pendingInitialFontReadyLayoutRef = useRef(false);
+  const suppressFontReadyUntilRef = useRef(0);
   const [isFocused, setIsFocused] = useState(false);
   const [selectionRects, setSelectionRects] = useState<SelectionRect[]>([]);
   const [caretPosition, setCaretPosition] = useState<CaretPosition | null>(
@@ -1572,11 +1866,36 @@ export function PagedEditor(
   // doesn't depend on a state setter callback that would trigger
   // its own re-run.
   const anonymizationMatchesRef = useRef<readonly AnonymizationMatch[]>([]);
+  const anonymizationOverlayRequestSeqRef = useRef(0);
+  // Autocomplete (inline ghost-text) overlay state. Mirrors the
+  // anonymization pattern: a ref tracks the latest plugin
+  // suggestion, a derived caret-rect lives in state and drives
+  // the overlay. The plugin sits in the hidden editor; the
+  // visible ghost is painted on the paged canvas.
+  const autocompleteSuggestionRef = useRef<AutocompleteSuggestionState>({
+    status: "idle",
+    anchor: null,
+    text: "",
+    requestId: null,
+  });
+  const autocompleteOverlayRequestSeqRef = useRef(0);
+  const [autocompleteCaret, setAutocompleteCaret] =
+    useState<AutocompleteCaretRect | null>(null);
+  const [autocompleteText, setAutocompleteText] = useState<string>("");
+  const [autocompleteIsStreaming, setAutocompleteIsStreaming] =
+    useState<boolean>(false);
   const [remoteSelections, setRemoteSelections] = useState<
     HiddenProseMirrorRemoteSelection[]
   >([]);
   const suppressSelectionOverlayRef = useRef(false);
   const revealSelectionOverlayTimerRef = useRef<number | null>(null);
+  const selectionOverlayRequestSeqRef = useRef(0);
+
+  const validPrecomputedInitialState =
+    precomputedInitialDocumentRef.current === document
+      ? precomputedInitialState
+      : null;
+  precomputedInitialStateRef.current = validPrecomputedInitialState;
 
   // Image selection state
   const [selectedImageInfo, setSelectedImageInfo] =
@@ -1605,6 +1924,119 @@ export function PagedEditor(
   // Drag selection state
   const isDraggingRef = useRef(false);
   const dragAnchorRef = useRef<number | null>(null);
+  // When the drag originated inside a painted HF slot, the anchor lives in
+  // that slot's PM (`hfPMsRef.current.getView(rId)`), not the body PM. The
+  // pointer pipeline reads this on every mousemove + on shift-click extend
+  // so drag-select / shift-extend dispatch on the right surface.
+  const activeHfDragSurfaceRef = useRef<{
+    rId: string;
+    kind: "header" | "footer";
+  } | null>(null);
+  // Same idea for table resize: when the resize handle lives inside an HF
+  // table the commit must dispatch setNodeMarkup on that slot's PM, not on
+  // the body PM. Captured at mousedown, cleared on mouseup.
+  const resizingHfSurfaceRef = useRef<{
+    rId: string;
+    kind: "header" | "footer";
+  } | null>(null);
+
+  const ensureHiddenEditorView = useCallback(
+    ({ focus = true, sync = false }: EnsureHiddenEditorViewOptions = {}) => {
+      if (focus) {
+        shouldFocusHiddenEditorOnReadyRef.current = true;
+      } else if (
+        !shouldCreateHiddenEditorView &&
+        !hiddenPMRef.current?.getView()
+      ) {
+        shouldFocusHiddenEditorOnReadyRef.current = false;
+      }
+
+      if (sync) {
+        flushSync(() => {
+          setShouldCreateHiddenEditorView(true);
+        });
+        return;
+      }
+
+      setShouldCreateHiddenEditorView(true);
+    },
+    [shouldCreateHiddenEditorView],
+  );
+
+  const queueHiddenEditorSelection = useCallback(
+    (selection: PendingHiddenEditorSelection) => {
+      pendingHiddenEditorSelectionRef.current = selection;
+      ensureHiddenEditorView();
+    },
+    [ensureHiddenEditorView],
+  );
+
+  const queueHiddenEditorTextInput = useCallback((text: string) => {
+    queuedInputBeforeHiddenEditorRef.current.push({ type: "text", text });
+  }, []);
+
+  const queueHiddenEditorKeyDown = useCallback((event: React.KeyboardEvent) => {
+    queuedInputBeforeHiddenEditorRef.current.push({
+      type: "keydown",
+      eventInit: toDeferredKeyboardEventInit(event),
+    });
+  }, []);
+
+  const applyPendingHiddenEditorInput = useCallback((view: EditorView) => {
+    const pendingSelection = pendingHiddenEditorSelectionRef.current;
+    pendingHiddenEditorSelectionRef.current = null;
+
+    if (pendingSelection?.type === "node") {
+      try {
+        view.dispatch(
+          view.state.tr.setSelection(
+            NodeSelection.create(view.state.doc, pendingSelection.pos),
+          ),
+        );
+      } catch {
+        // Fall through to queued text insertion at the current selection.
+      }
+    }
+
+    if (pendingSelection?.type === "text") {
+      const docEnd = view.state.doc.content.size;
+      const anchor = Math.max(0, Math.min(pendingSelection.anchor, docEnd));
+      const head =
+        pendingSelection.head === undefined
+          ? anchor
+          : Math.max(0, Math.min(pendingSelection.head, docEnd));
+      try {
+        const selection = TextSelection.between(
+          view.state.doc.resolve(anchor),
+          view.state.doc.resolve(head),
+        );
+        view.dispatch(view.state.tr.setSelection(selection));
+      } catch {
+        // Keep the default selection if the cached visual position went stale.
+      }
+    }
+
+    const queuedInput = queuedInputBeforeHiddenEditorRef.current;
+    if (queuedInput.length === 0) {
+      return;
+    }
+
+    queuedInputBeforeHiddenEditorRef.current = [];
+    for (const input of queuedInput) {
+      if (input.type === "text") {
+        dispatchEditorTextInput(view, input.text);
+        continue;
+      }
+
+      replayDeferredKeyDown(view, input.eventInit);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (collaboration !== undefined) {
+      ensureHiddenEditorView();
+    }
+  }, [collaboration, ensureHiddenEditorView]);
 
   // Column resize state
   const isResizingColumnRef = useRef(false);
@@ -1690,6 +2122,54 @@ export function PagedEditor(
     [sectionProperties],
   );
   const contentWidth = pageSize.w - margins.left - margins.right;
+  const defaultTabStop = document?.package.settings?.defaultTabStop;
+  const sectionHeaderFooterRefs = useMemo(
+    () => getSectionHeaderFooterRefs(document),
+    [document],
+  );
+  const layoutInputSignature = useMemo(
+    () =>
+      buildLayoutInputSignature({
+        columns,
+        contentWidth,
+        defaultTabStop,
+        firstPageFooterContent,
+        firstPageHeaderContent,
+        footerContent,
+        headerContent,
+        headerContentRId,
+        footerContentRId,
+        firstPageHeaderContentRId,
+        firstPageFooterContentRId,
+        sectionHeaderFooterRefs,
+        margins,
+        pageGap,
+        pageSize,
+        sectionProperties,
+        styles,
+        theme: _theme,
+      }),
+    [
+      columns,
+      contentWidth,
+      defaultTabStop,
+      firstPageFooterContent,
+      firstPageHeaderContent,
+      footerContent,
+      headerContent,
+      headerContentRId,
+      footerContentRId,
+      firstPageHeaderContentRId,
+      firstPageFooterContentRId,
+      sectionHeaderFooterRefs,
+      margins,
+      pageGap,
+      pageSize,
+      sectionProperties,
+      styles,
+      _theme,
+    ],
+  );
 
   // Initialize painter using useMemo to ensure it's ready before first render callbacks
   const painter = useMemo(
@@ -1718,8 +2198,20 @@ export function PagedEditor(
   const runLayoutPipeline = useCallback(
     (
       state: EditorState,
-      options: { dirtyRange?: DirtyRange; forceFull?: boolean } = {},
+      options: {
+        dirtyRange?: DirtyRange;
+        forceFull?: boolean;
+        reason?: LayoutRunReason;
+      } = {},
     ) => {
+      const reason = options.reason ?? "manual";
+      const recordPhaseDuration = (
+        phase: LayoutPhase,
+        startedAt: number,
+      ): void => {
+        recordLayoutPhase(reason, phase, performance.now() - startedAt);
+      };
+
       // Capture current state sequence for this layout run
       const currentEpoch = syncCoordinator.getStateSeq();
 
@@ -1728,6 +2220,7 @@ export function PagedEditor(
 
       try {
         // Step 1: Convert PM doc to flow blocks
+        let phaseStartedAt = performance.now();
         const pageContentHeight = pageSize.h - margins.top - margins.bottom;
         const flowOpts: ToFlowBlocksOptions = {
           pageContentHeight,
@@ -1735,44 +2228,19 @@ export function PagedEditor(
         if (_theme !== undefined) {
           flowOpts.theme = _theme;
         }
+        // Stamp the document's `w:defaultTabStop` onto every paragraph so
+        // list-marker tab-stop math (renderParagraph + measureParagraph)
+        // uses the right grid. Absent settings.xml falls back to the
+        // OOXML default inside `getListMarkerInlineWidth`.
+        if (defaultTabStop !== undefined) {
+          flowOpts.defaultTabStopTwips = defaultTabStop;
+        }
         const newBlocks = toFlowBlocks(state.doc, flowOpts);
         setBlocks(newBlocks);
-
-        // Compute per-block widths accounting for section breaks with different column configs
-        const bodyLayoutConfig: SectionLayoutConfig = {
-          pageSize,
-          margins,
-        };
-        if (columns !== undefined) {
-          bodyLayoutConfig.columns = columns;
-        }
-        const blockWidths = computePerBlockWidths({
-          blocks: newBlocks,
-          bodyConfig: bodyLayoutConfig,
-          finalConfig: bodyLayoutConfig,
-        });
-        const incrementalResult =
-          options.dirtyRange && !options.forceFull && layoutArtifactsRef.current
-            ? tryBuildIncrementalMeasures({
-                previousBlocks: layoutArtifactsRef.current.blocks,
-                previousMeasures: layoutArtifactsRef.current.measures,
-                previousBlockWidths: layoutArtifactsRef.current.blockWidths,
-                nextBlocks: newBlocks,
-                nextBlockWidths: blockWidths,
-                dirtyRange: options.dirtyRange,
-                measureBlock: measureSingleBlockWithoutFloatingZones,
-              })
-            : null;
-        const newMeasures =
-          incrementalResult?.measures ?? measureBlocks(newBlocks, blockWidths);
-        layoutArtifactsRef.current = {
-          blocks: newBlocks,
-          blockWidths,
-          measures: newMeasures,
-        };
-        setMeasures(newMeasures);
+        recordPhaseDuration("flow-blocks", phaseStartedAt);
 
         // Step 2.5: Collect footnote references from blocks
+        phaseStartedAt = performance.now();
         const footnoteRefs = collectFootnoteRefs(newBlocks);
         const hasFootnotes =
           footnoteRefs.length > 0 && document?.package.footnotes;
@@ -1789,80 +2257,219 @@ export function PagedEditor(
           pageSize,
           margins,
         };
-        const hfOptions = {
-          ...(styles ? { styles } : {}),
-          ...(_theme !== undefined ? { theme: _theme } : {}),
-          measureBlocks,
+        // Header/footer blocks are measured once but painted on every page with
+        // a different page number. Measure with the prior render's page count
+        // first, then rebuild the prepared HF content with the final page count
+        // after body layout stabilizes so digit-boundary changes are reflected
+        // before paint.
+        const hfPageCountEstimate = layout?.pages.length ?? 1;
+        const hfClock = new Date();
+        const buildHfOptions = (
+          pageCount: number,
+          fieldInputs?: HeaderFooterFieldInputs,
+        ) => {
+          const hfMeasureBlocks: MeasureBlocksFn = (hfBlocks, hfWidth) =>
+            measureBlocks(
+              hfBlocks,
+              hfWidth,
+              undefined,
+              undefined,
+              buildHeaderFooterFieldValues(
+                hfBlocks,
+                pageCount,
+                hfClock,
+                fieldInputs,
+              ),
+            );
+          return {
+            ...(styles ? { styles } : {}),
+            ...(_theme !== undefined ? { theme: _theme } : {}),
+            measureBlocks: hfMeasureBlocks,
+            ...(defaultTabStop !== undefined
+              ? { defaultTabStopTwips: defaultTabStop }
+              : {}),
+          };
         };
-        const headerContentForRender = convertHeaderFooterToContent(
+        const hfOptions = buildHfOptions(hfPageCountEstimate);
+        let headerContentForRender = renderHfFromContentOrPm(
           headerContent,
+          headerContentRId,
+          hfPMsRef.current,
           contentWidth,
           hfMetricsHeader,
           hfOptions,
         );
-        const footerContentForRender = convertHeaderFooterToContent(
+        let footerContentForRender = renderHfFromContentOrPm(
           footerContent,
+          footerContentRId,
+          hfPMsRef.current,
           contentWidth,
           hfMetricsFooter,
           hfOptions,
         );
         const hasTitlePg = sectionProperties?.titlePg === true;
-        const firstPageHeaderForRender = hasTitlePg
-          ? convertHeaderFooterToContent(
+        let firstPageHeaderForRender = hasTitlePg
+          ? renderHfFromContentOrPm(
               firstPageHeaderContent,
+              firstPageHeaderContentRId,
+              hfPMsRef.current,
               contentWidth,
               hfMetricsHeader,
               hfOptions,
             )
           : undefined;
-        const firstPageFooterForRender = hasTitlePg
-          ? convertHeaderFooterToContent(
+        let firstPageFooterForRender = hasTitlePg
+          ? renderHfFromContentOrPm(
               firstPageFooterContent,
+              firstPageFooterContentRId,
+              hfPMsRef.current,
               contentWidth,
               hfMetricsFooter,
               hfOptions,
             )
           : undefined;
+        let headerContentByRId = renderHeaderFooterContentByRId(
+          document?.package.headers,
+          hfPMsRef.current,
+          contentWidth,
+          hfMetricsHeader,
+          hfOptions,
+        );
+        let footerContentByRId = renderHeaderFooterContentByRId(
+          document?.package.footers,
+          hfPMsRef.current,
+          contentWidth,
+          hfMetricsFooter,
+          hfOptions,
+        );
 
+        // Rendered H/F content is shared across every extender; only the
+        // page size (body vs. a section's own) and the mode (default vs.
+        // first-page) vary.
+        const hfExtenderContent = {
+          headerContent: headerContentForRender,
+          footerContent: footerContentForRender,
+          firstPageHeaderContent: firstPageHeaderForRender,
+          firstPageFooterContent: firstPageFooterForRender,
+        };
+        const hfWarn = (msg: string): void => {
+          // eslint-disable-next-line no-console
+          console.warn(`[PagedEditor] ${msg}`);
+        };
         // Default extender — applied to pages 2+ of every section. It
         // ignores firstPage H/F so a `<w:titlePg/>` section's
         // overflowing first-page header doesn't push body content down
         // on every subsequent page.
         const extendForHfOverflow = computeHeaderFooterMarginExtender({
-          headerContent: headerContentForRender,
-          footerContent: footerContentForRender,
-          firstPageHeaderContent: firstPageHeaderForRender,
-          firstPageFooterContent: firstPageFooterForRender,
+          ...hfExtenderContent,
+          pageSize,
+          warn: hfWarn,
         });
         // First-page extender — used only for page 1 of a titlePg
         // section so the title page's larger header reservation is
         // honored without leaking onto pages 2+.
         const extendForFirstPage = computeFirstPageHeaderFooterMarginExtender({
-          headerContent: headerContentForRender,
-          footerContent: footerContentForRender,
-          firstPageHeaderContent: firstPageHeaderForRender,
-          firstPageFooterContent: firstPageFooterForRender,
+          ...hfExtenderContent,
+          pageSize,
+          warn: hfWarn,
         });
-        const effectiveMargins = extendForHfOverflow(margins);
-        const effectiveFirstPageMargins = hasTitlePg
+        let effectiveMargins = extendForHfOverflow(margins);
+        let effectiveFirstPageMargins = hasTitlePg
           ? extendForFirstPage(margins)
           : undefined;
-        // Section-break blocks carry their own `sb.margins` from
-        // `<w:sectPr>` and the layout engine prefers those over the
-        // body-level fallback. Apply the extension to each one too,
-        // otherwise a footer that overflows on one section silently
-        // re-overlaps body text on the next. (Eigenpal #400.)
-        for (const block of newBlocks) {
-          if (block.kind !== "sectionBreak") {
-            continue;
-          }
-          const sb = block as SectionBreakBlock;
-          if (sb.margins) {
-            sb.margins = extendForHfOverflow(sb.margins);
-          }
+        const sectionBreaks = newBlocks.filter(
+          (block): block is SectionBreakBlock => block.kind === "sectionBreak",
+        );
+        const originalSectionBreakMargins = new Map<
+          SectionBreakBlock["id"],
+          PageMargins | undefined
+        >();
+        for (const sectionBreak of sectionBreaks) {
+          originalSectionBreakMargins.set(
+            sectionBreak.id,
+            sectionBreak.margins ? { ...sectionBreak.margins } : undefined,
+          );
         }
+        const restoreSectionBreakMargins = (): void => {
+          for (const sectionBreak of sectionBreaks) {
+            const originalMargins = originalSectionBreakMargins.get(
+              sectionBreak.id,
+            );
+            if (originalMargins === undefined) {
+              delete sectionBreak.margins;
+              continue;
+            }
+            sectionBreak.margins = { ...originalMargins };
+          }
+        };
+        const applySectionBreakMargins = (
+          content: typeof hfExtenderContent,
+          bodyMargins: PageMargins,
+        ): void => {
+          restoreSectionBreakMargins();
+          // Section-break blocks carry their own `pageSize`/`margins` from
+          // `<w:sectPr>` and the layout engine prefers those over the
+          // body-level fallback. Extend each against its own resolved page
+          // so an overflowing footer never re-overlaps body text on the next
+          // section. (Eigenpal #400.)
+          extendSectionBreakMargins(sectionBreaks, {
+            content,
+            bodyPageSize: pageSize,
+            bodyMargins,
+            warn: hfWarn,
+          });
+        };
+        applySectionBreakMargins(hfExtenderContent, effectiveMargins);
+        recordPhaseDuration("header-footer", phaseStartedAt);
+
+        // Compute per-block widths + band geometry from the EFFECTIVE margins
+        // layout uses (header/footer overflow extension + section-break margin
+        // extension applied above), so a page/margin-pinned topAndBottom band
+        // reserves its band at the same Y the box is painted. Measuring with the
+        // raw margins would mis-place the reserved band when a tall header/footer
+        // extends the margins. eigenpal #694.
+        phaseStartedAt = performance.now();
+        let bodyLayoutConfig: SectionLayoutConfig = {
+          pageSize,
+          margins: effectiveMargins,
+        };
+        if (columns !== undefined) {
+          bodyLayoutConfig.columns = columns;
+        }
+        let blockMeasureInputs = computePerBlockMeasureInputs({
+          blocks: newBlocks,
+          bodyConfig: bodyLayoutConfig,
+          finalConfig: bodyLayoutConfig,
+        });
+        let blockWidths = blockMeasureInputs.widths;
+        const incrementalResult =
+          options.dirtyRange && !options.forceFull && layoutArtifactsRef.current
+            ? tryBuildIncrementalMeasures({
+                previousBlocks: layoutArtifactsRef.current.blocks,
+                previousMeasures: layoutArtifactsRef.current.measures,
+                previousBlockWidths: layoutArtifactsRef.current.blockWidths,
+                nextBlocks: newBlocks,
+                nextBlockWidths: blockWidths,
+                dirtyRange: options.dirtyRange,
+                measureBlock: measureSingleBlockWithoutFloatingZones,
+              })
+            : null;
+        let newMeasures =
+          incrementalResult?.measures ??
+          measureBlocks(newBlocks, blockWidths, blockMeasureInputs.marginTops, {
+            pageHeight: blockMeasureInputs.pageHeights,
+            marginBottom: blockMeasureInputs.marginBottoms,
+          });
+        layoutArtifactsRef.current = {
+          blocks: newBlocks,
+          blockWidths,
+          measures: newMeasures,
+        };
+        setMeasures(newMeasures);
+        recordPhaseDuration("measure-blocks", phaseStartedAt);
 
         // Step 3: Layout blocks onto pages (two-pass if footnotes exist)
+        phaseStartedAt = performance.now();
         let newLayout: Layout;
         let pageFootnoteMap = new Map<number, number[]>();
         let footnoteContentMap = new Map<number, FootnoteContent>();
@@ -1874,20 +2481,36 @@ export function PagedEditor(
           | "evenPage"
           | "oddPage"
           | undefined;
-        const layoutOpts: Parameters<typeof layoutDocument>[2] = {
-          pageSize,
-          margins: effectiveMargins,
-          pageGap,
+        const buildLayoutOpts = (
+          nextMargins: PageMargins,
+          nextFirstPageMargins: PageMargins | undefined,
+        ): Parameters<typeof layoutDocument>[2] => {
+          const nextLayoutOpts: Parameters<typeof layoutDocument>[2] = {
+            pageSize,
+            margins: nextMargins,
+            pageGap,
+          };
+          if (nextFirstPageMargins !== undefined) {
+            nextLayoutOpts.firstPageMargins = nextFirstPageMargins;
+          }
+          if (columns !== undefined) {
+            nextLayoutOpts.columns = columns;
+          }
+          if (bodyBreakType !== undefined) {
+            nextLayoutOpts.bodyBreakType = bodyBreakType;
+          }
+          if (sectionHeaderFooterRefs !== undefined) {
+            nextLayoutOpts.sectionHeaderFooterRefs = sectionHeaderFooterRefs;
+          }
+          return nextLayoutOpts;
         };
-        if (effectiveFirstPageMargins !== undefined) {
-          layoutOpts.firstPageMargins = effectiveFirstPageMargins;
-        }
-        if (columns !== undefined) {
-          layoutOpts.columns = columns;
-        }
-        if (bodyBreakType !== undefined) {
-          layoutOpts.bodyBreakType = bodyBreakType;
-        }
+        const layoutOpts = buildLayoutOpts(
+          effectiveMargins,
+          effectiveFirstPageMargins,
+        );
+        // The exact options the layout was produced with, reused if the field-
+        // width stabilization pass re-lays-out below.
+        let layoutOptsUsed: Parameters<typeof layoutDocument>[2] = layoutOpts;
 
         if (hasFootnotes) {
           // Build footnote content and measure heights up front. The
@@ -1908,27 +2531,30 @@ export function PagedEditor(
               if (_theme !== undefined) {
                 footnoteOptions.theme = _theme;
               }
+              if (defaultTabStop !== undefined) {
+                footnoteOptions.defaultTabStopTwips = defaultTabStop;
+              }
               return footnoteOptions;
             })(),
           );
 
           const footnoteHeightById = new Map<number, number>();
-          // Per-fn vertical margin applied by the painter
-          // (`renderFootnoteArea` sets `marginBottom: 4px` on each
-          // fn entry). Reserved alongside content height so the page
-          // accounts for inter-fn whitespace.
-          const FOOTNOTE_ENTRY_MARGIN = 4;
+          // Any per-fn wrapper margin applied by the painter is reserved
+          // alongside content height. The value is zero for Word-like footnote
+          // spacing; source paragraph spacing inside each note carries the
+          // visible gaps.
           for (const [id, content] of footnoteContentMap) {
-            footnoteHeightById.set(id, content.height + FOOTNOTE_ENTRY_MARGIN);
+            footnoteHeightById.set(
+              id,
+              content.height + FOOTNOTE_ENTRY_MARGIN_BOTTOM,
+            );
           }
-          // Note: the layout engine adds the divider's height once
-          // per fn-bearing page (in paginator.addFootnoteHeight); we
-          // pass per-fn (content + entry margin) here.
+          // Note: the layout engine adds the divider's height once per
+          // fn-bearing page (in paginator.addFootnoteHeight); we pass per-fn
+          // content plus any wrapper margin here.
 
-          newLayout = layoutDocument(newBlocks, newMeasures, {
-            ...layoutOpts,
-            footnoteHeightById,
-          });
+          layoutOptsUsed = { ...layoutOpts, footnoteHeightById };
+          newLayout = layoutDocument(newBlocks, newMeasures, layoutOptsUsed);
 
           // The layout engine assigned `page.footnoteIds` line-by-
           // line via `paginator.addFootnoteHeight(_, ids)`, so a fn
@@ -1948,11 +2574,255 @@ export function PagedEditor(
           newLayout = layoutDocument(newBlocks, newMeasures, layoutOpts);
         }
 
+        const rebuildFootnotePageMap = (): void => {
+          pageFootnoteMap = new Map<number, number[]>();
+          for (const page of newLayout.pages) {
+            if (page.footnoteIds && page.footnoteIds.length > 0) {
+              pageFootnoteMap.set(page.number, page.footnoteIds);
+            }
+          }
+        };
+
+        const withFootnoteHeights = (
+          nextLayoutOpts: Parameters<typeof layoutDocument>[2],
+        ): Parameters<typeof layoutDocument>[2] => {
+          if (!hasFootnotes) {
+            return nextLayoutOpts;
+          }
+          const footnoteHeightById = new Map<number, number>();
+          for (const [id, content] of footnoteContentMap) {
+            footnoteHeightById.set(
+              id,
+              content.height + FOOTNOTE_ENTRY_MARGIN_BOTTOM,
+            );
+          }
+          return { ...nextLayoutOpts, footnoteHeightById };
+        };
+
+        const relayoutWithCurrentMeasures = (
+          nextLayoutOpts: Parameters<typeof layoutDocument>[2],
+        ): void => {
+          layoutOptsUsed = withFootnoteHeights(nextLayoutOpts);
+          newLayout = layoutDocument(newBlocks, newMeasures, layoutOptsUsed);
+          if (hasFootnotes) {
+            rebuildFootnotePageMap();
+          }
+        };
+
+        const stabilizeFieldWidths = (): void => {
+          if (incrementalResult) {
+            return;
+          }
+          const MAX_FIELD_STABILIZATION_PASSES = 3;
+          const fieldClock = new Date();
+          let previousFieldValues: Map<number, string> | null = null;
+          for (let pass = 0; pass < MAX_FIELD_STABILIZATION_PASSES; pass++) {
+            const seqValues = buildSeqValues(newBlocks);
+            const bookmarkTextInputs =
+              previousFieldValues === null
+                ? { seqValues }
+                : { fieldValues: previousFieldValues, seqValues };
+            const { values, changed } = resolveFieldValues(
+              newBlocks,
+              newLayout.pages,
+              {
+                totalPages: newLayout.pages.length,
+                bookmarkPages: buildBookmarkPageMap(newLayout.pages, newBlocks),
+                bookmarkText: buildBookmarkText(newBlocks, bookmarkTextInputs),
+                seqValues,
+                sectionPageCounts: buildSectionPageCounts(newLayout.pages),
+                now: fieldClock,
+              },
+            );
+            const settled =
+              previousFieldValues === null
+                ? !changed
+                : fieldValuesEqual(previousFieldValues, values);
+            if (settled) {
+              stabilizedFieldValues = values;
+              break;
+            }
+            previousFieldValues = values;
+            stabilizedFieldValues = values;
+            newMeasures = measureBlocks(
+              newBlocks,
+              blockWidths,
+              blockMeasureInputs.marginTops,
+              {
+                pageHeight: blockMeasureInputs.pageHeights,
+                marginBottom: blockMeasureInputs.marginBottoms,
+              },
+              values,
+            );
+            relayoutWithCurrentMeasures(layoutOptsUsed);
+            layoutArtifactsRef.current = {
+              blocks: newBlocks,
+              blockWidths,
+              measures: newMeasures,
+            };
+            setMeasures(newMeasures);
+          }
+        };
+
+        // Field-width stabilization: fields were measured at their cached
+        // fallback text. Resolve them against this layout and, if a value's
+        // width differs, re-measure and re-lay-out so wrapping matches what the
+        // painter draws. PAGE/NUMPAGES depend on the layout they help produce,
+        // so a re-layout can shift pages and change values again — iterate to a
+        // fixed point with a small cap. Gated on a real change, so field-free
+        // documents and most edits do zero passes; skipped on the incremental
+        // (typing) path to keep keystrokes cheap.
+        let stabilizedFieldValues: Map<number, string> | undefined;
+        stabilizeFieldWidths();
+
+        const rebuildHeaderFooterForLayout = (): typeof hfExtenderContent => {
+          const seqValues = buildSeqValues(newBlocks);
+          const bookmarkTextInputs =
+            stabilizedFieldValues === undefined
+              ? { seqValues }
+              : { fieldValues: stabilizedFieldValues, seqValues };
+          const finalHfFieldInputs: HeaderFooterFieldInputs = {
+            bookmarkPages: buildBookmarkPageMap(newLayout.pages, newBlocks),
+            bookmarkText: buildBookmarkText(newBlocks, bookmarkTextInputs),
+            seqValues,
+            sectionPageCounts: buildSectionPageCounts(newLayout.pages),
+          };
+          const finalHfOptions = buildHfOptions(
+            newLayout.pages.length,
+            finalHfFieldInputs,
+          );
+          headerContentForRender = renderHfFromContentOrPm(
+            headerContent,
+            headerContentRId,
+            hfPMsRef.current,
+            contentWidth,
+            hfMetricsHeader,
+            finalHfOptions,
+          );
+          footerContentForRender = renderHfFromContentOrPm(
+            footerContent,
+            footerContentRId,
+            hfPMsRef.current,
+            contentWidth,
+            hfMetricsFooter,
+            finalHfOptions,
+          );
+          firstPageHeaderForRender = hasTitlePg
+            ? renderHfFromContentOrPm(
+                firstPageHeaderContent,
+                firstPageHeaderContentRId,
+                hfPMsRef.current,
+                contentWidth,
+                hfMetricsHeader,
+                finalHfOptions,
+              )
+            : undefined;
+          firstPageFooterForRender = hasTitlePg
+            ? renderHfFromContentOrPm(
+                firstPageFooterContent,
+                firstPageFooterContentRId,
+                hfPMsRef.current,
+                contentWidth,
+                hfMetricsFooter,
+                finalHfOptions,
+              )
+            : undefined;
+          headerContentByRId = renderHeaderFooterContentByRId(
+            document?.package.headers,
+            hfPMsRef.current,
+            contentWidth,
+            hfMetricsHeader,
+            finalHfOptions,
+          );
+          footerContentByRId = renderHeaderFooterContentByRId(
+            document?.package.footers,
+            hfPMsRef.current,
+            contentWidth,
+            hfMetricsFooter,
+            finalHfOptions,
+          );
+          return {
+            headerContent: headerContentForRender,
+            footerContent: footerContentForRender,
+            firstPageHeaderContent: firstPageHeaderForRender,
+            firstPageFooterContent: firstPageFooterForRender,
+          };
+        };
+
+        const MAX_HEADER_FOOTER_STABILIZATION_PASSES = 3;
+        for (
+          let pass = 0;
+          pass < MAX_HEADER_FOOTER_STABILIZATION_PASSES;
+          pass++
+        ) {
+          const finalHfExtenderContent = rebuildHeaderFooterForLayout();
+          const finalEffectiveMargins = computeHeaderFooterMarginExtender({
+            ...finalHfExtenderContent,
+            pageSize,
+            warn: hfWarn,
+          })(margins);
+          const finalEffectiveFirstPageMargins = hasTitlePg
+            ? computeFirstPageHeaderFooterMarginExtender({
+                ...finalHfExtenderContent,
+                pageSize,
+                warn: hfWarn,
+              })(margins)
+            : undefined;
+
+          if (
+            !pageMarginsEqual(effectiveMargins, finalEffectiveMargins) ||
+            !optionalPageMarginsEqual(
+              effectiveFirstPageMargins,
+              finalEffectiveFirstPageMargins,
+            )
+          ) {
+            effectiveMargins = finalEffectiveMargins;
+            effectiveFirstPageMargins = finalEffectiveFirstPageMargins;
+            applySectionBreakMargins(finalHfExtenderContent, effectiveMargins);
+            bodyLayoutConfig = { pageSize, margins: effectiveMargins };
+            if (columns !== undefined) {
+              bodyLayoutConfig.columns = columns;
+            }
+            blockMeasureInputs = computePerBlockMeasureInputs({
+              blocks: newBlocks,
+              bodyConfig: bodyLayoutConfig,
+              finalConfig: bodyLayoutConfig,
+            });
+            blockWidths = blockMeasureInputs.widths;
+            newMeasures = measureBlocks(
+              newBlocks,
+              blockWidths,
+              blockMeasureInputs.marginTops,
+              {
+                pageHeight: blockMeasureInputs.pageHeights,
+                marginBottom: blockMeasureInputs.marginBottoms,
+              },
+            );
+            layoutArtifactsRef.current = {
+              blocks: newBlocks,
+              blockWidths,
+              measures: newMeasures,
+            };
+            setMeasures(newMeasures);
+            relayoutWithCurrentMeasures(
+              buildLayoutOpts(effectiveMargins, effectiveFirstPageMargins),
+            );
+            stabilizeFieldWidths();
+            continue;
+          }
+          break;
+        }
+
         setLayout(newLayout);
-        recordLayoutComplete();
+        lastLayoutEditorStateRef.current = state;
+        lastLaidOutPmDocRef.current = state.doc;
+        lastLayoutUsedLoadedFontsRef.current = documentFontsAreLoaded();
+        recordLayoutComplete(reason);
+        recordPhaseDuration("layout-document", phaseStartedAt);
 
         // Step 4: Paint to DOM
         if (pagesContainerRef.current && painterRef.current) {
+          phaseStartedAt = performance.now();
           // Build block lookup
           const blockLookup: BlockLookup = new Map();
           for (let i = 0; i < newBlocks.length; i++) {
@@ -1973,55 +2843,128 @@ export function PagedEditor(
               )
             : undefined;
 
-          // Render pages to container
-          renderPages(newLayout.pages, pagesContainerRef.current, {
+          // Render pages to container.
+          // Built incrementally so optional fields are only present when
+          // defined (RenderPageOptions has `exactOptionalPropertyTypes`).
+          const renderOpts: RenderPageOptions & {
+            pageGap?: number;
+            footnotesByPage?: Map<number, FootnoteRenderItem[]>;
+          } = {
             pageGap,
             showShadow: true,
             blockLookup,
-            headerContent: headerContentForRender,
-            footerContent: footerContentForRender,
-            firstPageHeaderContent: firstPageHeaderForRender,
-            firstPageFooterContent: firstPageFooterForRender,
             titlePg: hasTitlePg,
-            headerDistance: sectionProperties?.headerDistance
-              ? twipsToPixels(sectionProperties.headerDistance)
-              : undefined,
-            footerDistance: sectionProperties?.footerDistance
-              ? twipsToPixels(sectionProperties.footerDistance)
-              : undefined,
-            pageBorders: sectionProperties?.pageBorders,
-            theme: _theme,
-            footnotesByPage: footnotesByPage?.size
-              ? footnotesByPage
-              : undefined,
-          } as RenderPageOptions & {
-            pageGap?: number;
-            blockLookup?: BlockLookup;
-            footnotesByPage?: Map<number, FootnoteRenderItem[]>;
-          });
-        }
-
-        // Compute anchor Y positions for comments sidebar (works without DOM queries).
-        // This is expensive on docs with many comments/tracked changes, so typing
-        // layouts skip it and let the idle full-layout reconcile update the sidebar.
-        const shouldComputeAnchorPositions =
-          onAnchorPositionsChange &&
-          (options.forceFull === true || !options.dirtyRange);
-        if (shouldComputeAnchorPositions) {
-          const positions = computeAnchorPositions(
-            hiddenPMRef.current?.getView() ?? null,
-            newLayout,
+          };
+          if (headerContentForRender) {
+            renderOpts.headerContent = headerContentForRender;
+          }
+          if (footerContentForRender) {
+            renderOpts.footerContent = footerContentForRender;
+          }
+          if (firstPageHeaderForRender) {
+            renderOpts.firstPageHeaderContent = firstPageHeaderForRender;
+          }
+          if (firstPageFooterForRender) {
+            renderOpts.firstPageFooterContent = firstPageFooterForRender;
+          }
+          if (headerContentByRId) {
+            renderOpts.headerContentByRId = headerContentByRId;
+          }
+          if (footerContentByRId) {
+            renderOpts.footerContentByRId = footerContentByRId;
+          }
+          if (
+            sectionHeaderFooterRefs === undefined &&
+            sectionProperties?.headerDistance
+          ) {
+            renderOpts.headerDistance = twipsToPixels(
+              sectionProperties.headerDistance,
+            );
+          }
+          if (
+            sectionHeaderFooterRefs === undefined &&
+            sectionProperties?.footerDistance
+          ) {
+            renderOpts.footerDistance = twipsToPixels(
+              sectionProperties.footerDistance,
+            );
+          }
+          if (sectionProperties?.pageBorders) {
+            renderOpts.pageBorders = sectionProperties.pageBorders;
+          }
+          if (_theme) {
+            renderOpts.theme = _theme;
+          }
+          if (footnotesByPage?.size) {
+            renderOpts.footnotesByPage = footnotesByPage;
+          }
+          // Map bookmarks to the pages they land on so PAGEREF fields resolve
+          // to live page numbers at paint.
+          const bookmarkPages = buildBookmarkPageMap(
+            newLayout.pages,
             newBlocks,
-            newMeasures,
-            pageGap,
-            {
-              includeRevisions: anchorPositionMode === "comments-and-revisions",
-            },
           );
-          onAnchorPositionsChange(positions);
+          if (bookmarkPages.size > 0) {
+            renderOpts.bookmarkPages = bookmarkPages;
+          }
+          // Assign SEQ caption numbers in document order so SEQ fields resolve.
+          const seqValues = buildSeqValues(newBlocks);
+          if (seqValues.size > 0) {
+            renderOpts.seqValues = seqValues;
+          }
+          // Bookmark text for REF cross-references.
+          const bookmarkTextInputs =
+            stabilizedFieldValues === undefined
+              ? { seqValues }
+              : { fieldValues: stabilizedFieldValues, seqValues };
+          const bookmarkText = buildBookmarkText(newBlocks, bookmarkTextInputs);
+          if (bookmarkText.size > 0) {
+            renderOpts.bookmarkText = bookmarkText;
+          }
+          // Per-section page counts so SECTIONPAGES fields resolve.
+          renderOpts.sectionPageCounts = buildSectionPageCounts(
+            newLayout.pages,
+          );
+          // Document watermark (rendered behind every page). Build a
+          // per-header-rId map so titlePg / even-odd / per-section
+          // header parts each paint their own watermark; the painter
+          // falls back to `renderOpts.watermark` for documents that
+          // share one header. Picture watermarks need an image-rId →
+          // asset URL resolver that currently lives outside the
+          // editor; until that's wired in, the painter silently skips
+          // them.
+          if (document) {
+            const watermark = getDocumentWatermark(document);
+            if (watermark) {
+              renderOpts.watermark = watermark;
+            }
+            const headers = document.package.headers;
+            if (headers) {
+              const watermarkByHeaderRId = new Map<string, Watermark>();
+              for (const [rId, header] of headers) {
+                if (header.watermark) {
+                  watermarkByHeaderRId.set(rId, header.watermark);
+                }
+              }
+              if (watermarkByHeaderRId.size > 0) {
+                renderOpts.watermarkByHeaderRId = watermarkByHeaderRId;
+              }
+            }
+          }
+          renderPages(newLayout.pages, pagesContainerRef.current, renderOpts);
+          recordPhaseDuration("render-pages", phaseStartedAt);
         }
-      } catch {
-        // Keep the previous anchor positions if layout measurement fails.
+      } catch (error) {
+        const invalidHighlights = describeInvalidHighlightMarks(state.doc);
+        recordLayoutError(
+          reason,
+          invalidHighlights
+            ? new Error(
+                `${String(error)} Invalid highlights: ${invalidHighlights}`,
+              )
+            : error,
+        );
+        // Keep the previous visible layout if measurement or painting fails.
       }
 
       // Signal layout is complete for this sequence
@@ -2040,11 +2983,22 @@ export function PagedEditor(
       footerContent,
       firstPageHeaderContent,
       firstPageFooterContent,
+      // HF rIds drive which hidden EditorView the pipeline sources from
+      // AND the `data-rid` stamped on each painted slot. Omitting them
+      // from this dep array let an rId swap between byte-identical
+      // HeaderFooter objects reuse a stale runLayoutPipeline closure
+      // and the painter emitted the previous slot's `data-rid` so
+      // clicks routed to the wrong HF view (Codex #487 P2: 23:21).
+      headerContentRId,
+      footerContentRId,
+      firstPageHeaderContentRId,
+      firstPageFooterContentRId,
+      sectionHeaderFooterRefs,
       _theme,
       sectionProperties,
-      onAnchorPositionsChange,
-      anchorPositionMode,
       document,
+      defaultTabStop,
+      styles,
     ],
   );
   const runLayoutPipelineRef = useRef(runLayoutPipeline);
@@ -2055,16 +3009,11 @@ export function PagedEditor(
   // =========================================================================
 
   /**
-   * Ref holding a pending requestAnimationFrame ID and the latest state.
-   * Multiple rapid transactions (e.g. typing "hello") within the same frame
-   * are coalesced so only the final state triggers an interactive layout pass.
+   * Ref holding the latest pending transaction layout request. Rapid typing
+   * updates this request in place so only the final state in the short
+   * coalescing window triggers an interactive layout pass.
    */
-  const pendingLayoutRef = useRef<{
-    dirtyRange: DirtyRange | null;
-    rafId: number;
-    state: EditorState;
-  } | null>(null);
-  const idleLayoutTimerRef = useRef<number | null>(null);
+  const pendingLayoutRef = useRef<PendingLayoutRequest | null>(null);
   const documentChangeNotifyTimerRef = useRef<number | null>(null);
 
   const flushDocumentChangeNotification = useCallback(() => {
@@ -2090,71 +3039,95 @@ export function PagedEditor(
     }, DOCUMENT_CHANGE_NOTIFY_DELAY);
   }, [flushDocumentChangeNotification]);
 
-  const scheduleIdleFullLayout = useCallback(
-    (state: EditorState) => {
-      if (idleLayoutTimerRef.current !== null) {
-        window.clearTimeout(idleLayoutTimerRef.current);
+  const flushPendingLayout = useCallback(() => {
+    const pending = pendingLayoutRef.current;
+    if (!pending || pending.rafId !== null) {
+      return;
+    }
+
+    pending.timerId = null;
+    pending.rafId = requestAnimationFrame(() => {
+      const latest = pendingLayoutRef.current;
+      pendingLayoutRef.current = null;
+      if (!latest) {
+        return;
       }
-      idleLayoutTimerRef.current = window.setTimeout(() => {
-        idleLayoutTimerRef.current = null;
-        runLayoutPipeline(state, { forceFull: true });
-      }, 200);
+
+      const layoutOptions: {
+        dirtyRange?: DirtyRange;
+        forceFull?: boolean;
+        reason: LayoutRunReason;
+      } = { reason: "transaction" };
+      if (latest.dirtyRange) {
+        layoutOptions.dirtyRange = latest.dirtyRange;
+      }
+      runLayoutPipeline(latest.state, layoutOptions);
+    });
+  }, [runLayoutPipeline]);
+
+  const armPendingLayoutTimer = useCallback(
+    (pending: PendingLayoutRequest) => {
+      if (pending.rafId !== null) {
+        return;
+      }
+      if (pending.timerId !== null) {
+        window.clearTimeout(pending.timerId);
+      }
+
+      const elapsedMs = performance.now() - pending.firstScheduledAt;
+      const delayMs =
+        elapsedMs >= TRANSACTION_LAYOUT_MAX_DELAY_MS
+          ? 0
+          : Math.min(
+              TRANSACTION_LAYOUT_DEBOUNCE_MS,
+              TRANSACTION_LAYOUT_MAX_DELAY_MS - elapsedMs,
+            );
+
+      pending.timerId = window.setTimeout(flushPendingLayout, delayMs);
     },
-    [runLayoutPipeline],
+    [flushPendingLayout],
   );
 
   /**
-   * Schedule a layout pipeline run for the next animation frame.
-   * If a run is already scheduled, the pending state is replaced so only
-   * the most recent document state gets laid out. A full source-of-truth
-   * reconcile is scheduled after the interactive pass has been idle.
+   * Schedule a layout pipeline run after a short coalescing window.
+   * If more transactions arrive before the timer fires, the pending state
+   * is replaced so rapid typing paints once for the burst while still
+   * enforcing a max latency from the first edit.
    */
   const scheduleLayout = useCallback(
     (state: EditorState, dirtyRange: DirtyRange | null) => {
-      if (idleLayoutTimerRef.current !== null) {
-        window.clearTimeout(idleLayoutTimerRef.current);
-        idleLayoutTimerRef.current = null;
-      }
-
-      if (pendingLayoutRef.current) {
-        // Already scheduled — just update the state to the latest
-        pendingLayoutRef.current.state = state;
-        pendingLayoutRef.current.dirtyRange = mergeDirtyRanges(
-          pendingLayoutRef.current.dirtyRange,
-          dirtyRange,
-        );
+      const pending = pendingLayoutRef.current;
+      if (pending) {
+        pending.state = state;
+        pending.dirtyRange = mergeDirtyRanges(pending.dirtyRange, dirtyRange);
+        armPendingLayoutTimer(pending);
         return;
       }
-      const rafId = requestAnimationFrame(() => {
-        const pending = pendingLayoutRef.current;
-        pendingLayoutRef.current = null;
-        if (pending) {
-          const layoutOptions: {
-            dirtyRange?: DirtyRange;
-            forceFull?: boolean;
-          } = {};
-          if (pending.dirtyRange) {
-            layoutOptions.dirtyRange = pending.dirtyRange;
-          }
-          runLayoutPipeline(pending.state, layoutOptions);
-          scheduleIdleFullLayout(pending.state);
-        }
-      });
-      pendingLayoutRef.current = { dirtyRange, rafId, state };
+
+      const nextPending: PendingLayoutRequest = {
+        dirtyRange,
+        firstScheduledAt: performance.now(),
+        rafId: null,
+        state,
+        timerId: null,
+      };
+      pendingLayoutRef.current = nextPending;
+      armPendingLayoutTimer(nextPending);
     },
-    [runLayoutPipeline, scheduleIdleFullLayout],
+    [armPendingLayoutTimer],
   );
 
   // Clean up pending rAF on unmount
   useEffect(
     () => () => {
       if (pendingLayoutRef.current) {
-        cancelAnimationFrame(pendingLayoutRef.current.rafId);
+        if (pendingLayoutRef.current.timerId !== null) {
+          window.clearTimeout(pendingLayoutRef.current.timerId);
+        }
+        if (pendingLayoutRef.current.rafId !== null) {
+          cancelAnimationFrame(pendingLayoutRef.current.rafId);
+        }
         pendingLayoutRef.current = null;
-      }
-      if (idleLayoutTimerRef.current !== null) {
-        window.clearTimeout(idleLayoutTimerRef.current);
-        idleLayoutTimerRef.current = null;
       }
       if (documentChangeNotifyTimerRef.current !== null) {
         window.clearTimeout(documentChangeNotifyTimerRef.current);
@@ -2296,6 +3269,10 @@ export function PagedEditor(
   const updateSelectionOverlay = useCallback(
     (state: EditorState) => {
       const { from, to } = state.selection;
+      const requestSeq = selectionOverlayRequestSeqRef.current + 1;
+      selectionOverlayRequestSeqRef.current = requestSeq;
+      const isCurrentRequest = () =>
+        selectionOverlayRequestSeqRef.current === requestSeq;
 
       // Always notify selection change (for toolbar sync) even if layout not ready
       // Use ref to avoid infinite loops when callback is unstable
@@ -2383,17 +3360,32 @@ export function PagedEditor(
           if (overlay && firstPage) {
             const overlayRect = overlay.getBoundingClientRect();
             const pageRect = firstPage.getBoundingClientRect();
-            const caret = getCaretPosition(layout, blocks, measures, from);
+            setCaretPosition(null);
+            void loadSelectionGeometry().then(
+              ({ getCaretPosition }) => {
+                if (!isCurrentRequest()) {
+                  return undefined;
+                }
 
-            if (caret) {
-              setCaretPosition({
-                ...caret,
-                x: caret.x + (pageRect.left - overlayRect.left) / zoom,
-                y: caret.y + (pageRect.top - overlayRect.top) / zoom,
-              });
-            } else {
-              setCaretPosition(null);
-            }
+                const caret = getCaretPosition(layout, blocks, measures, from);
+                if (caret) {
+                  setCaretPosition({
+                    ...caret,
+                    x: caret.x + (pageRect.left - overlayRect.left) / zoom,
+                    y: caret.y + (pageRect.top - overlayRect.top) / zoom,
+                  });
+                } else {
+                  setCaretPosition(null);
+                }
+                return undefined;
+              },
+              () => {
+                if (isCurrentRequest()) {
+                  setCaretPosition(null);
+                }
+                return undefined;
+              },
+            );
           } else {
             setCaretPosition(null);
           }
@@ -2482,22 +3474,37 @@ export function PagedEditor(
               const pageRect = firstPage.getBoundingClientRect();
               const pageOffsetX = (pageRect.left - overlayRect.left) / zoom;
               const pageOffsetY = (pageRect.top - overlayRect.top) / zoom;
+              setSelectionRects([]);
+              void loadSelectionGeometry().then(
+                ({ selectionToRects }) => {
+                  if (!isCurrentRequest()) {
+                    return undefined;
+                  }
 
-              const rects = selectionToRects(
-                layout,
-                blocks,
-                measures,
-                from,
-                to,
+                  const rects = selectionToRects(
+                    layout,
+                    blocks,
+                    measures,
+                    from,
+                    to,
+                  );
+                  const adjustedRects = rects.map((rect) => ({
+                    height: rect.height,
+                    pageIndex: rect.pageIndex,
+                    width: rect.width,
+                    x: rect.x + pageOffsetX,
+                    y: rect.y + pageOffsetY,
+                  }));
+                  setSelectionRects(adjustedRects);
+                  return undefined;
+                },
+                () => {
+                  if (isCurrentRequest()) {
+                    setSelectionRects([]);
+                  }
+                  return undefined;
+                },
               );
-              const adjustedRects = rects.map((rect) => ({
-                height: rect.height,
-                pageIndex: rect.pageIndex,
-                width: rect.width,
-                x: rect.x + pageOffsetX,
-                y: rect.y + pageOffsetY,
-              }));
-              setSelectionRects(adjustedRects);
             } else {
               setSelectionRects([]);
             }
@@ -2511,6 +3518,8 @@ export function PagedEditor(
     [layout, blocks, measures, getCaretFromDom, zoom],
     // NOTE: onSelectionChange removed from dependencies - accessed via ref to prevent infinite loops
   );
+  const updateSelectionOverlayRef = useRef(updateSelectionOverlay);
+  updateSelectionOverlayRef.current = updateSelectionOverlay;
 
   // Project anonymization match ranges onto container-space
   // rectangles. Mirrors the SelectionOverlay flow: prefer real
@@ -2521,6 +3530,10 @@ export function PagedEditor(
   // ProseMirror's spans are not used — they sit at -9999px and
   // would yield bogus coordinates.
   const updateAnonymizationOverlay = useCallback(() => {
+    const requestSeq = anonymizationOverlayRequestSeqRef.current + 1;
+    anonymizationOverlayRequestSeqRef.current = requestSeq;
+    const isCurrentRequest = () =>
+      anonymizationOverlayRequestSeqRef.current === requestSeq;
     const matches = anonymizationMatchesRef.current;
     if (matches.length === 0) {
       setAnonymizationRectGroups([]);
@@ -2544,8 +3557,10 @@ export function PagedEditor(
     const pageOffsetX = (pageRect.left - overlayRect.left) / zoom;
     const pageOffsetY = (pageRect.top - overlayRect.top) / zoom;
     const pmSpans = findBodyPmSpans(pagesContainer);
+    const layoutFallbackMatches: AnonymizationMatch[] = [];
 
     const rectsForMatch = (
+      match: AnonymizationMatch,
       from: number,
       to: number,
     ): AnonymizationRectGroup["rects"] => {
@@ -2583,7 +3598,7 @@ export function PagedEditor(
         const ownerDoc = spanEl.ownerDocument;
         const startChar = Math.max(0, from - pmStart);
         const endChar = Math.min(textNode.length, to - pmStart);
-        if (!(startChar < endChar)) {
+        if (startChar >= endChar) {
           continue;
         }
         const range = ownerDoc.createRange();
@@ -2606,20 +3621,13 @@ export function PagedEditor(
       if (!layout || blocks.length === 0) {
         return [];
       }
-      return selectionToRects(layout, blocks, measures, from, to).map(
-        (rect) => ({
-          height: rect.height,
-          pageIndex: rect.pageIndex,
-          width: rect.width,
-          x: rect.x + pageOffsetX,
-          y: rect.y + pageOffsetY,
-        }),
-      );
+      layoutFallbackMatches.push(match);
+      return [];
     };
 
     const groups: AnonymizationRectGroup[] = [];
     for (const match of matches) {
-      const rects = rectsForMatch(match.from, match.to);
+      const rects = rectsForMatch(match, match.from, match.to);
       if (rects.length > 0) {
         groups.push({
           rects,
@@ -2629,10 +3637,126 @@ export function PagedEditor(
       }
     }
     setAnonymizationRectGroups(groups);
+
+    if (layoutFallbackMatches.length === 0 || !layout || blocks.length === 0) {
+      return;
+    }
+
+    void loadSelectionGeometry().then(
+      ({ selectionToRects }) => {
+        if (!isCurrentRequest()) {
+          return undefined;
+        }
+
+        const fallbackGroups: AnonymizationRectGroup[] = [];
+        for (const match of layoutFallbackMatches) {
+          const rects = selectionToRects(
+            layout,
+            blocks,
+            measures,
+            match.from,
+            match.to,
+          ).map((rect) => ({
+            height: rect.height,
+            pageIndex: rect.pageIndex,
+            width: rect.width,
+            x: rect.x + pageOffsetX,
+            y: rect.y + pageOffsetY,
+          }));
+          if (rects.length > 0) {
+            fallbackGroups.push({
+              rects,
+              label: match.label,
+              canonical: match.canonical,
+            });
+          }
+        }
+
+        if (fallbackGroups.length > 0 && isCurrentRequest()) {
+          setAnonymizationRectGroups([...groups, ...fallbackGroups]);
+        }
+        return undefined;
+      },
+      () => undefined,
+    );
+  }, [layout, blocks, measures, zoom]);
+
+  // Project the autocomplete suggestion's anchor onto container
+  // coordinates so {@link AutocompleteCaretOverlay} can paint the
+  // ghost text at the cursor's pixel position. Pulls from the
+  // ref so this can run from a transaction handler without
+  // re-creating callbacks per render.
+  const updateAutocompleteOverlay = useCallback(() => {
+    const requestSeq = autocompleteOverlayRequestSeqRef.current + 1;
+    autocompleteOverlayRequestSeqRef.current = requestSeq;
+    const current = autocompleteSuggestionRef.current;
+    const isCurrentRequest = () =>
+      autocompleteOverlayRequestSeqRef.current === requestSeq &&
+      autocompleteSuggestionRef.current === current &&
+      current.status !== "idle" &&
+      current.text.length > 0;
+
+    if (current.status === "idle" || current.text.length === 0) {
+      setAutocompleteCaret(null);
+      setAutocompleteText("");
+      setAutocompleteIsStreaming(false);
+      return;
+    }
+    if (!layout || blocks.length === 0) {
+      return;
+    }
+    const anchor = current.anchor;
+    // Caret geometry is in the lazily-loaded selection-geometry chunk (kept out
+    // of the initial Folio bundle), so resolve it the same way the selection
+    // and anchor-position overlays do.
+    void loadSelectionGeometry().then(
+      ({ getCaretPosition }) => {
+        if (!isCurrentRequest()) {
+          return undefined;
+        }
+
+        const caret = getCaretPosition(layout, blocks, measures, anchor);
+        if (!isCurrentRequest()) {
+          return undefined;
+        }
+
+        if (caret === null) {
+          setAutocompleteCaret(null);
+          return undefined;
+        }
+        const pagesContainer = pagesContainerRef.current;
+        const overlay = pagesContainer?.parentElement?.querySelector(
+          '[data-testid="selection-overlay"]',
+        );
+        const firstPage = pagesContainer?.querySelector(".layout-page");
+        if (!overlay || !firstPage) {
+          setAutocompleteCaret(null);
+          return undefined;
+        }
+        const overlayRect = overlay.getBoundingClientRect();
+        const pageRect = firstPage.getBoundingClientRect();
+        const pageOffsetX = (pageRect.left - overlayRect.left) / zoom;
+        const pageOffsetY = (pageRect.top - overlayRect.top) / zoom;
+        if (!isCurrentRequest()) {
+          return undefined;
+        }
+
+        setAutocompleteCaret({
+          x: caret.x + pageOffsetX,
+          y: caret.y + pageOffsetY,
+          lineHeight: caret.height,
+        });
+        setAutocompleteText(current.text);
+        setAutocompleteIsStreaming(current.status === "streaming");
+        return undefined;
+      },
+      () => undefined,
+    );
   }, [layout, blocks, measures, zoom]);
 
   const hideSelectionOverlayDuringInput = useCallback(
     (state: EditorState) => {
+      selectionOverlayRequestSeqRef.current += 1;
       suppressSelectionOverlayRef.current = true;
       setCaretPosition(null);
       setSelectionRects([]);
@@ -2682,6 +3806,18 @@ export function PagedEditor(
         updateAnonymizationOverlay();
       }
 
+      // Same pattern for the inline autocomplete suggestion: keep
+      // the ref in sync with every transaction, repaint the
+      // ghost-text overlay when the suggestion changes (token
+      // arrival, accept, dismiss, doc-edit invalidation).
+      const nextSuggestion =
+        autocompleteSuggestionKey.getState(newState)?.suggestion ??
+        autocompleteSuggestionRef.current;
+      if (nextSuggestion !== autocompleteSuggestionRef.current) {
+        autocompleteSuggestionRef.current = nextSuggestion;
+        updateAutocompleteOverlay();
+      }
+
       if (transaction.docChanged) {
         // Increment state sequence to signal document changed
         syncCoordinator.incrementStateSeq();
@@ -2712,10 +3848,107 @@ export function PagedEditor(
       hideSelectionOverlayDuringInput,
       updateSelectionOverlay,
       updateAnonymizationOverlay,
+      updateAutocompleteOverlay,
       syncCoordinator,
     ],
     // NOTE: onDocumentChange removed from dependencies - accessed via ref to prevent infinite loops
   );
+
+  /**
+   * Handle a transaction on a persistent hidden HF EditorView.
+   *
+   * Two responsibilities:
+   *   1. Mirror the PM doc back into `Document.package.headers/footers[rId].content`
+   *      so the existing save path (which reads `hf.content`) ships the latest
+   *      HF content. Mutating in place matches upstream's pattern and avoids
+   *      churning history on every keystroke (the persistent PM is the
+   *      source of truth while loaded — same model the body PM uses).
+   *   2. Re-run the layout pipeline so the painter repaints with the new
+   *      HF blocks. We reuse the body PM's current state as the layout
+   *      input because `scheduleLayout` derives body blocks from that
+   *      state; the HF blocks are pulled from the HF PM via
+   *      `renderHfFromContentOrPm` on the next layout tick.
+   */
+  const [hfCaretSelection, setHfCaretSelection] =
+    useState<HfCaretSelection | null>(null);
+  // Page number (1-indexed) of the painted slot the user most recently
+  // clicked / dispatched into. Persisted across HF PM transactions so
+  // typing after a click on page 5 keeps the caret on page 5 — without
+  // this, the painter would scope the caret to whichever painted instance
+  // of the rId the lookup found first (page 1) on every subsequent
+  // selection update (Codex #487 P2: 21:28).
+  const activeHfPageNumberRef = useRef<number | null>(null);
+
+  const handleHfPmTransaction = useCallback(
+    (
+      rId: string,
+      kind: "header" | "footer",
+      view: EditorView,
+      docChanged: boolean,
+      selectionChanged: boolean,
+    ) => {
+      // HiddenHeaderFooterPMs writes the new blocks into
+      // package.headers/footers[rId].content in place inside its own
+      // dispatchTransaction, so we only need to nudge the layout pipeline
+      // and update HF caret + toolbar state here.
+      if (docChanged) {
+        // The body HiddenProseMirror view may still be deferred when the
+        // user enters HF editing first (a doc opened without
+        // collaboration that hasn't been clicked into yet). The HF PMs
+        // are mounted unconditionally so an HF transaction can fire
+        // before any body view exists; without a bodyState
+        // `scheduleLayout` was a no-op and the painter never repainted
+        // the in-flight HF edit (Codex #487 P1: 21:59 review). Use the
+        // precomputed initial state when present, otherwise force-create
+        // the view via `ensureHiddenEditorView` so the next read returns
+        // a state.
+        let bodyState = hiddenPMRef.current?.getState();
+        if (!bodyState && precomputedInitialStateRef.current) {
+          bodyState = precomputedInitialStateRef.current;
+        }
+        if (!bodyState) {
+          ensureHiddenEditorView({ sync: true });
+          bodyState = hiddenPMRef.current?.getState();
+        }
+        if (bodyState) {
+          scheduleLayout(bodyState, null);
+        }
+      }
+      if (docChanged || selectionChanged) {
+        const { from, to } = view.state.selection;
+        const pageNumber = activeHfPageNumberRef.current;
+        setHfCaretSelection({
+          rId,
+          kind,
+          from,
+          to,
+          ...(pageNumber !== null ? { pageNumber } : {}),
+        });
+        // Fan the HF PM selection out the same channel the body PM uses
+        // (DocxEditor's onSelectionChange handler then re-reads the
+        // active view via getActiveEditorView and re-syncs FormattingBar
+        // / context state to the HF surface). Without this the toolbar
+        // would freeze on the previous body selection while its actions
+        // dispatch on the HF view.
+        onSelectionChangeRef.current?.(from, to);
+      }
+    },
+    [scheduleLayout, ensureHiddenEditorView],
+  );
+
+  // Clear HF caret state + cross-surface drag state on any hfEditMode
+  // transition. Without this, dragAnchorRef leftover from the previous
+  // surface lets a Shift-click resolve an anchor in the wrong PM
+  // (e.g. body anchor used as the HF range start, or vice versa) and
+  // produces a nonsense selection.
+  useEffect(() => {
+    if (!hfEditMode) {
+      setHfCaretSelection(null);
+    }
+    dragAnchorRef.current = null;
+    activeHfDragSurfaceRef.current = null;
+    activeHfPageNumberRef.current = null;
+  }, [hfEditMode]);
 
   /**
    * Handle selection change from PM.
@@ -2853,29 +4086,37 @@ export function PagedEditor(
    * Find the table cell position in ProseMirror doc for a given PM position.
    * Returns the position just inside the cell node, suitable for CellSelection.create().
    */
-  const findCellPosFromPmPos = useCallback((pmPos: number): number | null => {
-    const view = hiddenPMRef.current?.getView();
-    if (!view) {
-      return null;
-    }
-    try {
-      const $pos = view.state.doc.resolve(pmPos);
-      for (let d = $pos.depth; d > 0; d--) {
-        const node = $pos.node(d);
-        if (
-          node.type.name === "tableCell" ||
-          node.type.name === "tableHeader"
-        ) {
-          // Return position of the cell node itself (before(d)).
-          // CellSelection.create will resolve this and use cellAround() internally.
-          return $pos.before(d);
+  const findCellPosInDoc = useCallback(
+    (doc: PMNode, pmPos: number): number | null => {
+      try {
+        const $pos = doc.resolve(pmPos);
+        for (let d = $pos.depth; d > 0; d--) {
+          const node = $pos.node(d);
+          if (
+            node.type.name === "tableCell" ||
+            node.type.name === "tableHeader"
+          ) {
+            return $pos.before(d);
+          }
         }
+      } catch {
+        // Position resolution failed
       }
-    } catch {
-      // Position resolution failed
-    }
-    return null;
-  }, []);
+      return null;
+    },
+    [],
+  );
+
+  const findCellPosFromPmPos = useCallback(
+    (pmPos: number): number | null => {
+      const view = hiddenPMRef.current?.getView();
+      if (!view) {
+        return null;
+      }
+      return findCellPosInDoc(view.state.doc, pmPos);
+    },
+    [findCellPosInDoc],
+  );
 
   /**
    * Find the closest image element from a click target.
@@ -2934,7 +4175,10 @@ export function PagedEditor(
     // instead of jumping straight to the target.
     const exact = findBodyPmAnchor(pageContainer, pmPos);
     if (exact) {
-      exact.scrollIntoView({ behavior: "smooth", block: "center" });
+      exact.scrollIntoView({
+        behavior: prefersReducedMotionBehavior(),
+        block: "center",
+      });
       return;
     }
 
@@ -2955,7 +4199,10 @@ export function PagedEditor(
       }
     }
     if (runMatch) {
-      runMatch.scrollIntoView({ behavior: "smooth", block: "center" });
+      runMatch.scrollIntoView({
+        behavior: prefersReducedMotionBehavior(),
+        block: "center",
+      });
       return;
     }
 
@@ -2974,14 +4221,20 @@ export function PagedEditor(
       return;
     }
     const { element: shell } = shellHit;
-    shell.scrollIntoView({ behavior: "smooth", block: "center" });
+    shell.scrollIntoView({
+      behavior: prefersReducedMotionBehavior(),
+      block: "center",
+    });
 
     let attempts = 0;
     const refine = () => {
       attempts++;
       const exactInShell = findBodyPmAnchor(shell, pmPos);
       if (exactInShell) {
-        exactInShell.scrollIntoView({ behavior: "smooth", block: "center" });
+        exactInShell.scrollIntoView({
+          behavior: prefersReducedMotionBehavior(),
+          block: "center",
+        });
         return;
       }
       let bestEl: HTMLElement | null = null;
@@ -3003,7 +4256,10 @@ export function PagedEditor(
         }
       }
       if (bestEl) {
-        bestEl.scrollIntoView({ behavior: "smooth", block: "center" });
+        bestEl.scrollIntoView({
+          behavior: prefersReducedMotionBehavior(),
+          block: "center",
+        });
         return;
       }
       // IntersectionObserver populates on the next tick; give it
@@ -3045,9 +4301,12 @@ export function PagedEditor(
       return;
     }
 
+    if (!hiddenPMRef.current?.getView()) {
+      ensureHiddenEditorView();
+    }
     hiddenPMRef.current?.focus();
     setIsFocused(true);
-  }, [readOnly]);
+  }, [ensureHiddenEditorView, readOnly]);
 
   const startPointerTextSelection = useCallback(
     (clientX: number, clientY: number) => {
@@ -3062,7 +4321,11 @@ export function PagedEditor(
 
         isDraggingRef.current = true;
         dragAnchorRef.current = pmPos;
-        hiddenPMRef.current?.setSelection(pmPos);
+        if (hiddenPMRef.current?.getView()) {
+          hiddenPMRef.current.setSelection(pmPos);
+        } else {
+          queueHiddenEditorSelection({ type: "text", anchor: pmPos });
+        }
       } else {
         cellDragAnchorPosRef.current = null;
         isCellDraggingRef.current = false;
@@ -3072,12 +4335,25 @@ export function PagedEditor(
           hiddenPMRef.current?.setSelection(endPos);
           dragAnchorRef.current = endPos;
           isDraggingRef.current = true;
+        } else {
+          const docEnd = Math.max(
+            0,
+            (precomputedInitialStateRef.current?.doc.content.size ?? 1) - 1,
+          );
+          queueHiddenEditorSelection({ type: "text", anchor: docEnd });
+          dragAnchorRef.current = docEnd;
+          isDraggingRef.current = true;
         }
       }
 
       focusHiddenEditor();
     },
-    [findCellPosFromPmPos, focusHiddenEditor, getPositionFromMouse],
+    [
+      findCellPosFromPmPos,
+      focusHiddenEditor,
+      getPositionFromMouse,
+      queueHiddenEditorSelection,
+    ],
   );
 
   const copySelectionText = useCallback(() => {
@@ -3134,6 +4410,9 @@ export function PagedEditor(
         return;
       }
 
+      // Portaled descendants (Dialog, Combobox) are filtered upstream by
+      // `containedHandler(pagesContainerRef, …)` at the JSX site.
+
       // Prevent default browser navigation for hyperlink clicks,
       // but let the rest of the handler run for cursor placement and drag selection.
       // The popup is shown in handlePagesClick (on mouseup) instead.
@@ -3147,8 +4426,7 @@ export function PagedEditor(
       // When in HF edit mode, clicks outside header/footer area close the HF editor
       if (!readOnly && hfEditMode && onBodyClick) {
         const isInHfArea =
-          target.closest(".layout-page-header") ||
-          target.closest(".layout-page-footer") ||
+          findHfSlotForTarget(target) !== null ||
           target.closest(".hf-inline-editor");
         if (!isInHfArea) {
           e.preventDefault();
@@ -3158,12 +4436,122 @@ export function PagedEditor(
         }
       }
 
+      // Resize handles must be intercepted BEFORE the HF text-routing
+      // branch — otherwise the table-edge handles painted inside an HF
+      // slot would be treated as a regular HF click and the user could
+      // never start a resize. The resize blocks below resolve the
+      // active surface (body or HF) and read the source columnWidths /
+      // row height from the matching PM.
+      const isResizeHandleTarget =
+        !readOnly &&
+        (target.classList.contains("layout-table-resize-handle") ||
+          target.classList.contains("layout-table-row-resize-handle") ||
+          target.classList.contains("layout-table-edge-handle-bottom") ||
+          target.classList.contains("layout-table-edge-handle-right"));
+      const resizeHfSlot = isResizeHandleTarget
+        ? findHfSlotForTarget(target)
+        : null;
+      const resizeViewForRead: EditorView | null = resizeHfSlot
+        ? (hfPMsRef.current?.getView(resizeHfSlot.rId) ?? null)
+        : hiddenPMRef.current.getView();
+
+      // HF edit mode + click inside a painted HF slot → route to the persistent
+      // hidden HF EditorView. The painter (not PM) is the visible HF renderer,
+      // so we translate the click via clickToPositionDom (which inspects the
+      // painted span's data-pm-start/end markers) and dispatch the resulting
+      // PM position on the matching hidden view. The drag-extend / shift-click
+      // refs are populated here too so subsequent mousemove + handlePagesClick
+      // dispatch on the same surface. Cell drag inside an HF table seeds
+      // cellDragAnchorPosRef with the HF cell position; the mousemove path
+      // dispatches CellSelection on the HF view.
+      //
+      // Image targets are skipped here so the later findImageElement branch
+      // can dispatch NodeSelection.create on the matching HF view —
+      // without this guard the generic text-click flow would silently
+      // shadow the image NodeSelect path (Codex #487 P2, 20:40 review).
+      const isHfImageTarget =
+        !readOnly && hfEditMode && findImageElement(target) !== null;
+      if (
+        !readOnly &&
+        hfEditMode &&
+        !isResizeHandleTarget &&
+        !isHfImageTarget
+      ) {
+        const slot = findHfSlotForTarget(target);
+        if (slot) {
+          const hfView = hfPMsRef.current?.getView(slot.rId);
+          if (hfView) {
+            e.preventDefault();
+            // Stop the click from bubbling to `handleContainerMouseDown`.
+            // The painted slot is `.layout-page-header` /
+            // `.layout-page-footer`, which is NOT an `[data-hf-r-id]`
+            // descendant; the existing container guard would miss this
+            // path and `focusHiddenEditor()` would steal focus to the
+            // body editor immediately after we focused the HF view
+            // (Codex #487 P1: 22:16 review).
+            e.stopPropagation();
+            // Slot-scoped mapper so a whitespace click inside the painted
+            // header / footer can't fall through to clickToPositionDom's
+            // body-content nearest-span path (Codex #487 P2: 21:02).
+            const pos = clickToPositionInHfSlot(
+              pagesContainerRef.current ?? slot.element,
+              slot.kind,
+              slot.rId,
+              e.clientX,
+              e.clientY,
+            );
+            if (pos !== null) {
+              const docEnd = hfView.state.doc.content.size;
+              const clamped = Math.max(0, Math.min(pos, docEnd));
+              // Set the page-scope ref BEFORE the dispatch — view.dispatch
+              // synchronously invokes our dispatchTransaction →
+              // handleHfPmTransaction, which reads
+              // activeHfPageNumberRef.current to stamp on the new
+              // HfCaretSelection. If we set it after the dispatch, the
+              // first selection update on this click still records the
+              // previous page and the caret renders on the wrong
+              // painted instance until the next transaction (Codex
+              // #487 P2: 22:27 review).
+              const pageEl = slot.element.closest<HTMLElement>(".layout-page");
+              const pageNumStr = pageEl?.dataset["pageNumber"];
+              activeHfPageNumberRef.current = pageNumStr
+                ? Number.parseInt(pageNumStr, 10)
+                : null;
+              if (e.shiftKey && dragAnchorRef.current !== null) {
+                const $anchor = hfView.state.doc.resolve(
+                  Math.max(0, Math.min(dragAnchorRef.current, docEnd)),
+                );
+                const $head = hfView.state.doc.resolve(clamped);
+                hfView.dispatch(
+                  hfView.state.tr.setSelection(
+                    TextSelection.between($anchor, $head),
+                  ),
+                );
+              } else {
+                const $pos = hfView.state.doc.resolve(clamped);
+                hfView.dispatch(
+                  hfView.state.tr.setSelection(TextSelection.near($pos)),
+                );
+                dragAnchorRef.current = clamped;
+              }
+              const cellPos = findCellPosInDoc(hfView.state.doc, clamped);
+              cellDragAnchorPosRef.current = cellPos;
+              isDraggingRef.current = true;
+              activeHfDragSurfaceRef.current = {
+                rId: slot.rId,
+                kind: slot.kind,
+              };
+            }
+            hfView.focus();
+            return;
+          }
+        }
+      }
+
       // In normal mode, clicks in header/footer area should place cursor at
       // start of body content, not inside header/footer (matches Word/Google Docs)
       if (!readOnly && !hfEditMode) {
-        const isInHfArea =
-          target.closest(".layout-page-header") ||
-          target.closest(".layout-page-footer");
+        const isInHfArea = findHfSlotForTarget(target) !== null;
         if (isInHfArea) {
           e.preventDefault();
           // Place cursor at start of body content
@@ -3182,6 +4570,9 @@ export function PagedEditor(
         e.preventDefault();
         e.stopPropagation();
         isResizingColumnRef.current = true;
+        resizingHfSurfaceRef.current = resizeHfSlot
+          ? { rId: resizeHfSlot.rId, kind: resizeHfSlot.kind }
+          : null;
         resizeStartXRef.current = e.clientX;
         resizeHandleRef.current = target;
         target.classList.add("dragging");
@@ -3196,8 +4587,7 @@ export function PagedEditor(
           10,
         );
 
-        // Get current column widths from the ProseMirror doc
-        const view = hiddenPMRef.current.getView();
+        const view = resizeViewForRead;
         if (view) {
           const $pos = view.state.doc.resolve(
             resizeTablePmStartRef.current + 1,
@@ -3232,6 +4622,9 @@ export function PagedEditor(
         e.preventDefault();
         e.stopPropagation();
         isResizingRowRef.current = true;
+        resizingHfSurfaceRef.current = resizeHfSlot
+          ? { rId: resizeHfSlot.rId, kind: resizeHfSlot.kind }
+          : null;
         resizeStartYRef.current = e.clientY;
         resizeRowHandleRef.current = target;
         resizeRowIsEdgeRef.current = target.dataset["isEdge"] === "bottom";
@@ -3244,8 +4637,7 @@ export function PagedEditor(
           10,
         );
 
-        // Get current row height from ProseMirror doc
-        const view = hiddenPMRef.current.getView();
+        const view = resizeViewForRead;
         if (view) {
           const $pos = view.state.doc.resolve(
             resizeRowTablePmStartRef.current + 1,
@@ -3288,6 +4680,9 @@ export function PagedEditor(
         e.preventDefault();
         e.stopPropagation();
         isResizingRightEdgeRef.current = true;
+        resizingHfSurfaceRef.current = resizeHfSlot
+          ? { rId: resizeHfSlot.rId, kind: resizeHfSlot.kind }
+          : null;
         resizeRightEdgeStartXRef.current = e.clientX;
         resizeRightEdgeHandleRef.current = target;
         target.classList.add("dragging");
@@ -3303,7 +4698,7 @@ export function PagedEditor(
         );
 
         // Get current last column width from ProseMirror doc
-        const view = hiddenPMRef.current.getView();
+        const view = resizeViewForRead;
         if (view) {
           const $pos = view.state.doc.resolve(
             resizeRightEdgePmStartRef.current + 1,
@@ -3331,13 +4726,44 @@ export function PagedEditor(
         const pmStart = imageEl.dataset["pmStart"];
         if (pmStart !== undefined) {
           const pos = Number.parseInt(pmStart, 10);
-          hiddenPMRef.current.setNodeSelection(pos);
-          setSelectedImageInfo(buildImageSelectionInfo(imageEl, pos));
-          setSelectionRects([]);
-          setCaretPosition(null);
+          // HF edit mode + image inside an HF slot: NodeSelect on the
+          // matching HF PM. Otherwise selection would land on body at
+          // an HF-doc position, which doesn't address a valid node and
+          // silently no-ops (or worse, picks an unrelated body node).
+          const hfSlot = hfEditMode ? findHfSlotForTarget(imageEl) : null;
+          const hfView = hfSlot ? hfPMsRef.current?.getView(hfSlot.rId) : null;
+          if (hfView) {
+            try {
+              hfView.dispatch(
+                hfView.state.tr.setSelection(
+                  NodeSelection.create(hfView.state.doc, pos),
+                ),
+              );
+            } catch {
+              // Pos didn't address a selectable node — fall back to a
+              // near text selection so the user still gets focus.
+              const $pos = hfView.state.doc.resolve(
+                Math.min(pos, hfView.state.doc.content.size),
+              );
+              hfView.dispatch(
+                hfView.state.tr.setSelection(TextSelection.near($pos)),
+              );
+            }
+            hfView.focus();
+            // Image selection chrome is body-only today; HF image select
+            // shows browser-default selection ring. Tracked for follow-up.
+          } else {
+            if (hiddenPMRef.current.getView()) {
+              hiddenPMRef.current.setNodeSelection(pos);
+            } else {
+              queueHiddenEditorSelection({ type: "node", pos });
+            }
+            setSelectedImageInfo(buildImageSelectionInfo(imageEl, pos));
+            setSelectionRects([]);
+            setCaretPosition(null);
+            focusHiddenEditor();
+          }
         }
-
-        focusHiddenEditor();
         return;
       }
 
@@ -3360,6 +4786,7 @@ export function PagedEditor(
       clearTableInsertTimer,
       focusHiddenEditor,
       startPointerTextSelection,
+      queueHiddenEditorSelection,
     ],
   );
 
@@ -3378,6 +4805,32 @@ export function PagedEditor(
   // Wire up the drag-extend callback after getPositionFromMouse is available
   dragExtendRef.current = (cx: number, cy: number) => {
     if (!isDraggingRef.current || dragAnchorRef.current === null) {
+      return;
+    }
+    const hfSurface = activeHfDragSurfaceRef.current;
+    if (hfSurface) {
+      const hfView = hfPMsRef.current?.getView(hfSurface.rId);
+      if (!hfView || !pagesContainerRef.current) {
+        return;
+      }
+      const pmPos = clickToPositionInHfSlot(
+        pagesContainerRef.current,
+        hfSurface.kind,
+        hfSurface.rId,
+        cx,
+        cy,
+      );
+      if (pmPos === null) {
+        return;
+      }
+      const docEnd = hfView.state.doc.content.size;
+      const anchor = Math.max(0, Math.min(dragAnchorRef.current, docEnd));
+      const head = Math.max(0, Math.min(pmPos, docEnd));
+      const $anchor = hfView.state.doc.resolve(anchor);
+      const $head = hfView.state.doc.resolve(head);
+      hfView.dispatch(
+        hfView.state.tr.setSelection(TextSelection.between($anchor, $head)),
+      );
       return;
     }
     if (!hiddenPMRef.current) {
@@ -3473,6 +4926,47 @@ export function PagedEditor(
       // Auto-scroll when dragging near viewport edges
       updateDragScroll(e.clientX, e.clientY);
 
+      // HF drag: route the rest of the mousemove through the active HF PM.
+      // If the drag started inside an HF table cell, dispatch CellSelection
+      // on the HF view; otherwise dragExtendRef handles text selection.
+      // The painter repaints via the HF caret overlay either way.
+      if (activeHfDragSurfaceRef.current) {
+        const hfSurface = activeHfDragSurfaceRef.current;
+        const hfView = hfPMsRef.current?.getView(hfSurface.rId);
+        if (hfView && cellDragAnchorPosRef.current !== null) {
+          const hfPos = clickToPositionInHfSlot(
+            pagesContainerRef.current,
+            hfSurface.kind,
+            hfSurface.rId,
+            e.clientX,
+            e.clientY,
+          );
+          if (hfPos !== null) {
+            const currentCellPos = findCellPosInDoc(hfView.state.doc, hfPos);
+            if (currentCellPos !== null) {
+              try {
+                hfView.dispatch(
+                  hfView.state.tr.setSelection(
+                    CellSelection.create(
+                      hfView.state.doc,
+                      cellDragAnchorPosRef.current,
+                      currentCellPos,
+                    ),
+                  ),
+                );
+                isCellDraggingRef.current = true;
+                return;
+              } catch {
+                // Cell positions weren't valid for CellSelection; fall
+                // through to text drag.
+              }
+            }
+          }
+        }
+        dragExtendRef.current(e.clientX, e.clientY);
+        return;
+      }
+
       const pmPos = getPositionFromMouse(e.clientX, e.clientY);
       if (pmPos === null) {
         return;
@@ -3539,7 +5033,12 @@ export function PagedEditor(
       const anchor = dragAnchorRef.current;
       hiddenPMRef.current.setSelection(anchor, pmPos);
     },
-    [getPositionFromMouse, findCellPosFromPmPos, updateDragScroll],
+    [
+      getPositionFromMouse,
+      findCellPosFromPmPos,
+      findCellPosInDoc,
+      updateDragScroll,
+    ],
   );
 
   /**
@@ -3554,8 +5053,13 @@ export function PagedEditor(
         resizeHandleRef.current = null;
       }
 
-      // Update ProseMirror document with new column widths
-      const view = hiddenPMRef.current?.getView();
+      // Update ProseMirror document with new column widths. Commit on the
+      // HF view if the resize started inside an HF slot, else body.
+      const view =
+        (resizingHfSurfaceRef.current
+          ? hfPMsRef.current?.getView(resizingHfSurfaceRef.current.rId)
+          : hiddenPMRef.current?.getView()) ?? null;
+      resizingHfSurfaceRef.current = null;
       if (view) {
         const pmStart = resizeTablePmStartRef.current;
         const colIdx = resizeColumnIndexRef.current;
@@ -3568,15 +5072,20 @@ export function PagedEditor(
           if (node.type.name === "table") {
             const tablePos = $pos.before(d);
             const tr = view.state.tr;
-            const widths = [...(node.attrs["columnWidths"] as number[])];
+            const tableAttrs = expectTableAttrs(node);
+            if (!tableAttrs.columnWidths) {
+              break;
+            }
+            const widths = [...tableAttrs.columnWidths];
             widths[colIdx] = newLeft;
             widths[colIdx + 1] = newRight;
 
             // Update table columnWidths attr
-            tr.setNodeMarkup(tablePos, undefined, {
-              ...node.attrs,
-              columnWidths: widths,
-            });
+            tr.setNodeMarkup(
+              tablePos,
+              undefined,
+              mergeTableAttrs(node, { columnWidths: widths }),
+            );
 
             // Update cell width attrs in each row
             let rowOffset = tablePos + 1;
@@ -3586,15 +5095,19 @@ export function PagedEditor(
               let cellColIdx = 0;
               // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node API
               row.forEach((cell) => {
-                const colspan = (cell.attrs["colspan"] as number) || 1;
+                const cellAttrs = expectTableCellAttrs(cell);
+                const colspan = cellAttrs.colspan || 1;
                 if (cellColIdx === colIdx || cellColIdx === colIdx + 1) {
                   const newWidth = cellColIdx === colIdx ? newLeft : newRight;
-                  tr.setNodeMarkup(tr.mapping.map(cellOffset), undefined, {
-                    ...cell.attrs,
-                    width: newWidth,
-                    widthType: "dxa",
-                    colwidth: null,
-                  });
+                  tr.setNodeMarkup(
+                    tr.mapping.map(cellOffset),
+                    undefined,
+                    mergeTableCellAttrs(cell, {
+                      width: newWidth,
+                      widthType: "dxa",
+                      colwidth: null,
+                    }),
+                  );
                 }
                 cellOffset += cell.nodeSize;
                 cellColIdx += colspan;
@@ -3618,7 +5131,11 @@ export function PagedEditor(
         resizeRowHandleRef.current = null;
       }
 
-      const view = hiddenPMRef.current?.getView();
+      const view =
+        (resizingHfSurfaceRef.current
+          ? hfPMsRef.current?.getView(resizingHfSurfaceRef.current.rId)
+          : hiddenPMRef.current?.getView()) ?? null;
+      resizingHfSurfaceRef.current = null;
       if (view) {
         const pmStart = resizeRowTablePmStartRef.current;
         const rowIdx = resizeRowIndexRef.current;
@@ -3637,11 +5154,14 @@ export function PagedEditor(
             // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node API
             node.forEach((row) => {
               if (idx === rowIdx) {
-                tr.setNodeMarkup(tr.mapping.map(rowOffset), undefined, {
-                  ...row.attrs,
-                  height: newHeight,
-                  heightRule: "atLeast",
-                });
+                tr.setNodeMarkup(
+                  tr.mapping.map(rowOffset),
+                  undefined,
+                  mergeTableRowAttrs(row, {
+                    height: newHeight,
+                    heightRule: "atLeast",
+                  }),
+                );
               }
               rowOffset += row.nodeSize;
               idx++;
@@ -3663,7 +5183,11 @@ export function PagedEditor(
         resizeRightEdgeHandleRef.current = null;
       }
 
-      const view = hiddenPMRef.current?.getView();
+      const view =
+        (resizingHfSurfaceRef.current
+          ? hfPMsRef.current?.getView(resizingHfSurfaceRef.current.rId)
+          : hiddenPMRef.current?.getView()) ?? null;
+      resizingHfSurfaceRef.current = null;
       if (view) {
         const pmStart = resizeRightEdgePmStartRef.current;
         const colIdx = resizeRightEdgeColIndexRef.current;
@@ -3677,13 +5201,18 @@ export function PagedEditor(
             const tr = view.state.tr;
 
             // Update columnWidths — only change last column
-            const widths = [...(node.attrs["columnWidths"] as number[])];
+            const tableAttrs = expectTableAttrs(node);
+            if (!tableAttrs.columnWidths) {
+              break;
+            }
+            const widths = [...tableAttrs.columnWidths];
             widths[colIdx] = newWidth;
 
-            tr.setNodeMarkup(tablePos, undefined, {
-              ...node.attrs,
-              columnWidths: widths,
-            });
+            tr.setNodeMarkup(
+              tablePos,
+              undefined,
+              mergeTableAttrs(node, { columnWidths: widths }),
+            );
 
             // Update cell width attrs in the last column of each row
             let rowOffset = tablePos + 1;
@@ -3693,14 +5222,18 @@ export function PagedEditor(
               let cellColIdx = 0;
               // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node API
               row.forEach((cell) => {
-                const colspan = (cell.attrs["colspan"] as number) || 1;
+                const cellAttrs = expectTableCellAttrs(cell);
+                const colspan = cellAttrs.colspan || 1;
                 if (cellColIdx === colIdx) {
-                  tr.setNodeMarkup(tr.mapping.map(cellOffset), undefined, {
-                    ...cell.attrs,
-                    width: newWidth,
-                    widthType: "dxa",
-                    colwidth: null,
-                  });
+                  tr.setNodeMarkup(
+                    tr.mapping.map(cellOffset),
+                    undefined,
+                    mergeTableCellAttrs(cell, {
+                      width: newWidth,
+                      widthType: "dxa",
+                      colwidth: null,
+                    }),
+                  );
                 }
                 cellOffset += cell.nodeSize;
                 cellColIdx += colspan;
@@ -3720,6 +5253,7 @@ export function PagedEditor(
     isCellDraggingRef.current = false;
     cellDragLastPmPosRef.current = null;
     cellDragOverflowXRef.current = null;
+    activeHfDragSurfaceRef.current = null;
     stopDragAutoScroll();
     // Keep dragAnchorRef for potential shift-click extension
   }, [stopDragAutoScroll]);
@@ -3924,6 +5458,8 @@ export function PagedEditor(
       if (!target) {
         return;
       }
+      // Portaled descendants (Dialog, Combobox) are filtered upstream by
+      // `containedHandler(pagesContainerRef, …)` at the JSX site.
       // Handle hyperlink clicks (single-click only, not drag-to-select)
       const anchorClosest = target.closest("a[href]");
       const anchorEl =
@@ -3961,10 +5497,19 @@ export function PagedEditor(
             }
           }
         } else if (onHyperlinkClick) {
-          // External hyperlink — show popup only if not a drag-to-select
-          const view = hiddenPMRef.current?.getView();
+          // External hyperlink — show popup only if not a drag-to-select.
+          // Check the active surface's selection: when the user is editing
+          // an HF and clicks a link inside that slot, we read HF PM
+          // selection state, not body. Without this fix, a single-click
+          // on an HF hyperlink while a body range was selected would
+          // incorrectly suppress the popup.
+          const hfSlot = hfEditMode ? findHfSlotForTarget(target) : null;
+          const surfaceView =
+            (hfSlot ? hfPMsRef.current?.getView(hfSlot.rId) : null) ??
+            hiddenPMRef.current?.getView();
           const hasRangeSelection =
-            view && view.state.selection.from !== view.state.selection.to;
+            surfaceView &&
+            surfaceView.state.selection.from !== surfaceView.state.selection.to;
           if (!hasRangeSelection) {
             const displayText = anchorEl.textContent || "";
             const tooltip = anchorEl.getAttribute("title") || undefined;
@@ -3981,23 +5526,118 @@ export function PagedEditor(
         return;
       }
 
-      // Double-click on header/footer area triggers editing mode
-      if (!readOnly && e.detail === 2 && onHeaderFooterDoubleClick) {
-        const headerEl = target.closest(".layout-page-header");
-        const footerEl = target.closest(".layout-page-footer");
-        if (headerEl || footerEl) {
+      // Double-click on header/footer area enters editing mode. Gate on
+      // `!hfEditMode` so a double-click *while already editing* falls
+      // through to the active-HF word/paragraph-select branch below
+      // instead of pointlessly re-firing `onHeaderFooterDoubleClick`
+      // (Codex #487 P2: 21:49 review).
+      if (
+        !readOnly &&
+        !hfEditMode &&
+        e.detail === 2 &&
+        onHeaderFooterDoubleClick
+      ) {
+        const slot = findHfSlotForTarget(target);
+        if (slot) {
           const pageEl = closestHtmlElement(target, "[data-page-number]");
           const pageNum = pageEl ? Number(pageEl.dataset["pageNumber"]) : 1;
-          if (headerEl) {
-            e.preventDefault();
-            e.stopPropagation();
-            onHeaderFooterDoubleClick("header", pageNum);
-            return;
-          }
-          if (footerEl) {
-            e.preventDefault();
-            e.stopPropagation();
-            onHeaderFooterDoubleClick("footer", pageNum);
+          // Seed the HF caret overlay's page scope so the very first
+          // transaction after entering edit mode draws on the page the
+          // user double-clicked, not the first painted instance of the
+          // shared rId.
+          activeHfPageNumberRef.current = pageNum;
+          e.preventDefault();
+          e.stopPropagation();
+          onHeaderFooterDoubleClick(slot.kind, pageNum);
+          return;
+        }
+      }
+
+      // Double / triple-click inside an active HF slot routes word /
+      // paragraph selection to the matching hidden HF EditorView instead of
+      // the body PM. We re-resolve the slot from the target so the
+      // selection lands on the right surface even when this handler fires
+      // before any prior HF click set drag state.
+      if (
+        !readOnly &&
+        hfEditMode &&
+        (e.detail === 2 || e.detail === 3) &&
+        hfPMsRef.current
+      ) {
+        const slot = findHfSlotForTarget(target);
+        if (slot) {
+          const hfView = hfPMsRef.current.getView(slot.rId);
+          if (hfView) {
+            const pos = clickToPositionInHfSlot(
+              pagesContainerRef.current ?? slot.element,
+              slot.kind,
+              slot.rId,
+              e.clientX,
+              e.clientY,
+            );
+            if (pos !== null) {
+              const docEnd = hfView.state.doc.content.size;
+              const clamped = Math.max(0, Math.min(pos, docEnd));
+              const $pos = hfView.state.doc.resolve(clamped);
+              const parent = $pos.parent;
+              // Set page scope BEFORE the dispatch — view.dispatch
+              // synchronously fires handleHfPmTransaction, which reads
+              // activeHfPageNumberRef.current to stamp the new
+              // HfCaretSelection. Without this, double / triple-click
+              // word / paragraph selection on a later page would
+              // render the highlight on the first matching painted
+              // instance (Codex #487 P2: 23:09 review).
+              const pageEl = slot.element.closest<HTMLElement>(".layout-page");
+              const pageNumStr = pageEl?.dataset["pageNumber"];
+              activeHfPageNumberRef.current = pageNumStr
+                ? Number.parseInt(pageNumStr, 10)
+                : null;
+              if (e.detail === 3) {
+                const start = $pos.start($pos.depth);
+                const end = $pos.end($pos.depth);
+                hfView.dispatch(
+                  hfView.state.tr.setSelection(
+                    TextSelection.create(hfView.state.doc, start, end),
+                  ),
+                );
+              } else if (parent.isTextblock) {
+                const pmAlignedParts: string[] = [];
+                for (let i = 0; i < parent.content.childCount; i++) {
+                  const node = parent.content.child(i);
+                  pmAlignedParts.push(
+                    node.isText ? (node.text ?? "") : " ".repeat(node.nodeSize),
+                  );
+                }
+                const pmAlignedText = pmAlignedParts.join("");
+                const offset = $pos.parentOffset;
+                let start = offset;
+                while (
+                  start > 0 &&
+                  /\w/u.test(pmAlignedText[start - 1]!) // SAFETY: start > 0
+                ) {
+                  start--;
+                }
+                let end = offset;
+                while (
+                  end < pmAlignedText.length &&
+                  /\w/u.test(pmAlignedText[end]!) // SAFETY: end < pmAlignedText.length
+                ) {
+                  end++;
+                }
+                const absStart = $pos.start() + start;
+                const absEnd = $pos.start() + end;
+                if (absStart < absEnd) {
+                  hfView.dispatch(
+                    hfView.state.tr.setSelection(
+                      TextSelection.create(hfView.state.doc, absStart, absEnd),
+                    ),
+                  );
+                }
+              }
+              hfView.focus();
+              e.preventDefault();
+              e.stopPropagation();
+            }
             return;
           }
         }
@@ -4117,6 +5757,44 @@ export function PagedEditor(
 
       e.preventDefault();
 
+      // HF edit mode: route the right-click to the matching HF PM so the
+      // context menu reads HF selection state. Without this the menu would
+      // act on body PM state — wrong "has selection" flag and any caret
+      // move on right-click would land in the body.
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      if (!readOnly && hfEditMode && target) {
+        const slot = findHfSlotForTarget(target);
+        if (slot) {
+          const hfView = hfPMsRef.current?.getView(slot.rId);
+          if (hfView) {
+            const { from, to } = hfView.state.selection;
+            const pmPos = clickToPositionInHfSlot(
+              pagesContainerRef.current ?? slot.element,
+              slot.kind,
+              slot.rId,
+              e.clientX,
+              e.clientY,
+            );
+            if (pmPos !== null && (from === to || pmPos < from || pmPos > to)) {
+              const docEnd = hfView.state.doc.content.size;
+              const clamped = Math.max(0, Math.min(pmPos, docEnd));
+              const $pos = hfView.state.doc.resolve(clamped);
+              hfView.dispatch(
+                hfView.state.tr.setSelection(TextSelection.near($pos)),
+              );
+              hfView.focus();
+            }
+            const after = hfView.state.selection;
+            onContextMenu({
+              x: e.clientX,
+              y: e.clientY,
+              hasSelection: after.from !== after.to,
+            });
+            return;
+          }
+        }
+      }
+
       const view = hiddenPMRef.current?.getView();
       if (!view) {
         return;
@@ -4125,15 +5803,12 @@ export function PagedEditor(
       const { from, to } = view.state.selection;
       const pmPos = getPositionFromMouse(e.clientX, e.clientY);
 
-      // If the right-click is within the existing selection, keep it
-      // Otherwise, move cursor to the right-click position
       if (pmPos !== null && (from === to || pmPos < from || pmPos > to)) {
         hiddenPMRef.current?.setSelection(pmPos);
         hiddenPMRef.current?.focus();
         setIsFocused(true);
       }
 
-      // Read updated selection state after potential change
       const updatedState = hiddenPMRef.current?.getState();
       const hasSelection = updatedState
         ? updatedState.selection.from !== updatedState.selection.to
@@ -4141,7 +5816,7 @@ export function PagedEditor(
 
       onContextMenu({ x: e.clientX, y: e.clientY, hasSelection });
     },
-    [onContextMenu, getPositionFromMouse],
+    [hfEditMode, onContextMenu, getPositionFromMouse, readOnly],
   );
 
   /**
@@ -4156,6 +5831,18 @@ export function PagedEditor(
       ) {
         return;
       }
+      // Don't steal focus from a persistent hidden HF EditorView. The
+      // HF host marks each view's mount node with `data-hf-r-id`; once
+      // an HF view holds focus, the body PM redirect would immediately
+      // bounce keystrokes off it (Codex #487 P1).
+      if (
+        e.target instanceof HTMLElement &&
+        e.target.closest("[data-hf-r-id]")
+      ) {
+        return;
+      }
+      // Portaled descendants (Dialog, Combobox) are filtered upstream
+      // by `containedHandler(containerRef, …)` at the JSX site.
       focusHiddenEditor();
     },
     [focusHiddenEditor],
@@ -4171,10 +5858,14 @@ export function PagedEditor(
     if (relatedTarget && containerRef.current?.contains(relatedTarget)) {
       return; // Focus staying within editor
     }
-    // Keep selection visible when focus moves to toolbar or dropdown portals
+    // Keep selection visible when focus moves to the editor's own
+    // formatting toolbar or dropdown portals. Use `[data-folio-toolbar]`
+    // (not `[role="toolbar"]`) so the AI chat composer — which uses
+    // `role="toolbar"` for accessibility — does NOT count as "still in
+    // the editor" and the caret correctly hides when typing in chat.
     if (
       relatedTarget?.closest(
-        '[role="toolbar"], [data-radix-popper-content-wrapper], [data-radix-select-content], .docx-table-options-dropdown',
+        '[data-folio-toolbar="true"], [data-radix-popper-content-wrapper], [data-radix-select-content], .docx-table-options-dropdown',
       )
     ) {
       return;
@@ -4198,11 +5889,11 @@ export function PagedEditor(
           return;
         }
 
-        const tr = view.state.tr.setNodeMarkup(pmPos, undefined, {
-          ...node.attrs,
-          width: newWidth,
-          height: newHeight,
-        });
+        const tr = view.state.tr.setNodeMarkup(
+          pmPos,
+          undefined,
+          mergeImageAttrs(node, { width: newWidth, height: newHeight }),
+        );
         view.dispatch(tr);
 
         // Re-select the image after resize
@@ -4245,12 +5936,12 @@ export function PagedEditor(
           return;
         }
 
+        const attrs = expectImageAttrs(node);
         const isFloating =
-          node.attrs["displayMode"] === "float" ||
-          (node.attrs["wrapType"] &&
-            ["square", "tight", "through"].includes(
-              node.attrs["wrapType"] as string,
-            ));
+          attrs.displayMode === "float" ||
+          attrs.wrapType === "square" ||
+          attrs.wrapType === "tight" ||
+          attrs.wrapType === "through";
 
         if (isFloating) {
           // For floating images: update position attributes so the image
@@ -4290,15 +5981,16 @@ export function PagedEditor(
           const hOffsetEmu = Math.round(dropX * PIXELS_TO_EMU);
           const vOffsetEmu = Math.round(dropY * PIXELS_TO_EMU);
 
-          const newPosition = {
+          const newPosition: ImagePositionAttrs = {
             horizontal: { posOffset: hOffsetEmu, relativeTo: "margin" },
             vertical: { posOffset: vOffsetEmu, relativeTo: "margin" },
           };
 
-          const tr = view.state.tr.setNodeMarkup(pmPos, undefined, {
-            ...node.attrs,
-            position: newPosition,
-          });
+          const tr = view.state.tr.setNodeMarkup(
+            pmPos,
+            undefined,
+            mergeImageAttrs(node, { position: newPosition }),
+          );
           view.dispatch(tr);
           hiddenPMRef.current?.setNodeSelection(pmPos);
         } else {
@@ -4363,6 +6055,59 @@ export function PagedEditor(
         return;
       }
 
+      // Don't take over keydown events that originated inside a persistent
+      // hidden HF EditorView — the HF PM has its own native handlers, and
+      // the body-PM routing below would steal focus + dispatch into the
+      // body editor (e.g. Space scrolling to the body, the first typed key
+      // landing under the cursor in the document instead of the active
+      // HF). Mirrors the focus / mousedown guards in handleContainerFocus
+      // and handleContainerMouseDown (Codex #487 P1: 21:12 review).
+      if (
+        e.target instanceof HTMLElement &&
+        e.target.closest("[data-hf-r-id]")
+      ) {
+        return;
+      }
+
+      let view = hiddenPMRef.current?.getView();
+      if (!view) {
+        ensureHiddenEditorView({ sync: true });
+        view = hiddenPMRef.current?.getView();
+
+        if (view) {
+          if (isPlainTextInputEvent(e)) {
+            e.preventDefault();
+            queueHiddenEditorTextInput(e.key);
+            return;
+          }
+
+          if (isDeferredEditorKeyDown(e)) {
+            e.preventDefault();
+            queueHiddenEditorKeyDown(e);
+            return;
+          }
+        }
+
+        if (isPlainTextInputEvent(e)) {
+          queueHiddenEditorTextInput(e.key);
+          e.preventDefault();
+          return;
+        }
+
+        if (isDeferredEditorKeyDown(e)) {
+          queueHiddenEditorKeyDown(e);
+          e.preventDefault();
+        }
+        return;
+      }
+
+      if (
+        pendingHiddenEditorSelectionRef.current ||
+        queuedInputBeforeHiddenEditorRef.current.length > 0
+      ) {
+        applyPendingHiddenEditorInput(view);
+      }
+
       // Ensure hidden PM is focused if user types
       if (!hiddenPMRef.current?.isFocused()) {
         focusHiddenEditor();
@@ -4378,26 +6123,7 @@ export function PagedEditor(
         !e.nativeEvent.isComposing
       ) {
         e.preventDefault();
-        const view = hiddenPMRef.current?.getView();
-        if (view) {
-          // Route through handleTextInput so plugins (suggestion mode) can intercept
-          const { from, to } = view.state.selection;
-          // oxlint-disable-next-line typescript/no-explicit-any
-          const handled = (view as any).someProp(
-            "handleTextInput",
-            (
-              f: (
-                v: EditorView,
-                fr: number,
-                t: number,
-                text: string,
-              ) => boolean,
-            ) => f(view, from, to, " "),
-          );
-          if (!handled) {
-            view.dispatch(view.state.tr.insertText(" "));
-          }
-        }
+        dispatchEditorTextInput(view, " ");
         return;
       }
 
@@ -4425,9 +6151,13 @@ export function PagedEditor(
     },
     [
       copySelectionText,
+      applyPendingHiddenEditorInput,
+      ensureHiddenEditorView,
       focusHiddenEditor,
       getScrollContainer,
       onReadOnlyEditAttempt,
+      queueHiddenEditorKeyDown,
+      queueHiddenEditorTextInput,
       readOnly,
     ],
   );
@@ -4444,7 +6174,17 @@ export function PagedEditor(
       ) {
         return;
       }
-      // Focus hidden PM if clicking outside pages area
+      // Don't steal focus from the persistent hidden HF EditorView host
+      // — see handleContainerFocus for the same guard rationale.
+      if (
+        e.target instanceof HTMLElement &&
+        e.target.closest("[data-hf-r-id]")
+      ) {
+        return;
+      }
+      // Focus hidden PM if clicking outside pages area. Wrapped via
+      // `containedHandler(containerRef, …)` at the JSX site to skip
+      // events bubbled in from portaled descendants (Dialog, Combobox).
       if (!hiddenPMRef.current?.isFocused()) {
         focusHiddenEditor();
       }
@@ -4456,33 +6196,182 @@ export function PagedEditor(
   // Initial Layout
   // =========================================================================
 
+  useEffect(() => {
+    if (
+      !shouldCreateHiddenEditorView &&
+      preHiddenInitialLayoutDoneRef.current &&
+      precomputedInitialDocumentRef.current !== document
+    ) {
+      preHiddenInitialLayoutDoneRef.current = false;
+      precomputedInitialDocumentRef.current = null;
+      setPrecomputedInitialState(null);
+    }
+
+    if (
+      shouldCreateHiddenEditorView ||
+      collaboration !== undefined ||
+      preHiddenInitialLayoutDoneRef.current
+    ) {
+      return undefined;
+    }
+
+    if (!document) {
+      ensureHiddenEditorView();
+      return undefined;
+    }
+
+    const initialState = createHiddenEditorState(
+      document,
+      styles,
+      extensionManager,
+      externalPlugins,
+      undefined,
+      null,
+      "mount",
+    );
+    precomputedInitialDocumentRef.current = document;
+    setPrecomputedInitialState(initialState);
+    anonymizationMatchesRef.current =
+      anonymizationDecorationsKey.getState(initialState)?.matches ?? [];
+
+    let cancelled = false;
+    pendingInitialFontReadyLayoutRef.current = true;
+    const fontWaitStartedAt = performance.now();
+    const runAfterFontWait = (fontsLoaded: boolean) => {
+      if (cancelled) {
+        return;
+      }
+
+      pendingInitialFontReadyLayoutRef.current = false;
+      preHiddenInitialLayoutDoneRef.current = true;
+      recordLayoutPhase(
+        "initial",
+        "initial-fonts",
+        performance.now() - fontWaitStartedAt,
+      );
+      resetCanvasContext();
+      clearAllCaches();
+      runLayoutPipeline(initialState, { reason: "initial" });
+      updateSelectionOverlay(initialState);
+      updateAnonymizationOverlay();
+      if (fontsLoaded) {
+        lastLayoutUsedLoadedFontsRef.current = true;
+        suppressFontReadyUntilRef.current =
+          performance.now() + INITIAL_FONT_READY_SUPPRESSION_MS;
+      }
+    };
+
+    void waitForInitialLayoutFonts(document, initialState.doc).then(
+      runAfterFontWait,
+      () => runAfterFontWait(false),
+    );
+
+    return () => {
+      cancelled = true;
+      pendingInitialFontReadyLayoutRef.current = false;
+    };
+  }, [
+    collaboration,
+    document,
+    ensureHiddenEditorView,
+    extensionManager,
+    externalPlugins,
+    runLayoutPipeline,
+    shouldCreateHiddenEditorView,
+    styles,
+    updateAnonymizationOverlay,
+    updateSelectionOverlay,
+  ]);
+
   /**
    * Run initial layout when document or view changes.
    */
   const handleEditorViewReady = useCallback(
     (view: EditorView) => {
-      runLayoutPipeline(view.state);
-      updateSelectionOverlay(view.state);
+      onEditorViewReadyRef.current?.(view);
       anonymizationMatchesRef.current =
         anonymizationDecorationsKey.getState(view.state)?.matches ?? [];
-      updateAnonymizationOverlay();
+      const initialSuggestion = autocompleteSuggestionKey.getState(
+        view.state,
+      )?.suggestion;
+      if (initialSuggestion !== undefined) {
+        autocompleteSuggestionRef.current = initialSuggestion;
+      }
+      updateAutocompleteOverlay();
 
-      // Auto-focus the editor so the user can start typing immediately
-      if (!readOnly) {
-        // Use requestAnimationFrame to ensure DOM is ready
+      const focusReadyView = () => {
+        if (readOnly || !shouldFocusHiddenEditorOnReadyRef.current) {
+          return;
+        }
+
         requestAnimationFrame(() => {
+          if (hiddenPMRef.current?.getView() !== view) {
+            return;
+          }
+
+          applyPendingHiddenEditorInput(view);
           view.focus();
           setIsFocused(true);
         });
+      };
+
+      if (lastLaidOutPmDocRef.current?.eq(view.state.doc)) {
+        updateSelectionOverlay(view.state);
+        updateAnonymizationOverlay();
+        focusReadyView();
+        return;
       }
+
+      const runInitialLayout = (currentView: EditorView) => {
+        runLayoutPipeline(currentView.state, { reason: "initial" });
+        updateSelectionOverlay(currentView.state);
+        updateAnonymizationOverlay();
+      };
+
+      pendingInitialFontReadyLayoutRef.current = true;
+      const fontWaitStartedAt = performance.now();
+      const runAfterFontWait = (fontsLoaded: boolean) => {
+        pendingInitialFontReadyLayoutRef.current = false;
+        const currentView = hiddenPMRef.current?.getView();
+        if (currentView !== view) {
+          return;
+        }
+        recordLayoutPhase(
+          "initial",
+          "initial-fonts",
+          performance.now() - fontWaitStartedAt,
+        );
+        resetCanvasContext();
+        clearAllCaches();
+        runInitialLayout(currentView);
+        if (fontsLoaded) {
+          lastLayoutUsedLoadedFontsRef.current = true;
+          suppressFontReadyUntilRef.current =
+            performance.now() + INITIAL_FONT_READY_SUPPRESSION_MS;
+        }
+      };
+      void waitForInitialLayoutFonts(document, view.state.doc).then(
+        runAfterFontWait,
+        () => runAfterFontWait(false),
+      );
+
+      // Auto-focus the editor so the user can start typing immediately
+      focusReadyView();
     },
     [
+      applyPendingHiddenEditorInput,
       runLayoutPipeline,
       updateSelectionOverlay,
       updateAnonymizationOverlay,
+      document,
+      updateAutocompleteOverlay,
       readOnly,
     ],
   );
+
+  const handleEditorViewDestroy = useCallback(() => {
+    onEditorViewReadyRef.current?.(null);
+  }, []);
 
   // Re-paint anonymization overlay whenever a fresh layout lands;
   // selectionToRects needs the latest layout/blocks/measures to
@@ -4491,30 +6380,105 @@ export function PagedEditor(
     updateAnonymizationOverlay();
   }, [updateAnonymizationOverlay]);
 
+  // Compute anchor Y positions for comments/revisions sidebar from the current
+  // layout artifacts. Opening the sidebar or switching anchor modes does not
+  // change page geometry, so this intentionally avoids a full layout pass.
+  useEffect(() => {
+    if (!onAnchorPositionsChange || !layout) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    void loadSelectionGeometry().then(
+      ({ getCaretPosition }) => {
+        if (cancelled) {
+          return undefined;
+        }
+
+        try {
+          const positions = computeAnchorPositions(
+            lastLayoutEditorStateRef.current,
+            layout,
+            blocks,
+            measures,
+            pageGap,
+            {
+              includeRevisions: anchorPositionMode === "comments-and-revisions",
+            },
+            getCaretPosition,
+          );
+          onAnchorPositionsChange(positions);
+        } catch {
+          // Keep the previous anchor positions if layout measurement fails.
+        }
+        return undefined;
+      },
+      () => undefined,
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    anchorPositionMode,
+    blocks,
+    layout,
+    measures,
+    onAnchorPositionsChange,
+    pageGap,
+  ]);
+
+  // Same dependency on layout for the autocomplete caret — when
+  // pages re-flow (zoom, content edit), the anchor's pixel
+  // position changes and the ghost text needs to move with it.
+  useEffect(() => {
+    updateAutocompleteOverlay();
+  }, [updateAutocompleteOverlay]);
+
   // Re-layout when web fonts finish loading to fix measurements that were
   // computed against fallback fonts during initial render.
   // Uses FontFaceSet.onloadingdone to detect when new fonts complete loading.
   useEffect(() => {
+    const fontSet = getDocumentFontSet();
+    if (!fontSet) {
+      return undefined;
+    }
+
+    const handleFontsLoading = () => {
+      if (performance.now() < suppressFontReadyUntilRef.current) {
+        return;
+      }
+      lastLayoutUsedLoadedFontsRef.current = false;
+    };
+
     const handleFontsLoaded = () => {
+      if (
+        pendingInitialFontReadyLayoutRef.current ||
+        performance.now() < suppressFontReadyUntilRef.current ||
+        lastLayoutUsedLoadedFontsRef.current
+      ) {
+        return;
+      }
+
       const view = hiddenPMRef.current?.getView();
       if (view) {
         // Clear all cached measurements — font metrics have changed
         resetCanvasContext();
         clearAllCaches();
-        runLayoutPipeline(view.state);
-        updateSelectionOverlay(view.state);
+        runLayoutPipelineRef.current(view.state, { reason: "font-ready" });
+        updateSelectionOverlayRef.current(view.state);
       }
     };
 
     // Listen for font loading completion events
-    window.document.fonts.addEventListener("loadingdone", handleFontsLoaded);
+    fontSet.addEventListener("loading", handleFontsLoading);
+    fontSet.addEventListener("loadingdone", handleFontsLoaded);
+    fontSet.addEventListener("loadingerror", handleFontsLoaded);
     return () => {
-      window.document.fonts.removeEventListener(
-        "loadingdone",
-        handleFontsLoaded,
-      );
+      fontSet.removeEventListener("loading", handleFontsLoading);
+      fontSet.removeEventListener("loadingdone", handleFontsLoaded);
+      fontSet.removeEventListener("loadingerror", handleFontsLoaded);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Re-layout when non-document layout inputs change (e.g., after HF editor save
@@ -4522,29 +6486,28 @@ export function PagedEditor(
   // runLayoutPipeline includes these values in its deps, but it
   // only runs when explicitly called — this effect triggers it.
   const layoutInputEpochRef = useRef(0);
+  const lastLayoutInputSignatureRef = useRef<string | null>(null);
   useEffect(() => {
     // Skip the initial render — handleEditorViewReady already does the first layout
     if (layoutInputEpochRef.current === 0) {
       layoutInputEpochRef.current = 1;
+      lastLayoutInputSignatureRef.current = layoutInputSignature;
       return;
     }
     const view = hiddenPMRef.current?.getView();
     if (view) {
-      runLayoutPipelineRef.current(view.state);
+      const layoutInputsChanged =
+        lastLayoutInputSignatureRef.current !== layoutInputSignature;
+      lastLayoutInputSignatureRef.current = layoutInputSignature;
+      if (
+        !layoutInputsChanged &&
+        view.state.doc === lastLaidOutPmDocRef.current
+      ) {
+        return;
+      }
+      runLayoutPipelineRef.current(view.state, { reason: "layout-input" });
     }
-  }, [
-    headerContent,
-    footerContent,
-    firstPageHeaderContent,
-    firstPageFooterContent,
-    contentWidth,
-    columns,
-    pageSize,
-    margins,
-    pageGap,
-    sectionProperties,
-    _theme,
-  ]);
+  }, [document, layoutInputSignature]);
 
   // Re-compute selection overlay when the container resizes.
   // Page elements shift during window resize (centering, scrollbar changes),
@@ -4582,6 +6545,18 @@ export function PagedEditor(
       getView() {
         return hiddenPMRef.current?.getView() ?? null;
       },
+      getHfView(rId: string) {
+        return hfPMsRef.current?.getView(rId) ?? null;
+      },
+      ensureView(options?: { focus?: boolean }) {
+        // Async (no flushSync) so this is safe to call from a consumer's
+        // useEffect during a concurrent render — flushSync inside a
+        // commit-phase effect throws "flushSync was called from inside
+        // a lifecycle method". The state setter still schedules a
+        // re-render that runs createView in the next layout effect;
+        // callers that need the view immediately can poll.
+        ensureHiddenEditorView(options);
+      },
       focus() {
         hiddenPMRef.current?.focus();
         setIsFocused(true);
@@ -4617,13 +6592,78 @@ export function PagedEditor(
       relayout() {
         const state = hiddenPMRef.current?.getState();
         if (state) {
-          runLayoutPipeline(state);
+          runLayoutPipeline(state, { reason: "manual" });
         }
       },
       scrollToPosition: scrollToPositionImpl,
       scrollToPage: scrollToPageImpl,
+      getPageNumberForPmPos(pmPos) {
+        const container = pagesContainerRef.current;
+        if (!container) {
+          return null;
+        }
+        // Fast path: virtualised docs keep a pm-to-shell map.
+        const hit = findPageShellForPmPos(container, pmPos);
+        if (hit) {
+          const raw = hit.element.dataset["pageNumber"];
+          const parsed = raw === undefined ? Number.NaN : Number(raw);
+          if (Number.isFinite(parsed)) {
+            return parsed;
+          }
+        }
+        // Fallback for non-virtualised docs (< 8 pages): every page is in the
+        // DOM eagerly, so scan shells and find the one whose pm range covers
+        // the target.
+        const shells =
+          container.querySelectorAll<HTMLElement>("[data-page-number]");
+        let bestNumber: number | null = null;
+        let bestStart = Number.NEGATIVE_INFINITY;
+        for (const shell of shells) {
+          const anchors =
+            shell.querySelectorAll<HTMLElement>("[data-pm-start]");
+          if (anchors.length === 0) {
+            continue;
+          }
+          let pageStart = Number.POSITIVE_INFINITY;
+          let pageEnd = Number.NEGATIVE_INFINITY;
+          for (const el of anchors) {
+            const pm = Number(el.dataset["pmStart"]);
+            if (!Number.isFinite(pm)) {
+              continue;
+            }
+            if (pm < pageStart) {
+              pageStart = pm;
+            }
+            if (pm > pageEnd) {
+              pageEnd = pm;
+            }
+          }
+          if (pageStart === Number.POSITIVE_INFINITY) {
+            continue;
+          }
+          const raw = shell.dataset["pageNumber"];
+          const parsed = raw === undefined ? Number.NaN : Number(raw);
+          if (!Number.isFinite(parsed)) {
+            continue;
+          }
+          if (pageStart <= pmPos && pmPos <= pageEnd) {
+            return parsed;
+          }
+          if (pageStart <= pmPos && pageStart > bestStart) {
+            bestStart = pageStart;
+            bestNumber = parsed;
+          }
+        }
+        return bestNumber;
+      },
     }),
-    [layout, runLayoutPipeline, scrollToPageImpl, scrollToPositionImpl],
+    [
+      ensureHiddenEditorView,
+      layout,
+      runLayoutPipeline,
+      scrollToPageImpl,
+      scrollToPositionImpl,
+    ],
   );
 
   useEffect(() => {
@@ -4658,7 +6698,7 @@ export function PagedEditor(
   // Calculate total height for scroll
   const totalHeight = useMemo(() => {
     if (!layout) {
-      return DEFAULT_PAGE_HEIGHT + 48;
+      return DEFAULT_PAGE_HEIGHT_PX + 48;
     }
     const numPages = layout.pages.length;
     return numPages * pageSize.h + (numPages - 1) * pageGap + 48;
@@ -4674,6 +6714,13 @@ export function PagedEditor(
     width: `max(100%, ${String(scaledViewportWidth)}px)`,
     height: scaledViewportHeight,
     backgroundColor: "transparent",
+    // The page keeps its unscaled width and is shrunk via `transform: scale()`,
+    // which doesn't shrink the layout box — so at zoom < 1 the unscaled page
+    // overflows this extent and creates phantom horizontal scroll. Clip it: the
+    // visible (scaled) page already fits, and at zoom >= 1 the extent is wide
+    // enough that nothing is clipped. `clip` (not `hidden`) avoids forcing a
+    // vertical scroll context.
+    overflowX: "clip",
   };
   const scaledViewportStyle: CSSProperties = {
     ...viewportStyles,
@@ -4700,21 +6747,37 @@ export function PagedEditor(
       tabIndex={0}
       role="textbox"
       aria-multiline
-      onFocus={handleContainerFocus}
+      onFocus={containedHandler(containerRef, handleContainerFocus)}
       onBlur={handleContainerBlur}
       onKeyDown={handleKeyDown}
-      onMouseDown={handleContainerMouseDown}
+      onMouseDown={containedHandler(containerRef, handleContainerMouseDown)}
     >
+      {/* Persistent off-screen ProseMirror per HF rId — the painter reads
+          from these views when a slot's view exists (see HF unification port,
+          eigenpal#611). Currently shadow instances: the inline overlay still
+          owns user input. Switching the layout pipeline to source from these
+          views is the next phase. */}
+      <HiddenHeaderFooterPMs
+        ref={hfPMsRef}
+        document={document}
+        onTransaction={handleHfPmTransaction}
+        {...(styles !== undefined ? { styles } : {})}
+        {...(_theme !== undefined ? { theme: _theme } : {})}
+      />
+
       {/* Hidden ProseMirror for keyboard input */}
       <HiddenProseMirror
         ref={hiddenPMRef}
         document={document}
         widthPx={contentWidth}
+        deferViewCreation={!shouldCreateHiddenEditorView}
+        precomputedInitialState={validPrecomputedInitialState}
         readOnly={readOnly}
         onTransaction={handleTransaction}
         onSelectionChange={handleSelectionChange}
         onRemoteSelectionsChange={setRemoteSelections}
         onEditorViewReady={handleEditorViewReady}
+        onEditorViewDestroy={handleEditorViewDestroy}
         onKeyDown={handlePMKeyDown}
         {...(styles !== undefined ? { styles } : {})}
         externalPlugins={externalPlugins}
@@ -4736,9 +6799,12 @@ export function PagedEditor(
             ref={pagesContainerRef}
             className={`paged-editor__pages${readOnly ? " paged-editor--readonly" : ""}${hfEditMode ? ` paged-editor--hf-editing paged-editor--editing-${hfEditMode}` : ""}`}
             style={pagesContainerStyles}
-            onMouseDown={handlePagesMouseDown}
+            onMouseDown={containedHandler(
+              pagesContainerRef,
+              handlePagesMouseDown,
+            )}
             onMouseMove={handlePagesMouseMove}
-            onClick={handlePagesClick}
+            onClick={containedHandler(pagesContainerRef, handlePagesClick)}
             onContextMenu={handlePagesContextMenu}
             aria-hidden="true" // Visual only, PM provides semantic content
           />
@@ -4754,6 +6820,17 @@ export function PagedEditor(
             selectionSeq={anonymizationSelectionSeq}
           />
 
+          {/* Inline autocomplete ghost-text + "stella" caret. The
+              ProseMirror autocomplete plugin lives in the hidden
+              editor; this overlay paints its state on top of the
+              paged canvas at container coords from
+              {@link getCaretPosition}. */}
+          <AutocompleteCaretOverlay
+            caret={autocompleteCaret}
+            text={autocompleteText}
+            isStreaming={autocompleteIsStreaming}
+          />
+
           {/* Selection overlay */}
           <SelectionOverlay
             selectionRects={selectionRects}
@@ -4761,6 +6838,20 @@ export function PagedEditor(
             isFocused={isFocused}
             pageGap={pageGap}
           />
+          {/* HF caret overlay — draws the caret + selection rects for the
+              focused persistent hidden HF EditorView. Painted DOM is the
+              source of truth: we walk findHfPmAnchor markers under
+              .layout-page-header[data-rid] / .layout-page-footer[data-rid]
+              and project the rects relative to the pages container. The
+              `painter:painted` and `hfCaretSelection` change events both
+              re-run the lookup. */}
+          {hfCaretSelection && (
+            <HfCaretOverlay
+              selection={hfCaretSelection}
+              pagesContainer={pagesContainerRef.current}
+              zoom={zoom}
+            />
+          )}
           {layout &&
             remoteSelections.map((remoteSelection) => (
               <RemoteSelectionOverlay

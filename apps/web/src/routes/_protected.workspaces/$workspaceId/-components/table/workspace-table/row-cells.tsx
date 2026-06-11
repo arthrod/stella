@@ -4,15 +4,15 @@ import type React from "react";
 import { draggable } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { setCustomNativeDragPreview } from "@atlaskit/pragmatic-drag-and-drop/element/set-custom-native-drag-preview";
 import { flexRender } from "@tanstack/react-table";
-import type {
-  Cell,
-  Column,
-  Table as ReactTable,
-  Row,
-} from "@tanstack/react-table";
+import {
+  row_getIsExpanded,
+  row_getIsSelected,
+  row_getIsSomeSelected,
+} from "@tanstack/react-table/static-functions";
 import { ChevronRightIcon, FolderIcon, FolderOpenIcon } from "lucide-react";
 
 import { Checkbox } from "@stll/ui/components/checkbox";
+import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 import { cn } from "@stll/ui/lib/utils";
 
 import { renderDragPreview } from "@/components/drag-preview";
@@ -23,6 +23,9 @@ import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-
 import { RowActions } from "@/routes/_protected.workspaces/$workspaceId/-components/row-actions";
 import type { VirtualAnchor } from "@/routes/_protected.workspaces/$workspaceId/-components/row-actions";
 import type {
+  TableCell,
+  TableColumn,
+  TableRow,
   TableTreeNode,
   WorkspaceTable as WorkspaceTableType,
 } from "@/routes/_protected.workspaces/$workspaceId/-components/table/types";
@@ -42,8 +45,10 @@ import {
   PinnedBoundary,
   selectColId,
 } from "@/routes/_protected.workspaces/$workspaceId/-components/table/workspace-table/internals";
+import { VersionOrNewFileDialog } from "@/routes/_protected.workspaces/$workspaceId/-components/version-or-new-file-dialog";
 import type { TableContentMode } from "@/routes/_protected.workspaces/$workspaceId/-hooks/table-store";
 import { useInspectorFlash } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-inspector-flash";
+import { useVersionOrNewFileDrop } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-version-or-new-file-drop";
 import {
   getEntityName,
   getFirstFile,
@@ -81,7 +86,7 @@ type ActiveCellFlashInput = {
   activeCellPropertyId: string | null;
   activationSeq: number;
   rowRef: React.RefObject<HTMLDivElement | null>;
-  visibleCells: Cell<TableTreeNode, unknown>[];
+  visibleCells: TableCell[];
 };
 
 const useActiveCellFlash = ({
@@ -145,12 +150,12 @@ const isActiveRow = ({
 // -- Draggable table row --
 
 export type DraggableRowProps = {
-  row: Row<TableTreeNode>;
+  row: TableRow;
   virtualIndex: number;
   index: number;
   rowLabel: string;
-  renderColumns: Column<TableTreeNode>[];
-  addPropertyColumn: Column<TableTreeNode> | null;
+  renderColumns: TableColumn[];
+  addPropertyColumn: TableColumn | null;
   table: WorkspaceTableType;
   workspaceId: string;
   activeEntityId: string | null;
@@ -244,9 +249,15 @@ export const DraggableRow = ({
     visibleCells,
   });
 
+  const { isDropTarget, pendingDrop } = useVersionOrNewFileDrop({
+    entity,
+    workspaceId,
+    rowRef,
+  });
+
   const getBulkSelectedEntities = () => {
     const selectedRows = table.getSelectedRowModel().rows;
-    if (!row.getIsSelected() || selectedRows.length <= 1) {
+    if (!row_getIsSelected(row) || selectedRows.length <= 1) {
       return undefined;
     }
     return selectedRows.map((selectedRow) => selectedRow.original);
@@ -260,7 +271,10 @@ export const DraggableRow = ({
     setContextAnchor({
       getBoundingClientRect: () => new DOMRect(e.clientX, e.clientY, 0, 0),
     });
-    setContextOpen(true);
+    // Defer to the next frame so the trailing pointerup from the
+    // right-click doesn't immediately count as an outside-click and
+    // dismiss the menu that the contextmenu just opened.
+    requestAnimationFrame(() => setContextOpen(true));
   };
 
   const handleRowClick = (e: React.MouseEvent) => {
@@ -268,7 +282,11 @@ export const DraggableRow = ({
       return;
     }
 
-    useInspectorStore.getState().openTask(entity.entityId, name);
+    useInspectorStore.getState().openTask({
+      taskId: entity.entityId,
+      workspaceId,
+      label: name,
+    });
   };
 
   const toggleExpandedCell = (columnId: string, mode?: "toggle" | "open") => {
@@ -411,49 +429,64 @@ export const DraggableRow = ({
   }
 
   return (
-    <WorkspaceGridRow
-      aria-rowindex={virtualIndex + 2}
-      aria-selected={row.getIsSelected()}
-      className={cn(
-        "transition-opacity duration-150",
-        contentMode === "tight" && TOOLBAR_ROW_HEIGHT,
-        isTask && "cursor-pointer",
-        isFocusedExpansionRow && "relative z-20",
-        isMutedByExpandedCell && "opacity-[0.92] hover:opacity-100",
+    <>
+      <WorkspaceGridRow
+        aria-rowindex={virtualIndex + 2}
+        aria-selected={row_getIsSelected(row)}
+        className={cn(
+          "transition-opacity duration-150",
+          contentMode === "tight" && TOOLBAR_ROW_HEIGHT,
+          isTask && "cursor-pointer",
+          isFocusedExpansionRow && "z-20",
+          isMutedByExpandedCell && "opacity-[0.92] hover:opacity-100",
+        )}
+        data-active={activeRow || undefined}
+        data-drop-target={isDropTarget || undefined}
+        data-index={virtualIndex}
+        data-state={row_getIsSelected(row) ? "selected" : undefined}
+        key={row.id}
+        onClick={containedHandler(rowRef, handleRowClick)}
+        onContextMenu={handleContextMenu}
+        ref={setRowRef}
+      >
+        <DataRowCells
+          expandedCellId={expandedCellId}
+          contentMode={contentMode}
+          hasExpandedCell={isFocusedExpansionRow}
+          onCellClick={handleCellClick}
+          selectCellWithActions={selectCellWithActions}
+          visibleCells={visibleCells}
+        />
+        <RowEndFillerCell
+          addPropertyColumn={addPropertyColumn}
+          renderColumns={renderColumns}
+          selected={row_getIsSelected(row)}
+        />
+        <AddPropertyCell
+          cell={addPropertyCell}
+          columnIndex={renderColumns.length + 1}
+          selected={row_getIsSelected(row)}
+        />
+      </WorkspaceGridRow>
+      {pendingDrop && (
+        <VersionOrNewFileDialog
+          droppedFile={pendingDrop.droppedFile}
+          entityFileName={pendingDrop.entityFileName}
+          isReplacePending={pendingDrop.isReplacePending}
+          onCreateNewFile={pendingDrop.onCreateNewFile}
+          onOpenChange={pendingDrop.onOpenChange}
+          onOpenChangeComplete={pendingDrop.onOpenChangeComplete}
+          onReplaceVersion={pendingDrop.onReplaceVersion}
+          open={pendingDrop.open}
+        />
       )}
-      data-active={activeRow || undefined}
-      data-index={virtualIndex}
-      data-state={row.getIsSelected() ? "selected" : undefined}
-      key={row.id}
-      onClick={handleRowClick}
-      onContextMenu={handleContextMenu}
-      ref={setRowRef}
-    >
-      <DataRowCells
-        expandedCellId={expandedCellId}
-        contentMode={contentMode}
-        hasExpandedCell={isFocusedExpansionRow}
-        onCellClick={handleCellClick}
-        selectCellWithActions={selectCellWithActions}
-        visibleCells={visibleCells}
-      />
-      <RowEndFillerCell
-        addPropertyColumn={addPropertyColumn}
-        renderColumns={renderColumns}
-        selected={row.getIsSelected()}
-      />
-      <AddPropertyCell
-        cell={addPropertyCell}
-        columnIndex={renderColumns.length + 1}
-        selected={row.getIsSelected()}
-      />
-    </WorkspaceGridRow>
+    </>
   );
 };
 
 type FolderTableRowProps = {
   activeEntityId: string | null;
-  addPropertyCell: Cell<TableTreeNode, unknown> | undefined;
+  addPropertyCell: TableCell | undefined;
   editingEntityId: string | null;
   entity: TableTreeNode;
   isMutedByExpandedCell: boolean;
@@ -462,11 +495,11 @@ type FolderTableRowProps = {
   onStartEditing: (entityId: string) => void;
   onStopEditing: () => void;
   ref: (element: HTMLDivElement | null) => void;
-  renderColumns: Column<TableTreeNode>[];
-  row: Row<TableTreeNode>;
+  renderColumns: TableColumn[];
+  row: TableRow;
   selectCellWithActions: React.ReactNode;
   virtualIndex: number;
-  visibleCells: Cell<TableTreeNode, unknown>[];
+  visibleCells: TableCell[];
 };
 
 const FolderTableRow = ({
@@ -495,7 +528,7 @@ const FolderTableRow = ({
   return (
     <WorkspaceGridRow
       aria-rowindex={virtualIndex + 2}
-      aria-selected={row.getIsSelected()}
+      aria-selected={row_getIsSelected(row)}
       className={cn(
         "transition-opacity duration-150",
         TOOLBAR_ROW_HEIGHT,
@@ -503,7 +536,7 @@ const FolderTableRow = ({
       )}
       data-active={entity.entityId === activeEntityId || undefined}
       data-index={virtualIndex}
-      data-state={row.getIsSelected() ? "selected" : undefined}
+      data-state={row_getIsSelected(row) ? "selected" : undefined}
       key={row.id}
       onContextMenu={onContextMenu}
       ref={ref}
@@ -513,7 +546,7 @@ const FolderTableRow = ({
         className={cn(
           isPinnedBoundaryColumn(selectCell.column) && "border-e-0",
         )}
-        data-state={row.getIsSelected() ? "selected" : undefined}
+        data-state={row_getIsSelected(row) ? "selected" : undefined}
         key={selectCell.id}
         style={{
           gridColumn: 1,
@@ -529,7 +562,7 @@ const FolderTableRow = ({
           "cursor-pointer",
           isPinnedBoundaryColumn(nameCell.column) && "border-e-0",
         )}
-        data-state={row.getIsSelected() ? "selected" : undefined}
+        data-state={row_getIsSelected(row) ? "selected" : undefined}
         key={nameCell.id}
         onClick={() => row.toggleExpanded()}
         style={{
@@ -542,7 +575,7 @@ const FolderTableRow = ({
           depth={row.depth}
           editingEntityId={editingEntityId}
           entity={entity}
-          isExpanded={row.getIsExpanded()}
+          isExpanded={row_getIsExpanded(row)}
           onRename={onRename}
           onStopEditing={onStopEditing}
           startEditing={() => onStartEditing(entity.entityId)}
@@ -551,14 +584,14 @@ const FolderTableRow = ({
       <WorkspaceGridCell
         aria-colindex={3}
         className="cursor-pointer border-e-0"
-        data-state={row.getIsSelected() ? "selected" : undefined}
+        data-state={row_getIsSelected(row) ? "selected" : undefined}
         onClick={() => row.toggleExpanded()}
         style={{ gridColumn: addPropertyCell ? "3 / -2" : "3 / -1" }}
       />
       <AddPropertyCell
         cell={addPropertyCell}
         columnIndex={renderColumns.length + 1}
-        selected={row.getIsSelected()}
+        selected={row_getIsSelected(row)}
       />
     </WorkspaceGridRow>
   );
@@ -574,7 +607,7 @@ type DataRowCellsProps = {
     canExpandCell: boolean,
   ) => void;
   selectCellWithActions: React.ReactNode;
-  visibleCells: Cell<TableTreeNode, unknown>[];
+  visibleCells: TableCell[];
 };
 
 const DataRowCells = ({
@@ -615,7 +648,7 @@ const DataRowCells = ({
             "after:bg-info after:pointer-events-none after:absolute after:top-0 after:right-0 after:bottom-0 after:z-50 after:w-px",
         )}
         data-expanded-cell={isExpandedCell || undefined}
-        data-state={cell.row.getIsSelected() ? "selected" : undefined}
+        data-state={row_getIsSelected(cell.row) ? "selected" : undefined}
         data-table-property-id={canFlagCell ? cell.column.id : undefined}
         key={cell.id}
         onClick={(event) => onCellClick(event, cell.column.id, canExpandCell)}
@@ -649,8 +682,8 @@ const DataRowCells = ({
 type SelectRowContentProps = {
   index: number;
   label: string;
-  row: Row<TableTreeNode>;
-  table: ReactTable<TableTreeNode>;
+  row: TableRow;
+  table: WorkspaceTableType;
   lastSelectedIndex: React.RefObject<number | null>;
 };
 
@@ -663,7 +696,7 @@ const SelectRowContent = ({
 }: SelectRowContentProps) => {
   const isFolder = row.original.kind === "folder";
   const someSelected =
-    isFolder && row.subRows.length > 0 && row.getIsSomeSelected();
+    isFolder && row.subRows.length > 0 && row_getIsSomeSelected(row);
 
   const handleChange = (_checked: boolean, eventDetails: { event: Event }) => {
     if (
@@ -697,11 +730,11 @@ const SelectRowContent = ({
         {label}
       </span>
       <Checkbox
-        checked={row.getIsSelected()}
+        checked={row_getIsSelected(row)}
         className="pointer-events-none absolute shrink-0 opacity-0 transition-opacity group-hover/row:pointer-events-auto group-hover/row:opacity-100 group-data-[state=selected]/row:pointer-events-auto group-data-[state=selected]/row:opacity-100"
         indeterminate={someSelected}
         onCheckedChange={handleChange}
-        tabIndex={row.getIsSelected() ? 0 : -1}
+        tabIndex={row_getIsSelected(row) ? 0 : -1}
       />
     </div>
   );

@@ -16,13 +16,14 @@
  *   bun apps/api/scripts/seed-case-law.ts
  */
 
+import { panic } from "better-result";
 import { and, eq, sql } from "drizzle-orm";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import * as v from "valibot";
 
-import type { PersistedDecisionAnalysis } from "@stll/case-law/analysis";
-import type { DocumentAst } from "@stll/case-law/document-ast";
+import type { PersistedDecisionAnalysis } from "@stll/legal-ast/analysis";
+import type { DocumentAst } from "@stll/legal-ast/document-ast";
 
 import { createScopedDb } from "@/api/db";
 import { rootDb, rlsDb } from "@/api/db/root";
@@ -151,7 +152,7 @@ const ensureSearchPreviewConfig = async () => {
 
 export async function seedCaseLaw() {
   if (process.env.NODE_ENV === "production") {
-    throw new Error("Refusing to run: NODE_ENV must not be 'production'.");
+    panic("Refusing to run: NODE_ENV must not be 'production'.");
   }
 
   const scopedDb = createScopedDb(
@@ -200,7 +201,7 @@ export async function seedCaseLaw() {
       // deterministic id that does not match what's on disk.
       sourceId = inserted.at(0)?.id ?? (await findSourceId())?.id;
       if (!sourceId) {
-        throw new Error(`Could not resolve source id for ${adapterKey}`);
+        panic(`Could not resolve source id for ${adapterKey}`);
       }
     }
 
@@ -260,7 +261,7 @@ export async function seedCaseLaw() {
         decisionId = existing.at(0)?.id;
       }
       if (!decisionId) {
-        throw new Error(
+        panic(
           `Could not resolve decision id for ${adapterKey} ${d.case_number} ${d.language}`,
         );
       }

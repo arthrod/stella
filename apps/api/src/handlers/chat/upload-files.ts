@@ -18,9 +18,16 @@ import {
   TEXT_PLAIN_MIME_TYPE,
 } from "@/api/handlers/chat/attachment-validation";
 import { ChatError } from "@/api/handlers/chat/errors";
+import {
+  generateImageThumbnail,
+  shouldGenerateImageThumbnail,
+  THUMBNAIL_MIME_TYPE,
+} from "@/api/handlers/files/image-derivative";
 import { createUserFileKey, deleteS3Keys } from "@/api/handlers/files/utils";
 import { isUserFileUrl, toUserFileUrl } from "@/api/handlers/user-files/types";
 import { captureError } from "@/api/lib/analytics";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
+import type { AuditRecorder } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import {
@@ -45,9 +52,11 @@ export type UserFileThreadAccess = {
 
 type UploadMessageFilesProps = {
   message: ChatMessage;
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   threadId: SafeId<"chatThread">;
   userId: SafeId<"user">;
+  workspaceId: SafeId<"workspace"> | null;
 };
 
 type UploadMessageFilesReturn = Result<
@@ -58,6 +67,7 @@ type UploadMessageFilesReturn = Result<
 export type UploadedChatFile = {
   id: SafeId<"userFile">;
   s3Key: string;
+  thumbnailS3Key: string | null;
 };
 
 type UploadedChatMessage = {
@@ -67,9 +77,11 @@ type UploadedChatMessage = {
 
 export const uploadMessageFiles = async ({
   message,
+  recordAuditEvent,
   safeDb,
   threadId,
   userId,
+  workspaceId,
 }: UploadMessageFilesProps): Promise<UploadMessageFilesReturn> => {
   if (message.role !== "user") {
     return Result.ok({ message, uploadedFiles: [] });
@@ -86,9 +98,11 @@ export const uploadMessageFiles = async ({
 
     const rollbackResult = await deleteUploadedChatFiles({
       files: uploadedFiles,
+      recordAuditEvent,
       safeDb,
       threadId,
       userId,
+      workspaceId,
     });
 
     if (Result.isOk(rollbackResult)) {
@@ -112,9 +126,11 @@ export const uploadMessageFiles = async ({
 
     const uploadedFile = await uploadUserFile({
       file: parsedPart.value,
+      recordAuditEvent,
       safeDb,
       threadId,
       userId,
+      workspaceId,
     });
     if (Result.isError(uploadedFile)) {
       return await fail(uploadedFile.error);
@@ -123,6 +139,7 @@ export const uploadMessageFiles = async ({
     uploadedFiles.push({
       id: uploadedFile.value.id,
       s3Key: uploadedFile.value.s3Key,
+      thumbnailS3Key: uploadedFile.value.thumbnailS3Key,
     });
     parts.push({
       ...part,
@@ -143,20 +160,28 @@ export const uploadMessageFiles = async ({
 
 export const deleteUploadedChatFiles = async ({
   files,
+  recordAuditEvent,
   safeDb,
   threadId,
   userId,
+  workspaceId,
 }: {
   files: readonly UploadedChatFile[];
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   threadId: SafeId<"chatThread">;
   userId: SafeId<"user">;
+  workspaceId: SafeId<"workspace"> | null;
 }): Promise<Result<void, HandlerError<500> | SafeDbError>> => {
   if (files.length === 0) {
     return Result.ok();
   }
 
-  const deleteS3Result = await deleteS3Keys(files.map((file) => file.s3Key));
+  const deleteS3Result = await deleteS3Keys(
+    files.flatMap((file) =>
+      file.thumbnailS3Key ? [file.s3Key, file.thumbnailS3Key] : [file.s3Key],
+    ),
+  );
   if (Result.isError(deleteS3Result)) {
     return Result.err(
       new HandlerError({
@@ -167,8 +192,8 @@ export const deleteUploadedChatFiles = async ({
     );
   }
 
-  const deleteDbResult = await safeDb((tx) =>
-    tx.delete(userFiles).where(
+  const deleteDbResult = await safeDb(async (tx) => {
+    await tx.delete(userFiles).where(
       and(
         eq(userFiles.threadId, threadId),
         eq(userFiles.userId, userId),
@@ -177,8 +202,19 @@ export const deleteUploadedChatFiles = async ({
           files.map((file) => file.id),
         ),
       ),
-    ),
-  );
+    );
+
+    await recordAuditEvent(
+      tx,
+      files.map((file) => ({
+        action: AUDIT_ACTION.DELETE,
+        resourceType: AUDIT_RESOURCE_TYPE.CHAT_FILE,
+        resourceId: file.id,
+        workspaceId,
+        metadata: { threadId, s3Key: file.s3Key },
+      })),
+    );
+  });
 
   return deleteDbResult.andThen(() => Result.ok());
 };
@@ -210,7 +246,7 @@ const DIRECT_TEXT_MIME_TYPES: ReadonlySet<string> = new Set([
   TEXT_PLAIN_MIME_TYPE,
 ]);
 const THIRD_PARTY_BOUNDARY_REFUSAL_MESSAGE =
-  "Cannot send this attachment to the AI in anonymized mode because Stella cannot extract and anonymize it safely.";
+  "Cannot send this attachment to the AI in anonymized mode because stella cannot extract and anonymize it safely.";
 
 export const canHydrateFilePartAsPlainText = (mimeType: string): boolean =>
   DIRECT_TEXT_MIME_TYPES.has(mimeType) || mimeType === DOCX_MIME_TYPE;
@@ -336,16 +372,20 @@ type UploadUserFileInput = {
     fileName: string;
     mimeType: string;
   };
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   threadId: SafeId<"chatThread">;
   userId: SafeId<"user">;
+  workspaceId: SafeId<"workspace"> | null;
 };
 
 export const uploadUserFile = async ({
   file,
+  recordAuditEvent,
   safeDb,
   threadId,
   userId,
+  workspaceId,
 }: UploadUserFileInput) =>
   await Result.gen(async function* () {
     const sanitizedFileName = sanitizeFilename(file.fileName);
@@ -399,8 +439,45 @@ export const uploadUserFile = async ({
       }),
     );
 
-    const saveResult = await safeDb((tx) =>
-      tx.insert(userFiles).values({
+    // Best-effort image thumbnail + blur placeholder. A failure here never
+    // blocks the upload: the original still serves; the row just carries no
+    // derivative.
+    let thumbnailFileId: string | null = null;
+    let placeholder: string | null = null;
+    let thumbnailKey: string | null = null;
+    if (shouldGenerateImageThumbnail({ mimeType: file.mimeType })) {
+      const thumbnailResult = await generateImageThumbnail(file.bytes);
+      if (Result.isError(thumbnailResult)) {
+        captureError(thumbnailResult.error, {
+          stage: "chat-thumbnail-generate",
+          userFileId: id,
+        });
+      } else {
+        const generatedThumbnailId = Bun.randomUUIDv7();
+        const key = createUserFileKey({
+          fileId: generatedThumbnailId,
+          mimeType: THUMBNAIL_MIME_TYPE,
+          userId,
+        });
+        const writeThumbnailResult = await Result.tryPromise({
+          try: async () => await getS3().write(key, thumbnailResult.value.webp),
+          catch: (cause) => cause,
+        });
+        if (Result.isError(writeThumbnailResult)) {
+          captureError(writeThumbnailResult.error, {
+            stage: "chat-thumbnail-write",
+            userFileId: id,
+          });
+        } else {
+          thumbnailFileId = generatedThumbnailId;
+          placeholder = thumbnailResult.value.placeholder;
+          thumbnailKey = key;
+        }
+      }
+    }
+
+    const saveResult = await safeDb(async (tx) => {
+      await tx.insert(userFiles).values({
         id,
         userId,
         fileName: sanitizedFileName,
@@ -410,8 +487,24 @@ export const uploadUserFile = async ({
         sha256Hex,
         sizeBytes: file.bytes.byteLength,
         threadId,
-      }),
-    );
+        thumbnailFileId,
+        placeholder,
+      });
+
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CHAT_FILE,
+        resourceId: id,
+        workspaceId,
+        metadata: {
+          threadId,
+          fileName: sanitizedFileName,
+          mimeType: file.mimeType,
+          sizeBytes: file.bytes.byteLength,
+          s3Key,
+        },
+      });
+    });
 
     if (Result.isOk(saveResult)) {
       return Result.ok({
@@ -419,11 +512,17 @@ export const uploadUserFile = async ({
         mimeType: file.mimeType,
         fileName: sanitizedFileName,
         s3Key,
+        thumbnailS3Key: thumbnailKey,
       });
     }
 
     const cleanupResult = await Result.tryPromise({
-      try: async () => await getS3().delete(s3Key),
+      try: async () => {
+        await getS3().delete(s3Key);
+        if (thumbnailKey) {
+          await getS3().delete(thumbnailKey);
+        }
+      },
       catch: (cleanupError) =>
         new HandlerError({
           status: 500,

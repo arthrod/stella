@@ -4,6 +4,8 @@ import { Result } from "better-result";
 import { Loader2Icon, SquareMinusIcon } from "lucide-react";
 import { useLocale, useTranslations } from "use-intl";
 
+import { Skeleton } from "@stll/ui/components/skeleton";
+
 import Tooltip from "@/components/tooltip";
 import { isFileDisplayable } from "@/lib/types";
 import type { WorkspaceField, WorkspaceProperty } from "@/lib/types";
@@ -39,32 +41,34 @@ export const CellResult = ({
     const hasPreview = preview !== undefined && preview.length > 0;
 
     return (
-      <div className="grid min-w-0 grid-cols-[1fr_auto] items-center justify-between gap-1.5">
-        <span className={hasPreview ? "line-clamp-2" : "truncate"}>
-          {hasPreview ? preview : t("workspaces.fields.calculating")}
-        </span>
+      <>
         <Loader2Icon
           aria-hidden="true"
-          className="text-muted-foreground size-3 shrink-0 animate-spin"
+          className="text-muted-foreground absolute end-1 top-1 z-20 size-3 shrink-0 animate-spin"
           strokeWidth={2.25}
         />
-      </div>
+        {hasPreview ? (
+          <div className="line-clamp-2 min-w-0">{preview}</div>
+        ) : (
+          <PendingSkeleton contentType={property.content.type} />
+        )}
+      </>
     );
   }
 
   if (type === "error") {
     return (
-      <span className="text-destructive block truncate italic">
+      <div className="text-destructive line-clamp-2 italic">
         {t("workspaces.fields.errored")}
-      </span>
+      </div>
     );
   }
 
   if (type === "unsupported") {
     return (
-      <span className="text-muted-foreground block truncate italic">
+      <div className="text-muted-foreground line-clamp-2 italic">
         {t("workspaces.fields.formatNotSupported")}
-      </span>
+      </div>
     );
   }
 
@@ -129,6 +133,39 @@ export const CellResult = ({
   return <div className="line-clamp-2">{field.content.value}</div>;
 };
 
+type PendingSkeletonProps = {
+  contentType: WorkspaceProperty["content"]["type"];
+};
+
+const PendingSkeleton = ({ contentType }: PendingSkeletonProps) => {
+  if (contentType === "single-select") {
+    return <Skeleton className="h-4 w-16 rounded-full" />;
+  }
+  if (contentType === "multi-select") {
+    return (
+      <div className="flex flex-wrap gap-1">
+        <Skeleton className="h-4 w-12 rounded-full" />
+        <Skeleton className="h-4 w-16 rounded-full" />
+      </div>
+    );
+  }
+  if (contentType === "date") {
+    return <Skeleton className="h-3.5 w-20" />;
+  }
+  if (contentType === "int") {
+    return <Skeleton className="h-3.5 w-10" />;
+  }
+  if (contentType === "file") {
+    return <Skeleton className="h-4 w-24" />;
+  }
+  return (
+    <div className="flex w-full max-w-[12rem] flex-col gap-1">
+      <Skeleton className="h-3 w-full" />
+      <Skeleton className="h-3 w-3/4" />
+    </div>
+  );
+};
+
 type FileCellProps = {
   fileName: string;
   mimeType: string;
@@ -150,7 +187,12 @@ const FileCell = ({
   workspaceId,
   propertyId,
 }: FileCellProps) => {
-  const isDisplayable = isFileDisplayable({ mimeType, pdfFileId, encrypted });
+  const isDisplayable = isFileDisplayable({
+    mimeType,
+    fileName,
+    pdfFileId,
+    encrypted,
+  });
   const openFile = useInspectorStore((s) => s.openFile);
 
   if (isDisplayable) {
@@ -165,6 +207,7 @@ const FileCell = ({
                 id: fieldId,
                 entityId,
                 label: fileName,
+                fileName,
                 workspaceId,
                 mimeType,
                 pdfFileId,
@@ -175,7 +218,11 @@ const FileCell = ({
           />
         }
       >
-        <DocumentIcon className="size-3.5 shrink-0" mimeType={mimeType} />
+        <DocumentIcon
+          className="size-3.5 shrink-0"
+          fileName={fileName}
+          mimeType={mimeType}
+        />
         <span className="min-w-0 truncate text-start">{fileName}</span>
       </Tooltip>
     );
@@ -188,7 +235,11 @@ const FileCell = ({
         <span className="bg-muted grid max-w-full min-w-0 grid-cols-[1rem_minmax(0,1fr)] items-center gap-1 rounded px-1 py-0.5 text-start opacity-60" />
       }
     >
-      <DocumentIcon className="size-3.5 shrink-0" mimeType={mimeType} />
+      <DocumentIcon
+        className="size-3.5 shrink-0"
+        fileName={fileName}
+        mimeType={mimeType}
+      />
       <span className="min-w-0 truncate text-start">{fileName}</span>
     </Tooltip>
   );

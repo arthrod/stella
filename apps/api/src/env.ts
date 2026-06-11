@@ -26,9 +26,12 @@ const envApi = createEnv({
         "anthropic",
         "mistral",
         "openai_compatible",
+        "huggingface",
       ]),
     ),
     AI_PROVIDER_BASE_URL: v.optional(v.pipe(v.string(), v.url())),
+    HUGGINGFACE_API_KEY: v.optional(v.string()),
+    HUGGINGFACE_BASE_URL: v.optional(v.pipe(v.string(), v.url())),
     AI_MODEL_FAST: v.optional(v.string()),
     AI_MODEL_CHAT: v.optional(v.string()),
     AI_MODEL_REASONING: v.optional(v.string()),
@@ -78,6 +81,13 @@ const envApi = createEnv({
         ),
       ),
     ),
+    /**
+     * Enables the post-deploy synthetic-monitoring session endpoint
+     * (handlers/smoke). Set only on non-production deployments; the
+     * route additionally refuses to exist when NODE_ENV is
+     * "production" regardless of this value.
+     */
+    SMOKE_SESSION_SECRET: v.optional(v.pipe(v.string(), v.minLength(32))),
     EMAIL_PROVIDER: v.pipe(
       v.picklist(["ses", "smtp"]),
       v.check((provider) => {
@@ -142,14 +152,101 @@ const envApi = createEnv({
 
     // Launch feature flags. Keep default-off; deployment must opt in.
     FEATURE_CHAT: featureFlagSchema,
-    FEATURE_BILLING: featureFlagSchema,
+    FEATURE_USAGE: featureFlagSchema,
     FEATURE_KNOWLEDGE_TEMPLATES: featureFlagSchema,
     FEATURE_CASE_LAW: featureFlagSchema,
+    FEATURE_PUBLIC_LAW: featureFlagSchema,
     FEATURE_CONTACTS: featureFlagSchema,
     FEATURE_CALENDAR: featureFlagSchema,
     FEATURE_TODOS: featureFlagSchema,
     FEATURE_MCP: featureFlagSchema,
     FEATURE_DESKTOP_EDITING: featureFlagSchema,
+    FEATURE_WEB_SEARCH: featureFlagSchema,
+
+    /**
+     * Web search backend. Only Tavily is wired today; add a new
+     * picklist entry alongside its WebSearchProvider implementation.
+     * Leave unset to disable the tool even when FEATURE_WEB_SEARCH=true.
+     */
+    WEB_SEARCH_PROVIDER: v.optional(v.picklist(["tavily"])),
+    TAVILY_API_KEY: v.optional(v.string()),
+
+    /**
+     * URL-fetch backend used by the chat `fetch_url` tool. Jina Reader
+     * (r.jina.ai) is keyless at low volume; supply JINA_API_KEY to
+     * raise the rate limit.
+     */
+    WEB_FETCH_PROVIDER: v.optional(v.picklist(["jina"])),
+    JINA_API_KEY: v.optional(v.string()),
+
+    /**
+     * Identifying `User-Agent` header for SEC EDGAR requests. The
+     * SEC mandates a real contact string (e.g. "<App name>
+     * <contact@email>") on every request to data.sec.gov; without it
+     * the API returns 403. Required whenever the EDGAR business
+     * registry adapter is exposed; without it the runtime marks the
+     * adapter unavailable instead of surfacing a tool that will fail.
+     */
+    EDGAR_USER_AGENT: v.optional(
+      v.pipe(
+        v.string(),
+        v.trim(),
+        v.minLength(
+          1,
+          "EDGAR_USER_AGENT must be a non-empty identifying string (e.g. '<App name> <contact@email>') — the SEC returns 403 without one.",
+        ),
+      ),
+    ),
+
+    /**
+     * API key for UK Companies House (https://api.company-information.service.gov.uk).
+     * The upstream authenticates every request via HTTP Basic with
+     * this key as the username and an empty password; missing or
+     * wrong credentials return 401. Free, instant via
+     * https://developer.company-information.service.gov.uk. Required
+     * whenever the Companies House business registry adapter is
+     * exposed; without it the runtime marks the adapter unavailable
+     * instead of surfacing a tool that will fail.
+     */
+    COMPANIES_HOUSE_API_KEY: v.optional(
+      v.pipe(
+        v.string(),
+        v.trim(),
+        v.minLength(
+          1,
+          "COMPANIES_HOUSE_API_KEY must be a non-empty API key from https://developer.company-information.service.gov.uk — the API returns 401 without one.",
+        ),
+      ),
+    ),
+
+    /** Optional hosted usage integration settings. */
+    HOSTED_USAGE_WEBHOOK_SECRET: v.optional(
+      v.pipe(v.string(), v.minLength(16)),
+    ),
+    /**
+     * Previous webhook secret kept active during a rotation
+     * window. When set, both this and the current secret are
+     * accepted for HMAC verification so in-flight deliveries keep
+     * working while the rotation propagates.
+     */
+    HOSTED_USAGE_WEBHOOK_SECRET_PREVIOUS: v.optional(
+      v.pipe(v.string(), v.minLength(16)),
+    ),
+    HOSTED_USAGE_PROVIDER_API_KEY: v.optional(
+      v.pipe(v.string(), v.minLength(8)),
+    ),
+    HOSTED_USAGE_PROVIDER_BASE_URL: v.optional(v.pipe(v.string(), v.url())),
+
+    /** Enables pre-flight usage-limit enforcement when true. */
+    USAGE_ENFORCEMENT_ENABLED: featureFlagSchema,
+
+    /**
+     * Deployment-owned usage-policy seed list. JSON array of
+     * { key, displayName, monthlyUsageUnits, hostedPolicyRef? }.
+     * Default is intentionally empty so public source does not
+     * encode an operator policy.
+     */
+    STELLA_USAGE_POLICY_SEEDS: v.optional(v.string(), "[]"),
   },
   emptyStringAsUndefined: true,
   runtimeEnv: process.env,

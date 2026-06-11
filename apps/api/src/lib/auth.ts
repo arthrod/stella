@@ -23,13 +23,17 @@ import { authSchema } from "@/api/db/auth-schema";
 import { rootDb, rlsDb } from "@/api/db/root";
 import { workspaceMembers, workspaces } from "@/api/db/schema";
 import { env } from "@/api/env";
-import { loadOrgAIConfig } from "@/api/lib/ai-config-loader";
+import {
+  loadOrgAIConfig,
+  loadPromptCachingPreference,
+} from "@/api/lib/ai-config-loader";
 import { captureError } from "@/api/lib/analytics";
+import { createAuditRecorder } from "@/api/lib/audit-log";
 import { revokeOrganizationMemberAuthArtifacts } from "@/api/lib/auth-artifacts";
 import { toSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tUuid } from "@/api/lib/custom-schema";
-import { DEV_INSPECTOR_ORIGINS } from "@/api/lib/dev-origins";
+import { DEV_INSPECTOR_ORIGINS, frontendOrigins } from "@/api/lib/dev-origins";
 import { stashDevOtp } from "@/api/lib/dev-otp-store";
 import {
   sendNewDeviceLoginEmail,
@@ -42,6 +46,7 @@ import { isMemberRole } from "@/api/lib/member-roles";
 import type { MemberRole } from "@/api/lib/member-roles";
 import { enrichRequestContext } from "@/api/lib/observability/request-context";
 import { parseUserAgent } from "@/api/lib/parse-user-agent";
+import { createAuthRateLimitStorage } from "@/api/lib/rate-limit/auth-storage";
 import {
   getMcpResourceUrl,
   MCP_ALL_RESOURCE_SCOPES,
@@ -182,7 +187,10 @@ const isMcpResourceScope = (
 const createAuth = () => {
   const auth = betterAuth({
     trustedOrigins: [
-      env.FRONTEND_URL,
+      ...frontendOrigins({
+        frontendUrl: env.FRONTEND_URL,
+        isDev: env.isDev,
+      }),
       ...(env.isDev ? ["chrome-extension://*"] : []),
       ...(env.isDev ? DEV_INSPECTOR_ORIGINS : []),
       ...(env.EXTENSION_ORIGIN ? [env.EXTENSION_ORIGIN] : []),
@@ -218,47 +226,9 @@ const createAuth = () => {
       enabled: true,
       window: AUTH_RATE_LIMITS.global.window,
       max: AUTH_RATE_LIMITS.global.max,
-      customStorage: (() => {
-        type Entry = {
-          value: { key: string; count: number; lastRequest: number };
-          expiresAt: number;
-        };
-        const store = new Map<string, Entry>();
-        const ttlMs = AUTH_RATE_LIMIT_MAX_WINDOW * 1000;
-        const cleanup = setInterval(() => {
-          const now = Date.now();
-          for (const [k, e] of store) {
-            if (e.expiresAt <= now) {
-              store.delete(k);
-            }
-          }
-        }, 60_000);
-        cleanup.unref();
-        return {
-          // eslint-disable-next-line require-await -- interface requires Promise
-          async get(key: string) {
-            const entry = store.get(key);
-            if (!entry || entry.expiresAt <= Date.now()) {
-              return null;
-            }
-            return entry.value;
-          },
-          // eslint-disable-next-line require-await -- interface requires Promise
-          async set(
-            key: string,
-            value: {
-              key: string;
-              count: number;
-              lastRequest: number;
-            },
-          ) {
-            store.set(key, {
-              value,
-              expiresAt: Date.now() + ttlMs,
-            });
-          },
-        };
-      })(),
+      customStorage: createAuthRateLimitStorage(
+        AUTH_RATE_LIMIT_MAX_WINDOW * 1000,
+      ),
       customRules: {
         "/sign-in/email-otp": AUTH_RATE_LIMITS.signIn,
         "/sign-up/email": AUTH_RATE_LIMITS.signUp,
@@ -271,7 +241,6 @@ const createAuth = () => {
     databaseHooks: {
       user: {
         create: {
-          // eslint-disable-next-line require-await -- async required by better-auth hook type
           before: async (user) => {
             validateTimezoneId(user["timezoneId"]);
             // Email-OTP and some social providers leave `name` blank.
@@ -281,15 +250,14 @@ const createAuth = () => {
             // Then trim `preferredName` / `wordEditShortcut` (Word author /
             // initials prefs) before persisting.
             const data = normalizeUserPreferences(ensureDisplayName(user));
-            return { data };
+            return await Promise.resolve({ data });
           },
         },
         update: {
-          // eslint-disable-next-line require-await -- async required by better-auth hook type
           before: async (user) => {
             validateTimezoneId(user["timezoneId"]);
             const data = normalizeUserPreferences(ensureDisplayName(user));
-            return { data };
+            return await Promise.resolve({ data });
           },
         },
       },
@@ -709,7 +677,7 @@ export const resolveAccessibleWorkspaces = async (
 
 export const authMacro = new Elysia({ name: "authMacro" }).macro({
   validateAuth: {
-    async resolve({ status, request }) {
+    async resolve({ status, request, server }) {
       const { sessionResult, memberRoleResult } = await getSessionAndMemberRole(
         request.headers,
       );
@@ -742,14 +710,16 @@ export const authMacro = new Elysia({ name: "authMacro" }).macro({
       });
 
       // Load workspaces and AI config in parallel.
-      const [accessibleWorkspaces, orgAIConfig] = await Promise.all([
-        resolveAccessibleWorkspaces(
-          userId,
-          activeOrganizationId,
-          memberRole.role,
-        ),
-        loadOrgAIConfig(activeOrganizationId),
-      ]);
+      const [accessibleWorkspaces, orgAIConfig, promptCachingEnabled] =
+        await Promise.all([
+          resolveAccessibleWorkspaces(
+            userId,
+            activeOrganizationId,
+            memberRole.role,
+          ),
+          loadOrgAIConfig(activeOrganizationId),
+          loadPromptCachingPreference(activeOrganizationId),
+        ]);
 
       const scopedDb = createScopedDb(
         rlsDb,
@@ -767,6 +737,14 @@ export const authMacro = new Elysia({ name: "authMacro" }).macro({
       const activeWorkspaceIds = accessibleWorkspaces
         .filter((w) => w.status !== "deleting")
         .map((w) => w.id);
+
+      const recorderBindings = {
+        organizationId: activeOrganizationId,
+        workspaceId: null,
+        userId,
+        request,
+        server,
+      };
 
       return {
         user: {
@@ -792,6 +770,30 @@ export const authMacro = new Elysia({ name: "authMacro" }).macro({
         safeDb,
         memberRole,
         orgAIConfig,
+        promptCachingEnabled,
+        /**
+         * Records audit rows in the supplied tx. Identity fields
+         * (org/user/IP/UA) are bound from the request context;
+         * workspaceId defaults to null for root handlers and is
+         * overridden by workspaceAccessMacro to the validated
+         * workspaceId for workspace handlers. Individual events
+         * can still override workspaceId for cross-workspace ops.
+         */
+        recordAuditEvent: createAuditRecorder(recorderBindings),
+        /**
+         * Builds a recorder with an overridden default workspaceId.
+         * Use when threading audit recording through helpers that
+         * don't receive the handler ctx (cross-workspace operations,
+         * shared copy/move utilities).
+         */
+        createAuditRecorder: (opts?: {
+          workspaceId?: SafeId<"workspace"> | null;
+        }) =>
+          createAuditRecorder({
+            ...recorderBindings,
+            workspaceId:
+              opts && "workspaceId" in opts ? (opts.workspaceId ?? null) : null,
+          }),
       };
     },
   },
@@ -819,6 +821,38 @@ export const permissionMacro = new Elysia({ name: "permissionMacro" }).macro({
   }),
 });
 
+const bindWorkspaceRecorder = (
+  ctx: {
+    session: { activeOrganizationId: SafeId<"organization"> };
+    user: { id: SafeId<"user"> };
+    request: Request;
+    server: Parameters<typeof createAuditRecorder>[0]["server"];
+  },
+  workspaceId: SafeId<"workspace">,
+) => {
+  const recorderBindings = {
+    organizationId: ctx.session.activeOrganizationId,
+    workspaceId,
+    userId: ctx.user.id,
+    request: ctx.request,
+    server: ctx.server,
+  };
+
+  return {
+    recordAuditEvent: createAuditRecorder(recorderBindings),
+    createAuditRecorder: (opts?: {
+      workspaceId?: SafeId<"workspace"> | null;
+    }) =>
+      createAuditRecorder({
+        ...recorderBindings,
+        workspaceId:
+          opts && "workspaceId" in opts
+            ? (opts.workspaceId ?? null)
+            : workspaceId,
+      }),
+  };
+};
+
 export const workspaceAccessMacro = new Elysia({
   name: "workspaceAccessMacro",
 })
@@ -838,8 +872,11 @@ export const workspaceAccessMacro = new Elysia({
         return ctx.status(404);
       }
 
+      const workspaceId = toSafeId<"workspace">(ctx.params.workspaceId);
+
       return {
-        workspaceId: toSafeId<"workspace">(ctx.params.workspaceId),
+        workspaceId,
+        ...bindWorkspaceRecorder(ctx, workspaceId),
       };
     },
   })
@@ -856,8 +893,11 @@ export const workspaceAccessMacro = new Elysia({
         return ctx.status(404);
       }
 
+      const workspaceId = toSafeId<"workspace">(ctx.params.workspaceId);
+
       return {
-        workspaceId: toSafeId<"workspace">(ctx.params.workspaceId),
+        workspaceId,
+        ...bindWorkspaceRecorder(ctx, workspaceId),
       };
     },
   });

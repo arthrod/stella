@@ -1,4 +1,4 @@
-import { Result } from "better-result";
+import { Result, panic } from "better-result";
 import { eq, sql } from "drizzle-orm";
 import { t } from "elysia";
 
@@ -18,6 +18,8 @@ import type {
 import { isFieldMeta, isNamedCondition } from "@/api/handlers/docx/types";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
+import type { AuditRecorder } from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tDefaultVarchar, tSafeId } from "@/api/lib/custom-schema";
@@ -49,6 +51,7 @@ type CreateTemplateProps = {
     categoryId?: SafeId<"templateCategory">;
     manifest?: unknown;
   };
+  recordAuditEvent: AuditRecorder;
 };
 
 const buildS3Key = (
@@ -97,6 +100,7 @@ const createTemplateHandler = async function* ({
   organizationId,
   userId,
   body: { file, name, categoryId, manifest: manifestJson },
+  recordAuditEvent,
 }: CreateTemplateProps) {
   if (file.type !== DOCX_MIME_TYPE) {
     return Result.err(
@@ -234,6 +238,25 @@ const createTemplateHandler = async function* ({
         createdBy: userId,
       });
 
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.TEMPLATE,
+        resourceId: templateId,
+        workspaceId: null,
+        changes: {
+          created: {
+            old: null,
+            new: {
+              name,
+              categoryId: categoryId ?? null,
+              fileName: row?.fileName ?? null,
+              fieldCount: fields.length,
+              currentVersion: 1,
+            },
+          },
+        },
+      });
+
       return { ok: true as const, row };
     }),
   );
@@ -247,7 +270,12 @@ const createTemplateHandler = async function* ({
     );
   }
 
-  return Result.ok(txResult.row);
+  const row = txResult.row;
+  if (!row) {
+    panic("Failed to create template");
+  }
+
+  return Result.ok(row);
 };
 
 const config = {
@@ -257,12 +285,13 @@ const config = {
 
 const createTemplate = createSafeRootHandler(
   config,
-  async function* ({ safeDb, session, user, body }) {
+  async function* ({ safeDb, session, user, body, recordAuditEvent }) {
     return yield* createTemplateHandler({
       safeDb,
       organizationId: session.activeOrganizationId,
       userId: user.id,
       body,
+      recordAuditEvent,
     });
   },
 );

@@ -1,13 +1,18 @@
 import { Result } from "better-result";
 import { eq, sql } from "drizzle-orm";
 
+import { roles } from "@stll/permissions";
+
 import { workspaceViews } from "@/api/db/schema";
+import { resolveTemplateProperties } from "@/api/handlers/view-templates/properties";
 import {
+  cleanStalePropertyIds,
   hasDuplicateSorts,
   hasMultipleKindFilters,
 } from "@/api/handlers/views/utils";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { LIMITS } from "@/api/lib/limits";
 import { broadcast } from "@/api/lib/sse";
@@ -23,7 +28,13 @@ const config = {
 
 const createView = createSafeHandler(
   config,
-  async function* ({ safeDb, workspaceId, body }) {
+  async function* ({
+    safeDb,
+    workspaceId,
+    memberRole,
+    body,
+    recordAuditEvent,
+  }) {
     const layout = parseViewLayout(body.layout);
 
     if (hasDuplicateSorts(layout.sorts)) {
@@ -66,6 +77,26 @@ const createView = createSafeHandler(
           };
         }
 
+        const resolvedTemplateProperties = await resolveTemplateProperties({
+          tx,
+          workspaceId,
+          layout,
+          templateProperties: body.templateProperties,
+          canCreateProperties: roles[memberRole.role].authorize({
+            property: ["create"],
+          }).success,
+          recordAuditEvent,
+        });
+
+        if (!resolvedTemplateProperties.ok) {
+          return {
+            ok: false as const,
+            status: resolvedTemplateProperties.status,
+            message: resolvedTemplateProperties.message,
+          };
+        }
+        cleanStalePropertyIds(layout, resolvedTemplateProperties.propertyIds);
+
         const [maxRow] = await tx
           .select({
             max: sql<number>`coalesce(max(${workspaceViews.position}), -1)`,
@@ -93,6 +124,22 @@ const createView = createSafeHandler(
             message: "Failed to create view",
           };
         }
+
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.CREATE,
+          resourceType: AUDIT_RESOURCE_TYPE.VIEW,
+          resourceId: inserted.id,
+          changes: {
+            created: {
+              old: null,
+              new: {
+                name: inserted.name,
+                layoutType: layout.type,
+                position: inserted.position,
+              },
+            },
+          },
+        });
 
         return {
           ok: true as const,

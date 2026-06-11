@@ -2,9 +2,12 @@ import { generateText } from "ai";
 import { Result } from "better-result";
 import { t } from "elysia";
 
-import { loadOrgAIConfig } from "@/api/lib/ai-config-loader";
+import {
+  loadOrgAIConfig,
+  loadPromptCachingPreference,
+} from "@/api/lib/ai-config-loader";
 import { aiHandlerError } from "@/api/lib/ai-error";
-import { getModelForRole, getTemperatureForRole } from "@/api/lib/ai-models";
+import { getModelForRole } from "@/api/lib/ai-models";
 import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
@@ -37,6 +40,7 @@ const suggestPromptBodySchema = t.Object({
 const config = {
   permissions: { property: ["create"] },
   body: suggestPromptBodySchema,
+  requiresUsage: { actionType: "chat", modelRole: "fast" },
 } satisfies HandlerConfig;
 
 const SUGGEST_TIMEOUT_MS = 20_000;
@@ -115,7 +119,7 @@ const suggestPrompt = createSafeHandler(
   config,
   // `createSafeHandler` requires an AsyncGenerator. No DB ops to yield* over.
   // eslint-disable-next-line require-yield
-  async function* ({ session, request, body }) {
+  async function* ({ session, request, body, safeDb, user, workspaceId }) {
     const trimmedName = body.name.trim();
     if (trimmedName.length === 0) {
       return Result.err(
@@ -123,9 +127,20 @@ const suggestPrompt = createSafeHandler(
       );
     }
 
-    const orgAIConfig = await loadOrgAIConfig(session.activeOrganizationId);
+    const [orgAIConfig, promptCachingEnabled] = await Promise.all([
+      loadOrgAIConfig(session.activeOrganizationId),
+      loadPromptCachingPreference(session.activeOrganizationId),
+    ]);
 
     const aiAnalytics = createAIAnalyticsCallbacks({
+      usageMetering: {
+        actionType: "chat",
+        organizationId: session.activeOrganizationId,
+        safeDb,
+        serviceTier: "standard",
+        userId: user.id,
+        workspaceId,
+      },
       feature: "properties.suggest-prompt",
       modelRole: "fast",
       orgAIConfig,
@@ -146,8 +161,12 @@ const suggestPrompt = createSafeHandler(
     const generateResult = await Result.tryPromise({
       try: async () => {
         const result = await generateText({
-          model: getModelForRole("fast", orgAIConfig),
-          temperature: getTemperatureForRole("fast"),
+          model: getModelForRole("fast", orgAIConfig, {
+            promptCachingEnabled,
+            scopeKey: null,
+            organizationId: session.activeOrganizationId,
+            serviceTier: "standard",
+          }),
           system: SYSTEM_PROMPT,
           messages: [{ role: "user", content: userMessage }],
           abortSignal: AbortSignal.any([

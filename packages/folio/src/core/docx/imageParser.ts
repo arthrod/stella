@@ -28,6 +28,7 @@
 
 import type {
   Image,
+  ImageCrop,
   ImageSize,
   ImageWrap,
   ImagePosition,
@@ -229,38 +230,132 @@ function parseTransform(xfrm: XmlElement | null): ImageTransform | undefined {
 // ============================================================================
 
 /**
- * Find the a:blip element and extract the relationship ID
+ * Find the pic:blipFill element in a w:drawing container.
  *
- * Path: a:graphic > a:graphicData > pic:pic > pic:blipFill > a:blip
+ * Path: a:graphic > a:graphicData > pic:pic > pic:blipFill
+ *
+ * The blipFill carries both `a:blip` (the relationship ID) and the optional
+ * `a:srcRect` crop element, so callers that need either share this walk.
  */
-function findBlipElement(container: XmlElement): XmlElement | null {
-  // Find a:graphic
+function findBlipFillElement(container: XmlElement): XmlElement | null {
   const graphic = findByFullName(container, "a:graphic");
   if (!graphic) {
     return null;
   }
 
-  // Find a:graphicData
   const graphicData = findByFullName(graphic, "a:graphicData");
   if (!graphicData) {
     return null;
   }
 
-  // Find pic:pic
   const pic = findByFullName(graphicData, "pic:pic");
   if (!pic) {
     return null;
   }
 
-  // Find pic:blipFill
-  const blipFill = findByFullName(pic, "pic:blipFill");
-  if (!blipFill) {
-    return null;
-  }
+  return findByFullName(pic, "pic:blipFill");
+}
 
-  // Find a:blip
-  const blip = findByFullName(blipFill, "a:blip");
-  return blip;
+/**
+ * Parse `<a:srcRect l="..." t="..." r="..." b="..."/>` inside `pic:blipFill`.
+ * Values are in 1/100000 of the source image dimension; converted to fractions
+ * in [0, 1] so the renderer can apply them as CSS clip-path percentages.
+ *
+ * eigenpal #424 (image-crop subset).
+ */
+function parseImageCrop(blipFill: XmlElement | null): ImageCrop | undefined {
+  if (!blipFill) {
+    return undefined;
+  }
+  const srcRect = findByFullName(blipFill, "a:srcRect");
+  if (!srcRect) {
+    return undefined;
+  }
+  const toFraction = (attr: string): number | undefined => {
+    const raw = parseNumericAttribute(srcRect, null, attr);
+    if (raw === undefined || raw === 0) {
+      return undefined;
+    }
+    return raw / 100_000;
+  };
+  const left = toFraction("l");
+  const top = toFraction("t");
+  const right = toFraction("r");
+  const bottom = toFraction("b");
+  if (
+    left === undefined &&
+    top === undefined &&
+    right === undefined &&
+    bottom === undefined
+  ) {
+    return undefined;
+  }
+  const crop: ImageCrop = {};
+  if (left !== undefined) {
+    crop.left = left;
+  }
+  if (top !== undefined) {
+    crop.top = top;
+  }
+  if (right !== undefined) {
+    crop.right = right;
+  }
+  if (bottom !== undefined) {
+    crop.bottom = bottom;
+  }
+  return crop;
+}
+
+/**
+ * Parse an OOXML `ST_OnOff` attribute on an element. Accepts the full
+ * set of literals the spec allows (`"1"`/`"true"`/`"on"` and
+ * `"0"`/`"false"`/`"off"`); anything else (including an absent
+ * attribute) folds back to `undefined` so callers can apply the
+ * spec-defined default.
+ */
+function parseOnOffAttr(
+  element: XmlElement,
+  name: string,
+): boolean | undefined {
+  const raw = getAttribute(element, null, name);
+  if (raw === null) {
+    return undefined;
+  }
+  if (raw === "1" || raw === "true" || raw === "on") {
+    return true;
+  }
+  if (raw === "0" || raw === "false" || raw === "off") {
+    return false;
+  }
+  return undefined;
+}
+
+/**
+ * Parse `<a:alphaModFix amt="..."/>` inside the `a:blip` element. The
+ * `amt` value is in 1/100000; convert to a fraction in [0, 1] for CSS
+ * `opacity`. Returns undefined when no alpha modifier is present (fully
+ * opaque), when `amt` is missing or non-numeric, or when `amt` >= 100000
+ * (also fully opaque). `parseNumericAttribute` already returns
+ * `undefined` (not `NaN`) for non-numeric values, so a downstream NaN
+ * is impossible here.
+ *
+ * Mirrors eigenpal docx-editor #424.
+ */
+function parseImageOpacity(blip: XmlElement | null): number | undefined {
+  if (!blip) {
+    return undefined;
+  }
+  const alpha = findByFullName(blip, "a:alphaModFix");
+  if (!alpha) {
+    return undefined;
+  }
+  const amt = parseNumericAttribute(alpha, null, "amt");
+  if (amt === undefined || amt >= 100_000) {
+    return undefined;
+  }
+  // `amt < 100_000` is guaranteed above, so the result is < 1; only
+  // clamp the lower bound.
+  return Math.max(0, amt / 100_000);
 }
 
 /**
@@ -489,8 +584,11 @@ function parseInline(
   const props = parseDocProps(docPr);
 
   // Find blip and extract rId
-  const blip = findBlipElement(inlineEl);
+  const blipFill = findBlipFillElement(inlineEl);
+  const blip = blipFill ? findByFullName(blipFill, "a:blip") : null;
   const rId = extractBlipRId(blip);
+  const crop = parseImageCrop(blipFill);
+  const opacity = parseImageOpacity(blip);
 
   // Resolve image data
   const imageData = resolveImageData(rId, rels, media);
@@ -554,6 +652,12 @@ function parseInline(
   if (transform) {
     image.transform = transform;
   }
+  if (crop) {
+    image.crop = crop;
+  }
+  if (opacity !== undefined) {
+    image.opacity = opacity;
+  }
 
   // Resolve image hyperlink (a:hlinkClick)
   if (props.hlinkRId && rels) {
@@ -594,6 +698,16 @@ function parseAnchor(
   // Check behindDoc attribute
   const behindDoc = getAttribute(anchorEl, null, "behindDoc") === "1";
 
+  // OOXML defaults `layoutInCell` and `allowOverlap` to "1" (true) when the
+  // attributes are absent. We only record the value when the document
+  // deviates from the default so the round-trip preserves author intent
+  // without bloating the serialized XML. Mirrors eigenpal #424.
+  //
+  // `ST_OnOff` accepts "1"/"true"/"on" and "0"/"false"/"off"; anything
+  // unrecognized folds back to `undefined` (default).
+  const layoutInCell = parseOnOffAttr(anchorEl, "layoutInCell");
+  const allowOverlap = parseOnOffAttr(anchorEl, "allowOverlap");
+
   // Read distance attributes from the wp:anchor element itself (fallback values)
   const anchorDistT = parseNumericAttribute(anchorEl, null, "distT");
   const anchorDistB = parseNumericAttribute(anchorEl, null, "distB");
@@ -625,8 +739,11 @@ function parseAnchor(
   }
 
   // Find blip and extract rId
-  const blip = findBlipElement(anchorEl);
+  const blipFill = findBlipFillElement(anchorEl);
+  const blip = blipFill ? findByFullName(blipFill, "a:blip") : null;
   const rId = extractBlipRId(blip);
+  const crop = parseImageCrop(blipFill);
+  const opacity = parseImageOpacity(blip);
 
   // Resolve image data
   const imageData = resolveImageData(rId, rels, media);
@@ -672,6 +789,18 @@ function parseAnchor(
   }
   if (transform) {
     image.transform = transform;
+  }
+  if (crop) {
+    image.crop = crop;
+  }
+  if (opacity !== undefined) {
+    image.opacity = opacity;
+  }
+  if (layoutInCell !== undefined) {
+    image.layoutInCell = layoutInCell;
+  }
+  if (allowOverlap !== undefined) {
+    image.allowOverlap = allowOverlap;
   }
 
   // Resolve image hyperlink (a:hlinkClick)

@@ -1,5 +1,4 @@
 import { Result, TaggedError } from "better-result";
-import { createHash, randomBytes } from "node:crypto";
 import * as v from "valibot";
 
 import type { McpOAuthRegistrationResponse } from "@/api/db/schema";
@@ -9,7 +8,10 @@ import {
   authorizationServerMetadataUrls,
   mcpWellKnownProtectedResourceUrls,
 } from "@/api/handlers/mcp-connectors/url-safety";
-import { HandlerError } from "@/api/lib/errors/tagged-errors";
+import {
+  FetchBoundaryError,
+  HandlerError,
+} from "@/api/lib/errors/tagged-errors";
 import {
   safeOutboundFetchBytes,
   validateOutboundFetchTarget,
@@ -47,6 +49,7 @@ const authorizationServerMetadataSchema = v.looseObject({
   code_challenge_methods_supported: v.optional(v.array(v.string())),
   token_endpoint_auth_methods_supported: v.optional(v.array(v.string())),
   grant_types_supported: v.optional(v.array(v.string())),
+  client_id_metadata_document_supported: v.optional(v.boolean()),
 });
 
 const dynamicClientRegistrationResponseSchema = v.intersect([
@@ -122,11 +125,15 @@ const fetchJson = async <T>({
 
       if (!response.value.ok) {
         const body = new TextDecoder().decode(response.value.body);
-        throw new Error(
-          body.length > 0
-            ? `HTTP ${response.value.status}: ${body.slice(0, 500)}`
-            : `HTTP ${response.value.status}`,
-        );
+        throw new FetchBoundaryError({
+          url: url.toString(),
+          status: response.value.status,
+          ...(body.length > 0 ? { body: body.slice(0, 500) } : {}),
+          message:
+            body.length > 0
+              ? `HTTP ${response.value.status}: ${body.slice(0, 500)}`
+              : `HTTP ${response.value.status}`,
+        });
       }
 
       return v.parse(
@@ -220,22 +227,75 @@ export const discoverOAuthMetadata = async (
   return Result.ok({ authorizationServer, protectedResource });
 };
 
+const randomBase64Url = (byteLength: number): string => {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Buffer.from(bytes).toString("base64url");
+};
+
 export const createPkce = () => {
-  const codeVerifier = randomBytes(PKCE_VERIFIER_BYTES).toString("base64url");
-  const codeChallenge = createHash("sha256")
+  const codeVerifier = randomBase64Url(PKCE_VERIFIER_BYTES);
+  const codeChallenge = new Bun.CryptoHasher("sha256")
     .update(codeVerifier)
     .digest("base64url");
 
   return { codeChallenge, codeVerifier };
 };
 
-export const createOAuthState = (): string =>
-  randomBytes(32).toString("base64url");
+export const createOAuthState = (): string => randomBase64Url(32);
 
 export const getMcpOAuthRedirectUri = (): string => {
   const publicUrl = env.PUBLIC_URL ?? env.BETTER_AUTH_URL;
   return new URL("/v1/mcp/oauth/callback", publicUrl).toString();
 };
+
+export type McpClientRegistrationMode = "cimd" | "dcr" | "unsupported";
+
+// Client ID Metadata Documents are the MCP spec's preferred registration
+// mechanism; Dynamic Client Registration is retained for authorization
+// servers that have not adopted CIMD yet.
+export const clientRegistrationMode = (
+  authorizationServer: AuthorizationServerMetadata,
+): McpClientRegistrationMode => {
+  if (authorizationServer.client_id_metadata_document_supported === true) {
+    return "cimd";
+  }
+  if (authorizationServer.registration_endpoint) {
+    return "dcr";
+  }
+  return "unsupported";
+};
+
+const MCP_CLIENT_METADATA_DOCUMENT_PATH = "/v1/mcp/oauth/client-metadata.json";
+
+export const getMcpClientMetadataDocumentUrl = (): string => {
+  const publicUrl = env.PUBLIC_URL ?? env.BETTER_AUTH_URL;
+  return new URL(MCP_CLIENT_METADATA_DOCUMENT_PATH, publicUrl).toString();
+};
+
+export type McpClientMetadataDocument = {
+  client_id: string;
+  client_name: string;
+  client_uri: string;
+  grant_types: string[];
+  redirect_uris: string[];
+  response_types: string[];
+  token_endpoint_auth_method: "none";
+};
+
+// draft-ietf-oauth-client-id-metadata-document: the document's `client_id`
+// must equal the URL it is served from, and it must not carry any shared
+// secret (stella is a public client; PKCE protects the code exchange).
+export const buildMcpClientMetadataDocument =
+  (): McpClientMetadataDocument => ({
+    client_id: getMcpClientMetadataDocumentUrl(),
+    client_name: "stella",
+    client_uri: env.FRONTEND_URL,
+    grant_types: ["authorization_code", "refresh_token"],
+    redirect_uris: [getMcpOAuthRedirectUri()],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none",
+  });
 
 export const buildAuthorizeUrl = ({
   authorizationServer,
@@ -296,7 +356,7 @@ export const registerOAuthClient = async ({
   }
 
   const registrationBody = {
-    client_name: "Stella",
+    client_name: "stella",
     client_uri: env.FRONTEND_URL,
     grant_types: ["authorization_code", "refresh_token"],
     redirect_uris: [redirectUri],
@@ -321,7 +381,7 @@ export const registerOAuthClient = async ({
     return Result.err(
       new HandlerError({
         status: 502,
-        message: "Failed to register Stella with MCP authorization server",
+        message: "Failed to register stella with MCP authorization server",
         cause: response.error,
       }),
     );

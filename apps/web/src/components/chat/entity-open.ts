@@ -38,6 +38,7 @@ const openDisplayableFile = ({
       id: field.id,
       entityId,
       label,
+      fileName: field.content.fileName,
       mimeType: field.content.mimeType,
       pdfFileId: field.content.pdfFileId,
       propertyId: field.propertyId,
@@ -78,7 +79,9 @@ const openEntityByKind = ({
   workspaceId: string;
 }): OpenEntityResult | null => {
   if (kind === "task") {
-    useInspectorStore.getState().openTask(entityId, label);
+    useInspectorStore
+      .getState()
+      .openTask({ taskId: entityId, workspaceId, label });
     return { type: "opened" };
   }
 

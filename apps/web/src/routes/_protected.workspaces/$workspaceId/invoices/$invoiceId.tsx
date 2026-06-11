@@ -1,12 +1,13 @@
 import { Suspense, useState } from "react";
 
-import { useForm, useStore } from "@tanstack/react-form";
+import { useForm } from "@tanstack/react-form";
 import {
   useMutation,
   useQueryClient,
   useSuspenseQuery,
 } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { useSelector } from "@tanstack/react-store";
 import {
   ArrowLeftIcon,
   CheckIcon,
@@ -122,12 +123,10 @@ const InvoiceDetail = ({
   );
 
   const invalidateAll = () => {
-    // eslint-disable-next-line typescript/no-floating-promises
-    queryClient.invalidateQueries({
+    void queryClient.invalidateQueries({
       queryKey: invoicesKeys.all(workspaceId),
     });
-    // eslint-disable-next-line typescript/no-floating-promises
-    queryClient.invalidateQueries({
+    void queryClient.invalidateQueries({
       queryKey: timeEntriesKeys.all(workspaceId),
     });
   };
@@ -704,15 +703,14 @@ const EditInvoiceForm = ({
         showErrorToast(t("billing.failedToSave"));
         return;
       }
-      // eslint-disable-next-line typescript/no-floating-promises
-      queryClient.invalidateQueries({
+      void queryClient.invalidateQueries({
         queryKey: invoicesKeys.all(workspaceId),
       });
       onClose();
     },
   });
 
-  const formErrors = useStore(form.store, (s) => toFormErrors(s.fieldMeta));
+  const formErrors = useSelector(form.store, (s) => toFormErrors(s.fieldMeta));
 
   return (
     <Form
@@ -720,8 +718,7 @@ const EditInvoiceForm = ({
       errors={formErrors}
       onSubmit={(e) => {
         e.preventDefault();
-        // eslint-disable-next-line typescript/no-floating-promises
-        form.handleSubmit();
+        void form.handleSubmit();
       }}
     >
       <h2 className="text-sm font-semibold">

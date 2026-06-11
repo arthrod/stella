@@ -14,6 +14,8 @@
 
 import React, { useCallback, useRef } from "react";
 
+import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
+
 import { cn } from "../lib/utils";
 import { FormattingBar } from "./FormattingBar";
 import {
@@ -111,7 +113,7 @@ export function Toolbar({
     <div
       ref={toolbarRef}
       className={cn(
-        "flex h-10 items-center justify-center overflow-x-auto border-b border-[var(--doc-border)] bg-[var(--doc-page)] px-1",
+        "flex h-10 [scrollbar-width:none] items-center justify-center overflow-x-auto border-b border-[var(--doc-border)] bg-[var(--doc-page)] px-1 [&::-webkit-scrollbar]:hidden",
         className,
       )}
       style={style}
@@ -119,8 +121,9 @@ export function Toolbar({
       aria-label="Formatting toolbar"
       tabIndex={-1}
       data-testid="toolbar"
-      onMouseDown={handleToolbarMouseDown}
-      onMouseUp={handleToolbarMouseUp}
+      data-folio-toolbar="true"
+      onMouseDown={containedHandler(toolbarRef, handleToolbarMouseDown)}
+      onMouseUp={containedHandler(toolbarRef, handleToolbarMouseUp)}
     >
       {/* Formatting icons — rendered inline (display:contents) */}
       <FormattingBar

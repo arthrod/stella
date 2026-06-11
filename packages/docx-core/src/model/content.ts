@@ -83,6 +83,14 @@ export type FieldCharContent = {
   fldLock?: boolean;
   /** Field is dirty (needs update) */
   dirty?: boolean;
+  /**
+   * Cached display value from a child `<w:numberingChange w:original="…"/>`.
+   * Word writes this on the end fldChar of self-numbering fields (LISTNUM,
+   * AUTONUM, …) so the static "(a)" / "1." text is recoverable without
+   * re-evaluating the field. Used as a fallback `fieldResult` when the
+   * field has no `separate` run.
+   */
+  originalValue?: string;
 };
 
 /**
@@ -250,6 +258,7 @@ export type FieldType =
   | "AUTONUM"
   | "AUTONUMLGL"
   | "AUTONUMOUT"
+  | "LISTNUM"
   | "IF"
   | "MERGEFIELD"
   | "NEXT"
@@ -400,6 +409,20 @@ export type ImagePadding = {
 };
 
 /**
+ * Image crop fractions in [0, 1] applied to each side of the source bitmap.
+ * Mirrors the four `<a:srcRect>` attributes (`l`, `t`, `r`, `b`) defined in
+ * ECMA-376 §20.1.8.55, stored in 1/100000 units on the wire.
+ *
+ * eigenpal #424 (image-crop subset).
+ */
+export type ImageCrop = {
+  left?: number;
+  top?: number;
+  right?: number;
+  bottom?: number;
+};
+
+/**
  * Embedded image (w:drawing)
  */
 export type Image = {
@@ -430,6 +453,27 @@ export type Image = {
   transform?: ImageTransform;
   /** Padding around image */
   padding?: ImagePadding;
+  /** Source-bitmap crop (wp:srcRect), eigenpal #424 */
+  crop?: ImageCrop;
+  /**
+   * Opacity in [0, 1] (OOXML `a:alphaModFix amt`). Undefined or `1` means
+   * fully opaque. Mirrors eigenpal docx-editor #424.
+   */
+  opacity?: number;
+  /**
+   * `wp:anchor layoutInCell` — when true (OOXML default), an anchored image
+   * inside a table cell is constrained to the cell. When false, the image
+   * escapes the cell into the page area. Round-tripped on save so the
+   * author's intent survives; undefined means "use the spec default".
+   */
+  layoutInCell?: boolean;
+  /**
+   * `wp:anchor allowOverlap` — when true (OOXML default), anchored objects
+   * may overlap; when false, Word repositions them to avoid collisions. We
+   * don't currently reposition, but we round-trip the flag so saving
+   * preserves the author's intent; undefined means "use the spec default".
+   */
+  allowOverlap?: boolean;
   /** Whether this is a decorative image */
   decorative?: boolean;
   /** Hyperlink URL for clickable image */
@@ -1055,6 +1099,19 @@ export type TableCellPropertyChange = {
 };
 
 /**
+ * Section property change (w:sectPrChange)
+ */
+export type SectionPropertyChange = {
+  type: "sectionPropertyChange";
+  /** Tracked change metadata */
+  info: PropertyChangeInfo;
+  /** Section properties before the tracked change */
+  previousProperties?: SectionProperties;
+  /** Section properties after the tracked change (editor model convenience) */
+  currentProperties?: SectionProperties;
+};
+
+/**
  * Table structural tracked change metadata (row/cell insert/delete/merge)
  */
 export type TableStructuralChangeInfo = {
@@ -1088,49 +1145,113 @@ export type SdtType =
   | "unknown";
 
 /**
- * SDT properties (w:sdtPr)
+ * SDT properties (`w:sdtPr`).
+ *
+ * Modeled fields are a read-only projection for downstream tooling
+ * (tag/alias addressing, template extraction). They are NOT the
+ * serialization source: the original `<w:sdtPr>` is captured verbatim in
+ * `rawPropertiesXml` and replayed on save, which preserves element order
+ * (`CT_SdtPr` is an `xsd:sequence`), avoids double-emission, and keeps
+ * unmodeled features (`w:dataBinding`, `w15:repeatingSection`, `@lastValue`,
+ * `w:sdtEndPr`) lossless.
  */
 export type SdtProperties = {
-  /** SDT type */
+  /** SDT type (projection; round-trip uses `rawPropertiesXml`). */
   sdtType: SdtType;
-  /** Alias (friendly name) */
+  /** Numeric id (`w:id/@w:val`). */
+  id?: number;
+  /** Alias (friendly name, `w:alias`). */
   alias?: string;
-  /** Tag (developer identifier) */
+  /** Tag (developer identifier, `w:tag`). */
   tag?: string;
-  /** Lock content editing */
+  /** Lock setting (`w:lock`). */
   lock?: "sdtLocked" | "contentLocked" | "sdtContentLocked" | "unlocked";
-  /** Placeholder text */
+  /**
+   * Placeholder building-block name (`w:placeholder/w:docPart@w:val`) — a
+   * reference to a glossary docPart, not the literal placeholder text.
+   */
   placeholder?: string;
-  /** Whether showing placeholder */
+  /** Whether the placeholder is currently shown (`w:showingPlcHdr`). */
   showingPlaceholder?: boolean;
-  /** Date format for date controls */
+  /** Date display format (`w:date/w:dateFormat@w:val`). */
   dateFormat?: string;
-  /** Dropdown/combobox list items */
+  /**
+   * Bound date value (`w:date/@w:fullDate`), ISO 8601. Independent of
+   * `dateFormat` (which controls display): the body text may show a
+   * formatted version like "2 June 2026" while this stays as
+   * `2026-06-02T00:00:00Z` so Word's date binding round-trips losslessly.
+   */
+  dateValueISO?: string;
+  /** Dropdown/combobox list items. */
   listItems?: { displayText: string; value: string }[];
-  /** Checkbox checked state */
+  /**
+   * Selected dropdown / comboBox value (`w:dropDownList@w:lastValue`).
+   * Persisted as the OOXML value, independent of the body display text.
+   * Without this, the serializer had to recover the saved value by
+   * matching the body's display text against `listItems`, which picked
+   * the wrong entry when two items shared a `displayText`.
+   */
+  dropdownLastValue?: string;
+  /** Checkbox checked state (`w14:checkbox/w14:checked`). */
   checked?: boolean;
+  /**
+   * Verbatim `<w:sdtPr>…</w:sdtPr>` captured at parse time. Replayed on
+   * serialize so unmodeled OOXML features (data binding, repeating sections,
+   * `@lastValue`, custom XML mappings) survive round-trip.
+   */
+  rawPropertiesXml?: string;
+  /** Verbatim `<w:sdtEndPr>…</w:sdtEndPr>` captured at parse time. */
+  rawEndPropertiesXml?: string;
+  /**
+   * Verbatim XML for any non-content direct children of `<w:sdt>` that
+   * appear BEFORE `<w:sdtContent>` — MS-OE376 §2.5.2.30 documents 16
+   * range-marker elements Word emits as direct sdt siblings (bookmark,
+   * comment range, custom XML range, tracked-change range). Captured at
+   * parse time and replayed on serialize so comment threads or tracked
+   * changes that span an SDT boundary round-trip without losing a
+   * delimiter.
+   */
+  rawSdtChildrenBeforeContent?: string;
+  /** Verbatim XML for non-content sdt children that appear AFTER `<w:sdtContent>`. */
+  rawSdtChildrenAfterContent?: string;
 };
 
 /**
- * Inline SDT (content control within a paragraph)
+ * Inline SDT (content control within a paragraph).
+ *
+ * OOXML allows runs, hyperlinks, simple/complex fields, nested SDTs,
+ * and math at this level. All of them must survive parse → edit → save
+ * so docProps-bound fields and similar template content do not lose
+ * their wrapper on round-trip.
  */
 export type InlineSdt = {
   type: "inlineSdt";
   /** SDT properties */
   properties: SdtProperties;
-  /** Content runs inside the control */
-  content: (Run | Hyperlink)[];
+  /** Inline content held inside the control */
+  content: (
+    | Run
+    | Hyperlink
+    | SimpleField
+    | ComplexField
+    | InlineSdt
+    | MathEquation
+  )[];
 };
 
 /**
- * Block-level SDT (content control wrapping paragraphs/tables)
+ * Block-level SDT (content control wrapping paragraphs/tables).
+ *
+ * Content is `BlockContent[]` (not just `(Paragraph | Table)[]`) because
+ * OOXML allows block SDTs to nest — e.g. a repeating-section control
+ * whose row is itself a content control.
  */
 export type BlockSdt = {
   type: "blockSdt";
-  /** SDT properties */
+  /** SDT properties (raw XML in `properties.rawPropertiesXml` round-trips losslessly). */
   properties: SdtProperties;
-  /** Block content inside the control */
-  content: (Paragraph | Table)[];
+  /** Block content inside the control. */
+  content: BlockContent[];
 };
 
 // ============================================================================
@@ -1164,6 +1285,20 @@ export type ParagraphContent =
 /**
  * Paragraph (w:p)
  */
+/**
+ * Paragraph-mark tracked-change marker (ECMA-376 §17.13.5).
+ *
+ * Word writes this as a child of `<w:pPr><w:rPr>` — `<w:ins/>` when the
+ * paragraph break itself was inserted in track-changes mode (the user
+ * pressed Enter mid-paragraph), `<w:del/>` when the paragraph break is
+ * pending deletion (Backspace at paragraph start or Delete at paragraph
+ * end). The mark is independent of the inline runs the paragraph carries.
+ */
+export type ParagraphMarkChange = {
+  kind: "ins" | "del";
+  info: TrackedChangeInfo;
+};
+
 export type Paragraph = {
   type: "paragraph";
   /** Unique paragraph ID */
@@ -1174,6 +1309,8 @@ export type Paragraph = {
   formatting?: ParagraphFormatting;
   /** Paragraph-level tracked property changes (w:pPrChange) */
   propertyChanges?: ParagraphPropertyChange[];
+  /** Paragraph-mark insertion / deletion (w:pPr / w:rPr / w:ins | w:del) */
+  pPrMark?: ParagraphMarkChange;
   /** Paragraph content */
   content: ParagraphContent[];
   /** Computed list rendering (if this is a list item) */
@@ -1213,8 +1350,103 @@ export type HeaderFooter = {
   type: "header" | "footer";
   /** Header/footer type */
   hdrFtrType: HeaderFooterType;
-  /** Content (paragraphs, tables, etc.) */
-  content: (Paragraph | Table)[];
+  /** Content (paragraphs, tables, block-level content controls). */
+  content: BlockContent[];
+  /**
+   * Document watermark detected in this header part. Word emits
+   * watermarks as VML or DrawingML behind-content shapes inside header
+   * parts; the body paragraph that contains them is empty otherwise.
+   * The modeled `Watermark` is exposed alongside `content` so callers
+   * can render and edit it without walking raw runs.
+   */
+  watermark?: Watermark;
+  /**
+   * Verbatim XML of the paragraph(s) containing the source watermark
+   * shape. Captured at parse time so an untouched DOCX serializes the
+   * watermark byte-exact even though `runParser` does not surface VML /
+   * DrawingML at the run level. Cleared (or rewritten) when callers
+   * mutate the modeled watermark via the headless API.
+   */
+  rawWatermarkXml?: string;
+  /**
+   * Index where the watermark paragraph sat among block-level siblings
+   * in the source header. The serializer inserts the watermark (raw or
+   * synthesized) at this position so a header that originally placed
+   * the watermark after visible text round-trips with the same flow.
+   * Undefined when no watermark was parsed or when callers built the
+   * watermark programmatically — in that case the serializer emits it
+   * at the top of the header (the same position Word's own UI uses).
+   */
+  watermarkBlockIndex?: number;
+};
+
+/**
+ * Document watermark (MS Word's behind-content page decoration).
+ */
+export type Watermark = TextWatermark | PictureWatermark;
+
+export type TextWatermark = {
+  kind: "text";
+  /** Visible string. Required. */
+  text: string;
+  /** Font family. Word's default is Calibri. */
+  font?: string;
+  /**
+   * Hex color (`"C0C0C0"`), `"auto"`, or `undefined` for the producer
+   * default. Word emits `#C0C0C0` (light gray) for text watermarks.
+   */
+  color?: string;
+  /**
+   * `true` = diagonal (Word default, -45°), `false` = horizontal.
+   * Stored as a boolean since the only Word-supported rotations are
+   * -45 and 0.
+   */
+  diagonal?: boolean;
+  /**
+   * Opacity 0..1. Word's interactive UI exposes a "transparency"
+   * percentage; folio stores it as an opacity scalar for renderer
+   * convenience. Default ~0.5.
+   */
+  opacity?: number;
+};
+
+export type PictureWatermark = {
+  kind: "picture";
+  /** Relationship id of the image part in `word/_rels/header*.xml.rels`. */
+  imageRId: string;
+  /**
+   * Stable identity of the image the `imageRId` resolved to in the header it
+   * was parsed from — an absolute package path for embedded media (e.g.
+   * `word/media/image1.png`) or the URL for a linked image (see
+   * {@link imageTargetExternal}). Relationship ids are scoped per header part
+   * and commonly repeat, so propagating a watermark across headers rebinds
+   * against this anchored target rather than the (ambiguous) source rId; each
+   * target header's relationship is written relative to its own part location.
+   */
+  imageTarget?: string;
+  /**
+   * When true, {@link imageTarget} is an external (linked) URL written back
+   * with `TargetMode="External"`, not an embedded package path.
+   */
+  imageTargetExternal?: boolean;
+  /** Optional scale factor (1.0 = native, 0.5 = half-size). */
+  scale?: number;
+  /**
+   * Display width in points from the VML shape, captured at parse so the
+   * source aspect ratio survives a save that re-synthesizes the watermark
+   * (Word stretches the image to the shape box, so a non-2:1 box distorts a
+   * non-2:1 image). Absent for synthesized watermarks, which fall back to
+   * Word's default box scaled by `scale`.
+   */
+  widthPt?: number;
+  /** Display height in points from the VML shape. See {@link widthPt}. */
+  heightPt?: number;
+  /**
+   * Whether Word's "washout" effect was applied (low contrast).
+   * Default true — Word emits washout=true on every picture
+   * watermark inserted via Insert → Watermark.
+   */
+  washout?: boolean;
 };
 
 // ============================================================================
@@ -1273,8 +1505,14 @@ export type Footnote = {
     | "separator"
     | "continuationSeparator"
     | "continuationNotice";
-  /** Content */
-  content: (Paragraph | Table)[];
+  /**
+   * Content. Note bodies may carry block-level `<w:sdt>` content
+   * controls (citation slots, bound metadata fields) — preserved as
+   * `BlockSdt` so the rest of folio's SDT round-trip + mutate APIs
+   * work in notes the same as they do in the main body. Mirrors the
+   * shape upstream eigenpal/docx-editor#678 fixed for the same case.
+   */
+  content: (Paragraph | Table | BlockSdt)[];
 };
 
 /**
@@ -1290,8 +1528,11 @@ export type Endnote = {
     | "separator"
     | "continuationSeparator"
     | "continuationNotice";
-  /** Content */
-  content: (Paragraph | Table)[];
+  /**
+   * Content. Like `Footnote.content`, may carry block-level `<w:sdt>`
+   * preserved as `BlockSdt` so SDT round-trip works inside endnotes.
+   */
+  content: (Paragraph | Table | BlockSdt)[];
 };
 
 // ============================================================================
@@ -1452,6 +1693,8 @@ export type SectionProperties = {
   // Footnote/Endnote properties
   /** Footnote properties for this section */
   footnotePr?: FootnoteProperties;
+  /** Number of footnote columns in this section (`w15:footnoteColumns`) */
+  footnoteColumns?: number;
   /** Endnote properties for this section */
   endnotePr?: EndnoteProperties;
 
@@ -1478,6 +1721,9 @@ export type SectionProperties = {
   rtlGutter?: boolean;
   /** Relationship id for printer settings */
   printerSettingsRelationshipId?: string;
+
+  /** Section-level tracked property changes (w:sectPrChange) */
+  propertyChanges?: SectionPropertyChange[];
 };
 
 // ============================================================================

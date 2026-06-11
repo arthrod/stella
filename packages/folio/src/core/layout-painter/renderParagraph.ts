@@ -5,11 +5,15 @@
  * Handles text formatting, alignment, and positioning.
  */
 
+import { ommlToMathml } from "../docx/mathToMathml";
+import { parseXmlDocument } from "../docx/xmlParser";
+import { evaluateFieldInstruction } from "../fields/evaluateField";
+import type { FieldContext } from "../fields/fieldContext";
+import { getListMarkerInlineWidth } from "../layout-engine/measure/listMarkerWidth";
 import type {
   ParagraphBlock,
   ParagraphMeasure,
   ParagraphFragment,
-  ParagraphIndent,
   ParagraphBorders,
   BorderStyle,
   MeasuredLine,
@@ -19,7 +23,9 @@ import type {
   ImageRun,
   LineBreakRun,
   FieldRun,
+  MathRun,
   TabStop,
+  ParagraphAttrs,
 } from "../layout-engine/types";
 import { calculateTabWidth } from "../prosemirror/utils/tabCalculator";
 import type {
@@ -29,9 +35,20 @@ import type {
 import { getAuthorColorIdx, AUTHOR_COLORS } from "../utils/authorColors";
 import { resolveFontFamily } from "../utils/fontResolver";
 import { DOCX_BOLD_FONT_WEIGHT } from "../utils/fontWeights";
+import {
+  inlineImageBoundingBox,
+  parseRotationDegrees,
+  rotatedBoundingBox,
+} from "../utils/rotationBoundingBox";
 import { getAutomaticTextColorForBackground } from "./documentColors";
+import {
+  applyImageVisualAttrs,
+  hasImageVisualAttrs,
+  wrapImageWithCrop,
+} from "./renderImage";
 import { isFloatingImageRun } from "./renderUtils";
 import type { RenderContext } from "./renderUtils";
+import { applySdtDataAttrs } from "./sdtBoundary";
 
 /**
  * CSS class names for paragraph rendering
@@ -101,8 +118,16 @@ function isFieldRun(run: Run): run is FieldRun {
   return run.kind === "field";
 }
 
+/**
+ * Check if run is a math equation run
+ */
+function isMathRun(run: Run): run is MathRun {
+  return run.kind === "math";
+}
+
 const AUTOMATIC_TEXT_COLOR_VALUES = new Set(["auto", "windowtext"]);
 const DEFAULT_BLACK_TEXT_COLOR_VALUES = new Set(["000000", "000"]);
+const DOCX_SUPERSCRIPT_SCALE = 0.75;
 
 function normalizeTextColorValue(color: string): string {
   return color.trim().toLowerCase().replace(/^#/u, "");
@@ -160,6 +185,17 @@ function getHyperlinkTextColor(run: TextRun, inheritedColor: string): string {
   return getRenderableTextColor(run) || inheritedColor || "#0563c1";
 }
 
+function fontSizePtToPx(fontSizePt: number): number {
+  return (fontSizePt * 96) / 72;
+}
+
+function getRaisedRunFontSize(run: TextRun | TabRun): string {
+  if (run.fontSize) {
+    return `${fontSizePtToPx(run.fontSize) * DOCX_SUPERSCRIPT_SCALE}px`;
+  }
+  return `${DOCX_SUPERSCRIPT_SCALE}em`;
+}
+
 /**
  * Apply text run styles to an element
  */
@@ -174,8 +210,7 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
     // fontSize is in points - convert to pixels to match Canvas measurement
     // (1pt = 96/72 px at standard web DPI)
     // Using px ensures consistent rendering with Canvas-based measurements
-    const fontSizePx = (run.fontSize * 96) / 72;
-    element.style.fontSize = `${fontSizePx}px`;
+    element.style.fontSize = `${fontSizePtToPx(run.fontSize)}px`;
   }
   if (run.bold) {
     element.style.fontWeight = DOCX_BOLD_FONT_WEIGHT;
@@ -184,11 +219,19 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
     element.style.fontStyle = "italic";
   }
 
-  // Color — skip black/auto so the CSS variable --doc-canvas-text can adapt to dark mode
+  // Color — black/auto are skipped so --doc-canvas-text can adapt to dark mode.
+  // Explicit colors are exposed as a custom property (--doc-run-color) and read
+  // back via var(); dark mode then inverts their lightness with relative-color
+  // CSS (hue/chroma preserved), matching Word's dark-mode rendering instead of
+  // leaving authored colors dim on the dark canvas.
   let hasExplicitTextColor = false;
   const textColor = getRenderableTextColor(run);
   if (textColor) {
     element.style.color = textColor;
+    // Also expose the authored color so dark mode can invert its lightness
+    // (hue/chroma preserved) via relative-color CSS. The dark rule overrides
+    // this inline color with !important; light mode keeps it verbatim.
+    element.style.setProperty("--doc-run-color", textColor);
     hasExplicitTextColor = true;
   }
 
@@ -236,6 +279,25 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
       }
     ).webkitTextFillColor = "transparent";
   }
+  // Per-run RTL direction (w:rtl). The browser's bidi algorithm reorders
+  // just this run, independent of the paragraph direction. `false` is an
+  // explicit override that disables inherited paragraph/style RTL.
+  if (run.rtl === true) {
+    element.dir = "rtl";
+  } else if (run.rtl === false) {
+    element.dir = "ltr";
+  }
+
+  // Text effect animation (w:effect). Host CSS opts in to the actual
+  // animation via the docx-text-effect-<name> class plus data-effect.
+  if (run.textEffect) {
+    element.classList.add(
+      "docx-text-effect",
+      `docx-text-effect-${run.textEffect}`,
+    );
+    element.dataset["effect"] = run.textEffect;
+  }
+
   if (run.emphasisMark) {
     let variant = "filled dot";
     if (run.emphasisMark === "comma") {
@@ -257,16 +319,32 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
     ).webkitTextEmphasisPosition = position;
   }
 
-  // Highlight (background color)
-  if (run.highlight) {
-    element.style.backgroundColor = run.highlight;
+  // Hidden run (OOXML w:vanish, §17.3.2.41). Word's print/normal view
+  // suppresses hidden text entirely, but in editing view it draws the
+  // run dimmed with a dotted underline so the author can still navigate
+  // to and edit it. Mirror that: keep the run in flow and selectable —
+  // `display: none` would orphan PM positions and break cursor movement
+  // across hidden ranges. The `docx-hidden` class hook lets host CSS
+  // swap to print-style suppression when a future view-mode toggle ships.
+  // eigenpal #424 (w:vanish gap 9)
+  if (run.hidden) {
+    element.classList.add("docx-hidden");
+    element.style.opacity = "0.4";
+  }
+
+  // Background color: an explicit highlight (w:highlight) wins over run shading
+  // (w:shd). Folio carries arbitrary run-background fills as `shading` because
+  // they fall outside the OOXML named-highlight palette. eigenpal #722 (#712).
+  const runBackground = run.highlight ?? run.shading;
+  if (runBackground) {
+    element.style.backgroundColor = runBackground;
     const hasTrackedChangeColor = run.isInsertion || run.isDeletion;
     const hasCommentHighlight =
       run.commentIds !== undefined && run.commentIds.length > 0;
     const automaticTextColor =
       hasExplicitTextColor || hasTrackedChangeColor || hasCommentHighlight
         ? undefined
-        : getAutomaticTextColorForBackground(run.highlight);
+        : getAutomaticTextColorForBackground(runBackground);
     if (automaticTextColor) {
       element.style.color = automaticTextColor;
     }
@@ -274,12 +352,16 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
 
   // Text decorations
   const decorations: string[] = [];
+  let explicitDecorationStyle = false;
 
   if (run.underline) {
-    decorations.push("underline");
+    if (!isNoteReferenceRun(run)) {
+      decorations.push("underline");
+    }
     if (typeof run.underline === "object") {
       if (run.underline.style) {
         element.style.textDecorationStyle = run.underline.style;
+        explicitDecorationStyle = true;
       }
       if (run.underline.color) {
         element.style.textDecorationColor = run.underline.color;
@@ -289,6 +371,21 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
 
   if (run.strike) {
     decorations.push("line-through");
+  }
+
+  // Hidden runs need a dotted underline alongside any explicit underline/strike.
+  // Push into the shared `decorations` array (consumed at the end of this
+  // function) so the line 376 longhand assignment doesn't clobber it. The
+  // `textDecorationStyle` longhand is set only when no explicit underline
+  // style has already won — that keeps `w:u w:val="double"` visible if a
+  // hidden run also carries an underline mark.
+  if (run.hidden) {
+    if (!decorations.includes("underline")) {
+      decorations.push("underline");
+    }
+    if (!explicitDecorationStyle) {
+      element.style.textDecorationStyle = "dotted";
+    }
   }
 
   // Comment highlight
@@ -365,11 +462,11 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
   // Superscript/subscript
   if (run.superscript) {
     element.style.verticalAlign = "super";
-    element.style.fontSize = "0.75em";
+    element.style.fontSize = getRaisedRunFontSize(run);
   }
   if (run.subscript) {
     element.style.verticalAlign = "sub";
-    element.style.fontSize = "0.75em";
+    element.style.fontSize = getRaisedRunFontSize(run);
   }
 }
 
@@ -435,14 +532,43 @@ function renderTextRun(run: TextRun, doc: Document): HTMLElement {
       anchor.style.textDecoration = "underline";
       // Override span color to match anchor (prevents color mismatch in selection)
       span.style.color = hyperlinkColor;
+      // Expose the link colour on the anchor (which paints over the span) so
+      // dark mode inverts its lightness via the same --doc-run-color rule.
+      // `noDefaultStyle` (e.g. TOC) anchors set no colour and keep inheriting
+      // the paragraph's inverted colour.
+      anchor.style.setProperty("--doc-run-color", hyperlinkColor);
+      span.style.setProperty("--doc-run-color", hyperlinkColor);
     }
     span.append(anchor);
   } else {
     // Set text content
     span.textContent = run.text;
   }
+  applyWhitespaceUnderline(span, run);
 
   return span;
+}
+
+function isNoteReferenceRun(run: TextRun | TabRun): boolean {
+  return run.footnoteRefId !== undefined || run.endnoteRefId !== undefined;
+}
+
+function removeUnderlineTextDecoration(element: HTMLElement): void {
+  const textDecorationLines = (element.style.textDecorationLine || "")
+    .split(/\s+/u)
+    .filter((line) => line && line !== "underline");
+  element.style.textDecorationLine = textDecorationLines.join(" ");
+}
+
+function applyWhitespaceUnderline(element: HTMLElement, run: TextRun): void {
+  if (!run.underline || run.text.trim().length > 0) {
+    return;
+  }
+  removeUnderlineTextDecoration(element);
+  element.style.borderBottom = "1px solid currentColor";
+  if (typeof run.underline === "object" && run.underline.color) {
+    element.style.borderBottomColor = run.underline.color;
+  }
 }
 
 /**
@@ -476,6 +602,8 @@ function renderTabRun(
 
   span.style.display = "inline-block";
   span.style.width = `${width}px`;
+  applyRunStyles(span, run);
+  applyTabUnderline(span, run);
 
   applyPmPositions(span, run.pmStart, run.pmEnd);
 
@@ -505,6 +633,17 @@ function renderTabRun(
   }
 
   return span;
+}
+
+function applyTabUnderline(element: HTMLElement, run: TabRun): void {
+  if (!run.underline) {
+    return;
+  }
+  removeUnderlineTextDecoration(element);
+  element.style.borderBottom = "1px solid currentColor";
+  if (typeof run.underline === "object" && run.underline.color) {
+    element.style.borderBottomColor = run.underline.color;
+  }
 }
 
 /**
@@ -544,6 +683,69 @@ function renderInlineImageRun(run: ImageRun, doc: Document): HTMLElement {
   }
   if (run.transform) {
     img.style.transform = run.transform;
+    // Word rotates around the picture's geometric centre; the CSS default
+    // happens to match, but be explicit so future transforms can't drift.
+    img.style.transformOrigin = "center center";
+  }
+
+  // Rotated images extend past `run.width × run.height`, so without a bbox
+  // wrapper the inline line box reserves too little space and the rotated
+  // picture clips into the line above/below. Wrap the `<img>` in an
+  // inline-block span sized to the rotated bbox; the img positions
+  // absolutely at the wrapper centre and rotates around it. Matches Word,
+  // where `wp:extent` carries the post-rotation bbox.
+  // eigenpal #424 (rotation bbox gap 8 follow-up).
+  const rotation = parseRotationDegrees(run.transform);
+  if (rotation !== 0) {
+    const bbox = rotatedBoundingBox(run.width, run.height, rotation);
+    const wrapper = doc.createElement("span");
+    wrapper.className = PARAGRAPH_CLASS_NAMES.run;
+    wrapper.style.display = "inline-block";
+    wrapper.style.position = "relative";
+    wrapper.style.width = `${bbox.width}px`;
+    wrapper.style.height = `${bbox.height}px`;
+    wrapper.style.verticalAlign = "middle";
+    if (run.distTop) {
+      wrapper.style.marginTop = `${run.distTop}px`;
+    }
+    if (run.distBottom) {
+      wrapper.style.marginBottom = `${run.distBottom}px`;
+    }
+    img.style.position = "absolute";
+    img.style.left = `${(bbox.width - run.width) / 2}px`;
+    img.style.top = `${(bbox.height - run.height) / 2}px`;
+    applyPmPositions(wrapper, run.pmStart, run.pmEnd);
+    wrapper.append(img);
+    return wrapper;
+  }
+
+  // eigenpal #424: a cropped inline image needs an overflow-clipped wrapper
+  // sized to the visible (extent) box, with the inner `<img>` scaled up so
+  // the cropped region fills it. See applyImageVisualAttrs for the geometry.
+  if (hasImageVisualAttrs(run)) {
+    const wrapper = wrapImageWithCrop(img, run, doc, {
+      display: "inline-block",
+      widthPx: run.width,
+      heightPx: run.height,
+    });
+    wrapper.className = `${PARAGRAPH_CLASS_NAMES.run} ${PARAGRAPH_CLASS_NAMES.image}`;
+    wrapper.style.verticalAlign = "middle";
+    // wp:inline distT/distB: the measurer folds these into maxImageHeightPx;
+    // applying them as margins on the wrapper keeps the margin-box footprint
+    // consistent with the line height the measurer reserved.
+    if (run.distTop) {
+      wrapper.style.marginTop = `${run.distTop}px`;
+    }
+    if (run.distBottom) {
+      wrapper.style.marginBottom = `${run.distBottom}px`;
+    }
+    applyPmPositions(wrapper, run.pmStart, run.pmEnd);
+    return wrapper;
+  }
+
+  // eigenpal #424 (opacity render pipeline)
+  if (hasImageVisualAttrs(run)) {
+    applyImageVisualAttrs(img, run);
   }
 
   // Inline images should flow with text
@@ -580,16 +782,76 @@ function renderBlockImage(run: ImageRun, doc: Document): HTMLElement {
   img.src = run.src;
   img.width = run.width;
   img.height = run.height;
-  // Global CSS reset (Tailwind preflight) sets img { display: block },
-  // which makes text-align: center on the container ineffective.
-  // Use margin: auto on the img itself to center it.
-  img.style.marginLeft = "auto";
-  img.style.marginRight = "auto";
   if (run.alt) {
     img.alt = run.alt;
   }
   if (run.transform) {
     img.style.transform = run.transform;
+    // Word rotates around the picture's geometric centre; be explicit so
+    // future stacked transforms can't drift. eigenpal #424.
+    img.style.transformOrigin = "center center";
+  }
+
+  // Reserve the rotated bbox on the container so a rotated block image
+  // doesn't bleed into the next paragraph. The container is sized to the
+  // rotated bbox; the inner `<img>` positions absolutely at the offset
+  // that centres it inside the wrapper, then rotates around its own
+  // centre. Non-rotated images keep the fast path (auto margins for
+  // horizontal centering). Mirrors the inline path that PR #518 added in
+  // `renderInlineImageRun` — keep the two in sync until they dedupe.
+  // eigenpal #424 (rotation bbox gap 8 follow-up).
+  const rotation = parseRotationDegrees(run.transform);
+  if (rotation !== 0) {
+    const bbox = rotatedBoundingBox(run.width, run.height, rotation);
+    // Width must be explicit: `renderLine` wraps a single-image line in a
+    // flex container, and an absolutely-positioned `<img>` provides no
+    // in-flow width, so the wrapper would collapse to 0 and break
+    // centering.
+    container.style.width = `${bbox.width}px`;
+    container.style.height = `${bbox.height}px`;
+    container.style.position = "relative";
+    img.style.position = "absolute";
+    img.style.left = `${(bbox.width - run.width) / 2}px`;
+    img.style.top = `${(bbox.height - run.height) / 2}px`;
+    // Tailwind preflight applies `img { max-width: 100%; height: auto }`,
+    // which would shrink an absolutely-positioned `<img>`. Pin the
+    // intrinsic dims explicitly, same as the inline path.
+    img.style.width = `${run.width}px`;
+    img.style.height = `${run.height}px`;
+    img.style.marginLeft = "0";
+    img.style.marginRight = "0";
+    img.style.marginTop = "0";
+  }
+
+  // eigenpal #424: cropped block images need an overflow-clipped wrapper
+  // sized to the visible (extent) box; see applyImageVisualAttrs.
+  if (hasImageVisualAttrs(run)) {
+    const wrapper = wrapImageWithCrop(img, run, doc, {
+      display: "inline-block",
+      widthPx: run.width,
+      heightPx: run.height,
+    });
+    // Tailwind preflight sets img { display: block }, which would defeat
+    // text-align centring on the container. The inline-block wrapper
+    // restores centring via the container's text-align: center.
+    applyPmPositions(container, run.pmStart, run.pmEnd);
+    container.append(wrapper);
+    return container;
+  }
+
+  // Global CSS reset (Tailwind preflight) sets img { display: block },
+  // which makes text-align: center on the container ineffective.
+  // Use margin: auto on the img itself to center it. Skip for rotated
+  // images — they are already centred via absolute positioning inside
+  // the bbox container above.
+  if (rotation === 0) {
+    img.style.marginLeft = "auto";
+    img.style.marginRight = "auto";
+  }
+
+  // eigenpal #424 (opacity render pipeline)
+  if (hasImageVisualAttrs(run)) {
+    applyImageVisualAttrs(img, run);
   }
 
   applyPmPositions(container, run.pmStart, run.pmEnd);
@@ -606,15 +868,67 @@ function renderBlockImage(run: ImageRun, doc: Document): HTMLElement {
 function renderImageRun(run: ImageRun, doc: Document): HTMLElement {
   // Floating images should be handled at paragraph level, not here
   // If they reach here (e.g., inside table cells), render as block
+  let el: HTMLElement;
   if (
     isFloatingImageRun(run) ||
     run.displayMode === "block" ||
     run.wrapType === "topAndBottom"
   ) {
-    return renderBlockImage(run, doc);
+    el = renderBlockImage(run, doc);
+  } else {
+    el = renderInlineImageRun(run, doc);
   }
-  // Default: inline
-  return renderInlineImageRun(run, doc);
+  applyImageRevisionStyle(getImageRevisionStyleTarget(el), run);
+  return el;
+}
+
+function isStyleableHTMLElement(
+  value: Element | undefined,
+): value is HTMLElement {
+  return typeof value === "object" && "style" in value;
+}
+
+function getImageRevisionStyleTarget(el: HTMLElement): HTMLElement {
+  if (!el.className.split(/\s+/u).includes("layout-block-image")) {
+    return el;
+  }
+
+  const firstChild = el.children[0];
+  if (isStyleableHTMLElement(firstChild)) {
+    return firstChild;
+  }
+
+  return el;
+}
+
+/**
+ * A picture that is itself a tracked change gets a coloured outline (green for
+ * an insertion, red + faded for a deletion), mirroring the text-run treatment.
+ * `outline` is used over `border` so the image's box size is unchanged and
+ * line metrics stay stable. eigenpal #641.
+ */
+function applyImageRevisionStyle(el: HTMLElement, run: ImageRun): void {
+  if (run.isInsertion) {
+    el.style.outline = "2px solid #2e7d32";
+    el.style.outlineOffset = "1px";
+    el.classList.add("docx-insertion");
+  } else if (run.isDeletion) {
+    el.style.outline = "2px solid #c62828";
+    el.style.outlineOffset = "1px";
+    el.style.opacity = "0.6";
+    el.classList.add("docx-deletion");
+  } else {
+    return;
+  }
+  if (run.changeAuthor !== undefined) {
+    el.dataset["changeAuthor"] = run.changeAuthor;
+  }
+  if (run.changeDate !== undefined) {
+    el.dataset["changeDate"] = run.changeDate;
+  }
+  if (run.changeRevisionId !== undefined) {
+    el.dataset["revisionId"] = String(run.changeRevisionId);
+  }
 }
 
 /**
@@ -633,31 +947,52 @@ function renderLineBreakRun(run: LineBreakRun, doc: Document): HTMLElement {
  * Render a field run (PAGE, NUMPAGES, etc.)
  * Substitutes the field with actual values from context.
  */
+const EMPTY_BOOKMARK_PAGES: ReadonlyMap<string, number> = new Map();
+const EMPTY_BOOKMARK_TEXT: ReadonlyMap<string, string> = new Map();
+const EMPTY_SEQ_VALUES: ReadonlyMap<number, number> = new Map();
+
+/**
+ * Resolve a field run to its display text against the painted page. Used by the
+ * painter and by the tab-anchor width/text helpers so the width reserved for a
+ * field after a tab and the text actually painted always agree. The instruction
+ * drives evaluation; `fieldType` is the fallback when a node carries none.
+ * Returns the cached fallback when no render context is available.
+ */
+function resolveFieldText(
+  run: FieldRun,
+  context: RenderContext | undefined,
+): string {
+  if (!context) {
+    return run.fallback ?? "";
+  }
+  const fieldContext: FieldContext = {
+    pageNumber: context.pageNumber,
+    totalPages: context.totalPages,
+    bookmarkPages: context.bookmarkPages ?? EMPTY_BOOKMARK_PAGES,
+    bookmarkText: context.bookmarkText ?? EMPTY_BOOKMARK_TEXT,
+    seqValues: context.seqValues ?? EMPTY_SEQ_VALUES,
+    now: new Date(),
+    ...(context.sectionPages === undefined
+      ? {}
+      : { sectionPages: context.sectionPages }),
+  };
+  return evaluateFieldInstruction(
+    run.instruction || run.fieldType,
+    fieldContext,
+    {
+      fallback: run.fallback ?? "",
+      ...(run.pmStart === undefined ? {} : { instanceId: run.pmStart }),
+      ...(run.fldLock ? { locked: true } : {}),
+    },
+  );
+}
+
 function renderFieldRun(
   run: FieldRun,
   doc: Document,
   context: RenderContext,
 ): HTMLElement {
-  let text = run.fallback ?? "";
-
-  switch (run.fieldType) {
-    case "PAGE":
-      text = String(context.pageNumber);
-      break;
-    case "NUMPAGES":
-      text = String(context.totalPages);
-      break;
-    case "DATE":
-      text = new Date().toLocaleDateString();
-      break;
-    case "TIME":
-      text = new Date().toLocaleTimeString();
-      break;
-    case "OTHER":
-      // Any field we don't recognise — render the cached fallback Word
-      // last computed (already assigned to `text` above).
-      break;
-  }
+  const text = resolveFieldText(run, context);
 
   // Spread the whole FieldRun so every RunFormatting field carries through —
   // Word renders the field result with the result run's full w:rPr. Explicit
@@ -672,6 +1007,89 @@ function renderFieldRun(
   };
 
   return renderTextRun(resolvedRun, doc);
+}
+
+/**
+ * Render an OMML math run by converting it to MathML and injecting a
+ * native `<math>` element. Browsers (Firefox, Safari, Chromium ≥ 109)
+ * render MathML Core natively, so no JS typesetting engine is required.
+ *
+ * The raw OMML XML stays on the model — only the rendered DOM is derived
+ * from it. If conversion fails we fall back to the existing italic
+ * plain-text span so the user always sees something and the underlying
+ * OMML is preserved for save.
+ */
+function renderMathRun(run: MathRun, doc: Document): HTMLElement {
+  const fallbackText = run.plainText || "[equation]";
+
+  let mathml: string | null = null;
+  try {
+    const ommlEl = parseXmlDocument(run.ommlXml);
+    if (ommlEl) {
+      mathml = ommlToMathml(ommlEl);
+    }
+  } catch {
+    // Conversion-time errors land on the fallback span below.
+  }
+
+  if (!mathml) {
+    return renderMathFallback(run, doc, fallbackText, "1");
+  }
+
+  // Inject the MathML via a sandbox span (`innerHTML` parses MathML in
+  // HTML documents per the HTML spec). Browsers without MathML support
+  // still render the inner `<mtext>` text content, so layout is preserved.
+  const host = doc.createElement("span");
+  host.className = `${PARAGRAPH_CLASS_NAMES.run} docx-math docx-math-${run.display}`;
+  host.dataset["display"] = run.display;
+  host.dataset["ommlRender"] = "mathml";
+
+  if (run.display === "block") {
+    host.style.display = "inline-block";
+    host.style.verticalAlign = "middle";
+  }
+
+  // Cambria Math fallback chain for browsers that don't ship a math font.
+  host.style.fontFamily =
+    '"Cambria Math", "Latin Modern Math", "STIX Two Math", serif';
+
+  try {
+    host.innerHTML = mathml;
+  } catch {
+    return renderMathFallback(run, doc, fallbackText, "1");
+  }
+
+  // Add an `alttext` attribute on the <math> root for screen-reader
+  // resilience even when the engine ignores MathML structure.
+  const mathRoot = host.firstElementChild;
+  if (mathRoot && mathRoot.tagName.toLowerCase() === "math") {
+    mathRoot.setAttribute("alttext", fallbackText);
+  }
+
+  applyPmPositions(host, run.pmStart, run.pmEnd);
+  return host;
+}
+
+function renderMathFallback(
+  run: MathRun,
+  doc: Document,
+  fallbackText: string,
+  errorFlag: "1" | "0",
+): HTMLElement {
+  const span = doc.createElement("span");
+  span.className = `${PARAGRAPH_CLASS_NAMES.run} docx-math docx-math-${run.display} docx-math-fallback`;
+  span.dataset["display"] = run.display;
+  span.dataset["ommlRender"] = "fallback";
+  if (errorFlag === "1") {
+    span.dataset["ommlRenderError"] = "1";
+    span.title = "[equation render failed]";
+  }
+  span.style.fontStyle = "italic";
+  span.style.fontFamily =
+    '"Cambria Math", "Latin Modern Math", "STIX Two Math", serif';
+  span.textContent = fallbackText;
+  applyPmPositions(span, run.pmStart, run.pmEnd);
+  return span;
 }
 
 /**
@@ -698,6 +1116,9 @@ function renderRun(
   }
   if (isFieldRun(run) && context) {
     return renderFieldRun(run, doc, context);
+  }
+  if (isMathRun(run)) {
+    return renderMathRun(run, doc);
   }
 
   // Fallback for unknown run types
@@ -797,7 +1218,7 @@ const RIGHT_EDGE_EPSILON_PX = 0.5;
 /**
  * Build a TextMeasureStyle from a TextRun or FieldRun's relevant fields.
  */
-function runMeasureStyle(run: TextRun | FieldRun): TextMeasureStyle {
+function runMeasureStyle(run: TextRun | FieldRun | MathRun): TextMeasureStyle {
   return {
     ...(run.bold !== undefined ? { bold: run.bold } : {}),
     ...(run.italic !== undefined ? { italic: run.italic } : {}),
@@ -850,12 +1271,7 @@ function measureFollowingContentWidth(
         ) *
         (scale / 100);
     } else if (isFieldRun(run)) {
-      let fieldText = run.fallback ?? "";
-      if (run.fieldType === "PAGE" && context) {
-        fieldText = String(context.pageNumber);
-      } else if (run.fieldType === "NUMPAGES" && context) {
-        fieldText = String(context.totalPages);
-      }
+      const fieldText = resolveFieldText(run, context);
       width +=
         measureText(
           run.allCaps ? fieldText.toLocaleUpperCase() : fieldText,
@@ -866,8 +1282,19 @@ function measureFollowingContentWidth(
         (scale / 100);
     } else if (isImageRun(run) && !isFloatingImageRun(run)) {
       // Inline images aren't horizontally scaled by w:w on the surrounding
-      // text run; their own width attribute is authoritative.
-      width += run.width || 0;
+      // text run; their own width attribute is authoritative. Rotated images
+      // occupy their axis-aligned bbox width, not the raw `run.width`, so
+      // right-tab anchoring stays aligned with what the painter reserves.
+      width += inlineImageBoundingBox(run).width || 0;
+    } else if (isMathRun(run)) {
+      width +=
+        measureText(
+          run.plainText,
+          run.fontSize ?? 11,
+          run.fontFamily ?? "Cambria Math",
+          runMeasureStyle(run),
+        ) *
+        (scale / 100);
     }
   }
   return width;
@@ -917,17 +1344,12 @@ function getTextAfterTab(
     if (isTextRun(run)) {
       text += run.text;
     } else if (isFieldRun(run)) {
-      // Resolve field values for TOC page numbers
-      if (run.fieldType === "PAGE" && context) {
-        text += String(context.pageNumber);
-      } else if (run.fieldType === "NUMPAGES" && context) {
-        text += String(context.totalPages);
-      } else {
-        text += run.fallback ?? "";
-      }
+      text += resolveFieldText(run, context);
     } else if (isTabRun(run) || isLineBreakRun(run)) {
       // Stop at next tab or line break
       break;
+    } else if (isMathRun(run)) {
+      text += run.plainText;
     }
   }
   return text;
@@ -1024,6 +1446,7 @@ export function renderLine(
 ): HTMLElement {
   const lineEl = doc.createElement("div");
   lineEl.className = PARAGRAPH_CLASS_NAMES.line;
+  lineEl.style.boxSizing = "content-box";
 
   // Apply line height
   lineEl.style.height = `${line.lineHeight}px`;
@@ -1031,9 +1454,35 @@ export function renderLine(
 
   // Get runs for this line
   const runsForLine = sliceRunsForLine(block, line);
+  // OOXML `<m:oMathPara>` (display math) defaults to `jc="centerGroup"` —
+  // Word renders display math centred on its own paragraph. When the line
+  // holds a single block math run, centre it horizontally so the equation
+  // sits in the middle of the column instead of hugging the left margin.
+  const onlyRun = runsForLine.length === 1 ? runsForLine[0] : undefined;
+  if (
+    onlyRun &&
+    isMathRun(onlyRun) &&
+    onlyRun.display === "block" &&
+    // Only an EXPLICIT right alignment suppresses display-math centering; a
+    // right default synthesized from RTL base direction must not (the equation
+    // still centres in an RTL paragraph). (#723)
+    block.attrs?.alignment !== "right"
+  ) {
+    lineEl.style.textAlign = "center";
+  }
   if (runsForLine.length === 1 && isImageRun(runsForLine[0]!)) {
     lineEl.style.display = "flex";
     lineEl.style.alignItems = "center";
+    // Flex defaults to flex-start regardless of the parent's text-align, so
+    // an image-only line in a centred / right-aligned paragraph would
+    // left-align after the flex switch. Mirror the paragraph alignment onto
+    // justify-content so logo-only header lines stay centred / right-aligned
+    // like Word.
+    if (alignment === "center") {
+      lineEl.style.justifyContent = "center";
+    } else if (alignment === "right") {
+      lineEl.style.justifyContent = "flex-end";
+    }
   } else if (runsForLine.some((r) => isImageRun(r) && !isFloatingImageRun(r))) {
     // Inline image flowing alongside text/tabs (logo + label header). Word
     // seats an inline image as a tall glyph on the text baseline, so
@@ -1078,11 +1527,11 @@ export function renderLine(
 
   // Calculate justify spacing if needed
   const isJustify = alignment === "justify";
-  let shouldJustify = false;
 
   if (isJustify && options) {
     // Justify all lines except the last line (unless it ends with line break)
-    shouldJustify = !options.isLastLine || options.paragraphEndsWithLineBreak;
+    const shouldJustify =
+      !options.isLastLine || options.paragraphEndsWithLineBreak;
 
     if (shouldJustify) {
       // Use CSS text-align: justify with text-align-last: justify
@@ -1099,10 +1548,7 @@ export function renderLine(
   // are rendered visually (unlike 'nowrap' which collapses them).
   lineEl.style.whiteSpace = "pre";
 
-  // Check if any run in this line has a highlight. If so, we need overflow:hidden
-  // to prevent the padding-extended background from bleeding into adjacent lines.
-  const hasHighlight = runsForLine.some((r) => isTextRun(r) && r.highlight);
-  lineEl.style.overflow = hasHighlight ? "hidden" : "visible";
+  lineEl.style.overflow = "visible";
 
   // Per-line floating margins (leftOffset/rightOffset) are now applied by
   // renderParagraphFragment via MeasuredLine offsets from re-measurement.
@@ -1135,7 +1581,7 @@ export function renderLine(
   // Track current X position for tab calculations
   // Tab stops are measured from the content area left edge (page text area)
   // We need to track where on that coordinate system our text is
-  let currentX = 0;
+  let currentX: number;
   const leftIndentPx = options?.leftIndentPx ?? 0;
 
   if (options?.isFirstLine) {
@@ -1143,8 +1589,12 @@ export function renderLine(
     // - With hanging indent (firstLineIndentPx < 0): starts at leftIndent + firstLineIndent
     // - With first-line indent (firstLineIndentPx > 0): starts at leftIndent + firstLineIndent
     // - No indent: starts at leftIndent
+    // Add the list marker's painted footprint so the body cursor aligns with
+    // where text actually starts after the marker (matches the measurer; see
+    // measureParagraph.ts contentX comment).
     const firstLineIndentPx = options.firstLineIndentPx ?? 0;
-    currentX = leftIndentPx + firstLineIndentPx;
+    const markerInlineWidth = getListMarkerInlineWidth(block);
+    currentX = leftIndentPx + firstLineIndentPx + markerInlineWidth;
   } else {
     // Non-first lines start at the left indent position
     currentX = leftIndentPx;
@@ -1155,16 +1605,50 @@ export function renderLine(
     const run = runsForLine[i]!; // SAFETY: i < runsForLine.length
 
     if (isTabRun(run) && tabContext) {
-      // Get text following this tab for alignment calculations
-      const followingText = getTextAfterTab(runsForLine, i, options?.context);
-
-      // Calculate tab width based on current position
-      const tabResult = calculateTabWidth(
-        currentX,
-        tabContext,
-        followingText,
+      // Per-run measurement (not a single-font pass over the joined string)
+      // keeps the tab width accurate when trailing runs differ in font/size.
+      const followingWidth = measureFollowingContentWidth(
+        runsForLine,
+        i,
         measureText,
+        options?.context,
       );
+      const followingText = getTextAfterTab(runsForLine, i, options?.context);
+      const decimalIndex = followingText.indexOf(".");
+      // Resolve the first text/field run after the tab and measure the
+      // decimal prefix in *its* font/style. Defaulting to 11px Calibri
+      // (the `measureText` fallback) drifts on sized/bold/italic runs and
+      // breaks decimal alignment — eigenpal #576 gemini review on PR #512.
+      const firstFollowingRun = (() => {
+        for (let j = i + 1; j < runsForLine.length; j++) {
+          const next = runsForLine[j];
+          if (!next || isTabRun(next) || isLineBreakRun(next)) {
+            return undefined;
+          }
+          if (isTextRun(next) || isFieldRun(next)) {
+            return next;
+          }
+          if (isMathRun(next)) {
+            return next;
+          }
+        }
+        return undefined;
+      })();
+      const decimalPrefixWidth =
+        decimalIndex !== -1
+          ? measureText(
+              followingText.slice(0, decimalIndex),
+              firstFollowingRun?.fontSize,
+              firstFollowingRun?.fontFamily,
+              firstFollowingRun ? runMeasureStyle(firstFollowingRun) : {},
+            ) *
+            ((firstFollowingRun?.horizontalScale ?? 100) / 100)
+          : 0;
+
+      const tabResult = calculateTabWidth(currentX, tabContext, {
+        followingWidth,
+        decimalPrefixWidth,
+      });
 
       // Right-tab anchor (TOC pattern): when an end-aligned tab's stop is at
       // (or past) the line's right edge AND no later tab follows on this
@@ -1172,15 +1656,7 @@ export function renderLine(
       // content flush right. This sidesteps canvas-vs-DOM measurement drift
       // that otherwise leaves the page number a pixel short of the margin.
       const lineRightEdgeX = options?.lineRightEdgePx;
-      const followingWidthForCheck =
-        lineRightEdgeX !== undefined
-          ? measureFollowingContentWidth(
-              runsForLine,
-              i,
-              measureText,
-              options?.context,
-            )
-          : 0;
+      const followingWidthForCheck = followingWidth;
       let hasFollowingTab = false;
       for (let j = i + 1; j < runsForLine.length; j++) {
         // SAFETY: j < runsForLine.length
@@ -1305,21 +1781,6 @@ export function renderLine(
     } else if (isTextRun(run)) {
       const runEl = renderTextRun(run, doc);
 
-      // For highlighted runs, extend background to fill the full line height.
-      // Inline elements' background only covers the content area (font ascent+descent),
-      // which differs by font size. Vertical padding on inline elements extends the
-      // background without affecting line box calculations.
-      if (run.highlight) {
-        const fontSizePx = run.fontSize ? (run.fontSize * 96) / 72 : 14.67;
-        const contentHeight = fontSizePx * 1.2; // approximate content area
-        const gap = Math.max(0, line.lineHeight - contentHeight);
-        if (gap > 0) {
-          const pad = gap / 2;
-          runEl.style.paddingTop = `${pad}px`;
-          runEl.style.paddingBottom = `${pad}px`;
-        }
-      }
-
       lineEl.append(runEl);
 
       // Measure text width for accurate tab position tracking
@@ -1356,9 +1817,12 @@ export function renderLine(
       // Inline or block image - render in the text flow
       const runEl = renderImageRun(run, doc);
       lineEl.append(runEl);
-      // Block images don't contribute to horizontal position
+      // Block images don't contribute to horizontal position. Rotated inline
+      // images advance by their axis-aligned bbox width — the wrapper span
+      // the painter emits has that width, so currentX must agree to keep
+      // following tab/text positions in sync.
       if (run.displayMode !== "block" && run.wrapType !== "topAndBottom") {
-        currentX += run.width;
+        currentX += inlineImageBoundingBox(run).width;
       }
     } else if (isLineBreakRun(run)) {
       const runEl = renderLineBreakRun(run, doc);
@@ -1367,13 +1831,9 @@ export function renderLine(
       // Render field run with context for PAGE/NUMPAGES substitution
       const runEl = renderFieldRun(run, doc, options.context);
       lineEl.append(runEl);
-      // Estimate field text width for tab calculations
-      let fieldText = run.fallback ?? "";
-      if (run.fieldType === "PAGE") {
-        fieldText = String(options.context.pageNumber);
-      } else if (run.fieldType === "NUMPAGES") {
-        fieldText = String(options.context.totalPages);
-      }
+      // Estimate field text width for tab calculations (same value the field
+      // painted, so tab math matches).
+      const fieldText = resolveFieldText(run, options.context);
       const fontSize = run.fontSize || 11;
       const fontFamily = run.fontFamily || "Calibri";
       const measuredWidth = measureText(
@@ -1388,6 +1848,17 @@ export function renderLine(
             : {}),
           ...(run.smallCaps !== undefined ? { smallCaps: run.smallCaps } : {}),
         },
+      );
+      reserveScaledAdvance(runEl, measuredWidth, run.horizontalScale);
+      currentX += measuredWidth * ((run.horizontalScale ?? 100) / 100);
+    } else if (isMathRun(run)) {
+      const runEl = renderMathRun(run, doc);
+      lineEl.append(runEl);
+      const measuredWidth = measureText(
+        run.plainText,
+        run.fontSize ?? 11,
+        run.fontFamily ?? "Cambria Math",
+        runMeasureStyle(run),
       );
       reserveScaledAdvance(runEl, measuredWidth, run.horizontalScale);
       currentX += measuredWidth * ((run.horizontalScale ?? 100) / 100);
@@ -1434,6 +1905,58 @@ function bordersFormGroup(a?: ParagraphBorders, b?: ParagraphBorders): boolean {
   );
 }
 
+// Strong-RTL letters, matched by Unicode script so RTL scripts outside the BMP
+// (Adlam U+1E900) and newer blocks (Arabic Extended-B U+0870) are covered
+// without hand-rolling code-point ranges. These eight cover every RTL script in
+// real-world use (Hebrew/Arabic are ~all of it); newer scripts (Yezidi, Garay,
+// …) are omitted because the pinned oxlint/tsc Unicode database rejects their
+// names. Only used to classify the first *letter* (`\p{L}`), so the non-letter
+// members of these scripts (Arabic-Indic digits, combining marks, punctuation)
+// are never tested — they're weak/neutral and skipped upstream.
+const RTL_STRONG_LETTER =
+  /[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}\p{Script=Samaritan}\p{Script=Mandaic}\p{Script=Adlam}]/u;
+
+/**
+ * Decide whether a paragraph without an explicit `w:bidi` flag should still be
+ * laid out right-to-left. Only paragraphs that carry at least one `w:rtl` run
+ * are candidates; among those the base direction follows the first strong
+ * directional character (the `dir="auto"` rule), so Hebrew/Arabic-led lines
+ * order RTL while an English- (or CJK-/Devanagari-/…) led line stays LTR.
+ * eigenpal #723 (#719).
+ */
+function paragraphBaseIsRtl(block: ParagraphBlock): boolean {
+  // Text runs plus field runs (a field result like a cross-reference renders as
+  // text, so it can be the paragraph's first strong character).
+  const runs = block.runs.filter((r) => isTextRun(r) || isFieldRun(r));
+  if (!runs.some((r) => r.rtl)) {
+    return false;
+  }
+  const text = runs
+    .map((r) => {
+      if (isTextRun(r)) {
+        return r.text;
+      }
+      return isFieldRun(r) ? (r.fallback ?? "") : "";
+    })
+    .join("");
+  // The first strong directional signal, in one native scan: an explicit bidi
+  // mark (RLM U+200F / ALM U+061C => RTL, LRM U+200E => LTR) or the first
+  // letter (`\p{L}`). Digits, combining marks, punctuation and spaces are
+  // weak/neutral and skipped. The first letter's script decides; nothing
+  // strong => honor w:rtl.
+  const match = /(\u200F|\u061C)|(\u200E)|(\p{L})/u.exec(text);
+  if (!match) {
+    return true;
+  }
+  if (match[1] !== undefined) {
+    return true; // RLM or ALM
+  }
+  if (match[2] !== undefined) {
+    return false; // LRM
+  }
+  return match[3] !== undefined && RTL_STRONG_LETTER.test(match[3]);
+}
+
 /**
  * Render a paragraph fragment
  *
@@ -1463,6 +1986,7 @@ export function renderParagraphFragment(
   fragmentEl.dataset["toLine"] = String(fragment.toLine);
 
   applyPmPositions(fragmentEl, fragment.pmStart, fragment.pmEnd);
+  applySdtDataAttrs(fragmentEl, fragment.sdtGroups);
 
   if (fragment.continuesFromPrev) {
     fragmentEl.dataset["continuesFromPrev"] = "true";
@@ -1487,9 +2011,16 @@ export function renderParagraphFragment(
     fragmentEl.dataset["styleId"] = block.attrs.styleId;
   }
 
-  // Apply RTL direction
-  const isBidi = block.attrs?.bidi;
-  if (isBidi) {
+  // Apply RTL direction. An explicit `w:bidi` flag wins: `true` ⇒ RTL, and an
+  // explicit `w:val="0"` (parsed as `false`) ⇒ LTR even when the paragraph
+  // carries `w:rtl` runs. Only when the flag is absent do we fall back to
+  // first-strong base-direction detection: Word/UBA order the runs by the
+  // paragraph's base direction, but the painter lays them out as independently
+  // `dir`-marked spans (each an isolate), so without a base `dir` on the
+  // fragment the runs stay in logical LTR order and reversed Hebrew/Arabic
+  // reads backwards. eigenpal #723 (#719).
+  const isRtl = block.attrs?.bidi ?? paragraphBaseIsRtl(block);
+  if (isRtl) {
     fragmentEl.dir = "rtl";
   }
 
@@ -1506,12 +2037,18 @@ export function renderParagraphFragment(
     } else {
       // 'justify' uses text-align: left (or right for RTL)
       // Justify is implemented via word-spacing on individual lines
-      fragmentEl.style.textAlign = isBidi ? "right" : "left";
+      fragmentEl.style.textAlign = isRtl ? "right" : "left";
     }
-  } else if (isBidi) {
+  } else if (isRtl) {
     // No explicit alignment on RTL paragraph — default to right
     fragmentEl.style.textAlign = "right";
   }
+
+  // An RTL paragraph with no explicit alignment defaults to right; pass that
+  // through to per-line rendering so flex-promoted lines (image-only,
+  // image+text, right-tab anchors) align to the start side too, not just the
+  // fragment text-align. (#723)
+  const effectiveAlignment = alignment ?? (isRtl ? "right" : undefined);
 
   // Track indentation for line-level application
   // Indentation is applied per-line, not at fragment level
@@ -1522,7 +2059,7 @@ export function renderParagraphFragment(
   if (indent) {
     // Track indent values for line-level application
     // For RTL paragraphs, swap left/right indentation
-    if (isBidi) {
+    if (isRtl) {
       if (indent.left !== undefined) {
         indentRight = indent.left;
       }
@@ -1716,7 +2253,7 @@ export function renderParagraphFragment(
       }
     }
 
-    const lineEl = renderLine(block, line, alignment, doc, {
+    const lineEl = renderLine(block, line, effectiveAlignment, doc, {
       availableWidth: lineAvailableWidth - lineLeftOffset - lineRightOffset,
       isLastLine,
       isFirstLine,
@@ -1769,6 +2306,14 @@ export function renderParagraphFragment(
 
     // Update cumulative Y for next line
     _cumulativeLineY += line.lineHeight;
+
+    // Lead skip: a line bumped past obstructing floats reserves vertical
+    // space above itself via marginTop. measureParagraph adds the same
+    // amount to totalHeight so containers stay sized correctly.
+    if (line.floatSkipBefore !== undefined && line.floatSkipBefore > 0) {
+      lineEl.style.marginTop = `${line.floatSkipBefore}px`;
+      _cumulativeLineY += line.floatSkipBefore;
+    }
 
     // Apply line-level indentation
     // Indentation is applied per-line for correct text wrapping
@@ -1835,17 +2380,16 @@ export function renderParagraphFragment(
       //    use this shape — the body of "(i) Tranche Closing..."
       //    wraps to the page margin, only the first line's marker is
       //    indented.
-      const markerHasHanging =
-        indent?.hanging !== undefined && indent.hanging > 0;
-      const markerHasFirstLine =
-        indent?.firstLine !== undefined && indent.firstLine > 0;
-      let markerPos = indentLeft;
-      if (markerHasHanging) {
-        markerPos = Math.max(0, indentLeft - (indent.hanging ?? 0));
-      } else if (markerHasFirstLine) {
-        markerPos = indentLeft + (indent.firstLine ?? 0);
-      }
-      lineEl.style.paddingLeft = `${markerPos}px`;
+      // The marker occupies a `hanging`-wide slot starting `hanging` left of
+      // the body (at `indentLeft - hanging`); the body lands at `indentLeft`.
+      // The offset rides on padding-left (NOT text-indent: Chrome folds
+      // text-indent into the first inline-block's box, overriding the marker's
+      // min-width and breaking tab-stop alignment).
+      const hanging = indent?.hanging ?? 0;
+      const firstLine = indent?.firstLine ?? 0;
+      const markerStart =
+        hanging > 0 ? indentLeft - hanging : indentLeft + firstLine;
+      lineEl.style.paddingLeft = `${Math.max(0, markerStart)}px`;
       lineEl.style.textIndent = "0"; // Don't use textIndent for lists
 
       // Resolve marker font per ECMA-376 §17.9.6:
@@ -1876,11 +2420,23 @@ export function renderParagraphFragment(
 
       const marker = renderListMarker(
         block.attrs.listMarker,
-        indent,
+        getListMarkerInlineWidth(block),
         doc,
         markerFontFamily,
         markerFontSize,
+        block.attrs.listMarkerRevision,
+        block.attrs.listMarkerSecondSlotOffsetTwips,
       );
+      // When the hang exceeds the left indent the marker belongs in the left
+      // margin — exactly where Word puts it (a list whose direct `w:ind` has
+      // `hanging` > `left`, eigenpal #730 / #729). CSS padding can't be
+      // negative, so the negative portion rides on the marker's own margin-left.
+      // Gated to `indentLeft > 0`: with no left indent the body/continuation
+      // lines already sit at `hanging` (see body-line branch above), so hanging
+      // the marker into the margin there would misalign the first line.
+      if (markerStart < 0 && indentLeft > 0) {
+        marker.style.marginLeft = `${markerStart}px`;
+      }
       lineEl.prepend(marker);
     }
 
@@ -1892,60 +2448,105 @@ export function renderParagraphFragment(
 }
 
 /**
- * Render a list marker element
- *
- * The marker is rendered as an inline-block with a consistent space after it.
- * For short markers, the box fills the hanging indent area.
- * For long markers (like "1.1.1"), we ensure minimum spacing after the text.
+ * Render a list marker element as an inline-block at the start of the first
+ * body line. `minWidth` (from `getListMarkerInlineWidth`) sizes the marker
+ * so the body text aligns at the next tab stop per ECMA-376 §17.9.25 —
+ * this honours `w:suff` (`tab` / `space` / `nothing`) and the document's
+ * tab grid. Long markers like "1.1.1." therefore grow to the next stop
+ * instead of butting against the body text.
  */
 function renderListMarker(
   marker: string,
-  indent: ParagraphIndent | undefined,
+  minWidth: number,
   doc: Document,
   fontFamily?: string,
   fontSize?: number,
+  revision?: ParagraphAttrs["listMarkerRevision"],
+  secondSlotOffsetTwips?: number,
 ): HTMLElement {
   const span = doc.createElement("span");
   span.className = "layout-list-marker";
   span.style.display = "inline-block";
 
-  // Apply font styling so the marker matches the paragraph text
-  // Per ECMA-376 §17.9.6, marker formatting comes from level rPr,
-  // then paragraph defaults, then document defaults.
+  // Per ECMA-376 §17.9.6, marker formatting comes from level rPr, then
+  // paragraph defaults, then document defaults.
   if (fontFamily) {
     span.style.fontFamily = resolveFontFamily(fontFamily).cssFallback;
   }
   if (fontSize) {
-    // Convert points to pixels: 1pt = 96/72 px
-    const fontSizePx = (fontSize * 96) / 72;
-    span.style.fontSize = `${fontSizePx}px`;
+    // 1pt = 96/72 px
+    span.style.fontSize = `${(fontSize * 96) / 72}px`;
+  }
+
+  // `text-align-last` inherits, so a justified paragraph would distribute the
+  // marker's internal whitespace across its minWidth box — pushing folded
+  // LISTNUM markers like "(a)" away from "7.1" to the right edge. Force the
+  // marker's own last (only) line back to left.
+  span.style.textAlign = "left";
+  span.style.textAlignLast = "left";
+  span.style.boxSizing = "border-box";
+  if (minWidth > 0) {
+    span.style.minWidth = `${minWidth}px`;
+  }
+
+  if (revision) {
+    const authorIdx = getAuthorColorIdx(revision.author ?? "");
+    const authorColor = AUTHOR_COLORS[authorIdx]!; // SAFETY: getAuthorColorIdx returns index within AUTHOR_COLORS bounds
+    span.style.color = authorColor;
+    span.style.textDecorationColor = authorColor;
+    span.dataset["tcAuthorIdx"] = String(authorIdx);
+    if (revision.author) {
+      span.dataset["changeAuthor"] = revision.author;
+    }
+    if (revision.date) {
+      span.dataset["changeDate"] = revision.date;
+    }
+    if (revision.revisionId !== undefined) {
+      span.dataset["revisionId"] = String(revision.revisionId);
+    }
+    const titleParts = [
+      revision.author,
+      revision.date ? new Date(revision.date).toLocaleDateString() : "",
+    ].filter(Boolean);
+    if (revision.kind === "ins") {
+      span.classList.add("docx-insertion");
+      span.style.textDecorationLine = "underline";
+      if (titleParts.length > 0) {
+        span.title = `Inserted: ${titleParts.join(", ")}`;
+      }
+    } else {
+      span.classList.add("docx-deletion");
+      span.style.textDecorationLine = "line-through";
+      if (titleParts.length > 0) {
+        span.title = `Deleted: ${titleParts.join(", ")}`;
+      }
+    }
+  }
+
+  // Tab-separated markers carry a folded LISTNUM cached value in their
+  // second slot ("7.1\t(a)"). Render the slots as inline children with the
+  // second one pinned at the deeper level's marker column (twips → px at
+  // 1440 twips/inch, 96px/inch → divide by 15) so it lines up with the
+  // following OutNum3 "(b)".
+  const tabIdx = marker.indexOf("\t");
+  if (tabIdx !== -1 && secondSlotOffsetTwips !== undefined) {
+    const firstSlot = doc.createElement("span");
+    firstSlot.textContent = marker.slice(0, tabIdx);
+    firstSlot.style.display = "inline-block";
+    const secondSlot = doc.createElement("span");
+    secondSlot.textContent = marker.slice(tabIdx + 1);
+    secondSlot.style.display = "inline-block";
+    // Position the second slot via absolute offset inside a relative
+    // container so its left edge sits at the desired column regardless of
+    // the first slot's width.
+    span.style.position = "relative";
+    secondSlot.style.position = "absolute";
+    secondSlot.style.left = `${secondSlotOffsetTwips / 15}px`;
+    secondSlot.style.top = "0";
+    span.append(firstSlot, secondSlot);
+    return span;
   }
 
   span.textContent = marker;
-  span.style.textAlign = "left";
-  span.style.boxSizing = "border-box";
-
-  // ECMA-376 §17.9.30: `<w:suff>` selects what follows the marker —
-  // `tab` (default), `space`, or `nothing`. We don't currently parse
-  // `<w:suff>` and fall back to the default (tab) behaviour.
-  //
-  // Hanging-indent lists bake the tab gap into the hanging space:
-  // marker fills `[indentLeft - hanging, indentLeft]`, body text
-  // picks up at `indentLeft`. Set `min-width: hanging` so short
-  // markers don't collapse against the body text.
-  //
-  // First-line-indent lists (`firstLine > 0` and no hanging) place
-  // the marker at `indentLeft + firstLine` with body text wrapping
-  // at `indentLeft`; the marker box has no implicit gap, so we add
-  // an explicit padding-right to emulate the marker's tab-after.
-  // Without this, NVCA-style lists rendered "(i)Tranche Closing"
-  // and "4.10Voting Agreement" with the marker flush against the
-  // text.
-  if (indent?.hanging !== undefined && indent.hanging > 0) {
-    span.style.minWidth = `${indent.hanging}px`;
-  } else if (indent?.firstLine !== undefined && indent.firstLine > 0) {
-    span.style.paddingRight = "12px";
-  }
-
   return span;
 }

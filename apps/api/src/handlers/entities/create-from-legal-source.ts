@@ -6,7 +6,6 @@ import { compileLegalSourceToDocx } from "@stll/docx-core";
 import { createChatRefRegistry } from "@/api/handlers/chat/tools/execute/ref-registry";
 import { createEntityFromBuffer } from "@/api/handlers/entities/create-from-buffer";
 import { createSafeHandler } from "@/api/lib/api-handlers";
-import { createAuditContext } from "@/api/lib/audit-log";
 import { HandlerError, unreachable } from "@/api/lib/errors/tagged-errors";
 import { sanitizeFilename } from "@/api/lib/sanitize-filename";
 import { DOCX_MIME_TYPE } from "@/api/mime-types";
@@ -27,8 +26,7 @@ export default createSafeHandler(
       session,
       user,
       workspaceId,
-      request,
-      server,
+      recordAuditEvent,
       body: { name, source },
     } = ctx;
 
@@ -52,13 +50,7 @@ export default createSafeHandler(
         organizationId: session.activeOrganizationId,
         workspaceId,
         userId: user.id,
-        auditContext: createAuditContext({
-          organizationId: session.activeOrganizationId,
-          workspaceId,
-          userId: user.id,
-          request,
-          server,
-        }),
+        recordAuditEvent,
         buffer: compiled.buffer,
         fileName,
         mimeType: DOCX_MIME_TYPE,
@@ -86,6 +78,11 @@ export default createSafeHandler(
       success: true as const,
       fileName: created.fileName,
       entityId: created.entityId,
+      // Returned so the client can immediately prefetch the file
+      // bytes via `fileOptions({ workspaceId, fieldId, purpose })`,
+      // priming the docx editor's buffer cache before the user
+      // clicks "Open in editor".
+      fieldId: created.fieldId,
       workspaceId,
       entityRef,
       matterRef,

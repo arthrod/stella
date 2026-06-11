@@ -30,6 +30,7 @@ const generateBoundingBoxes = createSafeHandler(
     workspaceId,
     body,
     orgAIConfig,
+    promptCachingEnabled,
   }) {
     const organizationId = session.activeOrganizationId;
     const { justificationId } = body;
@@ -61,6 +62,7 @@ const generateBoundingBoxes = createSafeHandler(
         justificationId,
         organizationId,
         orgAIConfig: orgAIConfig ?? null,
+        promptCachingEnabled,
         workspaceId,
         data: {
           pdf: preparedData.pdf,
@@ -79,7 +81,7 @@ const generateBoundingBoxes = createSafeHandler(
         });
         // `WorkflowIntegrationError.cause` carries the underlying AI
         // provider failure (APICallError / RetryError) — classify
-        // against that so quota/credits map to 429/402 instead of
+        // against that so quota/usage-limit errors map to 429/402 instead of
         // bubbling up as an uncaught Panic and returning 500.
         return Result.err(
           aiHandlerError(pageBoxesResult.error.cause, {
@@ -92,8 +94,10 @@ const generateBoundingBoxes = createSafeHandler(
       boxes.push(...pageBoxesResult.value);
 
       yield* Result.await(
-        safeDb((tx) =>
-          tx
+        safeDb(async (tx) => {
+          // audit: skip — background OCR pipeline persisting computed
+          // bounding boxes; derived AI output, not a user mutation.
+          await tx
             .update(justifications)
             .set({
               boundingBoxes: {
@@ -101,8 +105,8 @@ const generateBoundingBoxes = createSafeHandler(
                 boxes,
               },
             })
-            .where(eq(justifications.id, justificationId)),
-        ),
+            .where(eq(justifications.id, justificationId));
+        }),
       );
     }
 

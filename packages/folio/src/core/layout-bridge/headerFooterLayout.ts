@@ -17,9 +17,12 @@
  * inherited spacing). Measurement uses the normalized copy.
  */
 
+import type { Node as PMNode } from "prosemirror-model";
+
 import type {
   FlowBlock,
   FloatingTablePosition,
+  HeaderFooterContent,
   ImageRun,
   Measure,
   PageMargins,
@@ -27,8 +30,10 @@ import type {
   TableBlock,
   TableMeasure,
 } from "../layout-engine/types";
-import type { HeaderFooterContent } from "../layout-painter/renderPage";
-import { isFloatingImageRun } from "../layout-painter/renderUtils";
+import {
+  isFloatingImageRun,
+  isFloatingTextBoxBlock,
+} from "../layout-engine/types";
 import { headerFooterToProseDoc } from "../prosemirror/conversion/toProseDoc";
 import type { HeaderFooter, StyleDefinitions, Theme } from "../types/document";
 import { emuToPixels } from "../utils/units";
@@ -327,17 +332,19 @@ function resolveHeaderFooterFloatingTableVisualTop(
   return sourceY;
 }
 
-/**
- * Image is rendered "behind" body content (full-page letterhead, watermark).
- * The renderer lifts these out of the HF container to the page root, so they
- * must not push body margins down because they paint underneath the body.
- */
-function isBehindDocImageRun(run: Run): boolean {
-  return run.kind === "image" && run.wrapType === "behind";
-}
-
 function isBehindDocImageBlock(block: FlowBlock): boolean {
   return block.kind === "image" && block.anchor?.behindDoc === true;
+}
+
+type HeaderFooterTextBoxBlock = Extract<FlowBlock, { kind: "textBox" }>;
+
+function isPositionedHeaderFooterTextBoxBlock(
+  block: HeaderFooterTextBoxBlock,
+): boolean {
+  if (block.displayMode === "block" || block.displayMode === "inline") {
+    return false;
+  }
+  return isFloatingTextBoxBlock(block);
 }
 
 export function calculateHeaderFooterVisualBounds(
@@ -392,11 +399,11 @@ export function calculateHeaderFooterVisualBounds(
     } else {
       // Tables / images / textBoxes contribute their measured height as a
       // single block (they don't reflow within the HF area). Floating
-      // tables (`<w:tblpPr>`) anchor at (tblpX, tblpY) and don't
-      // participate in the cursorY flow — they're positioned absolutely by
-      // the renderer and can overlap surrounding HF content (Word
-      // semantics for unwrapped floating tables).
-      let blockHeight = 0;
+      // tables (`<w:tblpPr>`) and floating text boxes anchor at page-level
+      // positions and don't participate in the cursorY flow — they're
+      // positioned absolutely by the renderer and can overlap surrounding
+      // HF content (Word semantics for unwrapped floating content).
+      let blockHeight: number;
       let advancesCursor = true;
       if (block.kind === "table" && measure.kind === "table") {
         blockHeight = measure.totalHeight;
@@ -407,6 +414,9 @@ export function calculateHeaderFooterVisualBounds(
         blockHeight = measure.height;
       } else if (block.kind === "textBox" && measure.kind === "textBox") {
         blockHeight = measure.height;
+        if (isPositionedHeaderFooterTextBoxBlock(block)) {
+          advancesCursor = false;
+        }
       } else {
         continue;
       }
@@ -429,6 +439,13 @@ export function calculateHeaderFooterVisualBounds(
         );
         visualTop = Math.min(visualTop, blockTop);
         visualBottom = Math.max(visualBottom, blockTop + blockHeight);
+      } else if (
+        block.kind === "textBox" &&
+        isPositionedHeaderFooterTextBoxBlock(block) &&
+        measure.kind === "textBox"
+      ) {
+        visualTop = Math.min(visualTop, cursorY);
+        visualBottom = Math.max(visualBottom, cursorY + measure.height);
       }
     }
   }
@@ -438,12 +455,12 @@ export function calculateHeaderFooterVisualBounds(
 
 /**
  * Compute the header/footer bounds used by `computeHeaderFooterMarginExtender`
- * to push body margins clear of HF overflow. Excludes `behindDoc` images
- * (full-page letterheads, watermarks): the renderer lifts them out of the HF
- * container onto the page root and paints them behind body content, so they
- * must not reserve body push-down. Keeping them in `visualBottom` is still
- * correct for the renderer (and for the page-hash invalidation signal), but
- * the margin extender needs the flow-only extent.
+ * to push body margins clear of HF overflow. Excludes anchored/floating objects
+ * (full-page letterheads, watermarks): Word positions them on the page instead
+ * of in the header/footer flow, so they must not reserve body push-down. Keeping
+ * them in `visualBottom` is still correct for the renderer (and for the
+ * page-hash invalidation signal), but the margin extender needs the flow-only
+ * extent.
  */
 export function calculateHeaderFooterMarginPushBounds(
   blocks: FlowBlock[],
@@ -452,7 +469,7 @@ export function calculateHeaderFooterMarginPushBounds(
   metrics: HeaderFooterMetrics,
 ): { top: number; bottom: number } {
   let top = 0;
-  let bottom = flowHeight;
+  let bottom = 0;
   let cursorY = 0;
 
   for (let i = 0; i < blocks.length; i++) {
@@ -463,31 +480,14 @@ export function calculateHeaderFooterMarginPushBounds(
     }
 
     if (block.kind === "paragraph" && measure.kind === "paragraph") {
-      const paragraphStartY = cursorY;
-      const paragraphBottomY = paragraphStartY + measure.totalHeight;
-      top = Math.min(top, paragraphStartY);
+      // Margin push is the in-flow extent only. The paragraph's measured
+      // height already covers its inline content; anchored image runs are
+      // positioned on the page (Word does not let them push the body down),
+      // so they extend only the visual bounds, never the push bounds.
+      // eigenpal/docx-editor#709.
+      const paragraphBottomY = cursorY + measure.totalHeight;
+      top = Math.min(top, cursorY);
       bottom = Math.max(bottom, paragraphBottomY);
-
-      for (const run of block.runs) {
-        if (run.kind !== "image") {
-          continue;
-        }
-        if (!run.position && !isFloatingImageRun(run)) {
-          continue;
-        }
-        if (isBehindDocImageRun(run)) {
-          continue;
-        }
-        const runTop = resolveHeaderFooterVisualTop(
-          run,
-          paragraphStartY,
-          flowHeight,
-          metrics,
-        );
-        top = Math.min(top, runTop);
-        bottom = Math.max(bottom, runTop + run.height);
-      }
-
       cursorY = paragraphBottomY;
     } else if (isBehindDocImageBlock(block)) {
       // ImageBlock with anchor.behindDoc: skip entirely for the same reason
@@ -495,7 +495,7 @@ export function calculateHeaderFooterMarginPushBounds(
       // anchored images don't participate in HF flow either.
       continue;
     } else {
-      let blockHeight = 0;
+      let blockHeight: number;
       let advancesCursor = true;
       if (block.kind === "table" && measure.kind === "table") {
         blockHeight = measure.totalHeight;
@@ -503,8 +503,20 @@ export function calculateHeaderFooterMarginPushBounds(
           advancesCursor = false;
         }
       } else if (block.kind === "image" && measure.kind === "image") {
+        // Anchored images sit on the page (Word positions them there); they
+        // extend only the visual bounds, not the body push. eigenpal #709.
+        if (block.anchor?.isAnchored) {
+          continue;
+        }
         blockHeight = measure.height;
       } else if (block.kind === "textBox" && measure.kind === "textBox") {
+        // Floating/anchored text boxes — e.g. a page-anchored letterhead — are
+        // positioned on the page and must not push the body margin, or a tall
+        // letterhead inflates the top margin past the page and the paginator
+        // throws "no content area" (blank document). eigenpal #709.
+        if (isPositionedHeaderFooterTextBoxBlock(block)) {
+          continue;
+        }
         blockHeight = measure.height;
       } else {
         continue;
@@ -543,6 +555,15 @@ export type ConvertHeaderFooterOptions = {
   styles?: StyleDefinitions | null;
   theme?: Theme | null;
   measureBlocks: MeasureBlocksFn;
+  /** Document-wide `w:defaultTabStop` in twips — forwarded to toFlowBlocks. */
+  defaultTabStopTwips?: number;
+  /**
+   * Relationship id of the source HF part. Stamped onto the returned
+   * `HeaderFooterContent.rId` so the painter can emit `data-rid` on the
+   * `.layout-page-header` / `.layout-page-footer` DOM node for the pointer
+   * pipeline (`HiddenHeaderFooterPMs` + `findHfPmSpans`).
+   */
+  rId?: string;
 };
 
 /**
@@ -577,59 +598,293 @@ export function convertHeaderFooterToContent(
     proseDocOptions.theme = options.theme;
   }
   const pmDoc = headerFooterToProseDoc(headerFooter.content, proseDocOptions);
-  const flowOptions: { theme?: Theme | null } = {};
+  const flowOptions: {
+    theme?: Theme | null;
+    defaultTabStopTwips?: number;
+  } = {};
   if (options.theme !== undefined) {
     flowOptions.theme = options.theme;
   }
+  if (options.defaultTabStopTwips !== undefined) {
+    flowOptions.defaultTabStopTwips = options.defaultTabStopTwips;
+  }
   const blocks = toFlowBlocks(pmDoc, flowOptions);
+  return finalizeHeaderFooterContent(blocks, contentWidth, metrics, options);
+}
+
+// =============================================================================
+// 5. PM doc source (persistent hidden HF EditorView path)
+// =============================================================================
+
+/**
+ * Same as {@link convertHeaderFooterToContent}, but sourced from a live
+ * ProseMirror document instead of `HeaderFooter.content`. Used by the
+ * persistent hidden HF EditorView pipeline so the painter renders the PM's
+ * current state (Word-style WYSIWYG: every keystroke repaints).
+ *
+ * The pmDoc is expected to be a body-shaped PM doc (the result of
+ * `headerFooterToProseDoc` at mount, plus any user edits applied since).
+ * Theme + styles do NOT need to be threaded again — they only matter for the
+ * initial parse path; subsequent transformations are PM-internal.
+ */
+export function convertHeaderFooterPmDocToContent(
+  pmDoc: PMNode | null | undefined,
+  contentWidth: number,
+  metrics: HeaderFooterMetrics,
+  options: Omit<ConvertHeaderFooterOptions, "styles">,
+): HeaderFooterContent | undefined {
+  if (!pmDoc || pmDoc.content.size === 0) {
+    return undefined;
+  }
+  const flowOptions: {
+    theme?: Theme | null;
+    defaultTabStopTwips?: number;
+  } = {};
+  if (options.theme !== undefined) {
+    flowOptions.theme = options.theme;
+  }
+  if (options.defaultTabStopTwips !== undefined) {
+    flowOptions.defaultTabStopTwips = options.defaultTabStopTwips;
+  }
+  const blocks = toFlowBlocks(pmDoc, flowOptions);
+  return finalizeHeaderFooterContent(blocks, contentWidth, metrics, options);
+}
+
+// =============================================================================
+// 6. Shared tail — blocks → HeaderFooterContent
+// =============================================================================
+
+function finalizeHeaderFooterContent(
+  blocks: FlowBlock[],
+  contentWidth: number,
+  metrics: HeaderFooterMetrics,
+  options: { measureBlocks: MeasureBlocksFn; rId?: string },
+): HeaderFooterContent | undefined {
   if (blocks.length === 0) {
     return undefined;
   }
 
   const blocksForMeasure = normalizeHeaderFooterMeasureBlocks(blocks);
   const measures = options.measureBlocks(blocksForMeasure, contentWidth);
-  let totalHeight = 0;
+  let flowHeight = 0;
   for (let i = 0; i < measures.length; i++) {
     const m = measures[i];
     const b = blocks[i];
     if (!m || !b) {
       continue;
     }
-    if (m.kind === "paragraph") {
-      totalHeight += m.totalHeight;
-    } else if (m.kind === "table") {
-      // Floating tables (`<w:tblpPr>`) anchor at (tblpX, tblpY) and don't
-      // contribute to the in-flow height that drives body push-down.
-      if (!(b.kind === "table" && b.floating)) {
-        totalHeight += m.totalHeight;
-      }
-    } else if (m.kind === "image") {
-      totalHeight += m.height;
-    } else if (m.kind === "textBox") {
-      totalHeight += m.height;
-    }
+    flowHeight += getHeaderFooterFlowMeasureHeight(b, m);
   }
   const { visualTop, visualBottom } = calculateHeaderFooterVisualBounds(
     blocks,
     measures,
-    totalHeight,
+    flowHeight,
     metrics,
   );
   const { top: marginPushTop, bottom: marginPushBottom } =
     calculateHeaderFooterMarginPushBounds(
       blocks,
       measures,
-      totalHeight,
+      flowHeight,
       metrics,
     );
 
   return {
     blocks,
     measures,
-    height: totalHeight,
+    height: flowHeight,
     visualTop,
     visualBottom,
     marginPushTop,
     marginPushBottom,
+    textSig: computeHeaderFooterTextSig(blocks),
+    ...(options.rId ? { rId: options.rId } : {}),
   };
+}
+
+function getHeaderFooterFlowMeasureHeight(
+  block: FlowBlock,
+  measure: Measure,
+): number {
+  if (block.kind === "paragraph" && measure.kind === "paragraph") {
+    return measure.totalHeight;
+  }
+  if (block.kind === "table" && measure.kind === "table") {
+    if (block.floating) {
+      return 0;
+    }
+    return measure.totalHeight;
+  }
+  if (block.kind === "image" && measure.kind === "image") {
+    if (block.anchor?.isAnchored) {
+      return 0;
+    }
+    return measure.height;
+  }
+  if (block.kind === "textBox" && measure.kind === "textBox") {
+    if (isPositionedHeaderFooterTextBoxBlock(block)) {
+      return 0;
+    }
+    return measure.height;
+  }
+  return 0;
+}
+
+/**
+ * Cheap content fingerprint for the painter's incremental-render cache. The
+ * default fields hashed by `computeOptionsHash` (block count + flow height +
+ * visual bounds) miss same-height in-place edits — typing a replacement
+ * character, toggling bold, etc. — so the painter's incremental path then
+ * skips re-rendering page shells and the user's HF edits stay invisible
+ * until something else triggers a full repaint (Codex #487 P1 follow-up:
+ * 21:02 review; extended for run formatting + fields per 21:28 review).
+ *
+ * For each run carry text + every visual-affecting field: text characters,
+ * field type (PAGE / NUMPAGES / DATE / TIME), and the full RunFormatting
+ * record (bold, italic, color, underline, fontSize, font, etc.). Toggling
+ * bold or inserting a PAGE field on existing same-height content now
+ * differentiates the signature and forces a repaint. Tables, images, and
+ * text boxes are summarised by kind + dims so resize / image swap also
+ * invalidate. JSON.stringify is moderately expensive but folio HF is
+ * bounded (a handful of paragraphs, max).
+ */
+function computeHeaderFooterTextSig(blocks: FlowBlock[]): string {
+  return blocks.map(blockSig).join("|");
+}
+
+function blockSig(b: FlowBlock): string {
+  if (b.kind === "paragraph") {
+    // Carry paragraph-level formatting so same-height changes (alignment,
+    // RTL/LTR, indent, line spacing, paragraph style, borders, shading,
+    // list properties) still invalidate the cache. textSig was opening
+    // every paragraph with a constant `p:` before, so the body PM could
+    // toggle alignment / line spacing inside an HF paragraph without
+    // shifting computeOptionsHash and the painter's incremental path
+    // would skip the repaint (Codex #487 P2: 22:48 review).
+    let text = `p:${serializeParagraphAttrs(b.attrs)}|`;
+    for (const r of b.runs) {
+      if (r.kind === "text") {
+        text += `T:${r.text}|${serializeRunFmt(r)};`;
+      } else if (r.kind === "tab") {
+        text += `\\t|${serializeRunFmt(r)};`;
+      } else if (r.kind === "lineBreak") {
+        text += "\\n;";
+      } else if (r.kind === "image") {
+        // Include src + transform + wrapType so swapping the painted
+        // image (different logo at the same dims) invalidates the
+        // signature — width × height alone would let an unchanged
+        // layout slip past the painter's incremental cache (Codex
+        // #487 P2: 23:09 review).
+        text +=
+          `[i${r.width}x${r.height}|${r.src}|` +
+          `${r.transform ?? ""}|${r.wrapType ?? ""}];`;
+      } else if (r.kind === "math") {
+        // OMML XML uniquely identifies the rendered MathML output;
+        // changes to the equation must invalidate the HF cache so the
+        // painter re-injects the updated `<math>` element.
+        text += `M:${r.display}|${r.ommlXml};`;
+      } else {
+        // field run
+        text += `F:${r.fieldType}|${serializeRunFmt(r)};`;
+      }
+    }
+    return text;
+  }
+  if (b.kind === "table") {
+    // Recurse into cells — same-height text / formatting / field edits
+    // inside an existing HF table cell are otherwise invisible to the
+    // painter's incremental cache (Codex #487 P2: 21:41 review). Row
+    // count + per-cell block signatures detect every visible change a
+    // user can produce without growing the table.
+    const cellParts: string[] = [];
+    for (const row of b.rows) {
+      for (const cell of row.cells) {
+        cellParts.push(cell.blocks.map(blockSig).join(","));
+      }
+    }
+    return `t:${b.rows.length}:${cellParts.join("|")}`;
+  }
+  if (b.kind === "image") {
+    return (
+      `i:${b.width}x${b.height}|${b.src}|` +
+      `${b.transform ?? ""}|${b.anchor?.behindDoc ? "behind" : ""}`
+    );
+  }
+  if (b.kind === "textBox") {
+    // Text boxes can carry their own content (paragraph + runs). Recurse
+    // when the layout-engine TextBoxBlock surfaces nested blocks; for
+    // shapes that only carry dims we keep the original bare tag.
+    const inner = (b as { blocks?: FlowBlock[] }).blocks;
+    if (Array.isArray(inner) && inner.length > 0) {
+      return `tb:${inner.map(blockSig).join(",")}`;
+    }
+    return "tb";
+  }
+  return "";
+}
+
+function serializeParagraphAttrs(
+  attrs: Record<string, unknown> | undefined,
+): string {
+  if (!attrs) {
+    return "";
+  }
+  const keys = [
+    "alignment",
+    "bidi",
+    "indent",
+    "spacing",
+    "styleId",
+    "borders",
+    "shading",
+    "contextualSpacing",
+    "keepNext",
+    "keepLines",
+    "pageBreakBefore",
+    "numPr",
+    "listMarker",
+    "listIsBullet",
+    "listMarkerHidden",
+    "listMarkerSuffix",
+    "tabs",
+  ];
+  const out: Record<string, unknown> = {};
+  for (const k of keys) {
+    const v = attrs[k];
+    if (v !== undefined && v !== null) {
+      out[k] = v;
+    }
+  }
+  return JSON.stringify(out);
+}
+
+/**
+ * Serialise the RunFormatting fields that actually drive the painter's
+ * visual output. The Run type spreads RunFormatting in place, so we project
+ * a small shape and JSON-stringify it; properties that are undefined are
+ * skipped so the resulting string stays compact for unstyled runs.
+ */
+function serializeRunFmt(run: Record<string, unknown>): string {
+  const keys = [
+    "bold",
+    "italic",
+    "underline",
+    "strikethrough",
+    "color",
+    "highlightColor",
+    "fontSize",
+    "fontFamily",
+    "verticalAlign",
+    "letterSpacing",
+    "smallCaps",
+    "allCaps",
+  ];
+  const out: Record<string, unknown> = {};
+  for (const k of keys) {
+    const v = run[k];
+    if (v !== undefined && v !== null) {
+      out[k] = v;
+    }
+  }
+  return JSON.stringify(out);
 }

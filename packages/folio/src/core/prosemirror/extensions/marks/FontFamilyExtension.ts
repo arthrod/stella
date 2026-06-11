@@ -2,6 +2,9 @@
  * Font Family Mark Extension
  */
 
+import { panic } from "better-result";
+
+import { expectFontFamilyMarkAttrs } from "../../attrs";
 import { createMarkExtension } from "../create";
 import type { ExtensionContext, ExtensionRuntime } from "../types";
 import { setMark, removeMark } from "./markUtils";
@@ -36,15 +39,7 @@ export const FontFamilyExtension = createMarkExtension({
       },
     ],
     toDOM(mark) {
-      // SAFETY: fontFamily mark attrs always have ascii/hAnsi per schema
-      const ascii =
-        typeof mark.attrs["ascii"] === "string"
-          ? mark.attrs["ascii"]
-          : undefined;
-      const hAnsi =
-        typeof mark.attrs["hAnsi"] === "string"
-          ? mark.attrs["hAnsi"]
-          : undefined;
+      const { ascii, hAnsi } = expectFontFamilyMarkAttrs(mark);
       const fontName = ascii ?? hAnsi;
       if (!fontName) {
         return ["span", 0];
@@ -56,7 +51,7 @@ export const FontFamilyExtension = createMarkExtension({
   onSchemaReady(ctx: ExtensionContext): ExtensionRuntime {
     const fontFamilyType = ctx.schema.marks["fontFamily"];
     if (!fontFamilyType) {
-      throw new Error("Missing mark type: fontFamily");
+      panic("Missing mark type: fontFamily");
     }
     return {
       commands: {

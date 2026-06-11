@@ -5,6 +5,16 @@
  * Converts document blocks + measurements into positioned fragments on pages.
  */
 
+import type {
+  ImagePosition,
+  ImageWrap,
+  SdtProperties,
+  SdtType,
+  TableWidthType,
+} from "@stll/docx-core/model";
+
+import type { OutlineStyleAttr } from "../types/documentEnumValues";
+
 /**
  * Unique identifier for a block in the document.
  * Format: typically `${index}-${type}` or just the block index.
@@ -25,7 +35,18 @@ export type RunFormatting = {
   strike?: boolean;
   color?: string;
   textColorSource?: "direct" | "paragraphDefault";
+  // TODO: cannot tighten to NonNullable<TextFormatting["highlight"]> (the OOXML
+  // named-color union). The bridge stores a *resolved CSS* color here via
+  // `resolveHighlightToCss` (named color → hex, or raw `#hex`), so values like
+  // `#FFFF00` are not union members. Either keep a separate CSS field or move
+  // resolution to the painter before this can become the named-color union.
   highlight?: string;
+  /**
+   * Run-level shading (w:shd) used as a background, stored as a *resolved CSS*
+   * color (like `highlight`). Painted only when there is no `highlight` (an
+   * explicit highlight wins). eigenpal #722 (#712).
+   */
+  shading?: string;
   fontFamily?: string;
   fontSize?: number;
   letterSpacing?: number;
@@ -46,6 +67,32 @@ export type RunFormatting = {
   textShadow?: boolean;
   textOutline?: boolean;
   emphasisMark?: "dot" | "comma" | "circle" | "underDot";
+  /**
+   * Hidden run (OOXML w:vanish, §17.3.2.41). Word's print/normal view
+   * suppresses it entirely, but the editing view dims it with a dotted
+   * underline so the author can navigate to and edit it. The painter
+   * mirrors the editing-view treatment so PM cursor traversal works.
+   */
+  hidden?: boolean;
+  /**
+   * Per-run right-to-left direction (w:rtl). When true the painter sets
+   * `dir="rtl"` on the run span; the browser's bidi algorithm handles
+   * reordering. `false` means an explicit override that disables inherited
+   * RTL; the painter sets `dir="ltr"` so style/paragraph RTL does not leak in.
+   */
+  rtl?: boolean;
+  /**
+   * Text effect animation hint (w:effect). Word 2013+ no longer animates,
+   * but the painter emits `docx-text-effect-<name>` plus `data-effect` so
+   * host CSS can opt in.
+   */
+  textEffect?:
+    | "blinkBackground"
+    | "lights"
+    | "antsBlack"
+    | "antsRed"
+    | "shimmer"
+    | "sparkle";
   /** Hyperlink info if this run is a link */
   hyperlink?: HyperlinkInfo;
   /** Footnote reference ID (if this run contains a footnote reference) */
@@ -109,16 +156,21 @@ export type TabRun = RunFormatting & {
 /**
  * Position data for floating/anchored images.
  */
+// OOXML drawing anchors (`ST_RelFromH`/`ST_RelFromV`, `ST_AlignH`/`ST_AlignV`).
+// Mirrors the typed `ImagePositionAttrs` (schema/nodes.ts) rather than widening
+// to `string`, so band/anchor resolution can switch exhaustively over the
+// finite value set. The DOCX parser already narrows raw XML to these unions via
+// `narrowEnum`, so no runtime validation is needed here.
 export type ImageRunPosition = {
   horizontal?: {
-    relativeTo?: string;
+    relativeTo?: NonNullable<ImagePosition["horizontal"]["relativeTo"]>;
     posOffset?: number;
-    align?: string;
+    align?: NonNullable<ImagePosition["horizontal"]["alignment"]>;
   };
   vertical?: {
-    relativeTo?: string;
+    relativeTo?: NonNullable<ImagePosition["vertical"]["relativeTo"]>;
     posOffset?: number;
-    align?: string;
+    align?: NonNullable<ImagePosition["vertical"]["alignment"]>;
   };
 };
 
@@ -133,10 +185,16 @@ export type ImageRun = {
   alt?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
+  /**
+   * Opacity in [0, 1] from `<a:alphaModFix amt>`. Undefined or `1` means
+   * fully opaque; the painter emits no CSS `opacity` in that case.
+   * eigenpal #424 (opacity render pipeline).
+   */
+  opacity?: number;
   /** Position for floating/anchored images */
   position?: ImageRunPosition;
   /** Wrap type from DOCX (inline, square, tight, through, topAndBottom, etc.) */
-  wrapType?: string;
+  wrapType?: ImageWrap["type"];
   /** Display mode for CSS rendering */
   displayMode?: "inline" | "block" | "float";
   /** CSS float direction */
@@ -146,6 +204,24 @@ export type ImageRun = {
   distBottom?: number;
   distLeft?: number;
   distRight?: number;
+  /**
+   * wp:srcRect crop fractions in [0, 1]; emit as CSS `clip-path: inset(...)`
+   * to match Word's visible region. eigenpal #424 (image-crop subset).
+   */
+  cropTop?: number;
+  cropRight?: number;
+  cropBottom?: number;
+  cropLeft?: number;
+  /** Whether this picture is itself a tracked insertion (`<w:ins>`). eigenpal #641. */
+  isInsertion?: boolean;
+  /** Whether this picture is itself a tracked deletion (`<w:del>`). eigenpal #641. */
+  isDeletion?: boolean;
+  /** Author of the tracked change wrapping the picture. eigenpal #641. */
+  changeAuthor?: string;
+  /** Date of the tracked change wrapping the picture. eigenpal #641. */
+  changeDate?: string;
+  /** Revision id of the tracked change wrapping the picture. eigenpal #641. */
+  changeRevisionId?: number;
   pmStart?: number;
   pmEnd?: number;
 };
@@ -164,9 +240,36 @@ export type LineBreakRun = {
  */
 export type FieldRun = RunFormatting & {
   kind: "field";
+  /** Coarse render category, kept for cache keys and caret-width fast paths. */
   fieldType: "PAGE" | "NUMPAGES" | "DATE" | "TIME" | "OTHER";
+  /** Full OOXML field instruction (e.g. `PAGE \* ROMAN`, `PAGEREF _Ref1 \h`)
+   *  for live evaluation; falls back to `fieldType` when absent. */
+  instruction?: string;
   /** Fallback text if field can't be resolved */
   fallback?: string;
+  /** Whether OOXML marked this field as locked (`w:fldLock`). */
+  fldLock?: boolean;
+  pmStart?: number;
+  pmEnd?: number;
+};
+
+/**
+ * A native math equation run. The painter converts `ommlXml` to MathML
+ * and injects a `<math>` element inline; `plainText` is the screen-reader
+ * fallback and the measurer's width estimate.
+ *
+ * The raw OMML XML lives on the run so the painter can re-convert when
+ * markup changes; it is never modified on save (round-trip happens via
+ * the document model, not the layout layer).
+ */
+export type MathRun = RunFormatting & {
+  kind: "math";
+  /** `inline` = `<m:oMath>`, `block` = `<m:oMathPara>`. */
+  display: "inline" | "block";
+  /** Raw OMML XML for conversion + round-trip. */
+  ommlXml: string;
+  /** Plain-text fallback used when MathML rendering is unavailable. */
+  plainText: string;
   pmStart?: number;
   pmEnd?: number;
 };
@@ -174,7 +277,13 @@ export type FieldRun = RunFormatting & {
 /**
  * Union of all run types.
  */
-export type Run = TextRun | TabRun | ImageRun | LineBreakRun | FieldRun;
+export type Run =
+  | TextRun
+  | TabRun
+  | ImageRun
+  | LineBreakRun
+  | FieldRun
+  | MathRun;
 
 /**
  * Paragraph spacing configuration.
@@ -224,7 +333,12 @@ export type TabStop = {
  * Border specification for paragraphs.
  */
 export type BorderStyle = {
-  style?: string;
+  // TODO: this holds a *CSS* border-style (solid, double, ridge, groove, …),
+  // mapped from OOXML by `OOXML_TO_CSS_BORDER` in the bridge. It is NOT the
+  // OOXML `KnownBorderStyle` union (single/thinThickSmallGap/…), and includes
+  // CSS-only values (ridge/groove) that have no union member. Move the OOXML→CSS
+  // mapping to the painter to make this the `KnownBorderStyle` union.
+  style?: string; // CSS border-style
   width?: number; // in pixels
   color?: string; // CSS color
   space?: number; // spacing from text in pixels (from w:space, converted from pt)
@@ -292,9 +406,42 @@ export type ParagraphAttrs = {
   listMarkerHidden?: boolean; // w:vanish on numbering level rPr
   listMarkerFontFamily?: string; // from numbering level rPr (w:rFonts)
   listMarkerFontSize?: number; // from numbering level rPr, in points
+  /**
+   * `w:suff` (§17.9.25) — what follows the marker before body text.
+   * `tab` (default) grows the marker to the next tab stop; `space` adds
+   * one space glyph; `nothing` lets body text butt against the marker.
+   */
+  listMarkerSuffix?: "tab" | "space" | "nothing";
+  /**
+   * Tracked-change state of the list numbering itself. When a list is applied
+   * (or removed) under suggesting mode, the marker paints in the insertion /
+   * deletion color so an inserted list item's number reads as part of the
+   * suggestion, matching Word. `undefined` = numbering is not a pending change.
+   */
+  listMarkerRevision?: {
+    kind: "ins" | "del";
+    author?: string;
+    date?: string;
+    revisionId?: number;
+  };
+  /**
+   * When the marker text contains a TAB character (\t), the marker is
+   * rendered as a flex layout with two slots; this is the column offset
+   * (in twips, from the marker zone's left edge) where the second slot
+   * lands. Used to align an inline LISTNUM "(a)" with the deeper level's
+   * marker column.
+   */
+  listMarkerSecondSlotOffsetTwips?: number;
   // Default font for empty paragraphs (from style's rPr / pPr/rPr)
   defaultFontSize?: number; // in points
   defaultFontFamily?: string;
+  /**
+   * Document-wide `w:defaultTabStop` (§17.6.13) in twips. Read by the list
+   * marker tab-stop math so long markers align body text at the document's
+   * configured grid. Stamped onto every paragraph block by `toFlowBlocks`
+   * so paragraph-local helpers stay decoupled from `Document`.
+   */
+  defaultTabStopTwips?: number;
 };
 
 /**
@@ -305,10 +452,19 @@ export type ParagraphBlock = {
   id: BlockId;
   runs: Run[];
   attrs?: ParagraphAttrs;
+  /** Names of bookmarks anchored to this paragraph; used to map a bookmark to
+   *  the page it lands on for PAGEREF/REF resolution. */
+  bookmarks?: string[];
   /** ProseMirror start position for this block. */
   pmStart?: number;
   /** ProseMirror end position for this block. */
   pmEnd?: number;
+  /**
+   * Outer→inner SDT wrappers enclosing this block. Empty / undefined when
+   * the block sits at the body root. The painter stamps `data-sdt-*` from
+   * the innermost group and draws boundary chrome per outer→inner level.
+   */
+  sdtGroups?: SdtGroup[];
 };
 
 /**
@@ -317,6 +473,9 @@ export type ParagraphBlock = {
 export type CellBorderSpec = {
   width?: number; // pixels
   color?: string; // CSS color
+  // TODO: CSS border-style mapped from OOXML by the bridge, not the OOXML
+  // `KnownBorderStyle` union (see BorderStyle.style). Includes CSS-only values
+  // (ridge/groove) with no union member.
   style?: string; // CSS border-style (solid, dashed, dotted, double)
 };
 
@@ -344,6 +503,12 @@ export type TableCell = {
   borders?: CellBorders;
   /** Per-cell padding in pixels (from w:tcMar or table-level w:tblCellMar) */
   padding?: { top: number; right: number; bottom: number; left: number };
+  /**
+   * `w:noWrap` (§17.4.30): when true, the cell forbids soft-wrapping inside
+   * it. The painter emits `white-space: nowrap` on the cell box so content
+   * stays on a single line and the cell expands horizontally instead.
+   */
+  noWrap?: boolean;
 };
 
 /**
@@ -384,7 +549,7 @@ export type TableBlock = {
   /** Table width value (twips for dxa, 50ths of percent for pct). */
   width?: number;
   /** Table width type ('auto', 'pct', 'dxa', 'nil'). */
-  widthType?: string;
+  widthType?: TableWidthType;
   /** Table horizontal alignment */
   justification?: "left" | "center" | "right";
   /** Table indent from left margin (in pixels, from w:tblInd) */
@@ -393,6 +558,8 @@ export type TableBlock = {
   floating?: FloatingTablePosition;
   pmStart?: number;
   pmEnd?: number;
+  /** Outer→inner SDT wrappers enclosing this table (see ParagraphBlock). */
+  sdtGroups?: SdtGroup[];
 };
 
 /**
@@ -407,6 +574,12 @@ export type ImageBlock = {
   alt?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
+  /**
+   * Opacity in [0, 1] from `<a:alphaModFix amt>`. Undefined or `1` means
+   * fully opaque; the painter emits no CSS `opacity` in that case.
+   * eigenpal #424 (opacity render pipeline).
+   */
+  opacity?: number;
   anchor?: {
     isAnchored?: boolean;
     offsetH?: number;
@@ -415,6 +588,14 @@ export type ImageBlock = {
   };
   /** Hyperlink URL for clickable image */
   hlinkHref?: string;
+  /**
+   * wp:srcRect crop fractions in [0, 1]; emit as CSS `clip-path: inset(...)`.
+   * eigenpal #424 (image-crop subset).
+   */
+  cropTop?: number;
+  cropRight?: number;
+  cropBottom?: number;
+  cropLeft?: number;
   pmStart?: number;
   pmEnd?: number;
 };
@@ -430,6 +611,16 @@ export type SectionBreakBlock = {
   orientation?: "portrait" | "landscape";
   margins?: PageMargins;
   columns?: ColumnLayout;
+};
+
+export type PageHeaderFooterRefs = {
+  titlePg?: boolean;
+  headerDefault?: string;
+  headerFirst?: string;
+  headerEven?: string;
+  footerDefault?: string;
+  footerFirst?: string;
+  footerEven?: string;
 };
 
 /**
@@ -474,14 +665,74 @@ export type TextBoxBlock = {
   outlineWidth?: number;
   /** Border color */
   outlineColor?: string;
-  /** Border style */
-  outlineStyle?: string;
+  /** Outline dash style, or `"none"` for an explicit no-outline. */
+  outlineStyle?: OutlineStyleAttr;
   /** Internal padding */
   margins?: { top: number; bottom: number; left: number; right: number };
   /** Paragraph blocks inside the text box */
   content: ParagraphBlock[];
+  /** Display mode copied from the ProseMirror text box node. */
+  displayMode?: "inline" | "float" | "block";
+  /** CSS float direction copied from the ProseMirror text box node. */
+  cssFloat?: "left" | "right" | "none";
+  /** OOXML wrap type for anchored text boxes. */
+  wrapType?: ImageWrap["type"];
+  /** OOXML wrapText direction for anchored text boxes. */
+  wrapText?: "bothSides" | "left" | "right" | "largest";
+  /** Position for floating/anchored text boxes (OOXML EMU offsets). */
+  position?: ImageRunPosition;
+  /** Wrap distances in pixels. */
+  distTop?: number;
+  distBottom?: number;
+  distLeft?: number;
+  distRight?: number;
   pmStart?: number;
   pmEnd?: number;
+};
+
+/**
+ * Block-level content-control (OOXML `w:sdt`) projection attached to flow
+ * blocks that fall inside an SDT wrapper. The painter stamps `data-sdt-*`
+ * attributes from this so CSS / interactive widgets can find the group.
+ *
+ * `id` is a per-document, monotonically assigned identifier so nested SDTs
+ * stay disambiguated even when alias/tag/sdtId collide.
+ */
+export type SdtGroup = {
+  /** Folio-local identifier (stable within one toFlowBlocks call). */
+  id: string;
+  /**
+   * ProseMirror position of the blockSdt's open token in the source doc.
+   * Stable across renders for the same control and unique per instance —
+   * the addressing API uses this to disambiguate SDTs that share a tag.
+   */
+  pmPos: number;
+  sdtType: SdtType;
+  /** OOXML `w:alias` (friendly display name). */
+  alias?: string;
+  /** OOXML `w:tag` (developer identifier — anchor for addressing API). */
+  tag?: string;
+  /** OOXML numeric `w:id`. */
+  sdtId?: number;
+  /** OOXML `w:lock` setting. */
+  lock?: NonNullable<SdtProperties["lock"]>;
+  /** True if `w:showingPlcHdr` is set. */
+  showingPlaceholder?: boolean;
+  /** Modeled checkbox state, when the control is `w14:checkbox`. */
+  checked?: boolean;
+  /** Modeled `w:date/w:dateFormat`. */
+  dateFormat?: string;
+  /** Modeled `w:dropDownList`/`w:comboBox` items (JSON-encoded). */
+  listItemsJson?: string;
+  /**
+   * Position of the carrying block within its SDT group (`first`/`middle`/
+   * `last`/`only`). The painter stamps `data-sdt-position` from this so the
+   * CSS chrome can draw a continuous outline across the block sequence —
+   * top edge on `first`, bottom edge on `last`, only side edges in
+   * between. Without this, every block painted its own closed box and a
+   * multi-paragraph SDT looked like several stacked rectangles.
+   */
+  position?: "first" | "middle" | "last" | "only";
 };
 
 /**
@@ -524,6 +775,12 @@ export type MeasuredLine = {
   leftOffset?: number;
   /** Right offset from floating images (pixels from content right edge). */
   rightOffset?: number;
+  /**
+   * Vertical space inserted before this line to skip past floats that leave
+   * no usable horizontal room at the natural line Y. Painters render this
+   * as marginTop on the line element; measurement adds it to totalHeight.
+   */
+  floatSkipBefore?: number;
 };
 
 /**
@@ -542,6 +799,12 @@ export type ImageMeasure = {
   kind: "image";
   width: number;
   height: number;
+  /**
+   * Leading space (px) layout inserts before the block to clear a page-pinned
+   * topAndBottom band on the same page. Paragraphs absorb this per line via
+   * `floatSkipBefore`; non-paragraph blocks reserve it here. eigenpal #694.
+   */
+  bandSkipBefore?: number;
 };
 
 /**
@@ -572,6 +835,9 @@ export type TableMeasure = {
   columnWidths: number[];
   totalWidth: number;
   totalHeight: number;
+  /** Leading space (px) before the table to clear a page-pinned band on the
+   * same page; applied to the table's first fragment. See {@link ImageMeasure}. */
+  bandSkipBefore?: number;
 };
 
 /**
@@ -638,6 +904,12 @@ export type FragmentBase = {
   pmStart?: number;
   /** ProseMirror end position (for click mapping). */
   pmEnd?: number;
+  /**
+   * Outer→inner SDT wrappers enclosing the originating block. Copied
+   * verbatim from the FlowBlock so the painter can stamp `data-sdt-*`
+   * attributes per fragment.
+   */
+  sdtGroups?: SdtGroup[];
 };
 
 /**
@@ -678,6 +950,16 @@ export type TableFragment = FragmentBase & {
   continuesOnNext?: boolean;
   /** Number of header rows prepended to this continuation fragment (0 or undefined for first fragment). */
   headerRowCount?: number;
+  /**
+   * Mid-content row break (eigenpal #698): when a single row is taller than a
+   * whole page it is split across pages between whole text lines. The visible
+   * band of the broken row is `[topClip, bottomClip)` in the row's own
+   * coordinates. `topClip` is the px already shown on the previous page (the
+   * continuation fragment starts here); `bottomClip` is where this fragment
+   * cuts the row. Undefined on fragments that break only at row boundaries.
+   */
+  topClip?: number;
+  bottomClip?: number;
 };
 
 /**
@@ -745,15 +1027,10 @@ export type Page = {
   orientation?: "portrait" | "landscape";
   /** Section index this page belongs to. */
   sectionIndex?: number;
+  /** 1-based page number within the active section. */
+  sectionPageNumber?: number;
   /** Header/footer references for this page. */
-  headerFooterRefs?: {
-    headerDefault?: string;
-    headerFirst?: string;
-    headerEven?: string;
-    footerDefault?: string;
-    footerFirst?: string;
-    footerEven?: string;
-  };
+  headerFooterRefs?: PageHeaderFooterRefs;
   /** Footnote IDs that appear on this page (for rendering). */
   footnoteIds?: number[];
   /** Height reserved for the footnote area at page bottom (pixels). */
@@ -875,6 +1152,8 @@ export type LayoutOptions = {
   footnoteHeightById?: Map<number, number>;
   /** Section break type for the body-level (final) section (for section transition logic). */
   bodyBreakType?: "continuous" | "nextPage" | "evenPage" | "oddPage";
+  /** Header/footer references for each document section, by section index. */
+  sectionHeaderFooterRefs?: PageHeaderFooterRefs[];
 };
 
 // =============================================================================
@@ -908,3 +1187,133 @@ export type DocumentPosition = {
   /** ProseMirror position. */
   pmPos?: number;
 };
+
+// =============================================================================
+// SHARED CONSTANTS, PREDICATES, AND RENDER-INPUT CONTRACTS
+//
+// Symbols below are imported by both the bridge (which builds FlowBlocks /
+// Measures / footnote stacks) and the painter (which consumes them). They live
+// here, in the engine's shared-types module, so neither side has to reach
+// across the layer boundary. See `__tests__/layer-boundaries.test.ts` and the
+// `folio-layer-boundaries` lint rule for the enforcement.
+// =============================================================================
+
+/**
+ * Height of the horizontal separator line drawn above the footnote stack.
+ * Used by the paginator when reserving space and by the painter when laying
+ * out the stack at the bottom of the page.
+ */
+export const FOOTNOTE_SEPARATOR_HEIGHT = 12;
+
+/**
+ * Extra bottom margin applied to every rendered footnote entry, in CSS pixels.
+ *
+ * Word footnotes are separate paragraphs in the footnote story, so their
+ * own paragraph spacing already describes the vertical gap between notes.
+ * Keep the wrapper margin at zero to avoid adding whitespace that is not
+ * present in the source DOCX.
+ */
+export const FOOTNOTE_ENTRY_MARGIN_BOTTOM = 0;
+
+/**
+ * Line height used when a footnote entry has no measured line height yet.
+ * Conservative fallback so a missing measure does not collapse the entry.
+ */
+export const FOOTNOTE_FALLBACK_LINE_HEIGHT = 13;
+
+/**
+ * Header / footer content prepared by the bridge for the painter. Lives here
+ * because both layers reference the shape; the painter must not import it from
+ * the bridge and the bridge must not import it from the painter.
+ */
+export type HeaderFooterContent = {
+  /** Flow blocks for the header/footer content. */
+  blocks: FlowBlock[];
+  /** Measurements for the blocks. */
+  measures: Measure[];
+  /** Total height of the content. */
+  height: number;
+  /** Top-most visual extent relative to the nominal flow origin. */
+  visualTop?: number;
+  /** Bottom-most visual extent relative to the nominal flow origin. */
+  visualBottom?: number;
+  /**
+   * Flow-only bounds used by `computeHeaderFooterMarginExtender` to push
+   * body margins clear of HF overflow. Excludes `behindDoc` images that
+   * the renderer paints behind body content; including them would reserve
+   * a full-page letterhead as body push-down.
+   */
+  marginPushTop?: number;
+  marginPushBottom?: number;
+  /**
+   * Relationship id (`rId`) of the source HF part. Emitted as `data-rid`
+   * on the painted `.layout-page-header` / `.layout-page-footer` so the
+   * pointer pipeline can resolve clicks to the matching hidden HF
+   * EditorView.
+   */
+  rId?: string;
+  /**
+   * Cheap text fingerprint of the rendered blocks. Used to invalidate
+   * cached options hashes so same-height in-place HF edits force the
+   * painter to re-render shells.
+   */
+  textSig?: string;
+};
+
+/**
+ * `true` when the image run is anchored at page-level coordinates instead of
+ * participating in inline flow. Covers the OOXML floating wrap types
+ * (`square`, `tight`, `through`, `behind`, `inFront`) and the legacy
+ * `displayMode === "float"` escape hatch used by ProseMirror nodes that
+ * pre-date the wrap-type round-trip.
+ *
+ * Pure predicate over `ImageRun` — no DOM, no measurement state. Lives here
+ * so the bridge can call it without importing from the painter.
+ */
+export const isFloatingImageRun = (run: ImageRun): boolean => {
+  const wrapType = run.wrapType;
+  if (
+    wrapType === "square" ||
+    wrapType === "tight" ||
+    wrapType === "through" ||
+    wrapType === "behind" ||
+    wrapType === "inFront"
+  ) {
+    return true;
+  }
+  return run.displayMode === "float";
+};
+
+/**
+ * `true` when a floating image should also shrink surrounding line widths.
+ * `behind` / `inFront` (wrapNone) and `topAndBottom` do not — text either
+ * paints over/under them or flows above/below as a block — only
+ * `square` / `tight` / `through` carve a horizontal exclusion. The legacy
+ * `displayMode === "float"` path is treated as wrapping when a CSS float
+ * direction is set.
+ */
+export const isTextWrappingFloatingImageRun = (run: ImageRun): boolean => {
+  const wrapType = run.wrapType;
+  if (
+    wrapType === "behind" ||
+    wrapType === "inFront" ||
+    wrapType === "topAndBottom"
+  ) {
+    return false;
+  }
+  if (wrapType === "square" || wrapType === "tight" || wrapType === "through") {
+    return true;
+  }
+  return run.displayMode === "float" && run.cssFloat !== "none";
+};
+
+// `TextBoxFlowAttrs`, `isFloatingTextBoxBlock`, and `floatingTextBoxWrapsText`
+// are re-exported from `./textBoxFlow.ts` (where they live next to the
+// related wrap-type helpers in `../docx/wrapTypes`). Re-exporting here keeps
+// the painter on a single import surface — `layout-engine/types`.
+export type { TextBoxFlowAttrs } from "./textBoxFlow";
+export {
+  isFloatingTextBoxBlock,
+  floatingTextBoxWrapsText,
+  floatingTextBoxReservesBand,
+} from "./textBoxFlow";

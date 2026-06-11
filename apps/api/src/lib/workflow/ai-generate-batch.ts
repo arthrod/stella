@@ -1,11 +1,13 @@
-import { valibotSchema } from "@ai-sdk/valibot";
 import { Output, streamText } from "ai";
 import type { FilePart, TextPart } from "ai";
 import { Result } from "better-result";
 
-import { getModelForRole, getTemperatureForRole } from "@/api/lib/ai-models";
-import type { OrgAIConfig } from "@/api/lib/ai-models";
+import { markCacheBreakpoint } from "@/api/lib/ai-caching";
+import { getModelForRole, resolveCaching } from "@/api/lib/ai-models";
+import type { AIRequestServiceTier, OrgAIConfig } from "@/api/lib/ai-models";
+import { strictOutputSchema } from "@/api/lib/ai-output-schema";
 import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
+import type { AIUsageMetering } from "@/api/lib/analytics/ai";
 import type { SafeId } from "@/api/lib/branded-types";
 import { WorkflowIntegrationError } from "@/api/lib/errors/tagged-errors";
 import {
@@ -36,6 +38,9 @@ type GenerateWorkflowDataProps = {
   workspaceId: SafeId<"workspace">;
   entityVersionId: string;
   orgAIConfig?: OrgAIConfig | null;
+  promptCachingEnabled: boolean;
+  serviceTier: AIRequestServiceTier;
+  usageMetering?: AIUsageMetering | undefined;
   onPartialAnswer?:
     | ((update: PartialAnswerUpdate) => Promise<void> | void)
     | undefined;
@@ -45,6 +50,41 @@ type WorkflowDataOutput = Record<
   string,
   { answer: Answer; justification: AIJustificationOutput }
 >;
+
+type WorkflowAIAnalyticsProps = Parameters<
+  typeof createAIAnalyticsCallbacks
+>[0];
+
+type BuildWorkflowAIAnalyticsPropsInput = {
+  entityVersionId: string;
+  organizationId: SafeId<"organization">;
+  orgAIConfig: OrgAIConfig | null;
+  propertyCount: number;
+  usageMetering?: AIUsageMetering | undefined;
+  workspaceId: SafeId<"workspace">;
+};
+
+export const buildWorkflowAIAnalyticsProps = ({
+  entityVersionId,
+  organizationId,
+  orgAIConfig,
+  propertyCount,
+  usageMetering,
+  workspaceId,
+}: BuildWorkflowAIAnalyticsPropsInput): WorkflowAIAnalyticsProps => ({
+  feature: "workflow.generate-batch",
+  modelRole: "pdf",
+  orgAIConfig,
+  properties: {
+    entity_version_id: entityVersionId,
+    organization_id: organizationId,
+    property_count: propertyCount,
+    workspace_id: workspaceId,
+  },
+  sessionId: entityVersionId,
+  traceId: Bun.randomUUIDv7(),
+  ...(usageMetering ? { usageMetering } : {}),
+});
 
 export const generateWorkflowData = async ({
   files,
@@ -56,11 +96,19 @@ export const generateWorkflowData = async ({
   organizationId,
   workspaceId,
   orgAIConfig,
+  promptCachingEnabled,
+  serviceTier,
+  usageMetering,
   onPartialAnswer,
 }: GenerateWorkflowDataProps): Promise<
   Result<WorkflowDataOutput, WorkflowIntegrationError>
 > => {
   const schema = buildBatchSchema(properties, filenames);
+  const cachingDecision = resolveCaching({
+    promptCachingEnabled,
+    role: "pdf",
+    scopeKey: entityVersionId,
+  });
 
   const messageContent: (FilePart | TextPart)[] = [];
 
@@ -91,32 +139,44 @@ export const generateWorkflowData = async ({
     });
   }
 
+  const lastStaticIdx = messageContent.length - 1;
+  if (lastStaticIdx >= 0) {
+    const lastStatic = messageContent[lastStaticIdx];
+    if (lastStatic) {
+      messageContent[lastStaticIdx] = markCacheBreakpoint(lastStatic, {
+        decision: cachingDecision,
+      });
+    }
+  }
+
   messageContent.push({
     type: "text",
     text: buildPromptsMessage(properties),
   });
 
-  const aiAnalytics = createAIAnalyticsCallbacks({
-    feature: "workflow.generate-batch",
-    modelRole: "pdf",
-    orgAIConfig: orgAIConfig ?? null,
-    properties: {
-      entity_version_id: entityVersionId,
-      organization_id: organizationId,
-      property_count: properties.length,
-      workspace_id: workspaceId,
-    },
-    sessionId: entityVersionId,
-    traceId: Bun.randomUUIDv7(),
-  });
+  const aiAnalytics = createAIAnalyticsCallbacks(
+    buildWorkflowAIAnalyticsProps({
+      entityVersionId,
+      organizationId,
+      orgAIConfig: orgAIConfig ?? null,
+      propertyCount: properties.length,
+      usageMetering,
+      workspaceId,
+    }),
+  );
 
   return await Result.tryPromise({
     try: async () => {
       const result = streamText({
-        model: getModelForRole("pdf", orgAIConfig),
-        temperature: getTemperatureForRole("pdf"),
+        model: getModelForRole("pdf", orgAIConfig, {
+          promptCachingEnabled,
+          scopeKey: entityVersionId,
+          organizationId,
+          serviceTier,
+          allowServiceTierFallback: false,
+        }),
         messages: [{ role: "user", content: messageContent }],
-        output: Output.object({ schema: valibotSchema(schema) }),
+        output: Output.object({ schema: strictOutputSchema(schema) }),
         system: WORKFLOW_SYSTEM_PROMPT,
         abortSignal,
         ...aiAnalytics.stepCallbacks,

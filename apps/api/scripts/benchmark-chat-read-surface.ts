@@ -12,6 +12,7 @@
 import { valibotSchema } from "@ai-sdk/valibot";
 import { generateText, stepCountIs, tool } from "ai";
 import type { LanguageModel, LanguageModelUsage } from "ai";
+import { panic } from "better-result";
 import * as v from "valibot";
 
 const surfaces = ["old-mixed", "new-describe", "new-inline"] as const;
@@ -181,7 +182,7 @@ const readCatalog = [
 ] as const;
 
 const oldMixedSystem = [
-  "You answer questions for Stella, a legal workspace.",
+  "You answer questions for stella, a legal workspace.",
   "The read surface is mixed:",
   "- Direct read tools exist for focused reads.",
   "- Sandbox reads use describe-stella-function plus execute-typescript with stella.*.",
@@ -195,8 +196,8 @@ const oldMixedSystem = [
 ].join("\n");
 
 const newDescribeSystem = [
-  "You answer questions for Stella, a legal workspace.",
-  "For Stella data reads, use the Stella API:",
+  "You answer questions for stella, a legal workspace.",
+  "For stella data reads, use the stella API:",
   "1. call describe-stella-api if you need the catalog",
   "2. call run-stella-query with TypeScript that uses read.*",
   "3. every read result stores records in result.items",
@@ -204,8 +205,8 @@ const newDescribeSystem = [
 ].join("\n");
 
 const newInlineSystem = [
-  "You answer questions for Stella, a legal workspace.",
-  "For Stella data reads, call run-stella-query with TypeScript that uses read.*.",
+  "You answer questions for stella, a legal workspace.",
+  "For stella data reads, call run-stella-query with TypeScript that uses read.*.",
   "Every read result stores records in result.items.",
   "Available reads:",
   ...readCatalog.map((entry) => `- ${entry}`),
@@ -242,7 +243,7 @@ const parseSurface = (value: string | undefined): Surface | "all" => {
     }
   }
 
-  throw new Error(
+  return panic(
     `Unknown surface "${value}". Use one of: all, ${surfaces.join(", ")}.`,
   );
 };
@@ -298,7 +299,12 @@ const getBenchModel = async (): Promise<BenchModel | null> => {
     const info = getModelInfoForRole("fast", null);
     return {
       id: overrideModel,
-      model: getModelById(overrideModel, null),
+      model: getModelById(overrideModel, null, {
+        promptCachingEnabled: true,
+        scopeKey: null,
+        role: "fast",
+        organizationId: null,
+      }),
       provider: info.provider,
     };
   }
@@ -306,7 +312,11 @@ const getBenchModel = async (): Promise<BenchModel | null> => {
   const info = getModelInfoForRole("fast", null);
   return {
     id: info.modelId,
-    model: getModelForRole("fast", null),
+    model: getModelForRole("fast", null, {
+      promptCachingEnabled: true,
+      scopeKey: null,
+      organizationId: null,
+    }),
     provider: info.provider,
   };
 };
@@ -529,13 +539,12 @@ const simulateSandbox = ({
 const buildOldTools = (trace: BenchTrace) => ({
   "describe-stella-function": tool({
     description:
-      "Describe available Stella sandbox read functions. Omit name to list them.",
+      "Describe available stella sandbox read functions. Omit name to list them.",
     inputSchema: valibotSchema(
       v.strictObject({
         name: v.optional(v.string()),
       }),
     ),
-    // eslint-disable-next-line require-await
     execute: async ({ name }) => {
       const input = { name };
       addTrace({
@@ -545,27 +554,26 @@ const buildOldTools = (trace: BenchTrace) => ({
       });
 
       if (name) {
-        return {
+        return await Promise.resolve({
           function: `${name} returns { items } or { items, hasMore, nextOffset }.`,
-        };
+        });
       }
 
-      return {
+      return await Promise.resolve({
         functions: readCatalog.map((entry) =>
           entry.replace("read.", "stella."),
         ),
-      };
+      });
     },
   }),
   "execute-typescript": tool({
     description:
-      "Run TypeScript against Stella sandbox reads through stella.*.",
+      "Run TypeScript against stella sandbox reads through stella.*.",
     inputSchema: valibotSchema(
       v.strictObject({
         code: v.string(),
       }),
     ),
-    // eslint-disable-next-line require-await
     execute: async ({ code }) => {
       const output = simulateSandbox({
         code,
@@ -579,7 +587,7 @@ const buildOldTools = (trace: BenchTrace) => ({
         name: "execute-typescript",
         trace,
       });
-      return output;
+      return await Promise.resolve(output);
     },
   }),
   "read-contact": tool({
@@ -589,7 +597,6 @@ const buildOldTools = (trace: BenchTrace) => ({
         contactRef: v.string(),
       }),
     ),
-    // eslint-disable-next-line require-await
     execute: async ({ contactRef }) => {
       const input = { contactRef };
       const contact = contactItems.find(
@@ -602,7 +609,7 @@ const buildOldTools = (trace: BenchTrace) => ({
         name: "read-contact",
         trace,
       });
-      return contact ?? { error };
+      return await Promise.resolve(contact ?? { error });
     },
   }),
   "read-content-across-matters": tool({
@@ -613,7 +620,6 @@ const buildOldTools = (trace: BenchTrace) => ({
         entityRefs: v.array(v.string()),
       }),
     ),
-    // eslint-disable-next-line require-await
     execute: async ({ entityRefs }) => {
       const input = { entityRefs };
       const contents = contentItems.filter((item) =>
@@ -624,9 +630,9 @@ const buildOldTools = (trace: BenchTrace) => ({
         name: "read-content-across-matters",
         trace,
       });
-      return {
+      return await Promise.resolve({
         contents,
-      };
+      });
     },
   }),
   "search-across-matters": tool({
@@ -637,7 +643,6 @@ const buildOldTools = (trace: BenchTrace) => ({
         query: v.string(),
       }),
     ),
-    // eslint-disable-next-line require-await
     execute: async ({ query }) => {
       const input = { query };
       const normalizedQuery = query.toLowerCase();
@@ -649,9 +654,9 @@ const buildOldTools = (trace: BenchTrace) => ({
         name: "search-across-matters",
         trace,
       });
-      return {
+      return await Promise.resolve({
         hits,
-      };
+      });
     },
   }),
 });
@@ -666,13 +671,12 @@ const buildNewTools = ({
   const runner = {
     "run-stella-query": tool({
       description:
-        "Run TypeScript against Stella readonly reads through read.*.",
+        "Run TypeScript against stella readonly reads through read.*.",
       inputSchema: valibotSchema(
         v.strictObject({
           code: v.string(),
         }),
       ),
-      // eslint-disable-next-line require-await
       execute: async ({ code }) => {
         const output = simulateSandbox({
           code,
@@ -686,7 +690,7 @@ const buildNewTools = ({
           name: "run-stella-query",
           trace,
         });
-        return output;
+        return await Promise.resolve(output);
       },
     }),
   };
@@ -698,13 +702,12 @@ const buildNewTools = ({
   return {
     "describe-stella-api": tool({
       description:
-        "Describe available Stella readonly read functions. Omit name to list them.",
+        "Describe available stella readonly read functions. Omit name to list them.",
       inputSchema: valibotSchema(
         v.strictObject({
           name: v.optional(v.string()),
         }),
       ),
-      // eslint-disable-next-line require-await
       execute: async ({ name }) => {
         const input = { name };
         addTrace({
@@ -714,16 +717,16 @@ const buildNewTools = ({
         });
 
         if (name) {
-          return {
+          return await Promise.resolve({
             function: readCatalog.find((entry) =>
               entry.startsWith(`read.${name}`),
             ),
-          };
+          });
         }
 
-        return {
+        return await Promise.resolve({
           functions: readCatalog,
-        };
+        });
       },
     }),
     ...runner,

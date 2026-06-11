@@ -4,6 +4,7 @@ import { EditorState } from "prosemirror-state";
 import type { Transaction } from "prosemirror-state";
 
 import {
+  acceptChange,
   acceptAIEditRevision,
   findChangeAtPosition,
   findNextChange,
@@ -14,8 +15,23 @@ import {
 const schema = new Schema({
   nodes: {
     doc: { content: "block+" },
-    paragraph: { content: "text*", group: "block" },
-    text: { marks: "_" },
+    paragraph: {
+      content: "inline*",
+      group: "block",
+      attrs: {
+        numPr: { default: null },
+        _propertyChanges: { default: null },
+        pPrMark: { default: null },
+      },
+    },
+    text: { group: "inline", marks: "_" },
+    image: {
+      group: "inline",
+      inline: true,
+      atom: true,
+      marks: "_",
+      toDOM: () => ["img"],
+    },
   },
   marks: {
     // `bold` is here so a single tracked-change span can be split into
@@ -180,6 +196,60 @@ describe("findChangeAtPosition", () => {
     // "alpha" occupies positions 1..6, "beta" positions 6..10.
     expect(findChangeAtPosition(state, 3, 3)).toEqual({ from: 1, to: 6 });
   });
+
+  test("expands a cursor inside a list property suggestion to the paragraph boundary", () => {
+    const state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        schema.node(
+          "paragraph",
+          {
+            numPr: { numId: 1, ilvl: 0 },
+            _propertyChanges: [
+              {
+                type: "paragraphPropertyChange",
+                info: { id: 10, author: "Alice", date: "2026-01-01" },
+                previousFormatting: { numPr: null },
+              },
+            ],
+          },
+          [schema.text("alpha")],
+        ),
+      ]),
+    });
+
+    expect(findChangeAtPosition(state, 3, 3)).toEqual({ from: 6, to: 7 });
+  });
+
+  test("accepts a property-only list suggestion from a cursor-derived range", () => {
+    const initial = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        schema.node(
+          "paragraph",
+          {
+            numPr: { numId: 1, ilvl: 0 },
+            _propertyChanges: [
+              {
+                type: "paragraphPropertyChange",
+                info: { id: 10, author: "Alice", date: "2026-01-01" },
+                previousFormatting: { numPr: null },
+              },
+            ],
+          },
+          [schema.text("alpha")],
+        ),
+      ]),
+    });
+    const range = findChangeAtPosition(initial, 3, 3);
+    const view = dispatcher(initial);
+
+    expect(acceptChange(range.from, range.to)(view.state, view.dispatch)).toBe(
+      true,
+    );
+
+    expect(view.state.doc.child(0).attrs["_propertyChanges"]).toBeNull();
+  });
 });
 
 describe("tracked change navigation", () => {
@@ -315,6 +385,27 @@ describe("tracked change navigation", () => {
     expect(findNextChange(state, 8)).toMatchObject({
       from: 6,
       to: 15,
+      type: "insertion",
+    });
+  });
+
+  test("findNextChange expands across marked inline atoms in the same revision", () => {
+    const insertion = schema.marks["insertion"]!.create(REV_A_ATTRS);
+    const image = schema.nodes["image"]!.create(null, null, [insertion]);
+    const state = EditorState.create({
+      schema,
+      doc: schema.node("doc", null, [
+        schema.node("paragraph", null, [
+          schema.text("text", [insertion]),
+          image,
+          schema.text("tail", [insertion]),
+        ]),
+      ]),
+    });
+
+    expect(findNextChange(state, 0)).toMatchObject({
+      from: 1,
+      to: 10,
       type: "insertion",
     });
   });

@@ -1,21 +1,36 @@
 import { Result } from "better-result";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
-import { entities, entityVersions, fields, workspaces } from "@/api/db/schema";
+import {
+  cellMetadata,
+  entities,
+  entityVersions,
+  fields,
+  workspaces,
+} from "@/api/db/schema";
 import { computeVersionDiffStats } from "@/api/handlers/entities/compute-version-diff";
 import { uploadVersionBodySchema } from "@/api/handlers/entities/upload-version-schema";
 import {
   buildVersionStamp,
   cloneFieldsForRevision,
 } from "@/api/handlers/entities/version-utils";
+import {
+  allocateFileObject,
+  fileContentWithMintedObject,
+} from "@/api/handlers/files/file-object-ids";
 import { pdfDerivativeStateForFile } from "@/api/handlers/files/gotenberg";
+import { thumbnailDerivativeStateForFile } from "@/api/handlers/files/image-derivative";
 import { createFileKey } from "@/api/handlers/files/utils";
 import { captureError } from "@/api/lib/analytics";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
-import { enqueuePdfDerivativeOrMarkFailed } from "@/api/lib/file-derivative-queue";
+import {
+  enqueueImageThumbnailOrMarkFailed,
+  enqueuePdfDerivativeOrMarkFailed,
+} from "@/api/lib/file-derivative-queue";
 import { getScanWarnings, scanFile } from "@/api/lib/file-scan/scan";
 import { createRootScopedDb } from "@/api/lib/root-scoped-db";
 import { getS3 } from "@/api/lib/s3";
@@ -28,9 +43,29 @@ const config = {
   body: uploadVersionBodySchema,
 } satisfies HandlerConfig;
 
+type UploadVersionWriteResult =
+  | {
+      status: "ok";
+      versionNumber: number;
+    }
+  | {
+      status:
+        | "current-version-not-found"
+        | "entity-not-found"
+        | "entity-read-only"
+        | "missing-file-field";
+    };
+
 export default createSafeHandler(
   config,
-  async function* ({ safeDb, workspaceId, body, session, user }) {
+  async function* ({
+    safeDb,
+    workspaceId,
+    body,
+    session,
+    user,
+    recordAuditEvent,
+  }) {
     const organizationId = session.activeOrganizationId;
     const userId = user.id;
     const { entityId, file } = body;
@@ -129,7 +164,7 @@ export default createSafeHandler(
 
     // Upload the source file first; PDF derivatives are generated
     // asynchronously by the file-derivative queue.
-    const fileId = Bun.randomUUIDv7();
+    const fileId = allocateFileObject();
     const sha256Hex = new Bun.CryptoHasher("sha256")
       .update(new Uint8Array(fileBuffer))
       .digest("hex");
@@ -152,18 +187,63 @@ export default createSafeHandler(
       ),
     );
 
-    const nextVersionNumber = currentVersion.versionNumber + 1;
     const nextVersionId = createSafeId<"entityVersion">();
     const fileFieldId = createSafeId<"field">();
-    const nextVersionStamp = buildVersionStamp({
-      docSequence: entity.docSequence,
-      versionNumber: nextVersionNumber,
-      workspaceReference: workspace?.reference ?? null,
-    });
 
     // Create new version in DB
-    yield* Result.await(
-      safeDb(async (tx) => {
+    const writeResult = yield* Result.await(
+      safeDb(async (tx): Promise<UploadVersionWriteResult> => {
+        const entityRows = await tx
+          .select({
+            currentVersionId: entities.currentVersionId,
+            docSequence: entities.docSequence,
+            readOnly: entities.readOnly,
+          })
+          .from(entities)
+          .where(
+            and(
+              eq(entities.id, entityId),
+              eq(entities.workspaceId, workspaceId),
+            ),
+          )
+          .limit(1)
+          .for("update");
+        const lockedEntity = entityRows.at(0);
+
+        if (!lockedEntity?.currentVersionId) {
+          return { status: "entity-not-found" };
+        }
+        if (lockedEntity.readOnly) {
+          return { status: "entity-read-only" };
+        }
+
+        const freshCurrentVersionId = lockedEntity.currentVersionId;
+        const freshCurrentVersion = await tx.query.entityVersions.findFirst({
+          where: { id: { eq: freshCurrentVersionId } },
+          columns: { versionNumber: true },
+          with: {
+            fields: { columns: { content: true, propertyId: true } },
+          },
+        });
+
+        if (!freshCurrentVersion) {
+          return { status: "current-version-not-found" };
+        }
+
+        const freshFileField = freshCurrentVersion.fields.find(
+          (f) => f.content.type === "file",
+        );
+        if (!freshFileField) {
+          return { status: "missing-file-field" };
+        }
+
+        const nextVersionNumber = freshCurrentVersion.versionNumber + 1;
+        const nextVersionStamp = buildVersionStamp({
+          docSequence: lockedEntity.docSequence,
+          versionNumber: nextVersionNumber,
+          workspaceReference: workspace?.reference ?? null,
+        });
+
         await tx.insert(entityVersions).values({
           createdBy: userId,
           entityId,
@@ -176,11 +256,11 @@ export default createSafeHandler(
 
         await tx.insert(fields).values(
           cloneFieldsForRevision({
-            currentFields: currentVersion.fields,
+            currentFields: freshCurrentVersion.fields,
             entityVersionId: nextVersionId,
-            propertyId: fileField.propertyId,
+            propertyId: freshFileField.propertyId,
             replacementFieldId: fileFieldId,
-            replacementContent: {
+            replacementContent: fileContentWithMintedObject({
               encrypted: false,
               fileName: sanitizedName,
               id: fileId,
@@ -194,11 +274,53 @@ export default createSafeHandler(
                 encrypted: false,
                 mimeType: file.type,
               }),
+              thumbnailFileId: null,
+              thumbnailDerivative: thumbnailDerivativeStateForFile({
+                encrypted: false,
+                mimeType: file.type,
+              }),
               ...(scanWarnings !== undefined && { scanWarnings }),
-            },
+            }),
             workspaceId,
           }),
         );
+
+        const currentCellMetadataRows = await tx
+          .select({
+            createdAt: cellMetadata.createdAt,
+            createdBy: cellMetadata.createdBy,
+            metadata: cellMetadata.metadata,
+            propertyId: cellMetadata.propertyId,
+            updatedAt: cellMetadata.updatedAt,
+            updatedBy: cellMetadata.updatedBy,
+          })
+          .from(cellMetadata)
+          .where(
+            and(
+              eq(cellMetadata.workspaceId, workspaceId),
+              eq(cellMetadata.entityVersionId, freshCurrentVersionId),
+            ),
+          )
+          .for("update");
+
+        const cellMetadataRowsToCopy = currentCellMetadataRows.filter(
+          (row) => row.propertyId !== freshFileField.propertyId,
+        );
+
+        if (cellMetadataRowsToCopy.length > 0) {
+          await tx.insert(cellMetadata).values(
+            cellMetadataRowsToCopy.map((row) => ({
+              workspaceId,
+              entityVersionId: nextVersionId,
+              propertyId: row.propertyId,
+              metadata: row.metadata,
+              createdBy: row.createdBy,
+              updatedBy: row.updatedBy,
+              createdAt: row.createdAt,
+              updatedAt: row.updatedAt,
+            })),
+          );
+        }
 
         await tx
           .update(entities)
@@ -207,14 +329,87 @@ export default createSafeHandler(
             lastEditedBy: userId,
             updatedAt: new Date(),
           })
-          .where(eq(entities.id, entityId));
+          .where(
+            and(
+              eq(entities.id, entityId),
+              eq(entities.workspaceId, workspaceId),
+            ),
+          );
 
         await tx
           .update(workspaces)
           .set({ lastActivityAt: new Date() })
           .where(eq(workspaces.id, workspaceId));
+
+        await recordAuditEvent(tx, [
+          {
+            action: AUDIT_ACTION.CREATE,
+            resourceType: AUDIT_RESOURCE_TYPE.ENTITY_VERSION,
+            resourceId: nextVersionId,
+            changes: {
+              created: {
+                old: null,
+                new: {
+                  entityId,
+                  versionNumber: nextVersionNumber,
+                  fileName: sanitizedName,
+                  mimeType: file.type,
+                  sizeBytes: file.size,
+                  sha256Hex,
+                },
+              },
+            },
+            metadata: {
+              fileName: sanitizedName,
+              mimeType: file.type,
+              sizeBytes: file.size,
+              sha256Hex,
+            },
+          },
+          {
+            action: AUDIT_ACTION.UPDATE,
+            resourceType: AUDIT_RESOURCE_TYPE.ENTITY,
+            resourceId: entityId,
+            changes: {
+              currentVersionId: {
+                old: freshCurrentVersionId,
+                new: nextVersionId,
+              },
+            },
+          },
+        ]);
+
+        return { status: "ok", versionNumber: nextVersionNumber };
       }),
     );
+
+    if (writeResult.status !== "ok") {
+      switch (writeResult.status) {
+        case "entity-not-found":
+          return Result.err(
+            new HandlerError({ status: 404, message: "Entity not found" }),
+          );
+        case "entity-read-only":
+          return Result.err(
+            new HandlerError({ status: 409, message: "Entity is read-only" }),
+          );
+        case "current-version-not-found":
+          return Result.err(
+            new HandlerError({
+              status: 404,
+              message: "Current version not found",
+            }),
+          );
+        case "missing-file-field":
+          return Result.err(
+            new HandlerError({
+              status: 400,
+              message: "Entity has no file field",
+            }),
+          );
+      }
+    }
+    const nextVersionNumber = writeResult.versionNumber;
 
     // Fire-and-forget: extraction + diff stats
     processExtraction(entityId).catch((error: unknown) => {
@@ -222,6 +417,22 @@ export default createSafeHandler(
     });
 
     enqueuePdfDerivativeOrMarkFailed({
+      encrypted: false,
+      entityId,
+      fieldId: fileFieldId,
+      mimeType: file.type,
+      organizationId,
+      userId,
+      workspaceId,
+    }).catch((error: unknown) => {
+      captureError(error, {
+        entityId,
+        fieldId: fileFieldId,
+        mimeType: file.type,
+      });
+    });
+
+    enqueueImageThumbnailOrMarkFailed({
       encrypted: false,
       entityId,
       fieldId: fileFieldId,
@@ -257,6 +468,7 @@ export default createSafeHandler(
     });
 
     return Result.ok({
+      fieldId: fileFieldId,
       versionId: nextVersionId,
       versionNumber: nextVersionNumber,
     });

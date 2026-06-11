@@ -1,7 +1,12 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type React from "react";
 
-import { useSuspenseQuery } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useSuspenseQuery,
+} from "@tanstack/react-query";
+import { getRouteApi } from "@tanstack/react-router";
 import History from "@tiptap/extension-history";
 import Paragraph from "@tiptap/extension-paragraph";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -12,18 +17,30 @@ import { useEditor } from "@tiptap/react";
 import type { Editor } from "@tiptap/react";
 import { Loader2Icon, WandSparklesIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
+import * as v from "valibot";
 
 import { Button } from "@stll/ui/components/button";
 import { FieldError } from "@stll/ui/components/field";
 import { ScrollArea } from "@stll/ui/components/scroll-area";
 import { cn } from "@stll/ui/lib/utils";
 
+import { buildChatSlashItems } from "@/components/chat-editor-slash-items";
+import { PastedText } from "@/components/chat-pasted-text-extension";
+import {
+  createPromptSlashSuggestion,
+  PromptSlash,
+} from "@/components/chat/prompt-slash-extension";
+import type { SlashItem } from "@/components/chat/prompt-slash-extension";
 import {
   createPromptEditorDocument,
   handlePromptEditorSelectAll,
   PROMPT_EDITOR_SELECTION_CLASS,
   PromptEditorContent,
 } from "@/components/prompt-editor";
+import {
+  skillCommandsOptions,
+  skillsOptions,
+} from "@/routes/_protected.knowledge/-queries";
 import { PropertyFormField } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/form";
 import {
   createCustomMention,
@@ -31,14 +48,21 @@ import {
 } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/property-input/custom-mention";
 import { propertiesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/properties";
 
+const protectedRouteApi = getRouteApi("/_protected");
+
+const mentionAttrsSchema = v.object({
+  id: v.string(),
+});
+
 const getMentions = (editor: Editor): string[] => {
   const mentions = new Set<string>();
 
   editor.state.doc.descendants((node) => {
     if (node.type.name === "mention") {
-      // TODO: FIXME — ProseMirror node.attrs is Record<string, any>
-      // oxlint-disable-next-line typescript-eslint/no-unsafe-argument
-      mentions.add(node.attrs["id"]);
+      const result = v.safeParse(mentionAttrsSchema, node.attrs);
+      if (result.success) {
+        mentions.add(result.output.id);
+      }
     }
   });
 
@@ -103,11 +127,51 @@ export const PropertyPromptInput = ({
     .map((item) => ({ id: item.id, label: item.name }))
     .filter((item) => item.id !== propertyId);
   const fileProperty = properties.find((p) => p.content.type === "file");
+
+  const activeOrganizationId = protectedRouteApi.useRouteContext({
+    select: (ctx) => ctx.user.activeOrganizationId,
+  });
+  const { data: commandSkills = [] } = useQuery(
+    skillCommandsOptions(activeOrganizationId),
+  );
+  const { data: skillPages } = useInfiniteQuery(
+    skillsOptions(activeOrganizationId),
+  );
+  // See chat-editor-provider for the rationale on adapting the
+  // dedicated command-skills endpoint to the legacy slash shape.
+  const slashShortcutRows = useMemo(
+    () =>
+      commandSkills.flatMap((row) =>
+        row.command === null
+          ? []
+          : [
+              {
+                id: row.id,
+                scope: row.scope,
+                name: row.name,
+                command: row.command,
+                prompt: row.body,
+              },
+            ],
+      ),
+    [commandSkills],
+  );
+  const slashItemsRef = useRef<SlashItem[]>([]);
+  slashItemsRef.current = useMemo<SlashItem[]>(
+    () =>
+      buildChatSlashItems({
+        shortcuts: slashShortcutRows,
+        skillPages: skillPages?.pages,
+      }),
+    [slashShortcutRows, skillPages],
+  );
+
   const editor = useEditor({
     extensions: [
       createPromptEditorDocument(),
       Paragraph,
       Text,
+      PastedText,
       Placeholder.configure({
         placeholder:
           placeholder ?? t("workspaces.properties.setPromptPlaceholder"),
@@ -116,6 +180,9 @@ export const PropertyPromptInput = ({
       createCustomMention(workspaceId).configure({
         suggestion: createSuggestion(suggestionOptions),
         deleteTriggerWithBackspace: true,
+      }),
+      PromptSlash.configure({
+        suggestion: createPromptSlashSuggestion(() => slashItemsRef.current),
       }),
       History,
     ],

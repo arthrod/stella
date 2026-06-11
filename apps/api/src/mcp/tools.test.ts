@@ -2,6 +2,7 @@ import { Result } from "better-result";
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 
 import { env } from "@/api/env";
+import type { AuditRecorder } from "@/api/lib/audit-log";
 import { toSafeId } from "@/api/lib/branded-types";
 import type { McpRequestContext } from "@/api/mcp/context";
 import { asTestRaw } from "@/api/tests/helpers/test-tool-set";
@@ -12,9 +13,7 @@ const loadAnonymizationGazetteerEntriesMock = mock();
 const decryptContentMock = mock();
 const captureErrorMock = mock();
 const analyticsCaptureMock = mock();
-const analyticsFlushMock = mock(async function flushAnalyticsMock() {
-  return;
-});
+const analyticsFlushMock = mock(async () => undefined);
 const getAnalyticsMock = mock(() => ({
   capture: analyticsCaptureMock,
   flush: analyticsFlushMock,
@@ -163,6 +162,7 @@ void mock.module("@/api/handlers/case-law/decisions/search", () => ({
 }));
 
 void mock.module("@/api/handlers/case-law/decisions/read-by-id", () => ({
+  readDecisionBySlugHandler: mock(),
   readDecisionHandler: readDecisionHandlerMock,
 }));
 
@@ -178,8 +178,14 @@ void mock.module("@/api/handlers/workspaces/workspace-contacts-read", () => ({
   readWorkspaceContactsHandler: mock(),
 }));
 
-const { getMcpToolDefinition, handleMcpToolCall, listMcpTools } =
-  await import("@/api/mcp/tools");
+const {
+  getMcpToolDefinition,
+  getMcpToolScopeHint,
+  handleMcpToolCall,
+  listMcpTools,
+} = await import("@/api/mcp/tools");
+const { caseLawPublicReadDb } =
+  await import("@/api/lib/case-law-public-read-db");
 
 const parseToolPayload = (
   result: Awaited<ReturnType<typeof handleMcpToolCall>>,
@@ -251,8 +257,10 @@ const createReadDecisionResult = () => ({
   id: "dec_123",
   language: "cs",
   metadata: { panel: "29 Cdo" },
+  slug: "stable-official-slug",
   source: {
     adapterKey: "cz-ns",
+    allowsDerivedAi: true,
     id: "src_1",
     name: "Nejvyšší soud",
   },
@@ -329,11 +337,18 @@ const createScopedDb = (
     ),
   );
 
+const createRecordAuditEventMock = () =>
+  asTestRaw<AuditRecorder & ReturnType<typeof mock>>(
+    mock(async () => undefined),
+  );
+
 const createContext = ({
   accessibleWorkspaceIds = ["ws_1"],
+  recordAuditEvent = createRecordAuditEventMock(),
   scopedDb = createScopedDb(),
 }: {
   accessibleWorkspaceIds?: string[];
+  recordAuditEvent?: AuditRecorder;
   scopedDb?: McpRequestContext["scopedDb"];
 } = {}): McpRequestContext => ({
   accessibleWorkspaceIds: accessibleWorkspaceIds.map((workspaceId) =>
@@ -342,6 +357,7 @@ const createContext = ({
   accessibleWorkspaceIdSet: new Set(accessibleWorkspaceIds),
   memberRole: "owner",
   organizationId: toSafeId<"organization">("org_1"),
+  recordAuditEvent,
   safeDb: toSafeDbMock(scopedDb),
   scopedDb,
   userId: toSafeId<"user">("user_1"),
@@ -368,8 +384,10 @@ describe("OpenAI-compatible MCP tools", () => {
     mock.restore();
   });
 
-  test("advertises the exact search compatibility input schema", () => {
-    const searchTool = listMcpTools().find((tool) => tool.name === "search");
+  test("advertises the exact search compatibility input schema", async () => {
+    const searchTool = (await listMcpTools(createContext())).find(
+      (tool) => tool.name === "search",
+    );
 
     expect(searchTool?.inputSchema).toEqual({
       type: "object",
@@ -384,8 +402,8 @@ describe("OpenAI-compatible MCP tools", () => {
     });
   });
 
-  test("advertises the case-law search tool with filter support", () => {
-    const searchTool = listMcpTools().find(
+  test("advertises the case-law search tool with filter support", async () => {
+    const searchTool = (await listMcpTools(createContext())).find(
       (tool) => tool.name === "search_case_law",
     );
 
@@ -448,27 +466,76 @@ describe("OpenAI-compatible MCP tools", () => {
     });
   });
 
-  test("requires search scope for the case-law search tool", () => {
-    expect(getMcpToolDefinition("search_case_law")?.scope).toBe(
-      "stella:search",
-    );
-  });
-
-  test("lists shared case-law tools in anonymized mode", () => {
-    expect(listMcpTools("anonymized").map((tool) => tool.name)).toEqual([
-      "search",
-      "fetch",
-      "search_case_law",
-      "read_case_law_decision",
-    ]);
-  });
-
-  test("remaps case-law tools to anonymized scopes", () => {
-    expect(getMcpToolDefinition("search_case_law", "anonymized")?.scope).toBe(
-      "stella:search_anonymized",
-    );
+  test("requires search scope for the case-law search tool", async () => {
     expect(
-      getMcpToolDefinition("read_case_law_decision", "anonymized")?.scope,
+      (await getMcpToolDefinition("search_case_law", createContext()))?.scope,
+    ).toBe("stella:search");
+  });
+
+  test("hints dynamic tool scopes from names before resolving definitions", () => {
+    expect(getMcpToolScopeHint("search_case_law")).toBe("stella:search");
+    expect(getMcpToolScopeHint("mcp__registry__lookup")).toBe(
+      "stella:external_mcps",
+    );
+    expect(getMcpToolScopeHint("skill__research")).toBe("stella:skills");
+    expect(getMcpToolScopeHint("mcp__registry__lookup", "anonymized")).toBe(
+      undefined,
+    );
+  });
+
+  test("does not resolve dynamic definitions for unprefixed unknown tools", async () => {
+    const scopedDb = createScopedDb();
+
+    expect(
+      await getMcpToolDefinition(
+        "not_a_tool",
+        createContext({ scopedDb }),
+        "default",
+      ),
+    ).toBe(undefined);
+    expect(scopedDb).not.toHaveBeenCalled();
+  });
+
+  test("filters listed tools by granted scopes", async () => {
+    const scopedDb = createScopedDb();
+    const toolNames = (
+      await listMcpTools(createContext({ scopedDb }), "default", [
+        "stella:read",
+      ])
+    ).map((tool) => tool.name);
+
+    expect(toolNames).toContain("list_matters");
+    expect(toolNames).not.toContain("search_case_law");
+    expect(toolNames).not.toContain("set_practice_jurisdictions");
+    expect(scopedDb).not.toHaveBeenCalled();
+  });
+
+  test("lists shared case-law tools in anonymized mode", async () => {
+    expect(
+      (await listMcpTools(createContext(), "anonymized")).map(
+        (tool) => tool.name,
+      ),
+    ).toEqual(["search", "fetch", "search_case_law", "read_case_law_decision"]);
+  });
+
+  test("remaps case-law tools to anonymized scopes", async () => {
+    expect(
+      (
+        await getMcpToolDefinition(
+          "search_case_law",
+          createContext(),
+          "anonymized",
+        )
+      )?.scope,
+    ).toBe("stella:search_anonymized");
+    expect(
+      (
+        await getMcpToolDefinition(
+          "read_case_law_decision",
+          createContext(),
+          "anonymized",
+        )
+      )?.scope,
     ).toBe("stella:read_anonymized");
   });
 
@@ -587,6 +654,8 @@ describe("OpenAI-compatible MCP tools", () => {
           ecli: "ECLI:CZ:NS:2024:29.CDO.123.2024.1",
           headline: "Relevant <mark>holding</mark>",
           language: "cs",
+          languageAlternateCount: 2,
+          slug: "stable-official-slug",
           sourceUrl: "https://example.test/decision",
         },
       ],
@@ -603,6 +672,7 @@ describe("OpenAI-compatible MCP tools", () => {
         decision_type: "judgment",
         limit: 5,
         query: "shareholder dispute",
+        source_id: "11111111-1111-4111-8111-111111111111",
       },
       context,
       toolName: "search_case_law",
@@ -616,8 +686,9 @@ describe("OpenAI-compatible MCP tools", () => {
         decisionType: "judgment",
         limit: 5,
         query: "shareholder dispute",
+        sourceId: "11111111-1111-4111-8111-111111111111",
       },
-      context.scopedDb,
+      caseLawPublicReadDb,
     );
 
     expect(parseToolPayload(result)).toEqual({
@@ -629,7 +700,7 @@ describe("OpenAI-compatible MCP tools", () => {
       nextCursor: "cursor_2",
       results: [
         {
-          appUrl: `${APP_BASE_URL}/knowledge/case/29-cdo-123-2024--dec_123`,
+          appUrl: `${APP_BASE_URL}/law/cze/cases/nejvyssi-soud/2024-02-01/cs/stable-official-slug`,
           caseNumber: "29 Cdo 123/2024",
           citationCount: 7,
           country: "CZE",
@@ -664,6 +735,7 @@ describe("OpenAI-compatible MCP tools", () => {
           ecli: "ECLI:CZ:NS:2024:29.CDO.123.2024.1",
           headline: "Relevant <mark>holding</mark>",
           language: "cs",
+          slug: "stable-official-slug",
           sourceUrl: "https://example.test/decision",
         },
       ],
@@ -685,7 +757,7 @@ describe("OpenAI-compatible MCP tools", () => {
       nextCursor: null,
       results: [
         {
-          appUrl: `${APP_BASE_URL}/knowledge/case/29-cdo-123-2024--dec_123`,
+          appUrl: `${APP_BASE_URL}/law/cze/cases/nejvyssi-soud/2024-02-01/stable-official-slug`,
           caseNumber: "29 Cdo 123/2024",
           citationCount: 7,
           country: "CZE",
@@ -702,6 +774,68 @@ describe("OpenAI-compatible MCP tools", () => {
       totalCount: 1,
     });
     expect(anonymizeTextFieldsMock).not.toHaveBeenCalled();
+  });
+
+  test("search_case_law omits app URLs while public law routes are disabled", async () => {
+    const previousFeaturePublicLaw = env.FEATURE_PUBLIC_LAW;
+    const previousIsDev = env.isDev;
+    env.FEATURE_PUBLIC_LAW = false;
+    env.isDev = false;
+
+    try {
+      searchDecisionsHandlerMock.mockResolvedValue({
+        facets: null,
+        hits: [
+          {
+            caseNumber: "29 Cdo 123/2024",
+            citationCount: 7,
+            country: "CZE",
+            court: "Nejvyšší soud",
+            decisionDate: "2024-02-01",
+            decisionId: "dec_123",
+            decisionType: "judgment",
+            ecli: null,
+            headline: null,
+            language: "cs",
+            slug: "stable-official-slug",
+            sourceUrl: "https://example.test/decision",
+          },
+        ],
+        nextCursor: null,
+        totalCount: null,
+      });
+
+      const result = await handleMcpToolCall({
+        args: { query: "shareholder dispute" },
+        context: createContext(),
+        toolName: "search_case_law",
+      });
+
+      expect(parseToolPayload(result)).toEqual({
+        facets: null,
+        nextCursor: null,
+        results: [
+          {
+            appUrl: null,
+            caseNumber: "29 Cdo 123/2024",
+            citationCount: 7,
+            country: "CZE",
+            court: "Nejvyšší soud",
+            decisionDate: "2024-02-01",
+            decisionId: "dec_123",
+            decisionType: "judgment",
+            ecli: null,
+            language: "cs",
+            snippet: null,
+            sourceUrl: "https://example.test/decision",
+          },
+        ],
+        totalCount: null,
+      });
+    } finally {
+      env.FEATURE_PUBLIC_LAW = previousFeaturePublicLaw;
+      env.isDev = previousIsDev;
+    }
   });
 
   test("search_case_law rejects invalid ISO dates", async () => {
@@ -726,6 +860,28 @@ describe("OpenAI-compatible MCP tools", () => {
     expect(searchDecisionsHandlerMock).not.toHaveBeenCalled();
   });
 
+  test("search_case_law rejects invalid source IDs", async () => {
+    const result = await handleMcpToolCall({
+      args: {
+        query: "shareholder dispute",
+        source_id: "not-a-uuid",
+      },
+      context: createContext(),
+      toolName: "search_case_law",
+    });
+
+    expect(result).toEqual({
+      content: [
+        {
+          type: "text",
+          text: "Invalid parameter: source_id. Expected a UUID",
+        },
+      ],
+      isError: true,
+    });
+    expect(searchDecisionsHandlerMock).not.toHaveBeenCalled();
+  });
+
   test("read_case_law_decision derives plain text from the AST fallback", async () => {
     readDecisionHandlerMock.mockResolvedValue(createReadDecisionResult());
 
@@ -738,13 +894,12 @@ describe("OpenAI-compatible MCP tools", () => {
 
     expect(readDecisionHandlerMock).toHaveBeenCalledWith(
       "dec_123",
-      context.scopedDb,
+      caseLawPublicReadDb,
     );
 
     expect(parseToolPayload(result)).toEqual({
       decision: {
-        analysis: null,
-        appUrl: `${APP_BASE_URL}/knowledge/case/29-cdo-123-2024--dec_123`,
+        appUrl: `${APP_BASE_URL}/law/cze/cases/nejvyssi-soud/2024-02-01/stable-official-slug`,
         caseNumber: "29 Cdo 123/2024",
         citationsFrom: [{ citationText: "29 Odo 1/2001", id: "c_1" }],
         citationsFromTotal: 1,
@@ -761,11 +916,34 @@ describe("OpenAI-compatible MCP tools", () => {
         metadata: { panel: "29 Cdo" },
         source: {
           adapterKey: "cz-ns",
+          allowsDerivedAi: true,
           id: "src_1",
           name: "Nejvyšší soud",
         },
         sourceUrl: "https://example.test/decision",
         text: "29 Cdo 123/2024\n\nThe court dismissed the appeal.",
+      },
+    });
+  });
+
+  test("read_case_law_decision withholds text when the source bars AI use", async () => {
+    const base = createReadDecisionResult();
+    readDecisionHandlerMock.mockResolvedValue({
+      ...base,
+      source: { ...base.source, allowsDerivedAi: false },
+    });
+
+    const result = await handleMcpToolCall({
+      args: { decision_id: "dec_123" },
+      context: createContext(),
+      toolName: "read_case_law_decision",
+    });
+
+    expect(parseToolPayload(result)).toMatchObject({
+      decision: {
+        text: null,
+        textWithheldReason:
+          "The source licence does not permit AI use of the full text.",
       },
     });
   });
@@ -782,8 +960,7 @@ describe("OpenAI-compatible MCP tools", () => {
 
     expect(parseToolPayload(result)).toEqual({
       decision: {
-        analysis: null,
-        appUrl: `${APP_BASE_URL}/knowledge/case/29-cdo-123-2024--dec_123`,
+        appUrl: `${APP_BASE_URL}/law/cze/cases/nejvyssi-soud/2024-02-01/stable-official-slug`,
         caseNumber: "29 Cdo 123/2024",
         citationsFrom: [{ citationText: "29 Odo 1/2001", id: "c_1" }],
         citationsFromTotal: 1,
@@ -800,6 +977,7 @@ describe("OpenAI-compatible MCP tools", () => {
         metadata: { panel: "29 Cdo" },
         source: {
           adapterKey: "cz-ns",
+          allowsDerivedAi: true,
           id: "src_1",
           name: "Nejvyšší soud",
         },
@@ -931,6 +1109,67 @@ describe("OpenAI-compatible MCP tools", () => {
     });
     expect(anonymizeInput?.scopedDb).toBeTypeOf("function");
     expect(loadAnonymizationGazetteerEntriesMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("search batches anonymized titles by workspace", async () => {
+    searchAcrossMattersExecute.mockResolvedValue({
+      hits: [
+        {
+          entityId: "entity_1",
+          workspaceId: "ws_1",
+          name: "John Smith SPA",
+        },
+        {
+          entityId: "entity_2",
+          workspaceId: "ws_1",
+          name: "Jane Doe NDA",
+        },
+      ],
+    });
+    anonymizeTextFieldsMock.mockResolvedValue({
+      entityCount: 2,
+      fields: ["[PERSON_1] SPA", "[PERSON_2] NDA"],
+    });
+
+    const result = await handleMcpToolCall({
+      args: { query: "agreement" },
+      context: createContext({
+        scopedDb: createScopedDb([
+          {
+            entityId: "entity_1",
+            fieldId: "field_1",
+            workspaceId: "ws_1",
+          },
+          {
+            entityId: "entity_2",
+            fieldId: "field_2",
+            workspaceId: "ws_1",
+          },
+        ]),
+      }),
+      mode: "anonymized",
+      toolName: "search",
+    });
+
+    expect(parseToolPayload(result)).toEqual({
+      results: [
+        {
+          id: "entity_1",
+          title: "[PERSON_1] SPA",
+          url: `${APP_BASE_URL}/workspaces/ws_1/all/pdf?entity=entity_1&field=field_1`,
+        },
+        {
+          id: "entity_2",
+          title: "[PERSON_2] NDA",
+          url: `${APP_BASE_URL}/workspaces/ws_1/all/pdf?entity=entity_2&field=field_2`,
+        },
+      ],
+    });
+    expect(anonymizeTextFieldsMock).toHaveBeenCalledTimes(1);
+    expect(anonymizeTextFieldsMock.mock.calls.at(0)?.[0]).toMatchObject({
+      fields: ["John Smith SPA", "Jane Doe NDA"],
+      workspaceId: "ws_1",
+    });
   });
 
   test("search preserves empty anonymized output instead of leaking the original title", async () => {

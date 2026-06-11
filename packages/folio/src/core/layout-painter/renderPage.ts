@@ -5,11 +5,24 @@
  * Each page contains positioned fragments within a content area.
  */
 
+import { panic } from "better-result";
+
 import {
-  clampFloatingWrapMargins,
   measureParagraph,
-} from "../layout-bridge/measuring";
-import type { FloatingImageZone } from "../layout-bridge/measuring";
+  rectsToFloatingZones,
+} from "../layout-engine/measure";
+import type {
+  FloatingExclusionRect,
+  FloatingImageZone,
+} from "../layout-engine/measure";
+import {
+  FOOTNOTE_ENTRY_MARGIN_BOTTOM,
+  FOOTNOTE_FALLBACK_LINE_HEIGHT,
+  FOOTNOTE_SEPARATOR_HEIGHT,
+  floatingTextBoxReservesBand,
+  floatingTextBoxWrapsText,
+  isFloatingTextBoxBlock,
+} from "../layout-engine/types";
 import type {
   Page,
   Fragment,
@@ -33,14 +46,19 @@ import type {
   TextBoxMeasure,
   TextBoxFragment,
   FootnoteContent,
+  HeaderFooterContent,
 } from "../layout-engine/types";
-import type { BorderSpec, Theme } from "../types/document";
+import type { BorderSpec, Theme, Watermark } from "../types/document";
 import { resolveFontFamily } from "../utils/fontResolver";
 import { borderToStyle } from "../utils/formatToStyle";
 import { eighthsToPixels, pointsToPixels } from "../utils/units";
 import type { BlockLookup } from "./index";
 import { renderFragment } from "./renderFragment";
-import { renderImageFragment } from "./renderImage";
+import {
+  applyImageVisualAttrs,
+  hasImageVisualAttrs,
+  renderImageFragment,
+} from "./renderImage";
 import { renderParagraphFragment } from "./renderParagraph";
 import { renderTableFragment } from "./renderTable";
 import { renderTextBoxFragment } from "./renderTextBox";
@@ -50,17 +68,23 @@ import {
   isTextWrappingFloatingImageRun,
 } from "./renderUtils";
 import type { RenderContext } from "./renderUtils";
+import { renderWatermarkLayer } from "./renderWatermark";
 
 /**
  * Page-level floating image that has been extracted from paragraphs.
  * These are positioned absolutely within the page's content area.
  */
-type PageFloatingImage = {
+export type PageFloatingImage = {
   src: string;
   width: number;
   height: number;
   alt?: string;
   transform?: string;
+  /**
+   * Opacity in [0, 1] from `<a:alphaModFix amt>`. Undefined / 1 means fully
+   * opaque. eigenpal #424 (opacity render pipeline).
+   */
+  opacity?: number;
   /** Which side: 'left' for left margin, 'right' for right margin */
   side: "left" | "right";
   /** X position relative to content area (0 = left edge of content) */
@@ -93,28 +117,14 @@ type PageFloatingImage = {
   behindDoc: boolean;
 };
 
-/**
- * Floating object exclusion rectangle used for text wrapping.
- */
-type FloatingExclusionRect = {
-  /** Which side the IMAGE is on (for rendering): 'left' or 'right' */
-  side: "left" | "right";
-  /** X position relative to content area (0 = left edge of content) */
-  x: number;
-  /** Y position relative to content area (0 = top of content) */
-  y: number;
-  /** Object dimensions */
-  width: number;
-  height: number;
-  /** Wrap distances */
-  distTop: number;
-  distBottom: number;
-  distLeft: number;
-  distRight: number;
-  /** OOXML wrapText: which side(s) TEXT flows on */
-  wrapText?: "bothSides" | "left" | "right" | "largest";
-  /** Wrap type from DOCX (square, tight, through, topAndBottom) */
-  wrapType?: string;
+type ScopedFloatingRect = {
+  startsAtFragmentIndex: number;
+  rect: FloatingExclusionRect;
+};
+
+type ScopedFloatingZone = {
+  startsAtFragmentIndex: number;
+  zone: FloatingImageZone;
 };
 
 /**
@@ -133,29 +143,10 @@ export type { RenderContext } from "./renderUtils";
 export const getDefaultPageFontFamily = (): string =>
   resolveFontFamily("Calibri").cssFallback;
 
-/**
- * Header/footer content for rendering
- */
-export type HeaderFooterContent = {
-  /** Flow blocks for the header/footer content. */
-  blocks: FlowBlock[];
-  /** Measurements for the blocks. */
-  measures: Measure[];
-  /** Total height of the content. */
-  height: number;
-  /** Top-most visual extent relative to the nominal flow origin. */
-  visualTop?: number;
-  /** Bottom-most visual extent relative to the nominal flow origin. */
-  visualBottom?: number;
-  /**
-   * Flow-only bounds used by `computeHeaderFooterMarginExtender` to push
-   * body margins clear of HF overflow. Excludes `behindDoc` images that
-   * the renderer paints behind body content; including them would reserve
-   * a full-page letterhead as body push-down.
-   */
-  marginPushTop?: number;
-  marginPushBottom?: number;
-};
+// HeaderFooterContent lives in `layout-engine/types` so the bridge can
+// build it without importing across the layer boundary. Re-exported here
+// for back-compat with callers that imported it from this module.
+export type { HeaderFooterContent } from "../layout-engine/types";
 
 /**
  * A single footnote item ready for rendering at page bottom.
@@ -175,6 +166,14 @@ export type FootnoteRenderItem = {
 export type RenderPageOptions = {
   /** Document to create elements in (default: window.document) */
   document?: Document;
+  /** Bookmark name -> 1-indexed page, for resolving PAGEREF fields at paint. */
+  bookmarkPages?: ReadonlyMap<string, number>;
+  /** Bookmark name -> paragraph text, for resolving REF fields at paint. */
+  bookmarkText?: ReadonlyMap<string, string>;
+  /** Field run `pmStart` -> precomputed SEQ value, for resolving SEQ fields. */
+  seqValues?: ReadonlyMap<number, number>;
+  /** Section index -> page count in that section, for SECTIONPAGES fields. */
+  sectionPageCounts?: ReadonlyMap<number, number>;
   /** Custom page class name */
   pageClassName?: string;
   /** Show page borders (for debugging) */
@@ -187,6 +186,10 @@ export type RenderPageOptions = {
   headerContent?: HeaderFooterContent;
   /** Footer content to render (used for all pages, or pages 2+ when titlePg is set). */
   footerContent?: HeaderFooterContent;
+  /** Header content by part relationship id, used for section-scoped rendering. */
+  headerContentByRId?: ReadonlyMap<string, HeaderFooterContent>;
+  /** Footer content by part relationship id, used for section-scoped rendering. */
+  footerContentByRId?: ReadonlyMap<string, HeaderFooterContent>;
   /** Header content for the first page only (when titlePg is set). */
   firstPageHeaderContent?: HeaderFooterContent;
   /** Footer content for the first page only (when titlePg is set). */
@@ -213,9 +216,31 @@ export type RenderPageOptions = {
   theme?: Theme | null;
   /** Footnotes to render at the bottom of this page. */
   footnoteArea?: FootnoteRenderItem[];
+  /**
+   * Document watermark to paint behind page content. Applies to every
+   * page that doesn't have a more specific match in
+   * `watermarkByHeaderRId` — the right shape for single-header
+   * documents.
+   */
+  watermark?: Watermark;
+  /**
+   * Per-header-rId watermarks. When a section uses titlePg, even/odd,
+   * or section-scoped headers, each page's active header may carry a
+   * different watermark; this map lets `applySectionHeaderFooterOptions`
+   * select the right one without painting one header's watermark over
+   * the others.
+   */
+  watermarkByHeaderRId?: ReadonlyMap<string, Watermark>;
+  /**
+   * Resolved image src for a picture watermark. The renderer cannot
+   * resolve `imageRId` itself — relationship-id → asset URL belongs to
+   * the package layer; without a resolved src a picture watermark is
+   * silently skipped.
+   */
+  watermarkImageSrc?: string;
 };
 
-type HeaderFooterLayoutInfo = {
+export type HeaderFooterLayoutInfo = {
   flowTop: number;
   flowLeft: number;
   contentWidth: number;
@@ -415,6 +440,72 @@ function syncPageBorderOverlay(
 }
 
 /**
+ * Refresh the watermark overlay on a rendered page shell. Incremental
+ * rerenders replace only the body content area, so the watermark sibling
+ * must be reconciled separately when per-section header resolution changes.
+ */
+function syncPageWatermarkOverlay(
+  pageEl: HTMLElement,
+  page: Page,
+  options: RenderPageOptions,
+  doc: Document,
+): void {
+  for (const stale of Array.from(
+    pageEl.querySelectorAll<HTMLElement>(":scope > .layout-page-watermark"),
+  )) {
+    stale.remove();
+  }
+
+  const watermark = options.watermark;
+  if (!watermark) {
+    return;
+  }
+
+  const overlay = renderWatermarkLayer(
+    watermark,
+    page,
+    doc,
+    options.watermarkImageSrc !== undefined
+      ? { imageSrc: options.watermarkImageSrc }
+      : {},
+  );
+  if (!overlay) {
+    return;
+  }
+
+  const contentEl = pageEl.querySelector<HTMLElement>(
+    `:scope > .${PAGE_CLASS_NAMES.content}`,
+  );
+  if (contentEl) {
+    contentEl.before(overlay);
+    return;
+  }
+
+  pageEl.append(overlay);
+}
+
+function floatingZonesForFragment(
+  pageWideZones: FloatingImageZone[],
+  scopedZones: ScopedFloatingZone[],
+  fragmentIndex: number,
+): FloatingImageZone[] {
+  if (scopedZones.length === 0) {
+    return pageWideZones;
+  }
+
+  let activeZones: FloatingImageZone[] | undefined;
+  for (const scopedZone of scopedZones) {
+    if (scopedZone.startsAtFragmentIndex > fragmentIndex) {
+      continue;
+    }
+    activeZones ??= [...pageWideZones];
+    activeZones.push(scopedZone.zone);
+  }
+
+  return activeZones ?? pageWideZones;
+}
+
+/**
  * Apply content area styles to an element
  */
 function applyContentAreaStyles(element: HTMLElement, page: Page): void {
@@ -559,6 +650,69 @@ function resolveHeaderFooterFloatingTablePosition(
   return { left, top };
 }
 
+/**
+ * Resolve the CSS `left` (px string) for an anchored object (image or text box)
+ * in a header/footer, honoring `wp:positionH` (relativeTo page/margin, align
+ * left/center/right, or posOffset). Shared by floating images and text boxes so
+ * a page-centered banner in the header lands centered like Word, not pinned to
+ * the left. Ported from eigenpal/docx-editor#700.
+ */
+export function resolveHeaderFooterFloatLeft(
+  width: number,
+  h:
+    | {
+        relativeTo?: string;
+        posOffset?: number;
+        align?: string;
+        alignment?: string;
+      }
+    | undefined,
+  layout: HeaderFooterLayoutInfo,
+): string {
+  if (!h) {
+    return "0";
+  }
+
+  // Single-sided rendering: OOXML `inside`/`outside` alias `left`/`right`
+  // (matching resolveAnchoredImagePosition / the floating-table resolver).
+  let align = getPositionAlignment(h);
+  if (align === "inside") {
+    align = "left";
+  } else if (align === "outside") {
+    align = "right";
+  }
+
+  if (h.relativeTo === "page") {
+    if (h.posOffset !== undefined) {
+      return `${emuToPixels(h.posOffset) - layout.flowLeft}px`;
+    }
+    if (align === "right") {
+      return `${layout.pageWidth - width - layout.flowLeft}px`;
+    }
+    if (align === "center") {
+      return `${(layout.pageWidth - width) / 2 - layout.flowLeft}px`;
+    }
+    if (align === "left") {
+      return `${-layout.flowLeft}px`;
+    }
+  }
+
+  // `relativeTo: margin` falls through here intentionally: the header/footer
+  // content width IS the margin box, so the content-relative branch is already
+  // margin-correct.
+  if (h.posOffset !== undefined) {
+    return `${emuToPixels(h.posOffset)}px`;
+  }
+  if (align === "right") {
+    return `${layout.contentWidth - width}px`;
+  }
+  if (align === "center") {
+    return `${(layout.contentWidth - width) / 2}px`;
+  }
+
+  return "0";
+}
+
 function applyHeaderFooterFloatHorizontalPosition(
   img: HTMLImageElement,
   floatImg: {
@@ -574,48 +728,11 @@ function applyHeaderFooterFloatHorizontalPosition(
   },
   layout: HeaderFooterLayoutInfo,
 ): void {
-  const h = floatImg.position.horizontal;
-  if (!h) {
-    img.style.left = "0";
-    return;
-  }
-
-  const align = getPositionAlignment(h);
-
-  if (h.relativeTo === "page") {
-    if (h.posOffset !== undefined) {
-      img.style.left = `${emuToPixels(h.posOffset) - layout.flowLeft}px`;
-      return;
-    }
-    if (align === "right") {
-      img.style.left = `${layout.pageWidth - floatImg.width - layout.flowLeft}px`;
-      return;
-    }
-    if (align === "center") {
-      img.style.left = `${(layout.pageWidth - floatImg.width) / 2 - layout.flowLeft}px`;
-      return;
-    }
-    if (align === "left") {
-      img.style.left = `${-layout.flowLeft}px`;
-      return;
-    }
-  }
-
-  if (h.posOffset !== undefined) {
-    img.style.left = `${emuToPixels(h.posOffset)}px`;
-    return;
-  }
-
-  if (align === "right") {
-    img.style.left = `${layout.contentWidth - floatImg.width}px`;
-    return;
-  }
-  if (align === "center") {
-    img.style.left = `${(layout.contentWidth - floatImg.width) / 2}px`;
-    return;
-  }
-
-  img.style.left = "0";
+  img.style.left = resolveHeaderFooterFloatLeft(
+    floatImg.width,
+    floatImg.position.horizontal,
+    layout,
+  );
 }
 
 /**
@@ -644,13 +761,201 @@ function applyFragmentStyles(
 export { emuToPixels, isFloatingImageRun } from "./renderUtils";
 
 /**
+ * Page geometry needed to translate OOXML `relativeFrom` anchors into
+ * painter coordinates. All values are in CSS pixels. Mirrors the upstream
+ * (eigenpal docx-editor) `PageGeometry` shape introduced in #424 so the
+ * anchor math stays identical across the two codebases.
+ */
+export type PageGeometry = {
+  pageWidth: number;
+  pageHeight: number;
+  marginLeft: number;
+  marginTop: number;
+  marginRight: number;
+  marginBottom: number;
+  contentWidth: number;
+  contentHeight: number;
+};
+
+/**
+ * Resolved on-page coordinates for an anchored floating image.
+ * `x` / `y` are in content-area-relative pixels (content origin = (0, 0)).
+ * `side` feeds the text-wrap exclusion zone helper.
+ */
+export type AnchoredImagePosition = {
+  x: number;
+  y: number;
+  side: "left" | "right";
+};
+
+// eigenpal #424 (positionV/H align): ECMA-376 §20.4.3.2 (ST_RelFromH).
+// Maps the OOXML relativeFrom enum onto the painter's content-relative band.
+// `baseX` is the band origin; `bandWidth` is the band's extent — both feed
+// the align="left|center|right" / posOffset arithmetic below. We render
+// single-sided, so `insideMargin` is treated as `leftMargin` (recto inside)
+// and `outsideMargin` as `rightMargin` (recto outside).
+function resolveHorizontalBand(
+  relativeTo: string | undefined,
+  geometry: PageGeometry,
+): { baseX: number; bandWidth: number } {
+  switch (relativeTo) {
+    case "page":
+      return { baseX: -geometry.marginLeft, bandWidth: geometry.pageWidth };
+    case "leftMargin":
+    case "insideMargin":
+      return { baseX: -geometry.marginLeft, bandWidth: geometry.marginLeft };
+    case "rightMargin":
+    case "outsideMargin":
+      return { baseX: geometry.contentWidth, bandWidth: geometry.marginRight };
+    case "character":
+      // `character` would need the originating run's x-position; we don't
+      // thread that through the bridge yet. Anchor at the content origin.
+      return { baseX: 0, bandWidth: 0 };
+    default:
+      // `column`, `margin`, and unknown values resolve to the content band.
+      return { baseX: 0, bandWidth: geometry.contentWidth };
+  }
+}
+
+// eigenpal #424 (positionV/H align): ECMA-376 §20.4.3.1 (ST_RelFromV).
+// Symmetric with the horizontal helper. `topMargin` is the strip above
+// the content area; `bottomMargin` is below it; `paragraph` / `line` fall
+// back to the running paragraph anchor (no band). The resolver above
+// uses `relativeTo` (not `bandHeight`) to detect the no-band case so a
+// legitimately zero-sized margin still aligns correctly.
+function resolveVerticalBand(
+  relativeTo: string | undefined,
+  fragmentY: number,
+  geometry: PageGeometry,
+): { baseY: number; bandHeight: number } {
+  switch (relativeTo) {
+    case "page":
+      return { baseY: -geometry.marginTop, bandHeight: geometry.pageHeight };
+    case "topMargin":
+      return { baseY: -geometry.marginTop, bandHeight: geometry.marginTop };
+    case "bottomMargin":
+      return {
+        baseY: geometry.contentHeight,
+        bandHeight: geometry.marginBottom,
+      };
+    case "paragraph":
+    case "line":
+      return { baseY: fragmentY, bandHeight: 0 };
+    default:
+      // `margin`, `insideMargin`, `outsideMargin`, and unknown values all
+      // resolve to the content band; vertical `*Margin` variants degenerate
+      // to `margin` in a single-sided render.
+      return { baseY: 0, bandHeight: geometry.contentHeight };
+  }
+}
+
+/**
+ * Resolve the on-page coordinates of an anchored floating image.
+ *
+ * Pure function — no DOM, no side effects — so the math is unit-testable
+ * without spinning up a full page render. Used by
+ * `extractFloatingImagesFromParagraph` for body anchors; mirrors the
+ * upstream painter helper introduced in eigenpal #424.
+ *
+ * The OOXML position is `posOffset` (EMUs from the relativeFrom origin)
+ * XOR `align` (symbolic top|center|bottom / left|center|right). When
+ * neither is present, the spec means "anchor at the band origin"; for
+ * paragraph/line that's the paragraph itself, otherwise the band origin
+ * picked by `relativeFrom`.
+ */
+export function resolveAnchoredImagePosition(
+  imgRun: ImageRun,
+  fragmentY: number,
+  geometry: PageGeometry,
+): AnchoredImagePosition {
+  const position = imgRun.position;
+  const contentWidth = geometry.contentWidth;
+
+  let side: "left" | "right" = "left";
+  let x = 0;
+
+  if (position?.horizontal) {
+    const h = position.horizontal;
+    const { baseX, bandWidth } = resolveHorizontalBand(h.relativeTo, geometry);
+    // `character` is the only horizontal anchor that intentionally carries
+    // no band (we don't yet thread the originating run's x); for every
+    // other relativeFrom variant the band is real and `bandWidth === 0`
+    // means the page legitimately has a zero-width strip (e.g. mirrored
+    // margins on a no-margin layout), which should still be honoured.
+    const horizontalHasBand = h.relativeTo !== "character";
+
+    if (h.align === "right" || h.align === "outside") {
+      // `outside` is the facing-page mirror of `right`. Without facing-page
+      // context we treat it as the right edge of the band, matching Word's
+      // single-sided render.
+      side = "right";
+      x = horizontalHasBand ? baseX + bandWidth - imgRun.width : 0;
+    } else if (h.align === "left" || h.align === "inside") {
+      side = "left";
+      x = baseX;
+    } else if (h.align === "center") {
+      side = "left";
+      x = horizontalHasBand ? baseX + (bandWidth - imgRun.width) / 2 : 0;
+    } else if (h.posOffset !== undefined) {
+      x = baseX + emuToPixels(h.posOffset);
+      side = x > contentWidth / 2 ? "right" : "left";
+    } else {
+      // Bare positionH (no align, no offset) — anchor at the band origin.
+      x = baseX;
+    }
+  } else if (imgRun.cssFloat === "right") {
+    side = "right";
+    x = contentWidth - imgRun.width;
+  }
+
+  let y: number;
+
+  if (position?.vertical) {
+    const v = position.vertical;
+    const { baseY, bandHeight } = resolveVerticalBand(
+      v.relativeTo,
+      fragmentY,
+      geometry,
+    );
+    // paragraph/line are the only vertical anchors without a band — they
+    // ride the running paragraph's y, so align/center against a non-existent
+    // band must defer to `fragmentY`. Every other relativeFrom variant has
+    // a real band, so `bandHeight === 0` (e.g. zero top/bottom margin)
+    // should still resolve via the band-relative math instead of falling
+    // back to `fragmentY`.
+    const verticalHasBand =
+      v.relativeTo !== "paragraph" && v.relativeTo !== "line";
+
+    if (v.align === "top" || v.align === "inside") {
+      y = baseY;
+    } else if (v.align === "center") {
+      y = verticalHasBand
+        ? baseY + (bandHeight - imgRun.height) / 2
+        : fragmentY;
+    } else if (v.align === "bottom" || v.align === "outside") {
+      y = verticalHasBand ? baseY + bandHeight - imgRun.height : fragmentY;
+    } else if (v.posOffset !== undefined) {
+      y = baseY + emuToPixels(v.posOffset);
+    } else {
+      // Bare positionV — for paragraph/line bands the image stays in flow;
+      // for any other band, the spec means "anchor at the band origin".
+      y = verticalHasBand ? baseY : fragmentY;
+    }
+  } else {
+    y = fragmentY;
+  }
+
+  return { x, y, side };
+}
+
+/**
  * Extract floating images from a paragraph block and determine their page-level positions.
  * Returns extracted images and info for the paragraph about space reserved.
  */
 function extractFloatingImagesFromParagraph(
   block: ParagraphBlock,
   fragmentY: number, // Y position of the paragraph fragment on the page (relative to content area)
-  contentWidth: number, // Width of the content area
+  geometry: PageGeometry,
 ): PageFloatingImage[] {
   const floatingImages: PageFloatingImage[] = [];
 
@@ -664,77 +969,24 @@ function extractFloatingImagesFromParagraph(
       continue;
     }
 
-    // Determine position based on image attributes
-    const position = imgRun.position;
     const distTop = imgRun.distTop ?? 0;
     const distBottom = imgRun.distBottom ?? 0;
     const distLeft = imgRun.distLeft ?? 12;
     const distRight = imgRun.distRight ?? 12;
 
-    // Determine horizontal position (left or right side)
-    let side: "left" | "right" = "left";
-    let x = 0;
-
-    if (position?.horizontal) {
-      const h = position.horizontal;
-      if (h.align === "right") {
-        side = "right";
-        // Position from right edge of content
-        x = contentWidth - imgRun.width;
-      } else if (h.align === "left") {
-        side = "left";
-        x = 0;
-      } else if (h.align === "center") {
-        side = "left"; // Treat centered as left-aligned for simplicity
-        x = (contentWidth - imgRun.width) / 2;
-      } else if (h.posOffset !== undefined) {
-        // Explicit offset from margin
-        x = emuToPixels(h.posOffset);
-        side = x > contentWidth / 2 ? "right" : "left";
-      }
-    } else if (imgRun.cssFloat === "right") {
-      side = "right";
-      x = contentWidth - imgRun.width;
-    }
-
-    // Determine vertical position
-    let y = 0;
-
-    if (position?.vertical) {
-      const v = position.vertical;
-      if (v.align === "top") {
-        // Align to top of margin area
-        y = 0;
-      } else if (v.align === "bottom") {
-        // Would need page height - not supported, use paragraph position
-        y = fragmentY;
-      } else if (v.posOffset !== undefined) {
-        y = emuToPixels(v.posOffset);
-      } else {
-        // Default to paragraph position
-        y = fragmentY;
-      }
-
-      // Check relativeTo for positioning context
-      if (
-        v.relativeTo === "margin" &&
-        (v.align === "top" || v.posOffset !== undefined)
-      ) {
-        // Already in content-relative coordinates (margin = content area)
-      } else if (v.relativeTo === "paragraph") {
-        // Add fragment Y offset
-        y = fragmentY + y;
-      }
-    } else {
-      // Default: position at paragraph
-      y = fragmentY;
-    }
+    const { x, y, side } = resolveAnchoredImagePosition(
+      imgRun,
+      fragmentY,
+      geometry,
+    );
 
     // Derive wrapText from cssFloat:
     // cssFloat='left' → image floats left → text on right → wrapText='right'
     // cssFloat='right' → image floats right → text on left → wrapText='left'
-    // cssFloat='none' or undefined → wrapText='bothSides' (default)
-    let wrapText: "bothSides" | "left" | "right" | "largest" = "bothSides";
+    // cssFloat='none' or undefined → omit wrapText; rect.side drives the side
+    // (preserves pre-eigenpal-#474 image wrap behavior — text boxes opt in to
+    // the new bothSides splitting separately).
+    let wrapText: "bothSides" | "left" | "right" | "largest" | undefined;
     if (imgRun.cssFloat === "left") {
       wrapText = "right";
     } else if (imgRun.cssFloat === "right") {
@@ -749,6 +1001,9 @@ function extractFloatingImagesFromParagraph(
       ...(imgRun.transform !== undefined
         ? { transform: imgRun.transform }
         : {}),
+      // eigenpal #424 (opacity render pipeline). `!= null` so a PM null
+      // schema default doesn't leak into PageFloatingImage.opacity.
+      ...(imgRun.opacity != null ? { opacity: imgRun.opacity } : {}),
       side,
       x,
       y,
@@ -758,7 +1013,7 @@ function extractFloatingImagesFromParagraph(
       distRight,
       ...(imgRun.pmStart !== undefined ? { pmStart: imgRun.pmStart } : {}),
       ...(imgRun.pmEnd !== undefined ? { pmEnd: imgRun.pmEnd } : {}),
-      wrapText,
+      ...(wrapText !== undefined ? { wrapText } : {}),
       ...(imgRun.wrapType !== undefined ? { wrapType: imgRun.wrapType } : {}),
       affectsTextWrap: isTextWrappingFloatingImageRun(imgRun),
       behindDoc: imgRun.wrapType === "behind",
@@ -769,72 +1024,13 @@ function extractFloatingImagesFromParagraph(
 }
 
 /**
- * Convert floating exclusion rectangles to per-image FloatingImageZone[]
- * for the measurement system. Each rect becomes its own zone so
- * lines at different Y positions get independently correct widths.
- *
- * wrapText controls which side(s) TEXT flows on:
- *   'right'    → text only on right → image blocks left side (leftMargin)
- *   'left'     → text only on left  → image blocks right side (rightMargin)
- *   'bothSides'→ text on right of left-side images, left of right-side images
- *   'largest'  → same as bothSides (simplified)
- *
- * topAndBottom → full-width exclusion (leftMargin = contentWidth → forces line skip)
- */
-function rectsToFloatingZones(
-  rects: FloatingExclusionRect[],
-  contentWidth: number,
-): FloatingImageZone[] {
-  return rects.map((rect) => {
-    const rectRight = rect.x + rect.width + rect.distRight;
-    const rectTop = rect.y - rect.distTop;
-    const rectBottom = rect.y + rect.height + rect.distBottom;
-
-    let leftMargin = 0;
-    let rightMargin = 0;
-
-    const wt = rect.wrapText ?? "bothSides";
-
-    if (wt === "right") {
-      // Text flows on RIGHT only → image blocks the left side
-      leftMargin = rectRight;
-    } else if (wt === "left") {
-      // Text flows on LEFT only → image blocks the right side
-      rightMargin = contentWidth - (rect.x - rect.distLeft);
-    } else {
-      // bothSides / largest: use image position to determine which side it blocks
-      if (rect.side === "left") {
-        leftMargin = rectRight;
-      } else {
-        rightMargin = contentWidth - (rect.x - rect.distLeft);
-      }
-    }
-
-    // Near-full-width floats can compute a wrap margin >= contentWidth; if we
-    // let that propagate, body text after the float collapses to ~1 glyph per
-    // line. Word falls back to full content width in that case.
-    const clamped = clampFloatingWrapMargins(
-      leftMargin,
-      rightMargin,
-      contentWidth,
-    );
-    return {
-      leftMargin: clamped.leftMargin,
-      rightMargin: clamped.rightMargin,
-      topY: rectTop,
-      bottomY: rectBottom,
-    };
-  });
-}
-
-/**
  * Render floating images into a page-level layer.
  *
  * `layerMode === "behind"` paints below body text (used for `behindDoc`
  * wrapNone images, e.g. full-page letterhead backgrounds). `"front"` paints
  * above text (default for `inFront` wrapNone and side-wrapping images).
  */
-function renderFloatingImagesLayer(
+export function renderFloatingImagesLayer(
   floatingImages: PageFloatingImage[],
   doc: Document,
   layerMode: "front" | "behind" = "front",
@@ -875,11 +1071,22 @@ function renderFloatingImagesLayer(
     img.style.width = `${floatImg.width}px`;
     img.style.height = `${floatImg.height}px`;
     img.style.display = "block";
+    // A floating image is sized explicitly from its OOXML extent and may be
+    // anchored so it bleeds into the page margin (e.g. a logo flush to the
+    // right edge). Opt out of the global `img { max-width: 100% }` reset, which
+    // would otherwise cap the width to the remaining content area and squash
+    // the image against its fixed height. eigenpal/docx-editor#694.
+    img.style.maxWidth = "none";
+    img.style.maxHeight = "none";
     if (floatImg.alt) {
       img.alt = floatImg.alt;
     }
     if (floatImg.transform) {
       img.style.transform = floatImg.transform;
+    }
+    // eigenpal #424 (opacity render pipeline)
+    if (hasImageVisualAttrs(floatImg)) {
+      applyImageVisualAttrs(img, floatImg);
     }
 
     container.append(img);
@@ -911,6 +1118,14 @@ function renderHeaderFooterContent(
     width: number;
     height: number;
     alt?: string;
+    /**
+     * Opacity in [0, 1] from `<a:alphaModFix amt>`. Undefined / 1 means
+     * fully opaque. eigenpal #424 (opacity render pipeline).
+     */
+    opacity?: number;
+    /** Run-level PM position so the pointer pipeline can NodeSelect HF images. */
+    pmStart?: number;
+    pmEnd?: number;
     paragraphY: number; // Y position of the containing paragraph
     behindDoc?: boolean;
     position: {
@@ -966,6 +1181,12 @@ function renderHeaderFooterContent(
             width: run.width,
             height: run.height,
             ...(run.alt !== undefined ? { alt: run.alt } : {}),
+            // eigenpal #424 (opacity render pipeline). `!= null` so a PM
+            // null schema default doesn't leak into the HF floating-image
+            // collector.
+            ...(run.opacity != null ? { opacity: run.opacity } : {}),
+            ...(run.pmStart !== undefined ? { pmStart: run.pmStart } : {}),
+            ...(run.pmEnd !== undefined ? { pmEnd: run.pmEnd } : {}),
             paragraphY: paragraphStartY,
             behindDoc: run.wrapType === "behind",
             position: run.position ?? {},
@@ -1088,7 +1309,7 @@ function renderHeaderFooterContent(
     } else if (block.kind === "textBox" && measure.kind === "textBox") {
       // The unified pipeline extracts top-level text boxes inside H/F as
       // their own block. `renderTextBoxFragment` sets `position: absolute`
-      // internally; we only supply top/left so it stacks at cursorY.
+      // internally; we only supply top/left so it anchors at cursorY.
       // Use the *measured* width (not contentWidth): measureBlocks computed
       // `measure.width` and the cached `innerMeasures` against the authored
       // text box width, so passing contentWidth would cause the outer box
@@ -1112,9 +1333,22 @@ function renderHeaderFooterContent(
         { document: doc },
       );
       fragEl.style.top = `${cursorY}px`;
-      fragEl.style.left = "0";
+      // Honor the anchor's horizontal position (e.g. centered relative to the
+      // page) instead of pinning the box to the left. The vertical position
+      // stays on the H/F flow cursor (positionV is not yet honored for H/F text
+      // boxes). eigenpal/docx-editor#700.
+      fragEl.style.left = resolveHeaderFooterFloatLeft(
+        measure.width,
+        block.position?.horizontal,
+        layout,
+      );
+      if (block.wrapType === "behind") {
+        fragEl.style.zIndex = "-1";
+      }
       containerEl.append(fragEl);
-      cursorY += measure.height;
+      if (!isPositionedHeaderFooterTextBoxBlock(block)) {
+        cursorY += measure.height;
+      }
     }
   }
 
@@ -1126,6 +1360,18 @@ function renderHeaderFooterContent(
     img.height = floatImg.height;
     if (floatImg.alt) {
       img.alt = floatImg.alt;
+    }
+    // Mark as a click-resolvable image fragment so the pointer pipeline's
+    // `findImageElement` matches it. Without these markers an anchored HF
+    // image rendered here would fall through to the generic HF text-click
+    // branch and no NodeSelection could be created on the HF view
+    // (Codex #487 P2 follow-up: 20:52 review).
+    img.classList.add("layout-run", "layout-run-image");
+    if (floatImg.pmStart !== undefined) {
+      img.dataset["pmStart"] = String(floatImg.pmStart);
+    }
+    if (floatImg.pmEnd !== undefined) {
+      img.dataset["pmEnd"] = String(floatImg.pmEnd);
     }
 
     img.style.position = "absolute";
@@ -1142,6 +1388,10 @@ function renderHeaderFooterContent(
     if (floatImg.behindDoc) {
       img.style.zIndex = "-1";
     }
+    // eigenpal #424 (opacity render pipeline)
+    if (hasImageVisualAttrs(floatImg)) {
+      applyImageVisualAttrs(img, floatImg);
+    }
 
     applyHeaderFooterFloatHorizontalPosition(img, floatImg, layout);
     img.style.top = `${resolveHeaderFooterFloatTop(floatImg, layout)}px`;
@@ -1150,6 +1400,35 @@ function renderHeaderFooterContent(
   }
 
   return containerEl;
+}
+
+function isPositionedHeaderFooterTextBoxBlock(block: TextBoxBlock): boolean {
+  if (block.displayMode === "block" || block.displayMode === "inline") {
+    return false;
+  }
+  return isFloatingTextBoxBlock(block);
+}
+
+/**
+ * Calculate the painter's actual footnote-area height in pixels:
+ * separator slot + per-footnote content (or fallback line) + per-footnote
+ * `marginBottom` spacing the painter applies in `renderFootnoteArea`. Used
+ * to clamp the paginator's reservation if it under-estimated, so dense
+ * stacks never overflow past the page bottom. Mirrors the upstream helper
+ * from eigenpal/docx-editor#485, extended for folio's fallback rendering
+ * and any wrapper margin so the helper matches the painted stack.
+ */
+export function calculateFootnoteAreaRenderHeight(
+  footnotes: FootnoteRenderItem[],
+): number {
+  let height = FOOTNOTE_SEPARATOR_HEIGHT;
+  for (const fn of footnotes) {
+    const entryHeight = fn.content
+      ? fn.content.height
+      : FOOTNOTE_FALLBACK_LINE_HEIGHT;
+    height += entryHeight + FOOTNOTE_ENTRY_MARGIN_BOTTOM;
+  }
+  return height;
 }
 
 /**
@@ -1166,19 +1445,23 @@ export function renderFootnoteArea(
   container.className = "layout-footnote-area";
   container.style.width = `${contentWidth}px`;
 
-  // Separator line (33% width, Google Docs style)
+  // Separator line (33% width, Google Docs style). Margins derive from
+  // FOOTNOTE_SEPARATOR_HEIGHT so the painted separator slot matches the
+  // paginator's reservation byte-for-byte. eigenpal/docx-editor#485.
   const separator = doc.createElement("div");
+  const separatorRuleHeight = 0.5;
+  const separatorMargin = (FOOTNOTE_SEPARATOR_HEIGHT - separatorRuleHeight) / 2;
   separator.style.width = "33%";
-  separator.style.height = "0.5px";
+  separator.style.height = `${separatorRuleHeight}px`;
   separator.style.backgroundColor = "var(--doc-canvas-text, #000)";
-  separator.style.marginBottom = "6px";
-  separator.style.marginTop = "6px";
+  separator.style.marginTop = `${separatorMargin}px`;
+  separator.style.marginBottom = `${separatorMargin}px`;
   container.append(separator);
 
   // Render each footnote
   for (const fn of footnotes) {
     const fnEl = doc.createElement("div");
-    fnEl.style.marginBottom = "4px";
+    fnEl.style.marginBottom = `${FOOTNOTE_ENTRY_MARGIN_BOTTOM}px`;
     fnEl.style.color = "var(--doc-canvas-text, #000)";
 
     if (fn.content) {
@@ -1186,7 +1469,7 @@ export function renderFootnoteArea(
       fnEl.append(contentEl);
     } else {
       fnEl.style.fontSize = "10px";
-      fnEl.style.lineHeight = "1.3";
+      fnEl.style.lineHeight = `${FOOTNOTE_FALLBACK_LINE_HEIGHT / 10}`;
 
       const sup = doc.createElement("sup");
       sup.textContent = fn.displayNumber;
@@ -1212,7 +1495,7 @@ function renderFootnoteContent(
 ): HTMLElement {
   const content = footnote.content;
   if (!content) {
-    throw new Error("Missing structured footnote content");
+    panic("Missing structured footnote content");
   }
 
   const wrapper = doc.createElement("div");
@@ -1492,6 +1775,19 @@ export function renderPage(
   if (pageBorderEl && options.pageBorders?.zOrder === "back") {
     pageEl.append(pageBorderEl);
   }
+  if (options.watermark) {
+    const watermarkEl = renderWatermarkLayer(
+      options.watermark,
+      page,
+      doc,
+      options.watermarkImageSrc !== undefined
+        ? { imageSrc: options.watermarkImageSrc }
+        : {},
+    );
+    if (watermarkEl) {
+      pageEl.append(watermarkEl);
+    }
+  }
 
   // Create content area
   const contentEl = doc.createElement("div");
@@ -1504,6 +1800,17 @@ export function renderPage(
   // PHASE 1: Extract all floating images from paragraphs on this page
   const allFloatingImages: PageFloatingImage[] = [];
   const floatingRects: FloatingExclusionRect[] = [];
+  const scopedFloatingRects: ScopedFloatingRect[] = [];
+  const pageGeometry: PageGeometry = {
+    pageWidth: page.size.w,
+    pageHeight: page.size.h,
+    marginLeft: page.margins.left,
+    marginTop: page.margins.top,
+    marginRight: page.margins.right,
+    marginBottom: page.margins.bottom,
+    contentWidth,
+    contentHeight: page.size.h - page.margins.top - page.margins.bottom,
+  };
 
   for (const fragment of page.fragments) {
     if (fragment.kind === "paragraph" && options.blockLookup) {
@@ -1515,7 +1822,7 @@ export function renderPage(
         const extracted = extractFloatingImagesFromParagraph(
           paragraphBlock,
           contentRelativeY,
-          contentWidth,
+          pageGeometry,
         );
         allFloatingImages.push(...extracted);
 
@@ -1588,11 +1895,95 @@ export function renderPage(
     }
   }
 
+  // Collect floating text-box exclusion rectangles (eigenpal #474).
+  // The text-box paint already exists; this only adds the measurement-side
+  // contribution so body text wraps around anchored boxes instead of
+  // running underneath them.
+  if (options.blockLookup) {
+    for (
+      let fragmentIndex = 0;
+      fragmentIndex < page.fragments.length;
+      fragmentIndex++
+    ) {
+      const fragment = page.fragments[fragmentIndex]!; // SAFETY: fragmentIndex < page.fragments.length
+      if (fragment.kind !== "textBox") {
+        continue;
+      }
+      const blockData = options.blockLookup.get(String(fragment.blockId));
+      if (blockData?.block.kind !== "textBox") {
+        continue;
+      }
+      const textBoxBlock = blockData.block as TextBoxBlock;
+      if (!isFloatingTextBoxBlock(textBoxBlock)) {
+        continue;
+      }
+      // topAndBottom reserves a full-width band (text flows above/below);
+      // side-wrap types reserve a side exclusion. Both push a rect — the band
+      // is distinguished by `wrapType` in rectsToFloatingZones. eigenpal #694.
+      const reservesBand = floatingTextBoxReservesBand(textBoxBlock);
+      if (!reservesBand && !floatingTextBoxWrapsText(textBoxBlock)) {
+        continue;
+      }
+
+      const contentX = fragment.x - page.margins.left;
+      const contentY = fragment.y - page.margins.top;
+
+      const distTop = textBoxBlock.distTop ?? 0;
+      const distBottom = textBoxBlock.distBottom ?? 0;
+      const distLeft = textBoxBlock.distLeft ?? 12;
+      const distRight = textBoxBlock.distRight ?? 12;
+
+      // Side hints which margin the rect blocks when `wrapText` falls back to
+      // `rect.side`. Prefer the explicit cssFloat over the X heuristic so a
+      // right-floated box hugging the centre still produces a right-side rect.
+      let side: "left" | "right" =
+        contentX < contentWidth / 2 ? "left" : "right";
+      if (textBoxBlock.cssFloat === "left") {
+        side = "left";
+      } else if (textBoxBlock.cssFloat === "right") {
+        side = "right";
+      }
+
+      const rect: FloatingExclusionRect = {
+        side,
+        x: contentX,
+        y: contentY,
+        width: fragment.width,
+        height: fragment.height,
+        distTop,
+        distBottom,
+        distLeft,
+        distRight,
+      };
+      if (textBoxBlock.wrapText !== undefined) {
+        rect.wrapText = textBoxBlock.wrapText;
+      }
+      if (textBoxBlock.wrapType !== undefined) {
+        rect.wrapType = textBoxBlock.wrapType;
+      }
+      if (reservesBand) {
+        scopedFloatingRects.push({
+          startsAtFragmentIndex: fragmentIndex,
+          rect,
+        });
+      } else {
+        floatingRects.push(rect);
+      }
+    }
+  }
+
   // PHASE 2: Convert floating rects to per-image measurement zones
   const floatingZones: FloatingImageZone[] =
     floatingRects.length > 0
       ? rectsToFloatingZones(floatingRects, contentWidth)
       : [];
+  const scopedFloatingZones: ScopedFloatingZone[] = scopedFloatingRects.flatMap(
+    ({ startsAtFragmentIndex, rect }) =>
+      rectsToFloatingZones([rect], contentWidth).map((zone) => ({
+        startsAtFragmentIndex,
+        zone,
+      })),
+  );
 
   // PHASE 3a: Render behindDoc images first so they paint below body text.
   // Front-layer images (everything else) are appended after fragments below
@@ -1661,9 +2052,14 @@ export function renderPage(
 
         // Re-measure paragraph with floating zones for text wrapping
         let paragraphMeasure = blockData.measure as ParagraphMeasure;
-        if (floatingZones.length > 0) {
+        const fragmentFloatingZones = floatingZonesForFragment(
+          floatingZones,
+          scopedFloatingZones,
+          i,
+        );
+        if (fragmentFloatingZones.length > 0) {
           paragraphMeasure = measureParagraph(paragraphBlock, contentWidth, {
-            floatingZones,
+            floatingZones: fragmentFloatingZones,
             paragraphYOffset: fragmentContentY,
           });
         }
@@ -1785,12 +2181,20 @@ export function renderPage(
       context,
     );
     fnAreaEl.style.position = "absolute";
-    // Position at page bottom minus bottom margin (bottom of content area)
-    // The reserved height includes separator + all footnotes
-    const reservedHeight = page.footnoteReservedHeight ?? 0;
+    // Position at page bottom minus bottom margin (bottom of content
+    // area). Clamp the reservation upward to the painter's calculated
+    // area height so a dense stack of footnotes that under-reserved by
+    // a few pixels still ends at the page bottom rather than spilling
+    // past it; clamp the resulting top to `-page.margins.top` so an
+    // oversized area cannot escape above the page entirely.
+    // eigenpal/docx-editor#485.
+    const reservedHeight = Math.max(
+      page.footnoteReservedHeight ?? 0,
+      calculateFootnoteAreaRenderHeight(options.footnoteArea),
+    );
     const contentAreaBottom =
       page.size.h - page.margins.bottom - page.margins.top;
-    fnAreaEl.style.top = `${contentAreaBottom - reservedHeight}px`;
+    fnAreaEl.style.top = `${Math.max(-page.margins.top, contentAreaBottom - reservedHeight)}px`;
     fnAreaEl.style.left = "0";
     fnAreaEl.style.right = "0";
     contentEl.append(fnAreaEl);
@@ -1822,6 +2226,9 @@ export function renderPage(
 
     const headerEl = doc.createElement("div");
     headerEl.className = PAGE_CLASS_NAMES.header;
+    if (options.headerContent?.rId) {
+      headerEl.dataset["rid"] = options.headerContent.rId;
+    }
     headerEl.style.position = "absolute";
     headerEl.style.top = `${headerDistance + headerVisualTop}px`;
     headerEl.style.left = `${page.margins.left}px`;
@@ -1860,29 +2267,12 @@ export function renderPage(
     }
     pageEl.append(headerEl);
 
-    // behindDoc images (full-page letterhead backgrounds) must live on the
-    // page element, not inside the clipped header container.  Move them out
-    // so they aren't constrained by the header's bounds/overflow.
-    // Prepend as first child so they paint below the page background layer;
-    // z-index alone doesn't work because the page's own background covers
-    // negative z-index children.
-    for (const img of Array.from(
-      headerEl.querySelectorAll<HTMLImageElement>('img[style*="z-index"]'),
-    )) {
-      if (img.style.zIndex !== "-1") {
-        continue;
-      }
-      // Adjust position: the image's top/left was relative to the header
-      // container origin.  Shift it so it's relative to the page origin.
-      const currentTop = Number.parseFloat(img.style.top) || 0;
-      const currentLeft = Number.parseFloat(img.style.left) || 0;
-      img.style.top = `${currentTop + headerDistance + headerVisualTop}px`;
-      img.style.left = `${currentLeft + page.margins.left}px`;
-      // Use z-index 0 instead of -1 so the image sits above the page
-      // background but below text content (which has higher stacking).
-      img.style.zIndex = "0";
-      pageEl.prepend(img);
-    }
+    moveBehindHeaderFooterElementsToPage(
+      headerEl,
+      pageEl,
+      headerDistance,
+      page.margins.left,
+    );
   }
 
   // Render footer area (always rendered for hover hint / double-click target)
@@ -1917,6 +2307,9 @@ export function renderPage(
     const footerContainerTop = footerNaturalTop + footerVisualTop;
     const footerEl = doc.createElement("div");
     footerEl.className = PAGE_CLASS_NAMES.footer;
+    if (options.footerContent?.rId) {
+      footerEl.dataset["rid"] = options.footerContent.rId;
+    }
     footerEl.style.position = "absolute";
     footerEl.style.top = `${footerContainerTop}px`;
     footerEl.style.left = `${page.margins.left}px`;
@@ -1952,6 +2345,12 @@ export function renderPage(
       footerEl.style.overflow = "hidden";
     }
     pageEl.append(footerEl);
+    moveBehindHeaderFooterElementsToPage(
+      footerEl,
+      pageEl,
+      footerNaturalTop,
+      page.margins.left,
+    );
   }
 
   if (pageBorderEl && options.pageBorders?.zOrder !== "back") {
@@ -1961,12 +2360,141 @@ export function renderPage(
   return pageEl;
 }
 
+function moveBehindHeaderFooterElementsToPage(
+  slotEl: HTMLElement,
+  pageEl: HTMLElement,
+  contentTop: number,
+  contentLeft: number,
+): void {
+  const slotKind = slotEl.className.split(" ").includes(PAGE_CLASS_NAMES.header)
+    ? "header"
+    : "footer";
+  const slotRId = slotEl.dataset["rid"];
+
+  // behindDoc images and behind text boxes (full-page letterhead backgrounds)
+  // must live on the page element, not inside the clipped HF container. Move
+  // them out so they aren't constrained by HF bounds/overflow and so body
+  // content paints above them. Descendant positions are relative to the
+  // shifted content wrapper, so add the natural HF flow origin rather than the
+  // outer slot top.
+  for (const element of Array.from(
+    slotEl.querySelectorAll<HTMLElement>(
+      'img[style*="z-index"], .layout-textbox[style*="z-index"]',
+    ),
+  )) {
+    if (element.style.zIndex !== "-1") {
+      continue;
+    }
+    const currentTop = Number.parseFloat(element.style.top) || 0;
+    const currentLeft = Number.parseFloat(element.style.left) || 0;
+    element.style.top = `${currentTop + contentTop}px`;
+    element.style.left = `${currentLeft + contentLeft}px`;
+    if (slotRId) {
+      element.dataset["hfSlotKind"] = slotKind;
+      element.dataset["hfRid"] = slotRId;
+    }
+    // Use z-index 0 instead of -1 so the element sits above the page
+    // background but below body text content (which remains later in DOM).
+    element.style.zIndex = "0";
+    pageEl.prepend(element);
+  }
+}
+
 /**
  * Full options type used by page rendering helpers.
  */
 type FullPageOptions = RenderPageOptions & {
   footnotesByPage?: Map<number, FootnoteRenderItem[]>;
 };
+
+export function applySectionHeaderFooterOptions(
+  page: Page,
+  pageOptions: RenderPageOptions,
+  options: RenderPageOptions,
+): boolean {
+  const refs = page.headerFooterRefs;
+  if (!refs) {
+    return false;
+  }
+
+  const isFirstSectionPage = page.sectionPageNumber === 1;
+  const useFirst = refs.titlePg === true && isFirstSectionPage;
+  const sectionPageNumber = page.sectionPageNumber ?? page.number;
+  const useEven = sectionPageNumber % 2 === 0;
+
+  const headerRId = (() => {
+    if (useFirst) {
+      return refs.headerFirst;
+    }
+    if (useEven && refs.headerEven) {
+      return refs.headerEven;
+    }
+    return refs.headerDefault;
+  })();
+  const footerRId = (() => {
+    if (useFirst) {
+      return refs.footerFirst;
+    }
+    if (useEven && refs.footerEven) {
+      return refs.footerEven;
+    }
+    return refs.footerDefault;
+  })();
+
+  if (headerRId) {
+    const content = options.headerContentByRId?.get(headerRId);
+    if (content) {
+      pageOptions.headerContent = content;
+    } else {
+      delete pageOptions.headerContent;
+    }
+  } else {
+    delete pageOptions.headerContent;
+  }
+
+  if (footerRId) {
+    const content = options.footerContentByRId?.get(footerRId);
+    if (content) {
+      pageOptions.footerContent = content;
+    } else {
+      delete pageOptions.footerContent;
+    }
+  } else {
+    delete pageOptions.footerContent;
+  }
+
+  // Per-page watermark resolution. A document with titlePg, even/odd,
+  // or section-scoped headers can carry a different watermark on each
+  // header part. When a per-rId map is present, that map is
+  // authoritative: a page whose active header has no watermark — or no
+  // active header at all (titlePg first page without `headerFirst`) —
+  // must clear the global fallback so we don't paint the default
+  // header's watermark behind a page whose own header is blank.
+  const watermarkByRId = options.watermarkByHeaderRId;
+  if (watermarkByRId) {
+    const pageWatermark = headerRId ? watermarkByRId.get(headerRId) : undefined;
+    if (pageWatermark) {
+      pageOptions.watermark = pageWatermark;
+    } else {
+      delete pageOptions.watermark;
+    }
+  }
+
+  return true;
+}
+
+/** SECTIONPAGES context fragment for `page`: the page count of its section, or
+ *  nothing when section counts were not supplied (field then falls back). */
+function sectionPagesContext(
+  page: Page,
+  counts: ReadonlyMap<number, number> | undefined,
+): { sectionPages?: number } {
+  if (!counts) {
+    return {};
+  }
+  const value = counts.get(page.sectionIndex ?? 0);
+  return value === undefined ? {} : { sectionPages: value };
+}
 
 /**
  * Build a RenderContext and resolved page options (with footnotes) for a page.
@@ -1981,10 +2509,19 @@ function buildPageRenderArgs(
     pageNumber: page.number,
     totalPages,
     section: "body",
+    ...(options.bookmarkPages ? { bookmarkPages: options.bookmarkPages } : {}),
+    ...(options.bookmarkText ? { bookmarkText: options.bookmarkText } : {}),
+    ...(options.seqValues ? { seqValues: options.seqValues } : {}),
+    ...sectionPagesContext(page, options.sectionPageCounts),
   };
   const pageOptions: RenderPageOptions = { ...options };
+  const hasSectionHeaderFooter = applySectionHeaderFooterOptions(
+    page,
+    pageOptions,
+    options,
+  );
   // Per-page header/footer selection when titlePg is enabled
-  if (options.titlePg && page.number === 1) {
+  if (!hasSectionHeaderFooter && options.titlePg && page.number === 1) {
     if (options.firstPageHeaderContent !== undefined) {
       pageOptions.headerContent = options.firstPageHeaderContent;
     } else {
@@ -2014,7 +2551,8 @@ function buildPageRenderArgs(
  */
 type PageShellState = {
   element: HTMLElement;
-  fingerprint: string;
+  fingerprint: string | null;
+  renderFingerprint: string | null;
 };
 
 /**
@@ -2024,6 +2562,7 @@ type PageContainerState = {
   pageStates: PageShellState[];
   totalPages: number;
   optionsHash: string;
+  fieldContextHash: string;
   pageDataMap: Map<
     HTMLElement,
     { page: Page; index: number; rendered: boolean }
@@ -2048,6 +2587,25 @@ export function computePageFingerprint(
   page: Page,
   blockLookup?: BlockLookup,
 ): string {
+  return computePageFingerprintInternal(page, blockLookup, {
+    includePmPositions: true,
+  });
+}
+
+function computePageRenderFingerprint(
+  page: Page,
+  blockLookup?: BlockLookup,
+): string {
+  return computePageFingerprintInternal(page, blockLookup, {
+    includePmPositions: false,
+  });
+}
+
+function computePageFingerprintInternal(
+  page: Page,
+  blockLookup: BlockLookup | undefined,
+  options: { includePmPositions: boolean },
+): string {
   const parts: string[] = [];
 
   // Page-level properties
@@ -2056,6 +2614,15 @@ export function computePageFingerprint(
     `m:${page.margins.top},${page.margins.right},${page.margins.bottom},${page.margins.left}`,
   );
   parts.push(`n:${page.number}`);
+  if (page.sectionIndex !== undefined) {
+    parts.push(`si:${page.sectionIndex}`);
+  }
+  if (page.sectionPageNumber !== undefined) {
+    parts.push(`sp:${page.sectionPageNumber}`);
+  }
+  if (page.headerFooterRefs) {
+    parts.push(`hf:${JSON.stringify(page.headerFooterRefs)}`);
+  }
   if (page.footnoteReservedHeight) {
     parts.push(`fn:${page.footnoteReservedHeight}`);
   }
@@ -2063,10 +2630,10 @@ export function computePageFingerprint(
   // Each fragment's stable properties
   for (const frag of page.fragments) {
     let fp = `${frag.kind}:${frag.blockId},${frag.x},${frag.y},${frag.width},${frag.height}`;
-    if (frag.pmStart !== undefined) {
+    if (options.includePmPositions && frag.pmStart !== undefined) {
       fp += `,ps:${frag.pmStart}`;
     }
-    if (frag.pmEnd !== undefined) {
+    if (options.includePmPositions && frag.pmEnd !== undefined) {
       fp += `,pe:${frag.pmEnd}`;
     }
 
@@ -2074,14 +2641,33 @@ export function computePageFingerprint(
       fp += `,fl:${frag.fromLine},tl:${frag.toLine}`;
     } else if (frag.kind === "table") {
       fp += `,fr:${frag.fromRow},tr:${frag.toRow}`;
+      if (frag.headerRowCount !== undefined) {
+        fp += `,hr:${frag.headerRowCount}`;
+      }
+      if (frag.topClip !== undefined) {
+        fp += `,tc:${frag.topClip}`;
+      }
+      if (frag.bottomClip !== undefined) {
+        fp += `,bc:${frag.bottomClip}`;
+      }
+      if (frag.continuesFromPrev) {
+        fp += ",cfp";
+      }
+      if (frag.continuesOnNext) {
+        fp += ",con";
+      }
     }
     if (blockLookup) {
       const block = blockLookup.get(String(frag.blockId))?.block;
       const annotationFingerprint = block
-        ? computeAnnotationFingerprint(block)
+        ? computeAnnotationFingerprint(block, options.includePmPositions)
         : "";
       if (annotationFingerprint) {
         fp += `,ann:${annotationFingerprint}`;
+      }
+      const contentFingerprint = block ? computeContentFingerprint(block) : "";
+      if (contentFingerprint) {
+        fp += `,c:${contentFingerprint}`;
       }
     }
 
@@ -2091,13 +2677,34 @@ export function computePageFingerprint(
   return parts.join("|");
 }
 
-function computeAnnotationFingerprint(block: FlowBlock): string {
+function computeAnnotationFingerprint(
+  block: FlowBlock,
+  includePmPositions: boolean,
+): string {
   const parts: string[] = [];
-  collectAnnotationFingerprint(block, parts);
+  collectAnnotationFingerprint(block, parts, includePmPositions);
   return parts.join(";");
 }
 
-function collectAnnotationFingerprint(block: FlowBlock, parts: string[]): void {
+/**
+ * Fingerprint of run-level content + formatting that the painter applies via
+ * `applyRunStyles`. Geometry alone is insufficient: a mark-only edit (toggle
+ * bold/italic/color/etc.) can leave fragment width/height/line counts
+ * identical, in which case the geometry fingerprint matches and the
+ * incremental render path would skip repopulating the page, leaving the new
+ * formatting unpainted.
+ */
+function computeContentFingerprint(block: FlowBlock): string {
+  const parts: string[] = [];
+  collectContentFingerprint(block, parts);
+  return parts.join(";");
+}
+
+function collectAnnotationFingerprint(
+  block: FlowBlock,
+  parts: string[],
+  includePmPositions: boolean,
+): void {
   if (block.kind === "paragraph") {
     for (let index = 0; index < block.runs.length; index++) {
       const run = block.runs[index];
@@ -2119,7 +2726,9 @@ function collectAnnotationFingerprint(block: FlowBlock, parts: string[]): void {
       }
       if (runParts.length > 0) {
         parts.push(
-          `${index}:${run.pmStart ?? ""}-${run.pmEnd ?? ""}:${runParts.join("|")}`,
+          includePmPositions
+            ? `${index}:${run.pmStart ?? ""}-${run.pmEnd ?? ""}:${runParts.join("|")}`
+            : `${index}:${runParts.join("|")}`,
         );
       }
     }
@@ -2130,7 +2739,7 @@ function collectAnnotationFingerprint(block: FlowBlock, parts: string[]): void {
     for (const row of block.rows) {
       for (const cell of row.cells) {
         for (const child of cell.blocks) {
-          collectAnnotationFingerprint(child, parts);
+          collectAnnotationFingerprint(child, parts, includePmPositions);
         }
       }
     }
@@ -2139,9 +2748,168 @@ function collectAnnotationFingerprint(block: FlowBlock, parts: string[]): void {
 
   if (block.kind === "textBox") {
     for (const child of block.content) {
-      collectAnnotationFingerprint(child, parts);
+      collectAnnotationFingerprint(child, parts, includePmPositions);
     }
   }
+}
+
+function collectContentFingerprint(block: FlowBlock, parts: string[]): void {
+  if (block.kind === "paragraph") {
+    if (block.attrs?.styleId) {
+      parts.push(`p:st:${block.attrs.styleId}`);
+    }
+    if (block.attrs?.alignment) {
+      parts.push(`p:al:${block.attrs.alignment}`);
+    }
+    for (let index = 0; index < block.runs.length; index++) {
+      const run = block.runs[index];
+      if (!run) {
+        continue;
+      }
+      parts.push(`${index}:${runContentKey(run)}`);
+    }
+    return;
+  }
+
+  if (block.kind === "table") {
+    for (const row of block.rows) {
+      for (const cell of row.cells) {
+        for (const child of cell.blocks) {
+          collectContentFingerprint(child, parts);
+        }
+      }
+    }
+    return;
+  }
+
+  if (block.kind === "textBox") {
+    for (const child of block.content) {
+      collectContentFingerprint(child, parts);
+    }
+  }
+}
+
+function runContentKey(run: Run): string {
+  if (run.kind === "lineBreak") {
+    return "lb";
+  }
+  if (run.kind === "image") {
+    return `img:${run.src}|${run.width}x${run.height}${run.transform ? `|tr:${run.transform}` : ""}`;
+  }
+
+  // Remaining kinds (text, tab, field, math) all carry RunFormatting.
+  const parts: string[] = [run.kind];
+  if (run.kind === "text") {
+    parts.push(`t:${run.text}`);
+  } else if (run.kind === "tab") {
+    if (run.width !== undefined) {
+      parts.push(`w:${run.width}`);
+    }
+  } else if (run.kind === "math") {
+    // The OMML XML uniquely identifies the rendered MathML output;
+    // include `display` so swapping inline ↔ block also re-fingerprints.
+    parts.push(`md:${run.display}`);
+    parts.push(`mx:${run.ommlXml}`);
+  } else {
+    parts.push(`ft:${run.fieldType}`);
+    if (run.instruction !== undefined) {
+      parts.push(`fi:${run.instruction}`);
+    }
+    if (run.fallback !== undefined) {
+      parts.push(`fb:${run.fallback}`);
+    }
+    if (run.fldLock) {
+      parts.push("fl");
+    }
+  }
+
+  // Marks/format attrs the painter consumes via applyRunStyles. Keep in sync
+  // with renderParagraph.ts so toggling any of these triggers a re-paint.
+  if (run.bold) {
+    parts.push("b");
+  }
+  if (run.italic) {
+    parts.push("i");
+  }
+  if (run.underline) {
+    parts.push(
+      typeof run.underline === "boolean"
+        ? "u"
+        : `u:${run.underline.style ?? ""}:${run.underline.color ?? ""}`,
+    );
+  }
+  if (run.strike) {
+    parts.push("s");
+  }
+  if (run.color) {
+    parts.push(`c:${run.color}`);
+  }
+  if (run.highlight) {
+    parts.push(`hi:${run.highlight}`);
+  }
+  if (run.fontFamily) {
+    parts.push(`ff:${run.fontFamily}`);
+  }
+  if (run.fontSize !== undefined) {
+    parts.push(`fs:${run.fontSize}`);
+  }
+  if (run.letterSpacing !== undefined) {
+    parts.push(`ls:${run.letterSpacing}`);
+  }
+  if (run.superscript) {
+    parts.push("sup");
+  }
+  if (run.subscript) {
+    parts.push("sub");
+  }
+  if (run.allCaps) {
+    parts.push("ac");
+  }
+  if (run.smallCaps) {
+    parts.push("sc");
+  }
+  if (run.positionPx !== undefined) {
+    parts.push(`pp:${run.positionPx}`);
+  }
+  if (run.horizontalScale !== undefined && run.horizontalScale !== 100) {
+    parts.push(`hs:${run.horizontalScale}`);
+  }
+  if (run.imprint) {
+    parts.push("imp");
+  }
+  if (run.emboss) {
+    parts.push("emb");
+  }
+  if (run.textShadow) {
+    parts.push("sh");
+  }
+  if (run.textOutline) {
+    parts.push("ol");
+  }
+  if (run.emphasisMark) {
+    parts.push(`emk:${run.emphasisMark}`);
+  }
+  if (run.hyperlink) {
+    parts.push(`hl:${run.hyperlink.href}`);
+  }
+  return parts.join("|");
+}
+
+function headerFooterContentFingerprint(
+  prefix: string,
+  entries: ReadonlyMap<string, HeaderFooterContent> | undefined,
+): string[] {
+  if (!entries) {
+    return [];
+  }
+  return Array.from(entries.entries())
+    .toSorted(([left], [right]) => left.localeCompare(right))
+    .map(
+      ([rId, content]) =>
+        `${prefix}:${rId},${content.blocks.length},${content.height},${
+          content.visualTop ?? 0
+        },${content.visualBottom ?? content.height},${content.textSig ?? ""}`,
+    );
 }
 
 /**
@@ -2151,30 +2919,50 @@ function collectAnnotationFingerprint(block: FlowBlock, parts: string[]): void {
 function computeOptionsHash(options: RenderPageOptions): string {
   const parts: string[] = [];
 
-  // Header/footer content changes affect all pages
+  // Header/footer content changes affect all pages. Include `textSig` so
+  // same-height in-place edits (typing a replacement char, bold toggle, etc.)
+  // invalidate the hash and force the per-page shells to re-render — block
+  // count / height / visualBounds alone miss those (Codex #487 P1: 21:02
+  // review). Include `rId` so switching to a different HF part with
+  // identical content invalidates the hash too — otherwise the painted
+  // `data-rid` would stay stale (Codex #487 P2: 22:48 review).
   if (options.headerContent) {
     parts.push(
       `hdr:${options.headerContent.blocks.length},${options.headerContent.height},${
         options.headerContent.visualTop ?? 0
-      },${options.headerContent.visualBottom ?? options.headerContent.height}`,
+      },${options.headerContent.visualBottom ?? options.headerContent.height},${
+        options.headerContent.rId ?? ""
+      },${options.headerContent.textSig ?? ""}`,
     );
   }
   if (options.footerContent) {
     parts.push(
       `ftr:${options.footerContent.blocks.length},${options.footerContent.height},${
         options.footerContent.visualTop ?? 0
-      },${options.footerContent.visualBottom ?? options.footerContent.height}`,
+      },${options.footerContent.visualBottom ?? options.footerContent.height},${
+        options.footerContent.rId ?? ""
+      },${options.footerContent.textSig ?? ""}`,
     );
   }
+  parts.push(
+    ...headerFooterContentFingerprint("hdr-map", options.headerContentByRId),
+  );
+  parts.push(
+    ...headerFooterContentFingerprint("ftr-map", options.footerContentByRId),
+  );
 
   if (options.firstPageHeaderContent) {
     parts.push(
-      `fp-hdr:${options.firstPageHeaderContent.blocks.length},${options.firstPageHeaderContent.height}`,
+      `fp-hdr:${options.firstPageHeaderContent.blocks.length},${options.firstPageHeaderContent.height},${
+        options.firstPageHeaderContent.rId ?? ""
+      },${options.firstPageHeaderContent.textSig ?? ""}`,
     );
   }
   if (options.firstPageFooterContent) {
     parts.push(
-      `fp-ftr:${options.firstPageFooterContent.blocks.length},${options.firstPageFooterContent.height}`,
+      `fp-ftr:${options.firstPageFooterContent.blocks.length},${options.firstPageFooterContent.height},${
+        options.firstPageFooterContent.rId ?? ""
+      },${options.firstPageFooterContent.textSig ?? ""}`,
     );
   }
   if (options.titlePg) {
@@ -2199,6 +2987,53 @@ function computeOptionsHash(options: RenderPageOptions): string {
     parts.push(`fd:${options.footerDistance}`);
   }
 
+  // Watermark identity. Without this, virtualized large documents
+  // (8+ pages) keep already-rendered page shells when a watermark is
+  // added, removed, or mutated — `repopulatePageContent` only refreshes
+  // the content area and leaves the old watermark sibling behind. The
+  // image src is fingerprinted too so swapping pictures invalidates.
+  if (options.watermark) {
+    parts.push(`wm:${JSON.stringify(options.watermark)}`);
+  }
+  if (options.watermarkImageSrc !== undefined) {
+    parts.push(`wmsrc:${options.watermarkImageSrc}`);
+  }
+  if (options.watermarkByHeaderRId) {
+    const entries: [string, Watermark][] = [];
+    for (const [rId, wm] of options.watermarkByHeaderRId) {
+      entries.push([rId, wm]);
+    }
+    entries.sort(([a], [b]) => a.localeCompare(b));
+    parts.push(`wm-map:${JSON.stringify(entries)}`);
+  }
+
+  return parts.join("|");
+}
+
+function sortedMapFingerprint<K, V>(
+  prefix: string,
+  map: ReadonlyMap<K, V> | undefined,
+): string[] {
+  if (!map || map.size === 0) {
+    return [];
+  }
+
+  const entries: string[] = [];
+  for (const [key, value] of map) {
+    entries.push(`${String(key)}=${String(value)}`);
+  }
+  entries.sort();
+  return [`${prefix}:${entries.join(",")}`];
+}
+
+function computeFieldContextHash(options: RenderPageOptions): string {
+  const parts: string[] = [];
+  parts.push(...sortedMapFingerprint("bm-page", options.bookmarkPages));
+  parts.push(...sortedMapFingerprint("bm-text", options.bookmarkText));
+  parts.push(...sortedMapFingerprint("seq", options.seqValues));
+  parts.push(
+    ...sortedMapFingerprint("section-pages", options.sectionPageCounts),
+  );
   return parts.join("|");
 }
 
@@ -2218,7 +3053,9 @@ function applyContainerStyles(container: HTMLElement, pageGap: number): void {
  * Number of pages to render above and below the visible area.
  * Keeps nearby pages ready for smooth scrolling.
  */
-const VIRTUALIZATION_BUFFER = 2;
+const VIRTUALIZATION_BUFFER = 1;
+const VIRTUALIZATION_ROOT_MARGIN_PX = 1000;
+const INITIAL_EAGER_RENDER_PAGES = 3;
 
 /**
  * Minimum page count before virtualization kicks in.
@@ -2250,6 +3087,7 @@ export function renderPages(
   const pc = container as PageContainer;
   const prevState = pc.__pageRenderState;
   const currentOptionsHash = computeOptionsHash(options);
+  const currentFieldContextHash = computeFieldContextHash(options);
   const useVirtualization = totalPages >= VIRTUALIZATION_THRESHOLD;
 
   // Determine if we can do an incremental update
@@ -2264,51 +3102,87 @@ export function renderPages(
     const prevDataMap = prevState.pageDataMap;
     const observer = pc.__pageObserver;
 
-    // Compute new fingerprints
-    const newFingerprints: string[] = [];
-    for (const page of pages) {
-      newFingerprints.push(computePageFingerprint(page, options.blockLookup));
-    }
-
     // If total page count changed, NUMPAGES fields in headers/footers are stale.
     // Force re-render of all currently-rendered pages.
     const totalPagesChanged = prevState.totalPages !== totalPages;
+    const fieldContextChanged =
+      prevState.fieldContextHash !== currentFieldContextHash;
 
     // Update existing pages
     const commonCount = Math.min(prevShells.length, pages.length);
     for (let i = 0; i < commonCount; i++) {
       const prev = prevShells[i]!; // SAFETY: i < commonCount <= prevShells.length
-      const newFp = newFingerprints[i]!; // SAFETY: i < commonCount <= pages.length
+      const page = pages[i]!; // SAFETY: i < commonCount <= pages.length
+      const data = prevDataMap.get(prev.element);
+      if (!data) {
+        continue;
+      }
 
-      if (prev.fingerprint === newFp && !totalPagesChanged) {
-        // Page unchanged — update data map with new page data (references may differ)
-        const data = prevDataMap.get(prev.element);
-        if (data) {
-          data.page = pages[i]!; // SAFETY: i < commonCount <= pages.length
-        }
+      const oldPage = data.page;
+      data.page = page;
+
+      if (!data.rendered) {
+        prev.fingerprint = null;
+        prev.renderFingerprint = null;
+        applyPageStyles(prev.element, page.size.w, page.size.h, options);
+        syncPageBorderOverlay(
+          prev.element,
+          page,
+          options,
+          options.document ?? document,
+        );
+        prev.element.dataset["pageNumber"] = String(page.number);
+        continue;
+      }
+
+      const newFp = computePageFingerprint(page, options.blockLookup);
+
+      if (
+        prev.fingerprint === newFp &&
+        !totalPagesChanged &&
+        !fieldContextChanged
+      ) {
+        // Page unchanged — data map already points at the fresh page object.
         continue;
       }
 
       // Page changed — update the shell
       const shell = prev.element;
-      const data = prevDataMap.get(shell);
+      const pageContextChanged = totalPagesChanged || fieldContextChanged;
+      if (pageContextChanged) {
+        shell.innerHTML = "";
+        data.rendered = false;
+        populatePageShell(shell, prevDataMap, totalPages, options);
+        applyPageStyles(shell, page.size.w, page.size.h, options);
+        syncPageBorderOverlay(
+          shell,
+          page,
+          options,
+          options.document ?? document,
+        );
+        shell.dataset["pageNumber"] = String(page.number);
+        continue;
+      }
 
-      // Update data map entry
-      if (data) {
-        data.page = pages[i]!; // SAFETY: i < commonCount <= pages.length
+      const newRenderFp = computePageRenderFingerprint(
+        page,
+        options.blockLookup,
+      );
 
-        if (data.rendered) {
-          // Surgically replace only the content area, preserving header/footer
-          repopulatePageContent(shell, prevDataMap, totalPages, options);
-        }
-        // If not rendered, it will be populated when it scrolls into view
+      const renderChanged = prev.renderFingerprint !== newRenderFp;
+      const positionsSynced =
+        !renderChanged && syncRenderedPmPositionData(shell, oldPage, data.page);
+
+      if (!positionsSynced) {
+        // Surgically replace only the content area, preserving header/footer
+        repopulatePageContent(shell, prevDataMap, totalPages, options);
       }
 
       // Update fingerprint
       prev.fingerprint = newFp;
+      prev.renderFingerprint = newRenderFp;
 
       // Update page styles in case size changed
-      const page = pages[i]!; // SAFETY: i < commonCount <= pages.length
       applyPageStyles(shell, page.size.w, page.size.h, options);
       syncPageBorderOverlay(shell, page, options, options.document ?? document);
       shell.dataset["pageNumber"] = String(page.number);
@@ -2327,7 +3201,11 @@ export function renderPages(
         syncPageBorderOverlay(pageEl, page, options, doc);
         container.append(pageEl);
 
-        prevShells.push({ element: pageEl, fingerprint: newFingerprints[i]! }); // SAFETY: i < pages.length
+        prevShells.push({
+          element: pageEl,
+          fingerprint: null,
+          renderFingerprint: null,
+        });
         prevDataMap.set(pageEl, { page, index: i, rendered: false });
 
         if (observer) {
@@ -2359,8 +3237,13 @@ export function renderPages(
 
     // Update stored state with fresh options (blockLookup, footnotes, etc.)
     prevState.totalPages = totalPages;
+    prevState.fieldContextHash = currentFieldContextHash;
     prevState.currentOptions = options;
 
+    // Incremental path: existing shells were repopulated in place; fire
+    // painter:painted so caret/selection overlays recompute against the
+    // freshly written DOM (Codex #487 P2: 22:09 review).
+    emitPainterPainted(container);
     return;
   }
 
@@ -2381,11 +3264,9 @@ export function renderPages(
 
   // Build all page shells
   const pageShells: HTMLElement[] = [];
-  const fingerprints: string[] = [];
 
   for (let i = 0; i < pages.length; i++) {
     const page = pages[i]!; // SAFETY: i < pages.length
-    fingerprints.push(computePageFingerprint(page, options.blockLookup));
 
     if (!useVirtualization) {
       // Small document: render all pages eagerly
@@ -2413,7 +3294,12 @@ export function renderPages(
 
   if (!useVirtualization) {
     // Store state for potential future incremental updates (won't be used
-    // since small docs skip the incremental path, but keeps data consistent)
+    // since small docs skip the incremental path, but keeps data consistent).
+    // Fire painter:painted before returning so consumers — notably
+    // HfCaretOverlay, which recomputes after the painter writes new HF
+    // DOM — see the event in the common small-document path too
+    // (Codex #487 P2: 22:09 review).
+    emitPainterPainted(container);
     return;
   }
 
@@ -2521,7 +3407,7 @@ export function renderPages(
     },
     {
       root: null,
-      rootMargin: "1500px 0px 1500px 0px",
+      rootMargin: `${VIRTUALIZATION_ROOT_MARGIN_PX}px 0px ${VIRTUALIZATION_ROOT_MARGIN_PX}px 0px`,
     },
   );
 
@@ -2534,21 +3420,57 @@ export function renderPages(
   // so the populatePageShell calls below can find state if needed.
   pc.__pageObserver = observer;
   pc.__pageRenderState = {
-    pageStates: pageShells.map((el, i) => ({
+    pageStates: pageShells.map((el) => ({
       element: el,
-      fingerprint: fingerprints[i]!, // SAFETY: fingerprints built with same indices as pageShells
+      fingerprint: null,
+      renderFingerprint: null,
     })),
     totalPages,
     optionsHash: currentOptionsHash,
+    fieldContextHash: currentFieldContextHash,
     pageDataMap,
     currentOptions: options,
   };
 
   // Eagerly render the first few pages so the initial view isn't blank
-  const initialRenderCount = Math.min(pages.length, VIRTUALIZATION_BUFFER + 3);
+  const initialRenderCount = Math.min(pages.length, INITIAL_EAGER_RENDER_PAGES);
   for (let i = 0; i < initialRenderCount; i++) {
     populatePageShell(pageShells[i]!, pageDataMap, totalPages, options); // SAFETY: i < initialRenderCount <= pages.length
   }
+
+  emitPainterPainted(container);
+}
+
+// =============================================================================
+// painter:painted event bus
+// =============================================================================
+//
+// Subscribers (e.g. SelectionOverlay's HF caret cache, hidden HF PMs) need a
+// single signal that the painter has finished writing children for the current
+// layout pass. The body's hidden-PM + painter pipeline already exposes this
+// implicitly via `syncCoordinator.onLayoutComplete`; for HF caret math the
+// snapshot needs to invalidate the moment the painted DOM changes. A bubbling
+// CustomEvent on the container element keeps the API ergonomic
+// (`container.addEventListener("painter:painted", ...)`) without introducing a
+// global EventTarget that would leak across multiple editor mounts.
+
+export const PAINTER_PAINTED_EVENT = "painter:painted" as const;
+
+export type PainterPaintedDetail = {
+  container: HTMLElement;
+  pageCount: number;
+};
+
+function emitPainterPainted(container: HTMLElement): void {
+  const pageCount = container.querySelectorAll(
+    `.${PAGE_CLASS_NAMES.page}`,
+  ).length;
+  const event = new CustomEvent<PainterPaintedDetail>(PAINTER_PAINTED_EVENT, {
+    detail: { container, pageCount },
+    bubbles: true,
+    cancelable: false,
+  });
+  container.dispatchEvent(event);
 }
 
 /**
@@ -2589,6 +3511,19 @@ function populatePageShell(
   }
 
   data.rendered = true;
+  syncPageShellFingerprints(shell, data, options);
+
+  // Fire painter:painted on the pages container so HfCaretOverlay
+  // recomputes against the now-populated shell. Without this, an HF
+  // edit on a later page in a virtualized doc would emit
+  // painter:painted while only the first three shells were populated
+  // (full-rebuild path), the overlay would clear, and the caret would
+  // not return until another transaction (Codex #487 P2: 22:27
+  // review).
+  const container = shell.parentElement;
+  if (container instanceof HTMLElement) {
+    emitPainterPainted(container);
+  }
 }
 
 /**
@@ -2625,12 +3560,139 @@ function repopulatePageContent(
   if (newContentEl && oldContentEl) {
     // Replace only the content area — header/footer stay untouched
     oldContentEl.replaceWith(newContentEl);
-  } else {
-    // Fallback: full replace if structure doesn't match
-    shell.innerHTML = "";
-    data.rendered = false;
-    populatePageShell(shell, pageDataMap, totalPages, options);
+    syncPageWatermarkOverlay(
+      shell,
+      data.page,
+      pageOptions,
+      options.document ?? document,
+    );
+    return;
   }
+
+  // Fallback: full replace if structure doesn't match
+  shell.innerHTML = "";
+  data.rendered = false;
+  populatePageShell(shell, pageDataMap, totalPages, options);
+}
+
+function syncRenderedPmPositionData(
+  shell: HTMLElement,
+  oldPage: Page,
+  newPage: Page,
+): boolean {
+  const delta = getUniformPagePositionDelta(oldPage, newPage);
+  if (delta === null) {
+    return false;
+  }
+  if (delta === 0) {
+    return true;
+  }
+
+  for (const element of shell.querySelectorAll<HTMLElement>(
+    "[data-pm-start], [data-pm-end], [data-table-pm-start]",
+  )) {
+    shiftNumericDatasetValue(element, "pmStart", delta);
+    shiftNumericDatasetValue(element, "pmEnd", delta);
+    shiftNumericDatasetValue(element, "tablePmStart", delta);
+  }
+  return true;
+}
+
+function getUniformPagePositionDelta(
+  oldPage: Page,
+  newPage: Page,
+): number | null {
+  if (oldPage.fragments.length !== newPage.fragments.length) {
+    return null;
+  }
+
+  let delta: number | null = null;
+  for (let i = 0; i < oldPage.fragments.length; i++) {
+    const oldFragment = oldPage.fragments[i];
+    const newFragment = newPage.fragments[i];
+    if (!oldFragment || !newFragment) {
+      return null;
+    }
+    if (
+      oldFragment.kind !== newFragment.kind ||
+      oldFragment.blockId !== newFragment.blockId
+    ) {
+      return null;
+    }
+
+    const startDelta = readPositionDelta(
+      oldFragment.pmStart,
+      newFragment.pmStart,
+    );
+    if (startDelta !== null) {
+      if (delta !== null && delta !== startDelta) {
+        return null;
+      }
+      delta = startDelta;
+    }
+
+    const endDelta = readPositionDelta(oldFragment.pmEnd, newFragment.pmEnd);
+    if (endDelta !== null) {
+      if (delta !== null && delta !== endDelta) {
+        return null;
+      }
+      delta = endDelta;
+    }
+  }
+
+  return delta;
+}
+
+function readPositionDelta(
+  previous: number | undefined,
+  next: number | undefined,
+): number | null {
+  if (previous === undefined && next === undefined) {
+    return null;
+  }
+  if (previous === undefined || next === undefined) {
+    return null;
+  }
+  return next - previous;
+}
+
+function shiftNumericDatasetValue(
+  element: HTMLElement,
+  key: "pmEnd" | "pmStart" | "tablePmStart",
+  delta: number,
+): void {
+  const value = element.dataset[key];
+  if (value === undefined) {
+    return;
+  }
+
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return;
+  }
+
+  element.dataset[key] = String(numeric + delta);
+}
+
+function syncPageShellFingerprints(
+  shell: HTMLElement,
+  data: { page: Page; index: number },
+  options: FullPageOptions,
+): void {
+  const container = shell.parentElement as PageContainer | null;
+  const pageState = container?.__pageRenderState?.pageStates[data.index];
+  if (!pageState || pageState.element !== shell) {
+    return;
+  }
+
+  pageState.fingerprint = computePageFingerprint(
+    data.page,
+    options.blockLookup,
+  );
+  pageState.renderFingerprint = computePageRenderFingerprint(
+    data.page,
+    options.blockLookup,
+  );
 }
 
 /**
@@ -2700,4 +3762,11 @@ function depopulatePageShell(
 
   shell.innerHTML = "";
   data.rendered = false;
+
+  const container = shell.parentElement as PageContainer | null;
+  const pageState = container?.__pageRenderState?.pageStates[data.index];
+  if (pageState?.element === shell) {
+    pageState.fingerprint = null;
+    pageState.renderFingerprint = null;
+  }
 }

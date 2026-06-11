@@ -1,8 +1,9 @@
 import { useState } from "react";
 import type { ComponentProps } from "react";
 
-import { useForm, useStore } from "@tanstack/react-form";
+import { useForm } from "@tanstack/react-form";
 import { useQuery } from "@tanstack/react-query";
+import { useSelector } from "@tanstack/react-store";
 import { Result } from "better-result";
 import { UserPlusIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
@@ -124,7 +125,7 @@ export const InviteMemberDialog = ({
     },
   });
 
-  const formErrors = useStore(form.store, (s) => toFormErrors(s.fieldMeta));
+  const formErrors = useSelector(form.store, (s) => toFormErrors(s.fieldMeta));
 
   if (
     currentUserRole === undefined ||
@@ -155,8 +156,7 @@ export const InviteMemberDialog = ({
           errors={formErrors}
           onSubmit={(e) => {
             e.preventDefault();
-            // eslint-disable-next-line typescript/no-floating-promises
-            form.handleSubmit();
+            void form.handleSubmit();
           }}
         >
           <DialogHeader>

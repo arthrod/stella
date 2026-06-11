@@ -12,6 +12,7 @@
 
 import type { Node as PMNode, Mark } from "prosemirror-model";
 
+import { narrowEnum, ShapeOutlineStyleSchema } from "../../docx/parserEnums";
 import type {
   ImageWrap,
   ImagePosition,
@@ -22,6 +23,8 @@ import type {
   SectionStart,
 } from "../../types/content";
 import type {
+  BlockContent,
+  BlockSdt,
   Document,
   DocumentBody,
   Paragraph,
@@ -47,7 +50,6 @@ import type {
   NoteReferenceContent,
   SimpleField,
   ComplexField,
-  FieldType,
   InlineSdt,
   SdtProperties,
   TrackedChangeInfo,
@@ -55,27 +57,170 @@ import type {
   ColorValue,
   CellMargins,
 } from "../../types/document";
+import {
+  OUTLINE_STYLE_CSS_ALIASES,
+  type OutlineStyleCssAlias,
+} from "../../types/documentEnumValues";
 import { pixelsToEmu } from "../../utils/units";
-import { applyRunFormattingOverrideMark } from "../extensions/marks/RunFormattingOverrideExtension";
-import type { ShapeAttrs } from "../extensions/nodes/ShapeExtension";
-import type { TextBoxAttrs } from "../extensions/nodes/TextBoxExtension";
-import type {
-  TextColorAttrs,
-  UnderlineAttrs,
-  FontFamilyAttrs,
-} from "../schema/marks";
+import {
+  expectCharacterSpacingMarkAttrs,
+  expectCommentMarkAttrs,
+  expectEmphasisMarkAttrs,
+  expectTextEffectMarkAttrs,
+  expectFieldAttrs,
+  expectFontFamilyMarkAttrs,
+  expectFontSizeMarkAttrs,
+  expectFootnoteRefMarkAttrs,
+  expectHardBreakAttrs,
+  expectHighlightMarkAttrs,
+  expectRunShadingMarkAttrs,
+  expectHyperlinkMarkAttrs,
+  expectImageAttrs,
+  expectMathAttrs,
+  expectParagraphAttrs,
+  expectRunFormattingOverrideMarkAttrs,
+  expectBlockSdtAttrs,
+  expectSdtAttrs,
+  expectShapeAttrs,
+  expectStrikeMarkAttrs,
+  expectTableAttrs,
+  expectTableCellAttrs,
+  expectTableRowAttrs,
+  expectTextBoxAttrs,
+  expectTextColorMarkAttrs,
+  expectTrackedChangeMarkAttrs,
+  expectUnderlineMarkAttrs,
+} from "../attrs";
+import type { RunFormattingOverrideAttrs } from "../schema/marks";
 import type {
   ParagraphAttrs,
-  ImageAttrs,
   TableAttrs,
   TableRowAttrs,
   TableCellAttrs,
+  ImagePositionAttrs,
+  TextBoxAttrs,
 } from "../schema/nodes";
+import { assertValidProseMirrorDocument } from "../validation";
+import { runShadingAttrsToShading } from "./runShadingMark";
+
+function normalizeShapeOutlineStyle(
+  style: string | undefined,
+): ShapeOutline["style"] | undefined {
+  if (!style) {
+    return undefined;
+  }
+  // Map a folio CSS alias to its OOXML dash style; OOXML values pass through.
+  // `"none"` is not an OOXML dash style, so it narrows to undefined here — the
+  // serializer's no-outline guard must drop the `<a:ln>` before calling this.
+  if (style in OUTLINE_STYLE_CSS_ALIASES) {
+    // SAFETY: the `in` check narrows `style` to a CSS-alias key.
+    return OUTLINE_STYLE_CSS_ALIASES[style as OutlineStyleCssAlias];
+  }
+  return narrowEnum(style, ShapeOutlineStyleSchema);
+}
+
+function parseTransformAttr(
+  transformStr: string | undefined,
+): ImageTransform | undefined {
+  if (!transformStr) {
+    return undefined;
+  }
+  const transform: ImageTransform = {};
+  const rotateMatch = /rotate\(([-\d.]+)deg\)/u.exec(transformStr);
+  if (rotateMatch) {
+    const rotation = Number.parseFloat(rotateMatch[1]!);
+    if (Number.isFinite(rotation)) {
+      transform.rotation = rotation;
+    }
+  }
+  if (transformStr.includes("scaleX(-1)")) {
+    transform.flipH = true;
+  }
+  if (transformStr.includes("scaleY(-1)")) {
+    transform.flipV = true;
+  }
+  if (
+    transform.rotation === undefined &&
+    !transform.flipH &&
+    !transform.flipV
+  ) {
+    return undefined;
+  }
+  return transform;
+}
+
+function imagePositionFromAttrs(
+  attrs: ImagePositionAttrs | undefined,
+): ImagePosition | undefined {
+  const horizontalPosition = attrs?.horizontal;
+  const verticalPosition = attrs?.vertical;
+  if (!horizontalPosition || !verticalPosition) {
+    return undefined;
+  }
+
+  const horizontal: ImagePosition["horizontal"] = {
+    relativeTo: horizontalPosition.relativeTo || "column",
+  };
+  if (horizontalPosition.align) {
+    horizontal.alignment = horizontalPosition.align;
+  }
+  if (horizontalPosition.posOffset !== undefined) {
+    horizontal.posOffset = horizontalPosition.posOffset;
+  }
+
+  const vertical: ImagePosition["vertical"] = {
+    relativeTo: verticalPosition.relativeTo || "paragraph",
+  };
+  if (verticalPosition.align) {
+    vertical.alignment = verticalPosition.align;
+  }
+  if (verticalPosition.posOffset !== undefined) {
+    vertical.posOffset = verticalPosition.posOffset;
+  }
+
+  return { horizontal, vertical };
+}
+
+function textBoxWrapFromAttrs(attrs: TextBoxAttrs): ImageWrap | undefined {
+  const hasWrapData =
+    (attrs.wrapType !== undefined && attrs.wrapType !== "inline") ||
+    attrs.wrapText !== undefined ||
+    attrs.distTop !== undefined ||
+    attrs.distBottom !== undefined ||
+    attrs.distLeft !== undefined ||
+    attrs.distRight !== undefined;
+  if (!hasWrapData) {
+    return undefined;
+  }
+
+  const wrap: ImageWrap = { type: attrs.wrapType ?? "inline" };
+  if (attrs.wrapText !== undefined) {
+    wrap.wrapText = attrs.wrapText;
+  }
+  if (attrs.distTop !== undefined) {
+    wrap.distT = pixelsToEmu(attrs.distTop);
+  }
+  if (attrs.distBottom !== undefined) {
+    wrap.distB = pixelsToEmu(attrs.distBottom);
+  }
+  if (attrs.distLeft !== undefined) {
+    wrap.distL = pixelsToEmu(attrs.distLeft);
+  }
+  if (attrs.distRight !== undefined) {
+    wrap.distR = pixelsToEmu(attrs.distRight);
+  }
+  return wrap;
+}
 
 /**
  * Convert a ProseMirror document to our Document type
  */
 export function fromProseDoc(pmDoc: PMNode, baseDocument?: Document): Document {
+  assertValidProseMirrorDocument(
+    pmDoc,
+    "Cannot convert invalid ProseMirror document to DOCX model",
+  );
+
   const blocks = extractBlocks(pmDoc);
 
   // Preserve section properties (margins, headers, footers) from base document
@@ -111,28 +256,314 @@ export function fromProseDoc(pmDoc: PMNode, baseDocument?: Document): Document {
 }
 
 /**
- * Extract blocks (paragraphs and tables) from ProseMirror document
+ * Extract block content (paragraphs, tables, block SDTs) from a ProseMirror
+ * document.
  */
-function extractBlocks(pmDoc: PMNode): (Paragraph | Table)[] {
-  const blocks: (Paragraph | Table)[] = [];
+function extractBlocks(pmDoc: PMNode): BlockContent[] {
+  const blocks: BlockContent[] = [];
   const documentCounts = buildDocumentTrackedChangeCounts(pmDoc);
+  let pendingPageBreaks = 0;
+  let previousStandaloneTextBox: PreviousStandaloneTextBox | null = null;
+
+  const flushPendingPageBreaks = (): void => {
+    for (let index = 0; index < pendingPageBreaks; index += 1) {
+      blocks.push(createPageBreakParagraph());
+    }
+    pendingPageBreaks = 0;
+  };
+  const appendPendingPageBreaksToPreviousParagraph = (): boolean => {
+    const previousBlock = blocks.at(-1);
+    if (previousBlock?.type !== "paragraph") {
+      return false;
+    }
+    appendPageBreaks(previousBlock, pendingPageBreaks);
+    pendingPageBreaks = 0;
+    return true;
+  };
 
   // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
   pmDoc.forEach((node) => {
+    if (node.type.name === "pageBreak") {
+      pendingPageBreaks += 1;
+      previousStandaloneTextBox = null;
+      return;
+    }
+
     if (node.type.name === "paragraph") {
-      blocks.push(convertPMParagraph(node, documentCounts));
+      const paragraph = convertPMParagraph(node, documentCounts);
+      prependPageBreaks(paragraph, pendingPageBreaks);
+      pendingPageBreaks = 0;
+      blocks.push(paragraph);
+      previousStandaloneTextBox = null;
     } else if (node.type.name === "table") {
+      if (
+        pendingPageBreaks > 0 &&
+        !appendPendingPageBreaksToPreviousParagraph()
+      ) {
+        flushPendingPageBreaks();
+      }
       blocks.push(convertPMTable(node, documentCounts));
+      previousStandaloneTextBox = null;
     } else if (node.type.name === "textBox") {
-      // Convert text box back to a paragraph containing a shape with text body
-      blocks.push(convertPMTextBox(node));
-    } else if (node.type.name === "pageBreak") {
-      // Convert page break node to a paragraph with a page break run
-      blocks.push(createPageBreakParagraph());
+      previousStandaloneTextBox = appendTextBoxBlock(blocks, node, {
+        pendingPageBreaks,
+        previousStandaloneTextBox,
+      });
+      pendingPageBreaks = 0;
+    } else if (node.type.name === "blockSdt") {
+      if (
+        pendingPageBreaks > 0 &&
+        !appendPendingPageBreaksToPreviousParagraph()
+      ) {
+        flushPendingPageBreaks();
+      }
+      blocks.push(convertPMBlockSdt(node));
+      previousStandaloneTextBox = null;
     }
   });
 
+  if (pendingPageBreaks > 0 && !appendPendingPageBreaksToPreviousParagraph()) {
+    flushPendingPageBreaks();
+  }
+
   return blocks;
+}
+
+type AppendTextBoxBlockOptions = {
+  pendingPageBreaks: number;
+  previousStandaloneTextBox: PreviousStandaloneTextBox | null;
+};
+
+type PreviousStandaloneTextBox = {
+  paragraph: Paragraph;
+  groupId: string;
+};
+
+function convertPMBlockSdt(node: PMNode): BlockSdt {
+  const attrs = expectBlockSdtAttrs(node);
+  const properties: SdtProperties = { sdtType: attrs.sdtType };
+  if (attrs.alias) {
+    properties.alias = attrs.alias;
+  }
+  if (attrs.tag) {
+    properties.tag = attrs.tag;
+  }
+  if (typeof attrs.id === "number") {
+    properties.id = attrs.id;
+  }
+  if (attrs.lock) {
+    properties.lock = attrs.lock;
+  }
+  if (attrs.placeholder) {
+    properties.placeholder = attrs.placeholder;
+  }
+  // Preserve the explicit boolean — including `false`. When the widget
+  // / editor-ref path fills a placeholder-bearing control,
+  // `replaceBlockSdtChildren` sets `showingPlaceholder: false` so the
+  // serializer's `reconcileRawSdtPr` knows to remove the source DOCX's
+  // `<w:showingPlcHdr/>`. A truthy-only check (the prior shape) would
+  // drop that `false` and the saved file would keep marking the
+  // newly filled body as placeholder text.
+  if (attrs.showingPlaceholder !== undefined) {
+    properties.showingPlaceholder = attrs.showingPlaceholder;
+  }
+  if (attrs.dateFormat) {
+    properties.dateFormat = attrs.dateFormat;
+  }
+  if (attrs.dateValueISO) {
+    properties.dateValueISO = attrs.dateValueISO;
+  }
+  if (attrs.listItems) {
+    const items = parseListItemsJson(attrs.listItems);
+    if (items) {
+      properties.listItems = items;
+    }
+  }
+  if (typeof attrs.dropdownLastValue === "string") {
+    properties.dropdownLastValue = attrs.dropdownLastValue;
+  }
+  if (typeof attrs.checked === "boolean") {
+    properties.checked = attrs.checked;
+  }
+  if (attrs.rawPropertiesXml) {
+    properties.rawPropertiesXml = attrs.rawPropertiesXml;
+  }
+  if (attrs.rawEndPropertiesXml) {
+    properties.rawEndPropertiesXml = attrs.rawEndPropertiesXml;
+  }
+  if (attrs.rawSdtChildrenBeforeContent) {
+    properties.rawSdtChildrenBeforeContent = attrs.rawSdtChildrenBeforeContent;
+  }
+  if (attrs.rawSdtChildrenAfterContent) {
+    properties.rawSdtChildrenAfterContent = attrs.rawSdtChildrenAfterContent;
+  }
+
+  // Recursively materialize children. PM `blockSdt` content is `block+`, so a
+  // mini-doc node is a convenient way to reuse extractBlocks.
+  const innerDoc = node.type.schema.node("doc", null, node.content);
+  const extracted = extractBlocks(innerDoc);
+
+  // `toProseDoc` inserts a synthetic filler paragraph into any blockSdt
+  // whose source had an empty `<w:sdtContent/>` and stamps the
+  // `_originallyEmpty` marker on the PM node. Use that explicit marker
+  // (not a shape heuristic) to drop the filler on save — an authored
+  // `<w:sdtContent><w:p/></w:sdtContent>` does NOT carry the marker
+  // and its empty paragraph survives the round trip intact. If the
+  // user typed into the filler we still preserve the paragraph,
+  // matching their intent.
+  const wasOriginallyEmpty = attrs._originallyEmpty === true;
+  const content =
+    wasOriginallyEmpty && isStillSyntheticFiller(extracted) ? [] : extracted;
+
+  return { type: "blockSdt", properties, content };
+}
+
+function isStillSyntheticFiller(blocks: BlockContent[]): boolean {
+  if (blocks.length !== 1) {
+    return false;
+  }
+  const block = blocks[0];
+  if (!block || block.type !== "paragraph") {
+    return false;
+  }
+  if (block.content.length !== 0) {
+    return false;
+  }
+  // Reject anything that signals real editing (formatting, mark changes,
+  // section properties) — if the user authored content, preserve it.
+  if (block.formatting !== undefined) {
+    return false;
+  }
+  if (block.sectionProperties !== undefined) {
+    return false;
+  }
+  if (block.propertyChanges !== undefined) {
+    return false;
+  }
+  if (block.pPrMark !== undefined) {
+    return false;
+  }
+  return true;
+}
+
+function parseListItemsJson(
+  raw: string,
+): { displayText: string; value: string }[] | undefined {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return undefined;
+    }
+    const items: { displayText: string; value: string }[] = [];
+    for (const entry of parsed) {
+      if (
+        entry !== null &&
+        typeof entry === "object" &&
+        "displayText" in entry &&
+        "value" in entry &&
+        typeof (entry as { displayText: unknown }).displayText === "string" &&
+        typeof (entry as { value: unknown }).value === "string"
+      ) {
+        items.push(entry as { displayText: string; value: string });
+      }
+    }
+    return items.length > 0 ? items : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function appendTextBoxBlock(
+  blocks: BlockContent[],
+  node: PMNode,
+  options: AppendTextBoxBlockOptions,
+): PreviousStandaloneTextBox | null {
+  const attrs = expectTextBoxAttrs(node);
+  const paragraph = convertPMTextBox(node);
+  const previousBlock = blocks.at(-1);
+  if (
+    attrs._docxPlacement === "inlineWithPrevious" &&
+    previousBlock?.type === "paragraph"
+  ) {
+    appendPageBreaks(previousBlock, options.pendingPageBreaks);
+    previousBlock.content.push(...paragraph.content);
+    return null;
+  }
+
+  if (
+    attrs._docxPlacement === "standalone" &&
+    attrs._docxGroupId &&
+    options.previousStandaloneTextBox?.groupId === attrs._docxGroupId
+  ) {
+    options.previousStandaloneTextBox.paragraph.content.push(
+      ...paragraph.content,
+    );
+    return options.previousStandaloneTextBox;
+  }
+
+  prependPageBreaks(paragraph, options.pendingPageBreaks);
+  blocks.push(paragraph);
+  return attrs._docxPlacement === "standalone" && attrs._docxGroupId
+    ? { paragraph, groupId: attrs._docxGroupId }
+    : null;
+}
+
+/**
+ * Inverse of toProseDoc's listRendering → list* attrs flattening. Markdown
+ * export (`toMarkdown`) and re-layout of the rebuilt Document key off
+ * `paragraph.listRendering`; without this, every edited document loses its
+ * list markers on the way out of the editor.
+ */
+function listRenderingFromAttrs(
+  attrs: ParagraphAttrs,
+): Paragraph["listRendering"] {
+  const numId = attrs.numPr?.numId;
+  if (numId === undefined || numId === 0) {
+    return undefined;
+  }
+  const hasRenderingInfo =
+    attrs.listMarker != null || attrs.listIsBullet || attrs.listNumFmt != null;
+  if (!hasRenderingInfo) {
+    return undefined;
+  }
+  return {
+    marker: attrs.listMarker ?? "",
+    level: attrs.numPr?.ilvl ?? 0,
+    numId,
+    isBullet: attrs.listIsBullet ?? false,
+    ...(attrs.listIsLegal != null && { isLegal: attrs.listIsLegal }),
+    ...(attrs.listNumFmt != null && { numFmt: attrs.listNumFmt }),
+    ...(attrs.listMarkerHidden != null && {
+      markerHidden: attrs.listMarkerHidden,
+    }),
+    ...(attrs.listMarkerFontFamily != null && {
+      markerFontFamily: attrs.listMarkerFontFamily,
+    }),
+    ...(attrs.listMarkerFontSize != null && {
+      markerFontSize: attrs.listMarkerFontSize,
+    }),
+    ...(attrs.listMarkerSuffix != null && {
+      markerSuffix: attrs.listMarkerSuffix,
+    }),
+    ...(attrs.listMarkerAllCaps != null && {
+      markerAllCaps: attrs.listMarkerAllCaps,
+    }),
+    ...(attrs.listImplicitChildLevelAdvances != null && {
+      implicitChildLevelAdvances: attrs.listImplicitChildLevelAdvances,
+    }),
+    ...(attrs.listMarkerSecondSlotOffsetTwips != null && {
+      markerSecondSlotOffsetTwips: attrs.listMarkerSecondSlotOffsetTwips,
+    }),
+    ...(attrs.listLevelNumFmts != null && {
+      levelNumFmts: attrs.listLevelNumFmts,
+    }),
+    ...(attrs.listAbstractNumId != null && {
+      abstractNumId: attrs.listAbstractNumId,
+    }),
+    ...(attrs.listStartOverride != null && {
+      startOverride: attrs.listStartOverride,
+    }),
+  };
 }
 
 /**
@@ -147,6 +578,25 @@ function createPageBreakParagraph(): Paragraph {
   };
 }
 
+function createPageBreakRun(): Run {
+  return {
+    type: "run",
+    content: [{ type: "break", breakType: "page" }],
+  };
+}
+
+function prependPageBreaks(paragraph: Paragraph, count: number): void {
+  for (let index = 0; index < count; index += 1) {
+    paragraph.content.unshift(createPageBreakRun());
+  }
+}
+
+function appendPageBreaks(paragraph: Paragraph, count: number): void {
+  for (let index = 0; index < count; index += 1) {
+    paragraph.content.push(createPageBreakRun());
+  }
+}
+
 /**
  * Convert a ProseMirror paragraph node to our Paragraph type
  */
@@ -154,8 +604,12 @@ function convertPMParagraph(
   node: PMNode,
   documentCounts?: TrackedChangeCounts,
 ): Paragraph {
-  const attrs = node.attrs as ParagraphAttrs;
-  let content = extractParagraphContent(node, documentCounts);
+  const attrs = expectParagraphAttrs(node);
+  let content = extractParagraphContent(
+    node,
+    documentCounts,
+    attrs._emptyHyperlinks ?? undefined,
+  );
 
   // Emit BookmarkStart/End from bookmarks attr (for TOC anchors, cross-references)
   const bookmarks = attrs.bookmarks as
@@ -188,6 +642,10 @@ function convertPMParagraph(
   if (pFormatting) {
     paragraph.formatting = pFormatting;
   }
+  const listRendering = listRenderingFromAttrs(attrs);
+  if (listRendering) {
+    paragraph.listRendering = listRendering;
+  }
   if (attrs.renderedPageBreakBefore) {
     paragraph.renderedPageBreakBefore = true;
   }
@@ -211,6 +669,10 @@ function convertPMParagraph(
     attrs._propertyChanges.length > 0
   ) {
     paragraph.propertyChanges = [...attrs._propertyChanges];
+  }
+
+  if (attrs.pPrMark) {
+    paragraph.pPrMark = attrs.pPrMark;
   }
 
   return paragraph;
@@ -379,13 +841,22 @@ function extractParagraphContent(
   // — `moveFrom`/`moveTo` round-trip is now driven by the explicit
   // `moveKind` mark attribute set by `toProseDoc`.
   _documentCounts?: TrackedChangeCounts,
+  emptyHyperlinks?: NonNullable<ParagraphAttrs["_emptyHyperlinks"]>,
 ): ParagraphContent[] {
   const content: ParagraphContent[] = [];
+  const sortedEmptyHyperlinks = (emptyHyperlinks ?? [])
+    .map((attrs, order) => ({ attrs, order }))
+    .toSorted(
+      (left, right) =>
+        left.attrs.offset - right.attrs.offset || left.order - right.order,
+    );
+  let nextEmptyHyperlink = 0;
 
   // Track current run being built
   let currentRun: Run | null = null;
   let currentMarksKey: string | null = null;
   let currentHyperlink: Hyperlink | null = null;
+  let currentHyperlinkKey: string | null = null;
   const openedComments = new Set<number>();
 
   const flushCurrentInline = () => {
@@ -397,6 +868,7 @@ function extractParagraphContent(
     if (currentHyperlink) {
       content.push(currentHyperlink);
       currentHyperlink = null;
+      currentHyperlinkKey = null;
     }
   };
 
@@ -438,27 +910,28 @@ function extractParagraphContent(
     }
   };
 
-  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
-  paragraph.forEach((node) => {
+  const flushEmptyHyperlinksThroughOffset = (offset: number): void => {
+    while (nextEmptyHyperlink < sortedEmptyHyperlinks.length) {
+      const item = sortedEmptyHyperlinks[nextEmptyHyperlink];
+      if (!item || item.attrs.offset > offset) {
+        break;
+      }
+      nextEmptyHyperlink += 1;
+      flushCurrentInline();
+      content.push(createEmptyHyperlink(item.attrs));
+    }
+  };
+
+  const processInlineNode = (node: PMNode): void => {
     syncCommentRanges(node);
+    const linkMark = node.marks.find((m) => m.type.name === "hyperlink");
 
     // Check for footnote/endnote reference mark
     const noteRefMark = node.marks.find((m) => m.type.name === "footnoteRef");
-    if (noteRefMark) {
+    if (noteRefMark && !linkMark) {
       // Finish any current content
       flushCurrentInline();
-      const noteType =
-        noteRefMark.attrs["noteType"] === "endnote"
-          ? "endnoteRef"
-          : "footnoteRef";
-      const noteRef: NoteReferenceContent = {
-        type: noteType,
-        id: Number.parseInt(noteRefMark.attrs["id"], 10) || 0,
-      };
-      content.push({
-        type: "run",
-        content: [noteRef],
-      });
+      content.push(createNoteReferenceRun(noteRefMark));
       return;
     }
 
@@ -473,25 +946,22 @@ function extractParagraphContent(
       if (!changeMark) {
         return;
       }
+      const changeAttrs = expectTrackedChangeMarkAttrs(changeMark);
       // Filter out the tracked change mark for text formatting extraction
       const otherMarks = node.marks.filter(
         (m) => m.type.name !== "insertion" && m.type.name !== "deletion",
       );
-      const formatting = marksToTextFormatting(otherMarks);
-      const run: Run = {
-        type: "run",
-        content:
-          node.isText && node.text ? [{ type: "text", text: node.text }] : [],
-        ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
-      };
+      const run = createTrackedChangeRun(node, otherMarks);
+      if (!run) {
+        return;
+      }
 
       const info: TrackedChangeInfo = {
-        id: changeMark.attrs["revisionId"] as number,
-        author: (changeMark.attrs["author"] as string) || "Unknown",
+        id: changeAttrs.revisionId,
+        author: changeAttrs.author || "Unknown",
       };
-      const dateStr = changeMark.attrs["date"] as string;
-      if (dateStr) {
-        info.date = dateStr;
+      if (changeAttrs.date) {
+        info.date = changeAttrs.date;
       }
       // The mark itself records whether it originated as a
       // `w:moveTo` / `w:moveFrom`. The previous "is there both an
@@ -501,14 +971,13 @@ function extractParagraphContent(
       // typically don't), and unrelated `w:ins w:id="5"` /
       // `w:del w:id="5"` from different reviewers would coincidentally
       // fuse into a phantom move pair.
-      const moveKind = changeMark.attrs["moveKind"];
       if (insertionMark) {
-        if (moveKind === "moveTo") {
+        if (changeAttrs.moveKind === "moveTo") {
           content.push({ type: "moveTo", info, content: [run] });
         } else {
           content.push({ type: "insertion", info, content: [run] });
         }
-      } else if (moveKind === "moveFrom") {
+      } else if (changeAttrs.moveKind === "moveFrom") {
         content.push({ type: "moveFrom", info, content: [run] });
       } else {
         content.push({ type: "deletion", info, content: [run] });
@@ -516,17 +985,11 @@ function extractParagraphContent(
       return;
     }
 
-    // Check for hyperlink mark
-    const linkMark = node.marks.find((m) => m.type.name === "hyperlink");
-
     if (linkMark) {
       // Start or continue hyperlink
       const linkKey = getLinkKey(linkMark);
 
-      const currentKey =
-        currentHyperlink?.href ||
-        (currentHyperlink?.anchor ? `#${currentHyperlink.anchor}` : "");
-      if (currentHyperlink && currentKey === linkKey) {
+      if (currentHyperlink && currentHyperlinkKey === linkKey) {
         // Continue current hyperlink
         addNodeToHyperlink(currentHyperlink, node);
       } else {
@@ -535,6 +998,7 @@ function extractParagraphContent(
 
         // Start new hyperlink
         currentHyperlink = createHyperlink(linkMark);
+        currentHyperlinkKey = linkKey;
         addNodeToHyperlink(currentHyperlink, node);
       }
       return;
@@ -563,7 +1027,7 @@ function extractParagraphContent(
     } else if (node.type.name === "hardBreak") {
       // Hard break ends current run
       flushCurrentInline();
-      content.push(createBreakRun());
+      content.push(createBreakRun(readHardBreakType(node)));
     } else if (node.type.name === "image") {
       // Image ends current run
       flushCurrentInline();
@@ -589,7 +1053,43 @@ function extractParagraphContent(
       flushCurrentInline();
       content.push(createMathFromNode(node));
     }
+  };
+
+  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
+  paragraph.forEach((node, offset) => {
+    flushEmptyHyperlinksThroughOffset(offset);
+
+    if (node.isText && node.text) {
+      let consumed = 0;
+      const textEndOffset = offset + node.nodeSize;
+      while (nextEmptyHyperlink < sortedEmptyHyperlinks.length) {
+        const item = sortedEmptyHyperlinks[nextEmptyHyperlink];
+        if (!item || item.attrs.offset >= textEndOffset) {
+          break;
+        }
+
+        const splitOffset = Math.max(item.attrs.offset - offset, consumed);
+        const segment = node.text.slice(consumed, splitOffset);
+        if (segment) {
+          processInlineNode(node.type.schema.text(segment, node.marks));
+        }
+        flushCurrentInline();
+        content.push(createEmptyHyperlink(item.attrs));
+        nextEmptyHyperlink += 1;
+        consumed = splitOffset;
+      }
+
+      const remainder = node.text.slice(consumed);
+      if (remainder) {
+        processInlineNode(node.type.schema.text(remainder, node.marks));
+      }
+      return;
+    }
+
+    processInlineNode(node);
   });
+
+  flushEmptyHyperlinksThroughOffset(Number.POSITIVE_INFINITY);
 
   // Don't forget the last run/hyperlink
   flushCurrentInline();
@@ -600,11 +1100,57 @@ function extractParagraphContent(
   return content;
 }
 
+function createTrackedChangeRun(
+  node: PMNode,
+  marks: readonly Mark[],
+): Run | null {
+  if (node.isText) {
+    const formatting = marksToTextFormatting(marks);
+    return {
+      type: "run",
+      content: node.text ? [{ type: "text", text: node.text }] : [],
+      ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+    };
+  }
+  if (node.type.name === "hardBreak") {
+    return createBreakRun(readHardBreakType(node));
+  }
+  if (node.type.name === "image") {
+    return createImageRun(node);
+  }
+  if (node.type.name === "shape") {
+    return createShapeRun(node);
+  }
+  if (node.type.name === "tab") {
+    return createTabRun();
+  }
+  return null;
+}
+
+function createEmptyHyperlink(
+  attrs: NonNullable<ParagraphAttrs["_emptyHyperlinks"]>[number],
+): Hyperlink {
+  const hyperlink: Hyperlink = { type: "hyperlink", children: [] };
+  if (attrs.href !== undefined) {
+    hyperlink.href = attrs.href;
+  }
+  if (attrs.anchor !== undefined) {
+    hyperlink.anchor = attrs.anchor;
+  }
+  if (attrs.tooltip !== undefined) {
+    hyperlink.tooltip = attrs.tooltip;
+  }
+  if (attrs.rId !== undefined) {
+    hyperlink.rId = attrs.rId;
+  }
+  return hyperlink;
+}
+
 function getCommentMarkIds(marks: readonly Mark[]): Set<number> {
   const commentIds = new Set<number>();
   for (const mark of marks) {
     if (mark.type.name === "comment") {
-      commentIds.add(mark.attrs["commentId"] as number);
+      commentIds.add(expectCommentMarkAttrs(mark).commentId);
     }
   }
   return commentIds;
@@ -629,16 +1175,12 @@ function buildDocumentTrackedChangeCounts(pmDoc: PMNode): TrackedChangeCounts {
     const deletionMark = node.marks.find((m) => m.type.name === "deletion");
 
     if (insertionMark) {
-      const revisionId = Number(insertionMark.attrs["revisionId"]);
-      if (Number.isFinite(revisionId)) {
-        insertionById.set(revisionId, (insertionById.get(revisionId) ?? 0) + 1);
-      }
+      const { revisionId } = expectTrackedChangeMarkAttrs(insertionMark);
+      insertionById.set(revisionId, (insertionById.get(revisionId) ?? 0) + 1);
     }
     if (deletionMark) {
-      const revisionId = Number(deletionMark.attrs["revisionId"]);
-      if (Number.isFinite(revisionId)) {
-        deletionById.set(revisionId, (deletionById.get(revisionId) ?? 0) + 1);
-      }
+      const { revisionId } = expectTrackedChangeMarkAttrs(deletionMark);
+      deletionById.set(revisionId, (deletionById.get(revisionId) ?? 0) + 1);
     }
   });
 
@@ -649,7 +1191,13 @@ function buildDocumentTrackedChangeCounts(pmDoc: PMNode): TrackedChangeCounts {
  * Create a unique key for a link mark
  */
 function getLinkKey(mark: Mark): string {
-  return mark.attrs["href"] || "";
+  const attrs = expectHyperlinkMarkAttrs(mark);
+  return [
+    attrs.href,
+    attrs.rId ?? "",
+    attrs.tooltip ?? "",
+    attrs._docxHyperlinkIndex ?? "",
+  ].join("\u0000");
 }
 
 /**
@@ -671,51 +1219,117 @@ function getMarksKey(marks: readonly Mark[]): string {
  * Create a Hyperlink from a link mark
  */
 function createHyperlink(linkMark: Mark): Hyperlink {
-  const href = linkMark.attrs["href"] as string;
+  const attrs = expectHyperlinkMarkAttrs(linkMark);
+  const href = attrs.href;
   // Internal bookmark links use the anchor property in OOXML
   if (href.startsWith("#")) {
-    return {
+    const hyperlink: Hyperlink = {
       type: "hyperlink",
       anchor: href.slice(1),
-      tooltip: linkMark.attrs["tooltip"] || undefined,
       children: [],
     };
+    if (attrs.tooltip) {
+      hyperlink.tooltip = attrs.tooltip;
+    }
+    return hyperlink;
   }
-  return {
+  const hyperlink: Hyperlink = {
     type: "hyperlink",
     href,
-    tooltip: linkMark.attrs["tooltip"] || undefined,
-    rId: linkMark.attrs["rId"] || undefined,
     children: [],
   };
+  if (attrs.tooltip) {
+    hyperlink.tooltip = attrs.tooltip;
+  }
+  if (attrs.rId) {
+    hyperlink.rId = attrs.rId;
+  }
+  return hyperlink;
 }
 
 /**
  * Add a node to a hyperlink
  */
 function addNodeToHyperlink(hyperlink: Hyperlink, node: PMNode): void {
+  const noteRefMark = node.marks.find((m) => m.type.name === "footnoteRef");
+  if (noteRefMark) {
+    hyperlink.children.push(createNoteReferenceRun(noteRefMark));
+    return;
+  }
+
+  const nonLinkMarks = node.marks.filter((m) => m.type.name !== "hyperlink");
   if (node.isText && node.text) {
-    const nonLinkMarks = node.marks.filter((m) => m.type.name !== "hyperlink");
     const run = createRunFromText(node.text, nonLinkMarks);
     hyperlink.children.push(run);
+    return;
   }
+
+  if (node.type.name === "hardBreak") {
+    hyperlink.children.push(
+      createBreakRun(readHardBreakType(node), nonLinkMarks),
+    );
+    return;
+  }
+
+  if (node.type.name === "tab") {
+    hyperlink.children.push(createTabRun(nonLinkMarks));
+    return;
+  }
+
+  if (node.type.name === "image") {
+    hyperlink.children.push(createImageRun(node));
+    return;
+  }
+
+  if (node.type.name === "shape") {
+    hyperlink.children.push(createShapeRun(node));
+  }
+}
+
+function createNoteReferenceRun(noteRefMark: Mark): Run {
+  const noteAttrs = expectFootnoteRefMarkAttrs(noteRefMark);
+  const noteType =
+    noteAttrs.noteType === "endnote" ? "endnoteRef" : "footnoteRef";
+  const noteId =
+    typeof noteAttrs.id === "string"
+      ? Number.parseInt(noteAttrs.id, 10) || 0
+      : noteAttrs.id;
+  const noteRef: NoteReferenceContent = {
+    type: noteType,
+    id: noteId,
+  };
+  return {
+    type: "run",
+    content: [noteRef],
+  };
 }
 
 /**
  * Create a Run from text and marks
  */
 function createRunFromText(text: string, marks: readonly Mark[]): Run {
-  const formatting = marksToTextFormatting(marks);
+  const formatting = getRunFormattingFromMarks(marks);
   const textContent: TextContent = {
     type: "text",
     text,
   };
 
   const run: Run = { type: "run", content: [textContent] };
-  if (Object.keys(formatting).length > 0) {
+  if (formatting) {
     run.formatting = formatting;
   }
   return run;
+}
+
+function getRunFormattingFromMarks(
+  marks: readonly Mark[] | undefined,
+): TextFormatting | undefined {
+  if (!marks || marks.length === 0) {
+    return undefined;
+  }
+
+  const formatting = marksToTextFormatting(marks);
+  return Object.keys(formatting).length > 0 ? formatting : undefined;
 }
 
 /**
@@ -733,30 +1347,47 @@ function appendTextToRun(run: Run, text: string): void {
 /**
  * Create a Run containing a line break
  */
-function createBreakRun(): Run {
+function createBreakRun(
+  breakType: BreakContent["breakType"] = "textWrapping",
+  marks?: readonly Mark[],
+): Run {
   const breakContent: BreakContent = {
     type: "break",
-    breakType: "textWrapping",
+    breakType,
   };
 
-  return {
+  const run: Run = {
     type: "run",
     content: [breakContent],
   };
+  const formatting = getRunFormattingFromMarks(marks);
+  if (formatting) {
+    run.formatting = formatting;
+  }
+  return run;
+}
+
+function readHardBreakType(node: PMNode): BreakContent["breakType"] {
+  return expectHardBreakAttrs(node).breakType ?? "textWrapping";
 }
 
 /**
  * Create a Run containing a tab
  */
-function createTabRun(): Run {
+function createTabRun(marks?: readonly Mark[]): Run {
   const tabContent: TabContent = {
     type: "tab",
   };
 
-  return {
+  const run: Run = {
     type: "run",
     content: [tabContent],
   };
+  const formatting = getRunFormattingFromMarks(marks);
+  if (formatting) {
+    run.formatting = formatting;
+  }
+  return run;
 }
 
 /**
@@ -766,14 +1397,7 @@ function createFieldFromNode(
   node: PMNode,
   marks?: readonly Mark[],
 ): SimpleField | ComplexField {
-  const attrs = node.attrs as {
-    fieldType: string;
-    instruction: string;
-    displayText: string;
-    fieldKind: string;
-    fldLock: boolean;
-    dirty: boolean;
-  };
+  const attrs = expectFieldAttrs(node);
 
   const formatting =
     marks && marks.length > 0 ? marksToTextFormatting(marks) : undefined;
@@ -804,7 +1428,7 @@ function createFieldFromNode(
     const complex: ComplexField = {
       type: "complexField",
       instruction: attrs.instruction,
-      fieldType: attrs.fieldType as FieldType,
+      fieldType: attrs.fieldType,
       fieldCode: [],
       fieldResult: [displayRun],
     };
@@ -820,7 +1444,7 @@ function createFieldFromNode(
   const simple: SimpleField = {
     type: "simpleField",
     instruction: attrs.instruction,
-    fieldType: attrs.fieldType as FieldType,
+    fieldType: attrs.fieldType,
     content: [displayRun],
   };
   if (attrs.fldLock) {
@@ -836,15 +1460,11 @@ function createFieldFromNode(
  * Create a MathEquation from a PM math node
  */
 function createMathFromNode(node: PMNode): MathEquation {
-  const attrs = node.attrs as {
-    display: string;
-    ommlXml: string;
-    plainText: string;
-  };
+  const attrs = expectMathAttrs(node);
 
   const math: MathEquation = {
     type: "mathEquation",
-    display: (attrs.display as "inline" | "block" | undefined) ?? "inline",
+    display: attrs.display ?? "inline",
     ommlXml: attrs.ommlXml,
   };
   if (attrs.plainText) {
@@ -857,44 +1477,53 @@ function createMathFromNode(node: PMNode): MathEquation {
  * Create an InlineSdt from a PM sdt node
  */
 function createInlineSdtFromNode(node: PMNode): InlineSdt {
-  const attrs = node.attrs as Record<string, unknown>;
+  const attrs = expectSdtAttrs(node);
 
   const properties: SdtProperties = {
-    sdtType:
-      (attrs["sdtType"] as SdtProperties["sdtType"] | undefined) ?? "richText",
+    sdtType: attrs.sdtType,
   };
-  if (attrs["alias"]) {
-    properties.alias = attrs["alias"] as string;
+  if (attrs.alias) {
+    properties.alias = attrs.alias;
   }
-  if (attrs["tag"]) {
-    properties.tag = attrs["tag"] as string;
+  if (attrs.tag) {
+    properties.tag = attrs.tag;
   }
-  if (attrs["lock"]) {
-    properties.lock = attrs["lock"] as NonNullable<SdtProperties["lock"]>;
+  if (attrs.lock) {
+    properties.lock = attrs.lock;
   }
-  if (attrs["placeholder"]) {
-    properties.placeholder = attrs["placeholder"] as string;
+  if (attrs.placeholder) {
+    properties.placeholder = attrs.placeholder;
   }
-  if (
-    attrs["showingPlaceholder"] !== undefined &&
-    attrs["showingPlaceholder"] !== null
-  ) {
-    properties.showingPlaceholder = attrs["showingPlaceholder"] as boolean;
+  if (attrs.showingPlaceholder !== undefined) {
+    properties.showingPlaceholder = attrs.showingPlaceholder;
   }
-  if (attrs["dateFormat"]) {
-    properties.dateFormat = attrs["dateFormat"] as string;
+  if (attrs.dateFormat) {
+    properties.dateFormat = attrs.dateFormat;
   }
-  if (attrs["listItems"]) {
-    properties.listItems = JSON.parse(attrs["listItems"] as string);
+  if (attrs.dateValueISO) {
+    properties.dateValueISO = attrs.dateValueISO;
   }
-  if (attrs["checked"] !== null && attrs["checked"] !== undefined) {
-    properties.checked = attrs["checked"] as boolean;
+  if (attrs.listItems) {
+    properties.listItems = parseSdtListItems(attrs.listItems);
+  }
+  if (attrs.checked !== undefined) {
+    properties.checked = attrs.checked;
   }
 
-  // Extract content from the sdt node's children
+  // Extract content from the sdt node's children. OOXML allows runs,
+  // hyperlinks, simple/complex fields, nested SDTs, and math here — keep
+  // all of them so docProps-bound fields and similar template content
+  // survive a round-trip through the editor. Keep this filter in sync
+  // with the exhaustive switch in `serializeInlineSdt`.
   const sdtContent = extractParagraphContent(node);
   const content = sdtContent.filter(
-    (c): c is Run | Hyperlink => c.type === "run" || c.type === "hyperlink",
+    (c): c is InlineSdt["content"][number] =>
+      c.type === "run" ||
+      c.type === "hyperlink" ||
+      c.type === "simpleField" ||
+      c.type === "complexField" ||
+      c.type === "inlineSdt" ||
+      c.type === "mathEquation",
   );
 
   return {
@@ -904,11 +1533,40 @@ function createInlineSdtFromNode(node: PMNode): InlineSdt {
   };
 }
 
+function parseSdtListItems(
+  rawItems: string,
+): NonNullable<SdtProperties["listItems"]> {
+  const parsed = JSON.parse(rawItems) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new TypeError(
+      "Invalid ProseMirror sdt attrs: listItems is not an array",
+    );
+  }
+
+  return parsed.map((item): NonNullable<SdtProperties["listItems"]>[number] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new TypeError(
+        "Invalid ProseMirror sdt attrs: listItems contains an invalid item",
+      );
+    }
+    const itemAttrs = item as { displayText?: unknown; value?: unknown };
+    if (
+      typeof itemAttrs.displayText !== "string" ||
+      typeof itemAttrs.value !== "string"
+    ) {
+      throw new TypeError(
+        "Invalid ProseMirror sdt attrs: listItems contains an invalid item",
+      );
+    }
+    return { displayText: itemAttrs.displayText, value: itemAttrs.value };
+  });
+}
+
 /**
  * Create a Run containing an image
  */
 function createImageRun(node: PMNode): Run {
-  const attrs = node.attrs as ImageAttrs;
+  const attrs = expectImageAttrs(node);
 
   // Determine wrap type from attrs (default: inline)
   const wrapType = attrs.wrapType || "inline";
@@ -929,7 +1587,7 @@ function createImageRun(node: PMNode): Run {
 
   // Restore wrapText from PM attr
   if (attrs.wrapText) {
-    wrap.wrapText = attrs.wrapText as NonNullable<ImageWrap["wrapText"]>;
+    wrap.wrapText = attrs.wrapText;
   }
 
   const image: Image = {
@@ -949,56 +1607,20 @@ function createImageRun(node: PMNode): Run {
     image.title = attrs.title;
   }
 
-  // Parse CSS transform string back to ImageTransform for round-trip
-  if (attrs.transform) {
-    const transformStr = attrs.transform;
-    const imgTransform: ImageTransform = {};
-    const rotateMatch = /rotate\(([-\d.]+)deg\)/u.exec(transformStr);
-    if (rotateMatch) {
-      // SAFETY: capture group [1] always present when regex matches
-      imgTransform.rotation = Number.parseFloat(rotateMatch[1]!);
-    }
-    if (transformStr.includes("scaleX(-1)")) {
-      imgTransform.flipH = true;
-    }
-    if (transformStr.includes("scaleY(-1)")) {
-      imgTransform.flipV = true;
-    }
-    if (imgTransform.rotation || imgTransform.flipH || imgTransform.flipV) {
-      image.transform = imgTransform;
-    }
+  const imageTransform = parseTransformAttr(attrs.transform);
+  if (imageTransform) {
+    image.transform = imageTransform;
   }
 
-  // Round-trip floating image position (ImagePositionAttrs uses loose strings;
-  // cast to the strict OOXML union types for the Document model)
-  if (attrs.position?.horizontal && attrs.position.vertical) {
-    const pos = attrs.position;
-    type HRelativeTo = ImagePosition["horizontal"]["relativeTo"];
-    type HAlignment = ImagePosition["horizontal"]["alignment"];
-    type VRelativeTo = ImagePosition["vertical"]["relativeTo"];
-    type VAlignment = ImagePosition["vertical"]["alignment"];
+  // eigenpal #424 (opacity render pipeline). PM schema default is `null`;
+  // use `!= null` so the model only carries an explicit opacity value.
+  if (attrs.opacity != null) {
+    image.opacity = attrs.opacity;
+  }
 
-    const horizontal: ImagePosition["horizontal"] = {
-      relativeTo: (pos.horizontal?.relativeTo || "column") as HRelativeTo,
-    };
-    if (pos.horizontal?.align) {
-      horizontal.alignment = pos.horizontal.align as NonNullable<HAlignment>;
-    }
-    if (pos.horizontal?.posOffset !== undefined) {
-      horizontal.posOffset = pos.horizontal.posOffset;
-    }
-
-    const vertical: ImagePosition["vertical"] = {
-      relativeTo: (pos.vertical?.relativeTo || "paragraph") as VRelativeTo,
-    };
-    if (pos.vertical?.align) {
-      vertical.alignment = pos.vertical.align as NonNullable<VAlignment>;
-    }
-    if (pos.vertical?.posOffset !== undefined) {
-      vertical.posOffset = pos.vertical.posOffset;
-    }
-
-    image.position = { horizontal, vertical };
+  const imagePosition = imagePositionFromAttrs(attrs.position);
+  if (imagePosition) {
+    image.position = imagePosition;
   }
 
   // Round-trip border/outline
@@ -1031,10 +1653,50 @@ function createImageRun(node: PMNode): Run {
     image.hlinkHref = attrs.hlinkHref;
   }
 
+  // eigenpal #424: fold crop fractions back into Image.crop. PM defaults are
+  // `null`, so `!= null` catches both null and undefined; zero sides are
+  // omitted to keep the serialized <a:srcRect/> terse.
+  const cropTop =
+    attrs.cropTop != null && attrs.cropTop > 0 ? attrs.cropTop : undefined;
+  const cropRight =
+    attrs.cropRight != null && attrs.cropRight > 0
+      ? attrs.cropRight
+      : undefined;
+  const cropBottom =
+    attrs.cropBottom != null && attrs.cropBottom > 0
+      ? attrs.cropBottom
+      : undefined;
+  const cropLeft =
+    attrs.cropLeft != null && attrs.cropLeft > 0 ? attrs.cropLeft : undefined;
+  if (
+    cropTop !== undefined ||
+    cropRight !== undefined ||
+    cropBottom !== undefined ||
+    cropLeft !== undefined
+  ) {
+    const crop: NonNullable<Image["crop"]> = {};
+    if (cropTop !== undefined) {
+      crop.top = cropTop;
+    }
+    if (cropRight !== undefined) {
+      crop.right = cropRight;
+    }
+    if (cropBottom !== undefined) {
+      crop.bottom = cropBottom;
+    }
+    if (cropLeft !== undefined) {
+      crop.left = cropLeft;
+    }
+    image.crop = crop;
+  }
+
   const drawingContent: DrawingContent = {
     type: "drawing",
     image,
   };
+  if (attrs._docxRawXml) {
+    drawingContent.rawXml = attrs._docxRawXml;
+  }
 
   return {
     type: "run",
@@ -1046,7 +1708,7 @@ function createImageRun(node: PMNode): Run {
  * Create a Run from a ProseMirror shape node
  */
 function createShapeRun(node: PMNode): Run {
-  const attrs = node.attrs as ShapeAttrs;
+  const attrs = expectShapeAttrs(node);
 
   const shape: Shape = {
     type: "shape",
@@ -1058,6 +1720,33 @@ function createShapeRun(node: PMNode): Run {
   };
   if (attrs.shapeId) {
     shape.id = attrs.shapeId;
+  }
+  const shapeTransform = parseTransformAttr(attrs.transform);
+  if (shapeTransform) {
+    shape.transform = shapeTransform;
+  }
+
+  const wrap: ImageWrap = { type: attrs.wrapType || "inline" };
+  if (attrs.distTop !== undefined) {
+    wrap.distT = pixelsToEmu(attrs.distTop);
+  }
+  if (attrs.distBottom !== undefined) {
+    wrap.distB = pixelsToEmu(attrs.distBottom);
+  }
+  if (attrs.distLeft !== undefined) {
+    wrap.distL = pixelsToEmu(attrs.distLeft);
+  }
+  if (attrs.distRight !== undefined) {
+    wrap.distR = pixelsToEmu(attrs.distRight);
+  }
+  if (attrs.wrapText) {
+    wrap.wrapText = attrs.wrapText;
+  }
+  shape.wrap = wrap;
+
+  const shapePosition = imagePositionFromAttrs(attrs.position);
+  if (shapePosition) {
+    shape.position = shapePosition;
   }
 
   // Fill
@@ -1091,26 +1780,43 @@ function createShapeRun(node: PMNode): Run {
     }
   } else if (attrs.fillColor) {
     shape.fill = {
-      type: (attrs.fillType || "solid") as "solid" | "none",
+      type: attrs.fillType ?? "solid",
       color: { rgb: attrs.fillColor.replace("#", "") },
     };
   } else if (attrs.fillType === "none") {
     shape.fill = { type: "none" };
   }
 
-  // Outline
-  if (attrs.outlineWidth && attrs.outlineWidth > 0) {
-    const cssToOoxml: Record<string, string> = {
-      solid: "solid",
-      dotted: "dot",
-      dashed: "dash",
-    };
-    const shapeOutline: ShapeOutline = {
-      width: pixelsToEmu(attrs.outlineWidth),
-      style: attrs.outlineStyle
-        ? (cssToOoxml[attrs.outlineStyle] as ShapeOutline["style"]) || "solid"
-        : "solid",
-    };
+  // Outline. `outlineStyle === "none"` is the explicit "no outline" sentinel
+  // (see OUTLINE_STYLE_ATTR_VALUES): suppress the `<a:ln>` element entirely so a
+  // border-free shape round-trips border-free, even if other outline attrs (a
+  // leftover colour/width) linger on the node.
+  if (
+    attrs.outlineStyle !== "none" &&
+    ((attrs.outlineWidth !== undefined && attrs.outlineWidth > 0) ||
+      attrs.outlineColor ||
+      attrs.outlineStyle ||
+      attrs.outlineCap ||
+      attrs.outlineHeadEnd ||
+      attrs.outlineTailEnd)
+  ) {
+    const shapeOutline: ShapeOutline = {};
+    if (attrs.outlineWidth !== undefined && attrs.outlineWidth > 0) {
+      shapeOutline.width = pixelsToEmu(attrs.outlineWidth);
+    }
+    if (attrs.outlineStyle) {
+      shapeOutline.style =
+        normalizeShapeOutlineStyle(attrs.outlineStyle) ?? "solid";
+    }
+    if (attrs.outlineCap) {
+      shapeOutline.cap = attrs.outlineCap;
+    }
+    if (attrs.outlineHeadEnd) {
+      shapeOutline.headEnd = attrs.outlineHeadEnd;
+    }
+    if (attrs.outlineTailEnd) {
+      shapeOutline.tailEnd = attrs.outlineTailEnd;
+    }
     if (attrs.outlineColor) {
       shapeOutline.color = { rgb: attrs.outlineColor.replace("#", "") };
     }
@@ -1144,7 +1850,7 @@ function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
         break;
 
       case "underline": {
-        const attrs = mark.attrs as UnderlineAttrs;
+        const attrs = expectUnderlineMarkAttrs(mark);
         const uline: NonNullable<TextFormatting["underline"]> = {
           style: attrs.style || "single",
         };
@@ -1156,7 +1862,7 @@ function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
       }
 
       case "strike":
-        if (mark.attrs["double"]) {
+        if (expectStrikeMarkAttrs(mark).double) {
           formatting.doubleStrike = true;
         } else {
           formatting.strike = true;
@@ -1164,7 +1870,7 @@ function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
         break;
 
       case "textColor": {
-        const attrs = mark.attrs as TextColorAttrs;
+        const attrs = expectTextColorMarkAttrs(mark);
         const colorVal: ColorValue = {};
         if (attrs.rgb) {
           colorVal.rgb = attrs.rgb;
@@ -1183,16 +1889,25 @@ function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
       }
 
       case "highlight":
-        formatting.highlight = mark.attrs["color"];
+        formatting.highlight = expectHighlightMarkAttrs(mark).color;
         break;
 
-      case "fontSize":
-        formatting.fontSize = mark.attrs["size"];
-        formatting.fontSizeCs = mark.attrs["size"];
+      case "runShading":
+        // Rebuild the model `w:shd` fill so the run serializer re-emits it.
+        formatting.shading = runShadingAttrsToShading(
+          expectRunShadingMarkAttrs(mark),
+        );
         break;
+
+      case "fontSize": {
+        const attrs = expectFontSizeMarkAttrs(mark);
+        formatting.fontSize = attrs.size;
+        formatting.fontSizeCs = attrs.size;
+        break;
+      }
 
       case "fontFamily": {
-        const attrs = mark.attrs as FontFamilyAttrs;
+        const attrs = expectFontFamilyMarkAttrs(mark);
         const ff: NonNullable<TextFormatting["fontFamily"]> = {};
         if (attrs.ascii) {
           ff.ascii = attrs.ascii;
@@ -1244,17 +1959,18 @@ function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
         break;
 
       case "characterSpacing": {
-        if (mark.attrs["spacing"] !== null) {
-          formatting.spacing = mark.attrs["spacing"];
+        const attrs = expectCharacterSpacingMarkAttrs(mark);
+        if (attrs.spacing !== undefined) {
+          formatting.spacing = attrs.spacing;
         }
-        if (mark.attrs["position"] !== null) {
-          formatting.position = mark.attrs["position"];
+        if (attrs.position !== undefined) {
+          formatting.position = attrs.position;
         }
-        if (mark.attrs["scale"] !== null) {
-          formatting.scale = mark.attrs["scale"];
+        if (attrs.scale !== undefined) {
+          formatting.scale = attrs.scale;
         }
-        if (mark.attrs["kerning"] !== null) {
-          formatting.kerning = mark.attrs["kerning"];
+        if (attrs.kerning !== undefined) {
+          formatting.kerning = attrs.kerning;
         }
         break;
       }
@@ -1267,20 +1983,37 @@ function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
         formatting.imprint = true;
         break;
 
+      case "hidden":
+        // eigenpal #424 (w:vanish gap 9): mark closes the round-trip so
+        // `<w:vanish/>` survives parse → PM → serialize.
+        formatting.hidden = true;
+        break;
+
       case "textShadow":
         formatting.shadow = true;
         break;
 
       case "emphasisMark":
-        formatting.emphasisMark = mark.attrs["type"] || "dot";
+        formatting.emphasisMark = expectEmphasisMarkAttrs(mark).type || "dot";
         break;
 
       case "textOutline":
         formatting.outline = true;
         break;
 
+      case "rtl":
+        formatting.rtl = true;
+        break;
+
+      case "textEffect":
+        formatting.effect = expectTextEffectMarkAttrs(mark).effect;
+        break;
+
       case "runFormattingOverride":
-        applyRunFormattingOverrideMark(formatting, mark);
+        applyRunFormattingOverrideAttrs(
+          formatting,
+          expectRunFormattingOverrideMarkAttrs(mark),
+        );
         break;
 
       // hyperlink is handled separately
@@ -1290,6 +2023,51 @@ function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
   }
 
   return formatting;
+}
+
+function applyRunFormattingOverrideAttrs(
+  formatting: TextFormatting,
+  attrs: RunFormattingOverrideAttrs,
+): void {
+  if (attrs.bold === false) {
+    formatting.bold = false;
+  }
+  if (attrs.italic === false) {
+    formatting.italic = false;
+  }
+  if (attrs.underline === "none") {
+    formatting.underline = { style: "none" };
+  }
+  if (attrs.strike === false) {
+    formatting.strike = false;
+  }
+  if (attrs.doubleStrike === false) {
+    formatting.doubleStrike = false;
+  }
+  if (attrs.allCaps === false) {
+    formatting.allCaps = false;
+  }
+  if (attrs.smallCaps === false) {
+    formatting.smallCaps = false;
+  }
+  if (attrs.hidden === false) {
+    formatting.hidden = false;
+  }
+  if (attrs.emboss === false) {
+    formatting.emboss = false;
+  }
+  if (attrs.imprint === false) {
+    formatting.imprint = false;
+  }
+  if (attrs.shadow === false) {
+    formatting.shadow = false;
+  }
+  if (attrs.outline === false) {
+    formatting.outline = false;
+  }
+  if (attrs.rtl === false) {
+    formatting.rtl = false;
+  }
 }
 
 // ============================================================================
@@ -1332,15 +2110,8 @@ function convertPMTable(
   node: PMNode,
   documentCounts?: TrackedChangeCounts,
 ): Table {
-  const attrs = node.attrs as TableAttrs;
-  const rows: TableRow[] = [];
-
-  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
-  node.forEach((rowNode) => {
-    if (rowNode.type.name === "tableRow") {
-      rows.push(convertPMTableRow(rowNode, documentCounts));
-    }
-  });
+  const attrs = expectTableAttrs(node);
+  const rows = convertPMTableRows(node, documentCounts);
 
   const formatting = tableAttrsToFormatting(attrs) || undefined;
   if (!formatting?.borders) {
@@ -1372,6 +2143,31 @@ function convertPMTable(
     table.formatting = formatting;
   }
   return table;
+}
+
+type ActiveVerticalMerge = {
+  remainingRows: number;
+  colspan: number;
+  continuationCells?: TableCell[];
+};
+
+function convertPMTableRows(
+  node: PMNode,
+  documentCounts?: TrackedChangeCounts,
+): TableRow[] {
+  const rows: TableRow[] = [];
+  const activeVerticalMerges = new Map<number, ActiveVerticalMerge>();
+
+  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
+  node.forEach((rowNode) => {
+    if (rowNode.type.name === "tableRow") {
+      rows.push(
+        convertPMTableRow(rowNode, documentCounts, activeVerticalMerges),
+      );
+    }
+  });
+
+  return rows;
 }
 
 /**
@@ -1442,21 +2238,15 @@ function tableAttrsToFormatting(
       }
     }
     // Width: check if changed
-    const tableWidth = Reflect.get(attrs, "width");
-    const tableWidthType = Reflect.get(attrs, "widthType");
+    const tableWidth = attrs.width;
+    const tableWidthType = attrs.widthType;
     const origWidthVal = orig.width?.value;
     const origWidthType = orig.width?.type;
     if (tableWidth !== origWidthVal || tableWidthType !== origWidthType) {
-      if (
-        typeof tableWidth === "number" ||
-        typeof tableWidthType === "string"
-      ) {
+      if (tableWidth !== undefined || tableWidthType !== undefined) {
         result.width = {
-          value: typeof tableWidth === "number" ? tableWidth : 0,
-          type:
-            typeof tableWidthType === "string"
-              ? (tableWidthType as "auto" | "dxa" | "pct" | "nil")
-              : "dxa",
+          value: tableWidth ?? 0,
+          type: tableWidthType ?? "dxa",
         };
       } else {
         delete result.width;
@@ -1472,12 +2262,12 @@ function tableAttrsToFormatting(
 
   // Fallback: reconstruct formatting from individual attrs (e.g. for
   // newly created tables that don't have _originalFormatting)
-  const tableWidth = Reflect.get(attrs, "width");
-  const tableWidthType = Reflect.get(attrs, "widthType");
+  const tableWidth = attrs.width;
+  const tableWidthType = attrs.widthType;
   const hasFormatting =
     attrs.styleId ||
-    typeof tableWidth === "number" ||
-    typeof tableWidthType === "string" ||
+    tableWidth !== undefined ||
+    tableWidthType !== undefined ||
     attrs.justification ||
     attrs.floating ||
     attrs.cellMargins ||
@@ -1494,13 +2284,10 @@ function tableAttrsToFormatting(
 
   // Restore width — handle width=0 with type="auto" (common OOXML pattern)
   let width: TableFormatting["width"];
-  if (typeof tableWidth === "number" || typeof tableWidthType === "string") {
+  if (tableWidth !== undefined || tableWidthType !== undefined) {
     width = {
-      value: typeof tableWidth === "number" ? tableWidth : 0,
-      type:
-        typeof tableWidthType === "string"
-          ? (tableWidthType as "auto" | "dxa" | "pct" | "nil")
-          : "dxa",
+      value: tableWidth ?? 0,
+      type: tableWidthType ?? "dxa",
     };
   }
 
@@ -1532,19 +2319,57 @@ function tableAttrsToFormatting(
 function convertPMTableRow(
   node: PMNode,
   documentCounts?: TrackedChangeCounts,
+  activeVerticalMerges?: Map<number, ActiveVerticalMerge>,
 ): TableRow {
-  const attrs = node.attrs as TableRowAttrs;
+  const attrs = expectTableRowAttrs(node);
   const cells: TableCell[] = [];
+  let gridColumn = 0;
+
+  const appendActiveVerticalMerges = (): void => {
+    if (!activeVerticalMerges) {
+      return;
+    }
+
+    let activeMerge = activeVerticalMerges.get(gridColumn);
+    while (activeMerge) {
+      const preservedCell = activeMerge.continuationCells?.shift();
+      cells.push(
+        preservedCell ??
+          createVerticalMergeContinuationCell(activeMerge.colspan),
+      );
+      activeMerge.remainingRows -= 1;
+      if (activeMerge.remainingRows <= 0) {
+        activeVerticalMerges.delete(gridColumn);
+      }
+      gridColumn += activeMerge.colspan;
+      activeMerge = activeVerticalMerges.get(gridColumn);
+    }
+  };
 
   // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
   node.forEach((cellNode) => {
+    appendActiveVerticalMerges();
     if (
       cellNode.type.name === "tableCell" ||
       cellNode.type.name === "tableHeader"
     ) {
+      const cellAttrs = expectTableCellAttrs(cellNode);
+      const colspan = Math.max(cellAttrs.colspan, 1);
       cells.push(convertPMTableCell(cellNode, documentCounts));
+      if (cellAttrs.rowspan > 1) {
+        const continuationCells = cellAttrs._docxVMergeContinuationCells;
+        activeVerticalMerges?.set(gridColumn, {
+          remainingRows: cellAttrs.rowspan - 1,
+          colspan,
+          ...(continuationCells
+            ? { continuationCells: [...continuationCells] }
+            : {}),
+        });
+      }
+      gridColumn += colspan;
     }
   });
+  appendActiveVerticalMerges();
 
   const row: TableRow = { type: "tableRow", cells };
   const rowFormatting = tableRowAttrsToFormatting(attrs);
@@ -1552,6 +2377,18 @@ function convertPMTableRow(
     row.formatting = rowFormatting;
   }
   return row;
+}
+
+function createVerticalMergeContinuationCell(colspan: number): TableCell {
+  const formatting: TableCellFormatting = { vMerge: "continue" };
+  if (colspan > 1) {
+    formatting.gridSpan = colspan;
+  }
+  return {
+    type: "tableCell",
+    content: [{ type: "paragraph", content: [] }],
+    formatting,
+  };
 }
 
 /**
@@ -1577,7 +2414,7 @@ function tableRowAttrsToFormatting(
     }
     if (attrs.heightRule !== (orig.heightRule ?? undefined)) {
       if (attrs.heightRule) {
-        result.heightRule = attrs.heightRule as "auto" | "atLeast" | "exact";
+        result.heightRule = attrs.heightRule;
       } else {
         delete result.heightRule;
       }
@@ -1605,7 +2442,7 @@ function tableRowAttrsToFormatting(
     f.height = { value: attrs.height, type: "dxa" };
   }
   if (attrs.heightRule) {
-    f.heightRule = attrs.heightRule as "auto" | "atLeast" | "exact";
+    f.heightRule = attrs.heightRule;
   }
   if (attrs.isHeader) {
     f.header = attrs.isHeader;
@@ -1620,7 +2457,7 @@ function convertPMTableCell(
   node: PMNode,
   documentCounts?: TrackedChangeCounts,
 ): TableCell {
-  const attrs = node.attrs as TableCellAttrs;
+  const attrs = expectTableCellAttrs(node);
   const content: (Paragraph | Table)[] = [];
 
   // Extract cell content (paragraphs and nested tables)
@@ -1659,16 +2496,17 @@ function tableCellAttrsToFormatting(
     if (attrs.colspan > 1) {
       result.gridSpan = attrs.colspan;
     }
-    const cellWidth = Reflect.get(attrs, "width");
+    if (attrs.rowspan > 1) {
+      result.vMerge = "restart";
+    } else if (result.vMerge === "restart" && !attrs._preserveVMergeRestart) {
+      delete result.vMerge;
+    }
+    const cellWidth = attrs.width;
     // Width: keep null absent while preserving explicit width=0 values.
-    if (typeof cellWidth === "number") {
-      const cellWidthType = Reflect.get(attrs, "widthType");
+    if (cellWidth !== undefined) {
       result.width = {
         value: cellWidth,
-        type:
-          typeof cellWidthType === "string"
-            ? (cellWidthType as "auto" | "dxa" | "pct" | "nil")
-            : "dxa",
+        type: attrs.widthType ?? "dxa",
       };
     }
     if (attrs.verticalAlign !== (orig.verticalAlign ?? undefined)) {
@@ -1685,18 +2523,14 @@ function tableCellAttrsToFormatting(
       delete result.shading;
     }
     if (attrs.borders) {
-      result.borders = attrs.borders as NonNullable<
-        TableCellFormatting["borders"]
-      >;
+      result.borders = attrs.borders;
     }
     if (attrs.margins) {
       result.margins = buildCellMarginsFromAttrs(attrs.margins);
     }
     if (attrs.textDirection !== (orig.textDirection ?? undefined)) {
       if (attrs.textDirection) {
-        result.textDirection = attrs.textDirection as NonNullable<
-          TableCellFormatting["textDirection"]
-        >;
+        result.textDirection = attrs.textDirection;
       } else {
         delete result.textDirection;
       }
@@ -1706,11 +2540,11 @@ function tableCellAttrsToFormatting(
   }
 
   // Fallback: reconstruct formatting from individual attrs
-  const cellWidth = Reflect.get(attrs, "width");
+  const cellWidth = attrs.width;
   const hasFormatting =
     attrs.colspan > 1 ||
     attrs.rowspan > 1 ||
-    typeof cellWidth === "number" ||
+    cellWidth !== undefined ||
     attrs.verticalAlign ||
     attrs.backgroundColor ||
     attrs.borders ||
@@ -1725,29 +2559,26 @@ function tableCellAttrsToFormatting(
   if (attrs.colspan > 1) {
     f.gridSpan = attrs.colspan;
   }
-  if (typeof cellWidth === "number") {
-    const cellWidthType = Reflect.get(attrs, "widthType");
+  if (attrs.rowspan > 1) {
+    f.vMerge = "restart";
+  }
+  if (cellWidth !== undefined) {
     f.width = {
       value: cellWidth,
-      type:
-        typeof cellWidthType === "string"
-          ? (cellWidthType as "auto" | "dxa" | "pct" | "nil")
-          : "dxa",
+      type: attrs.widthType ?? "dxa",
     };
   }
   if (attrs.verticalAlign) {
     f.verticalAlign = attrs.verticalAlign;
   }
   if (attrs.textDirection) {
-    f.textDirection = attrs.textDirection as NonNullable<
-      TableCellFormatting["textDirection"]
-    >;
+    f.textDirection = attrs.textDirection;
   }
   if (attrs.backgroundColor) {
     f.shading = { fill: { rgb: attrs.backgroundColor } };
   }
   if (attrs.borders) {
-    f.borders = attrs.borders as NonNullable<TableCellFormatting["borders"]>;
+    f.borders = attrs.borders;
   }
   if (attrs.margins) {
     f.margins = buildCellMarginsFromAttrs(attrs.margins);
@@ -1764,7 +2595,7 @@ function tableCellAttrsToFormatting(
  * The text box content becomes a Shape with textBody.
  */
 function convertPMTextBox(node: PMNode): Paragraph {
-  const attrs = node.attrs as TextBoxAttrs;
+  const attrs = expectTextBoxAttrs(node);
 
   // Extract child paragraphs from the text box content
   const childParagraphs: Paragraph[] = [];
@@ -1779,7 +2610,7 @@ function convertPMTextBox(node: PMNode): Paragraph {
   // Build shape with text body
   const shape: Shape = {
     type: "shape",
-    shapeType: "rect",
+    shapeType: "textBox",
     size: {
       width: attrs.width ? pixelsToEmu(attrs.width) : 0,
       height: attrs.height ? pixelsToEmu(attrs.height) : 0,
@@ -1825,24 +2656,30 @@ function convertPMTextBox(node: PMNode): Paragraph {
     };
   }
 
-  // Convert outline back
-  if (attrs.outlineWidth && attrs.outlineWidth > 0) {
-    const cssToOoxmlOutline: Record<string, string> = {
-      solid: "solid",
-      dotted: "dot",
-      dashed: "dash",
-    };
+  // Convert outline back. `outlineStyle === "none"` is the explicit no-outline
+  // sentinel: drop the `<a:ln>` even if a width lingers, matching the shape path.
+  if (
+    attrs.outlineStyle !== "none" &&
+    attrs.outlineWidth &&
+    attrs.outlineWidth > 0
+  ) {
     const tbOutline: ShapeOutline = {
       width: pixelsToEmu(attrs.outlineWidth),
-      style: attrs.outlineStyle
-        ? (cssToOoxmlOutline[attrs.outlineStyle] as ShapeOutline["style"]) ||
-          "solid"
-        : "solid",
+      style: normalizeShapeOutlineStyle(attrs.outlineStyle) ?? "solid",
     };
     if (attrs.outlineColor) {
       tbOutline.color = { rgb: attrs.outlineColor.replace("#", "") };
     }
     shape.outline = tbOutline;
+  }
+
+  const wrap = textBoxWrapFromAttrs(attrs);
+  if (wrap) {
+    shape.wrap = wrap;
+  }
+  const position = imagePositionFromAttrs(attrs.position);
+  if (position) {
+    shape.position = position;
   }
 
   // Wrap the shape in a paragraph with a run containing ShapeContent
@@ -1867,9 +2704,12 @@ export function updateDocumentContent(
 }
 
 /**
- * Convert a ProseMirror document back to an array of Paragraph/Table blocks.
- * Used for converting edited header/footer PM content back to the document model.
+ * Convert a ProseMirror document back to an array of `BlockContent` blocks
+ * (paragraphs, tables, and block-level content controls).
+ *
+ * Used for converting edited header/footer PM content back to the document
+ * model.
  */
-export function proseDocToBlocks(pmDoc: PMNode): (Paragraph | Table)[] {
+export function proseDocToBlocks(pmDoc: PMNode): BlockContent[] {
   return extractBlocks(pmDoc);
 }

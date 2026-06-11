@@ -16,8 +16,12 @@
  *
  * Content structure:
  * - w:hdr or w:ftr root element
- * - Contains w:p (paragraphs) and w:tbl (tables)
- * - Can contain images, shapes, page numbers, etc.
+ * - Contains w:p (paragraphs), w:tbl (tables), and w:sdt containers
+ * - Can contain images, shapes, text boxes, page numbers, etc.
+ *
+ * Header/footer content uses the same OOXML block model as the document body,
+ * so it goes through the shared block-content parser instead of a body-only
+ * subset.
  *
  * OOXML Reference:
  * - Root: w:hdr (header) or w:ftr (footer)
@@ -29,16 +33,14 @@ import type {
   HeaderFooterType,
   HeaderReference,
   FooterReference,
-  Paragraph,
-  Table,
   Theme,
   RelationshipMap,
   MediaFile,
 } from "../types/document";
+import { parseBlockContent } from "./blockContentParser";
 import type { NumberingMap } from "./numberingParser";
-import { parseParagraph } from "./paragraphParser";
 import type { StyleMap } from "./styleParser";
-import { parseTable } from "./tableParser";
+import { parseWatermark } from "./watermarkParser";
 import { parseXml } from "./xmlParser";
 import type { XmlElement } from "./xmlParser";
 
@@ -73,95 +75,6 @@ export type HeaderFooterMap = {
   /** Get by type */
   getByType(type: HeaderFooterType): HeaderFooter | undefined;
 };
-
-// ============================================================================
-// HEADER/FOOTER CONTENT PARSING
-// ============================================================================
-
-/**
- * Parse header/footer content (paragraphs and tables)
- *
- * @param root - Root element (w:hdr or w:ftr)
- * @param styles - Style map for applying styles
- * @param theme - Theme for color resolution
- * @param numbering - Numbering definitions for lists
- * @param rels - Relationships for resolving hyperlinks/images
- * @param media - Media files for images
- * @returns Array of content elements (Paragraph | Table)
- */
-function parseHeaderFooterContent(
-  root: XmlElement,
-  styles: StyleMap | null,
-  theme: Theme | null,
-  numbering: NumberingMap | null,
-  rels: RelationshipMap | null,
-  media: Map<string, MediaFile> | null,
-): (Paragraph | Table)[] {
-  const content: (Paragraph | Table)[] = [];
-
-  // Get all child elements
-  const elements = root.elements ?? [];
-  const options = { inHeaderFooter: true };
-
-  for (const el of elements) {
-    if (el.type !== "element") {
-      continue;
-    }
-
-    const name = el.name ?? "";
-
-    // Parse paragraphs
-    if (name === "w:p" || name.endsWith(":p")) {
-      const paragraph = parseParagraph(
-        el,
-        styles,
-        theme,
-        numbering,
-        rels,
-        media,
-        options,
-      );
-      content.push(paragraph);
-    }
-    // Parse tables
-    else if (name === "w:tbl" || name.endsWith(":tbl")) {
-      const table = parseTable(
-        el,
-        styles,
-        theme,
-        numbering,
-        rels,
-        media,
-        options,
-      );
-      content.push(table);
-    }
-    // SDT (structured document tags) can contain paragraphs/tables
-    else if (name === "w:sdt" || name.endsWith(":sdt")) {
-      // Find sdtContent
-      const sdtContentEl = (el.elements ?? []).find(
-        (child: XmlElement) =>
-          child.type === "element" &&
-          (child.name === "w:sdtContent" ||
-            child.name?.endsWith(":sdtContent")),
-      );
-      if (sdtContentEl) {
-        // Recursively parse content inside SDT
-        const sdtContent = parseHeaderFooterContent(
-          sdtContentEl,
-          styles,
-          theme,
-          numbering,
-          rels,
-          media,
-        );
-        content.push(...sdtContent);
-      }
-    }
-  }
-
-  return content;
-}
 
 /**
  * Parse a header XML file (word/header*.xml)
@@ -207,17 +120,48 @@ export function parseHeader(
     return result;
   }
 
-  // Parse content
-  result.content = parseHeaderFooterContent(
-    rootElement,
+  // Watermark detection runs first so the hosting paragraph can be
+  // excluded from regular body parsing — otherwise the parser would
+  // emit an empty paragraph placeholder where the watermark sat (the
+  // run-level VML / DrawingML is not surfaced by `runParser`).
+  const watermarkResult = parseWatermark(rootElement);
+  if (watermarkResult) {
+    result.watermark = watermarkResult.watermark;
+    result.rawWatermarkXml = watermarkResult.rawParagraphXml;
+    result.watermarkBlockIndex = watermarkResult.blockIndex;
+    // A picture watermark's media target (PictureWatermark.imageTarget) is
+    // anchored to a stable, package-absolute path by parseHeadersAndFooters,
+    // which knows this header part's own path.
+  }
+  const contentRoot = watermarkResult
+    ? withoutChild(rootElement, watermarkResult.hostingParagraph)
+    : rootElement;
+
+  result.content = parseBlockContent(
+    contentRoot,
     styles,
     theme,
     numbering,
     rels,
     media,
+    { inHeaderFooter: true },
   );
 
   return result;
+}
+
+/**
+ * Return a shallow copy of `parent` whose `elements` array omits the
+ * single child reference `child`. Used to skip the watermark paragraph
+ * when feeding the header into `parseBlockContent` — without this the
+ * body parser would emit an empty placeholder paragraph where the
+ * watermark sits in the source.
+ */
+function withoutChild(parent: XmlElement, child: XmlElement): XmlElement {
+  return {
+    ...parent,
+    elements: (parent.elements ?? []).filter((el) => el !== child),
+  };
 }
 
 /**
@@ -264,14 +208,14 @@ export function parseFooter(
     return result;
   }
 
-  // Parse content
-  result.content = parseHeaderFooterContent(
+  result.content = parseBlockContent(
     rootElement,
     styles,
     theme,
     numbering,
     rels,
     media,
+    { inHeaderFooter: true },
   );
 
   return result;
@@ -417,6 +361,17 @@ export function getHeaderFooterText(hf: HeaderFooter): string {
         }
       }
       texts.push(paraTexts.join(""));
+    } else if (item.type === "blockSdt") {
+      // The SDT wrapper is invisible to plain-text extraction; recurse via a
+      // synthetic HeaderFooter so the existing per-block dispatch handles
+      // the nested paragraphs/tables/SDTs without code duplication.
+      texts.push(
+        getHeaderFooterText({
+          type: hf.type,
+          hdrFtrType: hf.hdrFtrType,
+          content: item.content,
+        }),
+      );
     } else {
       // Extract text from table cells
       for (const row of item.rows) {

@@ -18,6 +18,7 @@ import type {
   ParagraphFormatting,
   TextFormatting,
 } from "../../types/document";
+import { mergeParagraphFormatting } from "../../utils/paragraphFormattingMerge";
 import { mergeTextFormatting } from "../../utils/textFormattingMerge";
 
 /**
@@ -145,6 +146,33 @@ export class StyleResolver {
     this.mergeStyleIntoResult(result, style);
 
     return result;
+  }
+
+  /**
+   * Resolve the style applied to the paragraph that follows one styled with
+   * `styleId` when the user presses Enter (OOXML `w:next`, §17.7.4.10).
+   *
+   * Returns null when the style has no `w:next`, when `next` points back at
+   * the same style (the common heading-stays-heading case is handled by the
+   * caller), when the style is unknown, when `next` is a dangling reference
+   * to a style that does not exist, or when the target is not a paragraph
+   * style (malformed DOCX may point `w:next` at a character or table style;
+   * writing such an ID into a paragraph's `styleId` would create an invalid
+   * reference).
+   */
+  getNextStyleId(styleId: string | undefined | null): string | null {
+    if (!styleId) {
+      return null;
+    }
+    const next = this.stylesById.get(styleId)?.next;
+    if (!next || next === styleId) {
+      return null;
+    }
+    const target = this.stylesById.get(next);
+    if (!target || target.type !== "paragraph") {
+      return null;
+    }
+    return next;
   }
 
   /**
@@ -279,7 +307,7 @@ export class StyleResolver {
     style: Style,
   ): void {
     if (style.pPr) {
-      const merged = this.mergeParagraphFormatting(
+      const merged = mergeParagraphFormatting(
         result.paragraphFormatting,
         style.pPr,
       );
@@ -293,52 +321,6 @@ export class StyleResolver {
         result.runFormatting = merged;
       }
     }
-  }
-
-  /**
-   * Merge paragraph formatting (source overrides target)
-   */
-  private mergeParagraphFormatting(
-    target: ParagraphFormatting | undefined,
-    source: ParagraphFormatting | undefined,
-  ): ParagraphFormatting | undefined {
-    if (!source) {
-      return target;
-    }
-    if (!target) {
-      return { ...source };
-    }
-
-    const result = { ...target };
-
-    for (const key of Object.keys(source) as (keyof ParagraphFormatting)[]) {
-      const value = source[key];
-      if (value !== undefined) {
-        if (key === "runProperties") {
-          const mergedRPr = mergeTextFormatting(
-            result.runProperties,
-            source.runProperties,
-          );
-          if (mergedRPr !== undefined) {
-            result.runProperties = mergedRPr;
-          }
-        } else if (key === "borders" || key === "numPr" || key === "frame") {
-          const baseValue = result[key] as Record<string, unknown> | undefined;
-          const sourceValue = value as Record<string, unknown> | undefined;
-          (result as Record<string, unknown>)[key] = {
-            ...baseValue,
-            ...sourceValue,
-          };
-        } else if (key === "tabs" && Array.isArray(value)) {
-          // Tabs from higher priority source replace lower priority
-          result.tabs = [...value];
-        } else {
-          (result as Record<string, unknown>)[key] = value;
-        }
-      }
-    }
-
-    return result;
   }
 }
 

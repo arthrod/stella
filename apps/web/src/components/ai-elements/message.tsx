@@ -1,15 +1,16 @@
 "use client";
 
-import { memo } from "react";
-import type { ComponentProps, HTMLAttributes } from "react";
+import { lazy, Suspense } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 
-import { cjk } from "@streamdown/cjk";
-import { math } from "@streamdown/math";
-import { mermaid } from "@streamdown/mermaid";
 import type { UIMessage } from "ai";
-import { Streamdown } from "streamdown";
+import { WandSparklesIcon } from "lucide-react";
 
 import { cn } from "@stll/ui/lib/utils";
+
+import type { MessageResponseProps } from "@/components/ai-elements/message-response";
+import { SKILL_REF_HASH_PREFIX } from "@/components/chat/streamdown-mention-link";
+import { InlinePill } from "@/components/inline-pill";
 
 type MessageProps = HTMLAttributes<HTMLDivElement> & {
   from: UIMessage["role"] | "system";
@@ -57,74 +58,77 @@ export const MessageContent = ({
   </div>
 );
 
-type MessageResponseProps = ComponentProps<typeof Streamdown>;
+// Streamdown plus its `@streamdown/{cjk,math,mermaid}` plugins drag
+// katex (~80 KB gz) and mermaid + cytoscape (~330 KB gz) into the
+// bundle. Splitting them behind `lazy()` keeps that weight out of the
+// entry chunk — the chunk only loads when an actual chat / AI-response
+// surface mounts.
+const LazyMessageResponse = lazy(async () => {
+  const m = await import("@/components/ai-elements/message-response");
+  return { default: m.MessageResponseImpl };
+});
 
-const streamdownPlugins = { cjk, math, mermaid };
-
-// `<stll-anon>` is injected into the parsed HAST by the
-// `rehype-anon-spans` plugin after markdown parsing. Streamdown's
-// default sanitisation drops unknown tags, so we whitelist it here
-// to let it through. The `ph` attribute carries the placeholder
-// the model actually saw (`[PERSON_1]`, …).
-const ANON_TAG_ALLOWED: { "stll-anon": string[] } = { "stll-anon": ["ph"] };
-
-export const MessageResponse = memo(
-  ({
-    className,
-    allowedTags,
-    rehypePlugins,
-    ...props
-  }: MessageResponseProps) => (
-    // Streamdown's internal memo doesn't compare `rehypePlugins`, so
-    // a re-render with a new plugin set is silently skipped and the
-    // unified processor is never rebuilt. Tying the key to plugin
-    // identity (defined/undefined plus a counter for distinct
-    // arrays) forces a fresh mount whenever the rehype chain
-    // actually changes — without this, the anonymization plugin
-    // wouldn't run for messages whose children text was identical
-    // when first rendered with no plugins.
-    <Streamdown
-      key={rehypePluginsKey(rehypePlugins)}
-      className={cn(
-        "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-        "[&_ol]:my-2 [&_ol]:list-decimal [&_ol]:ps-5",
-        "[&_ul]:my-2 [&_ul]:list-disc [&_ul]:ps-5",
-        "[&_li]:my-1 [&_li>p]:my-0 [&_li>p+p]:mt-2",
-        className,
-      )}
-      plugins={streamdownPlugins}
-      allowedTags={{ ...ANON_TAG_ALLOWED, ...allowedTags }}
-      {...(rehypePlugins ? { rehypePlugins } : {})}
-      {...props}
-    />
-  ),
-  // Children covers streaming text deltas. Compare the props that
-  // matter for downstream features (rehype plugin, components map,
-  // styling) so the wasm pipeline output isn't masked by an over-
-  // aggressive memo.
-  (prev, next) =>
-    prev.children === next.children &&
-    prev.rehypePlugins === next.rehypePlugins &&
-    prev.components === next.components &&
-    prev.allowedTags === next.allowedTags &&
-    prev.className === next.className,
+// Skill chip markdown link: `[label](#stella-skill-ref=slug)`. We
+// inline-render these as placeholder `<InlinePill>`s during the
+// Streamdown lazy-chunk load, so the raw `[...](#stella-skill-ref=...)`
+// source never paints between the composer chip leaving and the
+// transcript `SkillRefChip` arriving. The placeholder's visual
+// shape matches the real chip, so no second flash when Streamdown
+// finishes parsing. Prefix is imported from the chip module so a
+// rename of `SKILL_REF_HASH_PREFIX` invalidates this matcher at
+// compile time instead of silently leaving raw markdown to flash.
+const SKILL_LINK_RE = new RegExp(
+  `\\[([^\\]]+)\\]\\(${SKILL_REF_HASH_PREFIX.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}([^)]+)\\)`,
+  "gu",
 );
 
-const rehypePluginIds = new WeakMap<object, number>();
-let nextRehypePluginId = 0;
-const rehypePluginsKey = (
-  rehypePlugins: MessageResponseProps["rehypePlugins"],
-): string => {
-  if (!rehypePlugins) {
-    return "no-rehype";
+const renderFallbackChildren = (children: ReactNode): ReactNode => {
+  if (typeof children !== "string") {
+    return children;
   }
-  let id = rehypePluginIds.get(rehypePlugins);
-  if (id === undefined) {
-    nextRehypePluginId += 1;
-    id = nextRehypePluginId;
-    rehypePluginIds.set(rehypePlugins, id);
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  // Reset between calls: `RegExp.exec` with `g` keeps lastIndex
+  // across invocations of the same regex instance.
+  SKILL_LINK_RE.lastIndex = 0;
+  let match: RegExpExecArray | null = SKILL_LINK_RE.exec(children);
+  while (match !== null) {
+    if (match.index > cursor) {
+      nodes.push(children.slice(cursor, match.index));
+    }
+    const label = match[1] ?? "";
+    nodes.push(
+      <InlinePill
+        key={`${match.index}-${match[2] ?? ""}`}
+        leadingIcon={<WandSparklesIcon className="size-3 shrink-0" />}
+        truncate
+      >
+        {label}
+      </InlinePill>,
+    );
+    cursor = match.index + match[0].length;
+    match = SKILL_LINK_RE.exec(children);
   }
-  return `rehype-${id}`;
+  if (nodes.length === 0) {
+    return children;
+  }
+  if (cursor < children.length) {
+    nodes.push(children.slice(cursor));
+  }
+  return nodes;
 };
 
-MessageResponse.displayName = "MessageResponse";
+const MessageResponseFallback = ({
+  children,
+  className,
+}: MessageResponseProps) => (
+  <div className={cn("size-full whitespace-pre-wrap", className)}>
+    {renderFallbackChildren(children)}
+  </div>
+);
+
+export const MessageResponse = (props: MessageResponseProps) => (
+  <Suspense fallback={<MessageResponseFallback {...props} />}>
+    <LazyMessageResponse {...props} />
+  </Suspense>
+);

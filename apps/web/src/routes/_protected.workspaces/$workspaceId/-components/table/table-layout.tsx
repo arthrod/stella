@@ -1,11 +1,13 @@
-import { useEffect, useMemo } from "react";
+import { lazy, Suspense, useEffect, useMemo } from "react";
 
 import {
   useSuspenseInfiniteQuery,
   useSuspenseQuery,
 } from "@tanstack/react-query";
-import { getCoreRowModel, useReactTable } from "@tanstack/react-table";
+import { ClientOnly } from "@tanstack/react-router";
+import { createCoreRowModel, useTable } from "@tanstack/react-table";
 import { ClockIcon, HashIcon, TableIcon, UserIcon } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
 import { useAIKeyGate } from "@/components/require-ai-key";
@@ -17,9 +19,17 @@ import {
   VersionCell,
 } from "@/routes/_protected.workspaces/$workspaceId/-components/metadata-cells";
 import { MetadataPopover } from "@/routes/_protected.workspaces/$workspaceId/-components/metadata-popover";
+import type { SortHint } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/sort-property";
 import { getPropertyColumn } from "@/routes/_protected.workspaces/$workspaceId/-components/table-column";
-import type { TableColumnDef } from "@/routes/_protected.workspaces/$workspaceId/-components/table/types";
+import { workspaceTableFeatures } from "@/routes/_protected.workspaces/$workspaceId/-components/table/table-features";
+import type {
+  TableCellContext,
+  TableColumnDef,
+  TableHeaderContext,
+  TableTreeNode,
+} from "@/routes/_protected.workspaces/$workspaceId/-components/table/types";
 import { WorkspaceTable } from "@/routes/_protected.workspaces/$workspaceId/-components/table/workspace-table";
+import { useTableStore } from "@/routes/_protected.workspaces/$workspaceId/-hooks/table-store";
 import { useSyncJustificationChunks } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-sync-justifications";
 import { useTableState } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-table-state";
 import {
@@ -38,6 +48,45 @@ const selectColId = getInternalColId("select");
 const addPropertyColId = getInternalColId("add-property");
 const DEFAULT_COLUMN_MIN_SIZE = 64;
 const ADD_PROPERTY_COLUMN_SIZE = 48;
+
+const loadTableDevtools = async () => {
+  const tableDevtoolsModule =
+    await import("@/routes/_protected.workspaces/$workspaceId/-components/table/table-devtools");
+
+  return tableDevtoolsModule;
+};
+
+// Keeps the devtools package out of production bundles.
+const TableDevtools = import.meta.env.DEV ? lazy(loadTableDevtools) : null;
+
+type MetadataHeaderOptions = {
+  icon: LucideIcon;
+  label: string;
+  sortHint: SortHint;
+};
+
+const createMetadataHeader =
+  ({ icon, label, sortHint }: MetadataHeaderOptions) =>
+  ({ header }: TableHeaderContext) => (
+    <MetadataPopover
+      column={header.column}
+      icon={icon}
+      label={label}
+      sortHint={sortHint}
+    />
+  );
+
+const renderAuthorCell = ({ row }: TableCellContext) => (
+  <AuthorCell entity={row.original} />
+);
+
+const renderLastUpdatedCell = ({ row }: TableCellContext) => (
+  <LastUpdatedCell entity={row.original} />
+);
+
+const renderVersionCell = ({ row }: TableCellContext) => (
+  <VersionCell entity={row.original} />
+);
 
 type TableLayoutProps = {
   workspaceId: string;
@@ -97,6 +146,29 @@ export const TableLayout = ({ workspaceId, view }: TableLayoutProps) => {
     entityIdChunks: justificationEntityIdChunks,
   });
 
+  // Resolve the row selection to entities for chrome outside the
+  // table (the view toolbar's bulk actions menu).
+  const rowSelection = useTableStore((s) => s.rowSelection[view.id]);
+  const setSelectedEntities = useTableStore((s) => s.setSelectedEntities);
+  useEffect(() => {
+    const selected = rowSelection ?? {};
+    const result: TableTreeNode[] = [];
+    const visit = (nodes: TableTreeNode[] | undefined) => {
+      if (!nodes) {
+        return;
+      }
+
+      for (const node of nodes) {
+        if (selected[node.entityId]) {
+          result.push(node);
+        }
+        visit(node.children);
+      }
+    };
+    visit(treeData);
+    setSelectedEntities(view.id, result);
+  }, [rowSelection, treeData, view.id, setSelectedEntities]);
+
   const columns = useMemo(() => {
     const columnDefs: TableColumnDef[] = [
       {
@@ -112,7 +184,10 @@ export const TableLayout = ({ workspaceId, view }: TableLayoutProps) => {
     ];
 
     for (const property of properties) {
-      const col = getPropertyColumn(property);
+      const col = getPropertyColumn({
+        filters: view.layout.filters,
+        property,
+      });
       columnDefs.push(col);
     }
 
@@ -120,15 +195,12 @@ export const TableLayout = ({ workspaceId, view }: TableLayoutProps) => {
       id: getInternalPropertyId("created-by"),
       accessorKey: getInternalPropertyId("created-by"),
       meta: { muted: true },
-      header: (ctx) => (
-        <MetadataPopover
-          column={ctx.header.column}
-          icon={UserIcon}
-          label={t("workspaces.filesystem.author")}
-          sortHint="text"
-        />
-      ),
-      cell: (props) => <AuthorCell entity={props.row.original} />,
+      header: createMetadataHeader({
+        icon: UserIcon,
+        label: t("workspaces.filesystem.author"),
+        sortHint: "text",
+      }),
+      cell: renderAuthorCell,
       size: 160,
     });
 
@@ -136,15 +208,12 @@ export const TableLayout = ({ workspaceId, view }: TableLayoutProps) => {
       id: getInternalPropertyId("updated-at"),
       accessorKey: getInternalPropertyId("updated-at"),
       meta: { muted: true },
-      header: (ctx) => (
-        <MetadataPopover
-          column={ctx.header.column}
-          icon={ClockIcon}
-          label={t("workspaces.filesystem.lastUpdated")}
-          sortHint="date"
-        />
-      ),
-      cell: (props) => <LastUpdatedCell entity={props.row.original} />,
+      header: createMetadataHeader({
+        icon: ClockIcon,
+        label: t("workspaces.filesystem.lastUpdated"),
+        sortHint: "date",
+      }),
+      cell: renderLastUpdatedCell,
       size: 140,
     });
 
@@ -152,15 +221,12 @@ export const TableLayout = ({ workspaceId, view }: TableLayoutProps) => {
       id: getInternalPropertyId("version"),
       accessorKey: getInternalPropertyId("version"),
       meta: { muted: true },
-      header: (ctx) => (
-        <MetadataPopover
-          column={ctx.header.column}
-          icon={HashIcon}
-          label={t("workspaces.filesystem.version")}
-          sortHint="number"
-        />
-      ),
-      cell: (props) => <VersionCell entity={props.row.original} />,
+      header: createMetadataHeader({
+        icon: HashIcon,
+        label: t("workspaces.filesystem.version"),
+        sortHint: "number",
+      }),
+      cell: renderVersionCell,
       size: 80,
     });
 
@@ -178,16 +244,17 @@ export const TableLayout = ({ workspaceId, view }: TableLayoutProps) => {
     });
 
     return columnDefs;
-  }, [properties, t]);
+  }, [properties, t, view.layout.filters]);
 
-  const table = useReactTable({
+  const table = useTable({
+    features: workspaceTableFeatures,
+    rowModels: { coreRowModel: createCoreRowModel() },
     columnResizeMode: "onChange",
     data: treeData,
     columns,
     defaultColumn: {
       minSize: DEFAULT_COLUMN_MIN_SIZE,
     },
-    getCoreRowModel: getCoreRowModel(),
     manualSorting: true,
     enableSortingRemoval: false,
     enableSubRowSelection: true,
@@ -207,16 +274,24 @@ export const TableLayout = ({ workspaceId, view }: TableLayoutProps) => {
   }
 
   return (
-    <WorkspaceTable
-      hasNextPage={hasNextPage}
-      isFetchingNextPage={isFetchingNextPage}
-      onLoadMore={() => {
-        // eslint-disable-next-line typescript/no-floating-promises
-        fetchNextPage();
-      }}
-      table={table}
-      contentMode={tableState.contentMode}
-      workspaceId={workspaceId}
-    />
+    <>
+      <WorkspaceTable
+        hasNextPage={hasNextPage}
+        isFetchingNextPage={isFetchingNextPage}
+        onLoadMore={() => {
+          void fetchNextPage();
+        }}
+        table={table}
+        contentMode={tableState.contentMode}
+        workspaceId={workspaceId}
+      />
+      {TableDevtools ? (
+        <ClientOnly>
+          <Suspense fallback={null}>
+            <TableDevtools table={table} />
+          </Suspense>
+        </ClientOnly>
+      ) : null}
+    </>
   );
 };

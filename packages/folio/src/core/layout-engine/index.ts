@@ -4,13 +4,24 @@
  * Converts blocks + measures into positioned fragments on pages.
  */
 
+import { panic } from "better-result";
+
 import {
   computeKeepNextChains,
   calculateChainHeight,
   getMidChainIndices,
   hasPageBreakBefore,
 } from "./keep-together";
+import { measuredLineAdvance } from "./lineFlow";
 import { FOOTNOTE_SEPARATOR_HEIGHT, createPaginator } from "./paginator";
+import { getParagraphFragmentPmRange } from "./paragraphFragmentRange";
+import { buildTableRowBreakInfo, snapRowBreak } from "./tableRowBreak";
+import {
+  bandFragmentX,
+  bandTopContentY,
+  floatingTextBoxReservesBand,
+  isPageFrameRelativeAnchor,
+} from "./textBoxFlow";
 import type {
   FlowBlock,
   Measure,
@@ -127,7 +138,7 @@ function getSpacingAfter(block: ParagraphBlock): number {
  *
  * This mutates the block attrs in-place before layout runs.
  */
-function applyContextualSpacing(blocks: FlowBlock[]): void {
+export function applyContextualSpacing(blocks: FlowBlock[]): void {
   for (let i = 0; i < blocks.length - 1; i++) {
     const curr = blocks[i]!; // SAFETY: i < blocks.length - 1
     const next = blocks[i + 1]!; // SAFETY: i + 1 < blocks.length
@@ -155,6 +166,22 @@ function applyContextualSpacing(blocks: FlowBlock[]): void {
       }
     }
   }
+
+  // Recurse into nested block containers (table cells and text boxes) so
+  // contextual spacing is suppressed there too — measure, pagination, and the
+  // painter all read the (mutated) paragraph spacing, so they stay consistent.
+  // eigenpal/docx-editor#699.
+  for (const block of blocks) {
+    if (block.kind === "table") {
+      for (const row of block.rows) {
+        for (const cell of row.cells) {
+          applyContextualSpacing(cell.blocks);
+        }
+      }
+    } else if (block.kind === "textBox") {
+      applyContextualSpacing(block.content);
+    }
+  }
 }
 
 /**
@@ -169,11 +196,11 @@ function applyContextualSpacing(blocks: FlowBlock[]): void {
 export function layoutDocument(
   blocks: FlowBlock[],
   measures: Measure[],
-  options: LayoutOptions = {} as LayoutOptions,
+  options: LayoutOptions,
 ): Layout {
   // Validate input
   if (blocks.length !== measures.length) {
-    throw new Error(
+    panic(
       `layoutDocument: expected one measure per block (blocks=${blocks.length}, measures=${measures.length})`,
     );
   }
@@ -204,9 +231,7 @@ export function layoutDocument(
   // Calculate content width
   const contentWidth = pageSize.w - margins.left - margins.right;
   if (contentWidth <= 0) {
-    throw new Error(
-      "layoutDocument: page size and margins yield no content area",
-    );
+    panic("layoutDocument: page size and margins yield no content area");
   }
 
   const bodyConfig: SectionLayoutConfig = {
@@ -245,6 +270,9 @@ export function layoutDocument(
     ...(options.footnoteReservedHeights !== undefined
       ? { footnoteReservedHeights: options.footnoteReservedHeights }
       : {}),
+    ...(options.sectionHeaderFooterRefs !== undefined
+      ? { sectionHeaderFooterRefs: options.sectionHeaderFooterRefs }
+      : {}),
   });
 
   // Apply contextual spacing: suppress spaceBefore/spaceAfter between
@@ -258,6 +286,13 @@ export function layoutDocument(
 
   // Process each block, tracking section break index with a counter (O(1) per break)
   let sectionIdx = 0;
+  // Section page geometry for resolving page/margin-pinned topAndBottom bands.
+  // The measure pass (extractFloatingZones) uses the section config, not the
+  // page's possibly-different first-page margins, so layout must too or the
+  // reserved band and painted box desync. eigenpal #694.
+  let activeSectionMarginTop = initialConfig.margins.top;
+  let activeSectionPageHeight = initialConfig.pageSize.h;
+  let activeSectionMarginBottom = initialConfig.margins.bottom;
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i]!; // SAFETY: i < blocks.length
     const measure = measures[i]!; // SAFETY: measures.length === blocks.length (validated above)
@@ -317,11 +352,12 @@ export function layoutDocument(
         break;
 
       case "textBox":
-        layoutTextBox(
-          block as TextBoxBlock,
-          measure as TextBoxMeasure,
+        layoutTextBox(block as TextBoxBlock, measure as TextBoxMeasure, {
           paginator,
-        );
+          sectionMarginTop: activeSectionMarginTop,
+          sectionPageHeight: activeSectionPageHeight,
+          sectionMarginBottom: activeSectionMarginBottom,
+        });
         break;
 
       case "pageBreak":
@@ -335,14 +371,20 @@ export function layoutDocument(
       case "sectionBreak": {
         // Use the NEXT section's columns; for break type, prefer next section's
         // type but fall back to current break's type (preserves explicit 'continuous')
+        const nextSectionConfig =
+          sectionConfigs[sectionIdx + 1] ?? initialConfig;
         const nextType =
           sectionBreakTypes[sectionIdx + 1] ?? sectionBreakTypes[sectionIdx];
         handleSectionBreak(
           block as SectionBreakBlock,
           paginator,
-          sectionConfigs[sectionIdx + 1] ?? initialConfig,
+          nextSectionConfig,
           nextType,
+          sectionIdx + 1,
         );
+        activeSectionMarginTop = nextSectionConfig.margins.top;
+        activeSectionPageHeight = nextSectionConfig.pageSize.h;
+        activeSectionMarginBottom = nextSectionConfig.margins.bottom;
         sectionIdx++;
         break;
       }
@@ -439,6 +481,7 @@ function layoutParagraph(
       toLine: 0,
       ...(block.pmStart !== undefined ? { pmStart: block.pmStart } : {}),
       ...(block.pmEnd !== undefined ? { pmEnd: block.pmEnd } : {}),
+      ...(block.sdtGroups ? { sdtGroups: block.sdtGroups } : {}),
     };
 
     paginator.addFragment(fragment, 0, spaceBefore, spaceAfter);
@@ -475,14 +518,14 @@ function layoutParagraph(
 
     for (let j = currentLineIndex; j < lines.length; j++) {
       const line = lines[j]!; // SAFETY: j < lines.length
-      const lineHeight = line.lineHeight;
+      const lineAdvance = measuredLineAdvance(line);
       const lineRefs = getLineFootnoteRefs(
         block,
         line.fromRun,
         line.toRun,
         footnoteHeightById,
       );
-      const totalWithLine = linesHeight + lineHeight;
+      const totalWithLine = linesHeight + lineAdvance;
       const withSpacing =
         totalWithLine +
         firstFragmentSpaceBefore +
@@ -507,6 +550,13 @@ function layoutParagraph(
     const effectiveSpaceBefore = isFirstFragment ? spaceBefore : 0;
     const effectiveSpaceAfter = isLastFragment ? spaceAfter : 0;
 
+    const pmRange = getParagraphFragmentPmRange(
+      block,
+      measure,
+      currentLineIndex,
+      currentLineIndex + fittingLines,
+    );
+
     const fragment: ParagraphFragment = {
       kind: "paragraph",
       blockId: block.id,
@@ -516,10 +566,11 @@ function layoutParagraph(
       height: linesHeight,
       fromLine: currentLineIndex,
       toLine: currentLineIndex + fittingLines,
-      ...(block.pmStart !== undefined ? { pmStart: block.pmStart } : {}),
-      ...(block.pmEnd !== undefined ? { pmEnd: block.pmEnd } : {}),
+      ...(pmRange.pmStart !== undefined ? { pmStart: pmRange.pmStart } : {}),
+      ...(pmRange.pmEnd !== undefined ? { pmEnd: pmRange.pmEnd } : {}),
       ...(!isFirstFragment ? { continuesFromPrev: true } : {}),
       ...(!isLastFragment ? { continuesOnNext: true } : {}),
+      ...(block.sdtGroups ? { sdtGroups: block.sdtGroups } : {}),
     };
 
     // Ensure the page can accommodate body lines + footnote demand
@@ -579,7 +630,7 @@ function layoutParagraph(
 
     // If more lines remain, advance to next column/page
     if (currentLineIndex < lines.length) {
-      paginator.ensureFits(lines[currentLineIndex]!.lineHeight); // SAFETY: guarded by length check
+      paginator.ensureFits(measuredLineAdvance(lines[currentLineIndex]!)); // SAFETY: guarded by length check
     }
   }
 }
@@ -633,21 +684,186 @@ function layoutTable(
 
   let currentRowIndex = 0;
 
+  const breakInfo = buildTableRowBreakInfo(block, measure);
+
+  // X position from justification / indent, recomputed per fragment because the
+  // active column can change across section breaks.
+  const computeTableX = (columnIndex: number): number => {
+    let x = paginator.getColumnX(columnIndex);
+    if (block.justification === "center") {
+      x += (paginator.columnWidth - measure.totalWidth) / 2;
+    } else if (block.justification === "right") {
+      x = x + paginator.columnWidth - measure.totalWidth;
+    } else if (block.indent) {
+      x += block.indent;
+    }
+    return x;
+  };
+
+  const getCurrentRowCapacity = (state = paginator.getCurrentState()): number =>
+    state.rawContentBottom - state.topMargin;
+
+  const getCurrentAvailableHeight = (
+    state = paginator.getCurrentState(),
+  ): number => state.contentBottom - state.cursorY;
+
+  const hasAdjacentPriorTableRows = (
+    rowIndex: number,
+    state = paginator.getCurrentState(),
+  ): boolean => {
+    const previous = state.page.fragments.at(-1);
+    return (
+      previous?.kind === "table" &&
+      previous.blockId === block.id &&
+      previous.toRow === rowIndex &&
+      previous.y + previous.height === state.cursorY &&
+      previous.x === computeTableX(state.columnIndex)
+    );
+  };
+
+  const shouldRepeatHeaderRows = (
+    rowIndex: number,
+    consumed: number,
+    state = paginator.getCurrentState(),
+  ): boolean =>
+    headerRowCount > 0 &&
+    rowIndex >= headerRowCount &&
+    !(consumed === 0 && hasAdjacentPriorTableRows(rowIndex, state));
+
+  const canSplitRow = (
+    rowIndex: number,
+    state = paginator.getCurrentState(),
+  ): boolean => {
+    const row = rows[rowIndex];
+    if (!row) {
+      return false;
+    }
+    const repeatedHeaderOverhead = shouldRepeatHeaderRows(rowIndex, 0, state)
+      ? headerRowsHeight
+      : 0;
+    if ((breakInfo.breakOffsets[rowIndex]?.length ?? 0) <= 1) {
+      return false;
+    }
+    const requiredHeight = row.height + repeatedHeaderOverhead;
+    if (requiredHeight > getCurrentRowCapacity(state)) {
+      return true;
+    }
+    return (
+      hasAdjacentPriorTableRows(rowIndex, state) &&
+      requiredHeight > getCurrentAvailableHeight(state) - state.trailingSpacing
+    );
+  };
+
   while (currentRowIndex < rows.length) {
+    // A row taller than a whole page can't fit anywhere; break it between whole
+    // text lines across pages instead of overflowing the page and clipping the
+    // content. eigenpal/docx-editor#698 (fixes their #570).
+    const oversizedRow = rows[currentRowIndex]!; // SAFETY: currentRowIndex < rows.length
+    if (canSplitRow(currentRowIndex)) {
+      let consumed = 0;
+      while (consumed < oversizedRow.height) {
+        const sliceState = paginator.getCurrentState();
+        const repeatHeaderRows = shouldRepeatHeaderRows(
+          currentRowIndex,
+          consumed,
+          sliceState,
+        );
+        const headerOverhead = repeatHeaderRows ? headerRowsHeight : 0;
+        const sliceAvail =
+          paginator.getAvailableHeight() -
+          headerOverhead -
+          (consumed === 0 ? sliceState.trailingSpacing : 0);
+        let slice = snapRowBreak(
+          breakInfo,
+          currentRowIndex,
+          consumed,
+          sliceAvail,
+        );
+        if (slice <= 0) {
+          const isFreshPage =
+            sliceState.cursorY === sliceState.topMargin &&
+            sliceState.page.fragments.length === 0;
+          if (!isFreshPage) {
+            // Not even one line fits in the space left; continue in the next
+            // column, or on a fresh page when this is the last column.
+            paginator.forceColumnBreak();
+            continue;
+          }
+          // Fresh page and a single line still exceeds the page height: place
+          // the next whole line anyway so the loop always makes progress.
+          const from = consumed;
+          const next = breakInfo.breakOffsets[currentRowIndex]?.find(
+            (o) => o > from,
+          );
+          slice = (next ?? oversizedRow.height) - consumed;
+        }
+        const sliceBottom = consumed + slice;
+        const reachesRowEnd = sliceBottom >= oversizedRow.height;
+        const moreAfter = !reachesRowEnd || currentRowIndex + 1 < rows.length;
+        const fragmentHeight = headerOverhead + slice;
+        const sliceFragment: TableFragment = {
+          kind: "table",
+          blockId: block.id,
+          x: computeTableX(sliceState.columnIndex),
+          y: 0,
+          width: measure.totalWidth,
+          height: fragmentHeight,
+          fromRow: currentRowIndex,
+          toRow: currentRowIndex + 1,
+          ...(block.pmStart !== undefined ? { pmStart: block.pmStart } : {}),
+          ...(block.pmEnd !== undefined ? { pmEnd: block.pmEnd } : {}),
+          ...(consumed > 0 || currentRowIndex > 0
+            ? { continuesFromPrev: true }
+            : {}),
+          ...(moreAfter ? { continuesOnNext: true } : {}),
+          ...(repeatHeaderRows ? { headerRowCount } : {}),
+          ...(consumed > 0 ? { topClip: consumed } : {}),
+          ...(reachesRowEnd ? {} : { bottomClip: sliceBottom }),
+          ...(block.sdtGroups ? { sdtGroups: block.sdtGroups } : {}),
+        };
+        const sliceResult = paginator.addFragment(
+          sliceFragment,
+          fragmentHeight,
+          0,
+          0,
+        );
+        sliceFragment.y = sliceResult.y;
+        sliceFragment.x = computeTableX(sliceResult.state.columnIndex);
+        consumed = sliceBottom;
+        if (consumed < oversizedRow.height) {
+          paginator.forceColumnBreak();
+        }
+      }
+      currentRowIndex += 1;
+      continue;
+    }
+
     const state = paginator.getCurrentState();
     const rawAvailableHeight = paginator.getAvailableHeight();
     const isFirstFragment = currentRowIndex === 0;
 
-    // Account for trailing spacing from previous block that addFragment will consume.
-    // addFragment computes effectiveSpaceBefore = max(spaceBefore, trailingSpacing)
-    // and adds it to the fragment height before calling ensureFits.
-    // We pass spaceBefore=0 for tables, so the overhead is just trailingSpacing.
-    const pendingSpacing = isFirstFragment ? state.trailingSpacing : 0;
+    // Leading skip past a page-pinned band, applied only to the table's first
+    // fragment (a band sits on one page). eigenpal #694.
+    const bandSkip = isFirstFragment ? (measure.bandSkipBefore ?? 0) : 0;
+
+    // Account for the space addFragment will consume before the fragment, which
+    // is max(spaceBefore, trailingSpacing). We pass bandSkip as spaceBefore, so
+    // the overhead is the larger of that and the previous block's trailing space.
+    const pendingSpacing = isFirstFragment
+      ? Math.max(bandSkip, state.trailingSpacing)
+      : 0;
     const availableHeight = rawAvailableHeight - pendingSpacing;
 
-    // For continuation fragments, we need space for header rows + at least one content row
-    const headerOverhead =
-      !isFirstFragment && headerRowCount > 0 ? headerRowsHeight : 0;
+    const repeatHeaderRowsForNormalFragment = shouldRepeatHeaderRows(
+      currentRowIndex,
+      0,
+      state,
+    );
+
+    // For continuation fragments, we need space for header rows + at least one content row.
+    const normalHeaderOverhead = repeatHeaderRowsForNormalFragment
+      ? headerRowsHeight
+      : 0;
 
     // Calculate how many rows fit (excluding header rows which are prepended separately)
     let rowsHeight = 0;
@@ -655,7 +871,7 @@ function layoutTable(
 
     for (let j = currentRowIndex; j < rows.length; j++) {
       const rowHeight = rows[j]!.height; // SAFETY: j < rows.length
-      const totalWithRow = rowsHeight + rowHeight + headerOverhead;
+      const totalWithRow = rowsHeight + rowHeight + normalHeaderOverhead;
 
       if (totalWithRow <= availableHeight || fittingRows === 0) {
         rowsHeight += rowHeight;
@@ -666,20 +882,13 @@ function layoutTable(
     }
 
     // Total fragment height includes header rows for continuation fragments
-    const fragmentHeight = rowsHeight + headerOverhead;
+    const fragmentHeight = rowsHeight + normalHeaderOverhead;
 
     // Create fragment for these rows
     const isLastFragment = currentRowIndex + fittingRows >= rows.length;
 
     // Calculate x position based on table justification and indent
-    let desiredX = paginator.getColumnX(state.columnIndex);
-    if (block.justification === "center") {
-      desiredX += (paginator.columnWidth - measure.totalWidth) / 2;
-    } else if (block.justification === "right") {
-      desiredX = desiredX + paginator.columnWidth - measure.totalWidth;
-    } else if (block.indent) {
-      desiredX += block.indent;
-    }
+    const desiredX = computeTableX(state.columnIndex);
 
     const fragment: TableFragment = {
       kind: "table",
@@ -694,10 +903,11 @@ function layoutTable(
       ...(block.pmEnd !== undefined ? { pmEnd: block.pmEnd } : {}),
       ...(!isFirstFragment ? { continuesFromPrev: true } : {}),
       ...(!isLastFragment ? { continuesOnNext: true } : {}),
-      ...(!isFirstFragment && headerRowCount > 0 ? { headerRowCount } : {}),
+      ...(repeatHeaderRowsForNormalFragment ? { headerRowCount } : {}),
+      ...(block.sdtGroups ? { sdtGroups: block.sdtGroups } : {}),
     };
 
-    const result = paginator.addFragment(fragment, fragmentHeight, 0, 0);
+    const result = paginator.addFragment(fragment, fragmentHeight, bandSkip, 0);
     fragment.y = result.y;
     fragment.x = desiredX;
 
@@ -705,10 +915,30 @@ function layoutTable(
 
     // If more rows remain, advance to next column/page
     if (currentRowIndex < rows.length) {
+      if (canSplitRow(currentRowIndex)) {
+        const nextState = paginator.getCurrentState();
+        const nextHeaderOverhead = shouldRepeatHeaderRows(
+          currentRowIndex,
+          0,
+          nextState,
+        )
+          ? headerRowsHeight
+          : 0;
+        const nextSliceAvail =
+          paginator.getAvailableHeight() -
+          nextHeaderOverhead -
+          nextState.trailingSpacing;
+        if (snapRowBreak(breakInfo, currentRowIndex, 0, nextSliceAvail) > 0) {
+          continue;
+        }
+      }
       // Need space for at least one content row plus repeated header rows
+      const nextState = paginator.getCurrentState();
       const nextRowHeight =
         rows[currentRowIndex]!.height + // SAFETY: guarded by length check
-        (headerRowCount > 0 ? headerRowsHeight : 0);
+        (shouldRepeatHeaderRows(currentRowIndex, 0, nextState)
+          ? headerRowsHeight
+          : 0);
       paginator.ensureFits(nextRowHeight);
     }
   }
@@ -806,6 +1036,7 @@ function layoutFloatingTable(
     ...(block.pmStart !== undefined ? { pmStart: block.pmStart } : {}),
     ...(block.pmEnd !== undefined ? { pmEnd: block.pmEnd } : {}),
     isFloating: true,
+    ...(block.sdtGroups ? { sdtGroups: block.sdtGroups } : {}),
   };
 
   // Add directly without advancing cursor
@@ -826,8 +1057,9 @@ function layoutImage(
     return;
   }
 
-  // Inline image - ensure it fits
-  const state = paginator.ensureFits(measure.height);
+  // Inline image - ensure it fits (plus any leading skip past a page band)
+  const bandSkip = measure.bandSkipBefore ?? 0;
+  const state = paginator.ensureFits(bandSkip + measure.height);
 
   const fragment: ImageFragment = {
     kind: "image",
@@ -840,7 +1072,7 @@ function layoutImage(
     ...(block.pmEnd !== undefined ? { pmEnd: block.pmEnd } : {}),
   };
 
-  const result = paginator.addFragment(fragment, measure.height, 0, 0);
+  const result = paginator.addFragment(fragment, measure.height, bandSkip, 0);
   fragment.y = result.y;
 }
 
@@ -879,14 +1111,72 @@ function layoutAnchoredImage(
   state.page.fragments.push(fragment);
 }
 
+type LayoutTextBoxOptions = {
+  paginator: ReturnType<typeof createPaginator>;
+  sectionMarginTop: number;
+  sectionPageHeight: number;
+  sectionMarginBottom: number;
+};
+
 /**
  * Layout a text box block onto pages.
  */
 function layoutTextBox(
   block: TextBoxBlock,
   measure: TextBoxMeasure,
-  paginator: ReturnType<typeof createPaginator>,
+  {
+    paginator,
+    sectionMarginTop,
+    sectionPageHeight,
+    sectionMarginBottom,
+  }: LayoutTextBoxOptions,
 ): void {
+  // A page/margin-pinned topAndBottom band (e.g. a title banner) floats to the
+  // top of its page; the reserved band in the measure pass pushes body text
+  // below it (see extractFloatingZones in PagedEditor). It must not also consume
+  // flow at its anchor, or the box height would be reserved twice. Place it at
+  // the page content top without advancing the cursor. eigenpal #694.
+  if (isPagePinnedBandTextBox(block)) {
+    const state = paginator.getCurrentState();
+    // Position the box at the same content-Y the measure pass reserved its band
+    // at. The measure pass uses the section top margin (not a page's
+    // first-page margin), so use the same value here; `bandTopContentY` is
+    // content-relative, and `fragment.y` is page-absolute, so add the page's
+    // own top margin (`state.topMargin`) to convert. Using `state.topMargin`
+    // inside the resolver instead would desync the box from its band on a
+    // title page whose first-page top margin differs from the section margin.
+    const bandTop = bandTopContentY(block.position?.vertical, {
+      pageHeight: sectionPageHeight,
+      marginTop: sectionMarginTop,
+      marginBottom: sectionMarginBottom,
+      boxHeight: measure.height,
+    });
+    // Honor the box's horizontal anchor (align center/right, page-relative
+    // offset) instead of always pinning to the column's left edge. The band is
+    // full-width regardless, so this only moves where the box paints.
+    const horizontal = block.position?.horizontal;
+    const x = horizontal
+      ? bandFragmentX(horizontal, {
+          pageWidth: state.page.size.w,
+          marginLeft: state.page.margins.left,
+          marginRight: state.page.margins.right,
+          boxWidth: measure.width,
+        })
+      : paginator.getColumnX(state.columnIndex);
+    const fragment: TextBoxFragment = {
+      kind: "textBox",
+      blockId: block.id,
+      x,
+      y: state.topMargin + bandTop,
+      width: measure.width,
+      height: measure.height,
+      ...(block.pmStart !== undefined ? { pmStart: block.pmStart } : {}),
+      ...(block.pmEnd !== undefined ? { pmEnd: block.pmEnd } : {}),
+    };
+    state.page.fragments.push(fragment);
+    return;
+  }
+
   const state = paginator.ensureFits(measure.height);
 
   const fragment: TextBoxFragment = {
@@ -905,6 +1195,19 @@ function layoutTextBox(
 }
 
 /**
+ * A topAndBottom text box whose vertical anchor pins it to the page frame
+ * (page/margin/margin-strip) — it floats to a fixed page position rather than
+ * flowing in document order. Must agree with the measure pass's band extraction
+ * (extractFloatingZones), which uses the same predicate. eigenpal #694.
+ */
+function isPagePinnedBandTextBox(block: TextBoxBlock): boolean {
+  if (!floatingTextBoxReservesBand(block)) {
+    return false;
+  }
+  return isPageFrameRelativeAnchor(block.position?.vertical?.relativeTo);
+}
+
+/**
  * Handle a section break block.
  * @param block - The section break block (current section's properties)
  * @param paginator - The paginator instance
@@ -916,6 +1219,7 @@ function handleSectionBreak(
   paginator: ReturnType<typeof createPaginator>,
   nextSectionConfig: SectionLayoutConfig,
   nextSectionType: SectionBreakBlock["type"] = "nextPage",
+  nextSectionIndex?: number,
 ): void {
   switch (nextSectionType) {
     case "nextPage":
@@ -923,6 +1227,9 @@ function handleSectionBreak(
         nextSectionConfig.pageSize,
         nextSectionConfig.margins,
       );
+      if (nextSectionIndex !== undefined) {
+        paginator.startSection(nextSectionIndex);
+      }
       paginator.forcePageBreak({ coalesceBlankPage: true });
       break;
 
@@ -931,6 +1238,9 @@ function handleSectionBreak(
         nextSectionConfig.pageSize,
         nextSectionConfig.margins,
       );
+      if (nextSectionIndex !== undefined) {
+        paginator.startSection(nextSectionIndex);
+      }
       const state = paginator.forcePageBreak({ coalesceBlankPage: true });
       // If landed on odd page, add another page
       if (state.page.number % 2 !== 0) {
@@ -944,6 +1254,9 @@ function handleSectionBreak(
         nextSectionConfig.pageSize,
         nextSectionConfig.margins,
       );
+      if (nextSectionIndex !== undefined) {
+        paginator.startSection(nextSectionIndex);
+      }
       const state = paginator.forcePageBreak({ coalesceBlankPage: true });
       // If landed on even page, add another page
       if (state.page.number % 2 === 0) {

@@ -100,6 +100,90 @@ describe("parseParagraph tracked-change hardening", () => {
     expect(insertion.info.date).toBeUndefined();
   });
 
+  test("preserves tracked-change metadata for marker-only wrappers", () => {
+    const paragraph = parseParagraphXml(`
+      <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:ins w:id="12" w:author="Reviewer">
+          <w:bookmarkStart w:id="5" w:name="insertedMarker"/>
+        </w:ins>
+      </w:p>
+    `);
+
+    expect(paragraph.content.map((content) => content.type)).toEqual([
+      "insertion",
+      "bookmarkStart",
+    ]);
+    const insertion = paragraph.content.at(0);
+    expect(insertion?.type).toBe("insertion");
+    if (!insertion || insertion.type !== "insertion") {
+      return;
+    }
+    expect(insertion.info).toMatchObject({ id: 12, author: "Reviewer" });
+    expect(insertion.content).toHaveLength(0);
+  });
+
+  test("preserves inline SDT metadata for marker-only controls", () => {
+    const paragraph = parseParagraphXml(`
+      <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:sdt>
+          <w:sdtPr>
+            <w:alias w:val="Clause marker"/>
+            <w:tag w:val="clause-marker"/>
+          </w:sdtPr>
+          <w:sdtContent>
+            <w:bookmarkStart w:id="9" w:name="controlledMarker"/>
+          </w:sdtContent>
+        </w:sdt>
+      </w:p>
+    `);
+
+    expect(paragraph.content.map((content) => content.type)).toEqual([
+      "inlineSdt",
+      "bookmarkStart",
+    ]);
+    const sdt = paragraph.content.at(0);
+    expect(sdt?.type).toBe("inlineSdt");
+    if (!sdt || sdt.type !== "inlineSdt") {
+      return;
+    }
+    expect(sdt.properties).toMatchObject({
+      alias: "Clause marker",
+      tag: "clause-marker",
+    });
+    expect(sdt.content).toHaveLength(0);
+  });
+
+  test("reads inline date-SDT format from <w:dateFormat>, not <w:date w:fullDate>", () => {
+    // Regression: parseSdtProperties used to read w:date@w:fullDate as the
+    // format, but w:fullDate is the bound *value*; the display format lives
+    // in the child <w:dateFormat w:val="..."/>. Picked up from upstream
+    // eigenpal/docx-editor#661.
+    const paragraph = parseParagraphXml(`
+      <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:sdt>
+          <w:sdtPr>
+            <w:tag w:val="effective-date"/>
+            <w:date w:fullDate="2026-06-02T00:00:00Z">
+              <w:dateFormat w:val="d MMMM yyyy"/>
+              <w:lid w:val="en-GB"/>
+            </w:date>
+          </w:sdtPr>
+          <w:sdtContent><w:r><w:t>2 June 2026</w:t></w:r></w:sdtContent>
+        </w:sdt>
+      </w:p>
+    `);
+
+    const sdt = paragraph.content.at(0);
+    if (!sdt || sdt.type !== "inlineSdt") {
+      throw new Error("expected inline SDT");
+    }
+    expect(sdt.properties).toMatchObject({
+      sdtType: "date",
+      tag: "effective-date",
+      dateFormat: "d MMMM yyyy",
+    });
+  });
+
   test("preserves point comment references from runs", () => {
     const paragraph = parseParagraphXml(`
       <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -115,6 +199,28 @@ describe("parseParagraph tracked-change hardening", () => {
     expect(paragraph.content.at(1)).toEqual({
       type: "commentReference",
       id: 42,
+    });
+  });
+
+  test("lifts bookmark markers out of tracked-change wrappers", () => {
+    const paragraph = parseParagraphXml(`
+      <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:bookmarkStart w:id="5" w:name="deletedRange"/>
+        <w:del w:id="7" w:author="Reviewer">
+          <w:r><w:delText>removed</w:delText></w:r>
+          <w:bookmarkEnd w:id="5"/>
+        </w:del>
+      </w:p>
+    `);
+
+    expect(paragraph.content.map((content) => content.type)).toEqual([
+      "bookmarkStart",
+      "deletion",
+      "bookmarkEnd",
+    ]);
+    expect(paragraph.content.at(2)).toMatchObject({
+      type: "bookmarkEnd",
+      id: 5,
     });
   });
 });
@@ -202,5 +308,89 @@ describe("parseParagraph spacing explicit flags", () => {
     `);
 
     expect(paragraph.formatting?.spacingExplicit).toBeUndefined();
+  });
+});
+
+// Mirror of upstream eigenpal/docx-editor PR #482 parser tests
+// (see commit 29f95751d). OOXML allows simple/complex fields, nested
+// SDTs, and math equations directly inside `<w:sdtContent>`. The folio
+// fork previously split these out as siblings of the SDT wrapper, so
+// docProps-bound title fields (and similar template content) lost their
+// wrapper on parse.
+describe("parseParagraph SDT content preservation", () => {
+  test("keeps a simple field that lives inside an inline SDT", () => {
+    const paragraph = parseParagraphXml(`
+      <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:sdt>
+          <w:sdtPr><w:alias w:val="title-control"/></w:sdtPr>
+          <w:sdtContent>
+            <w:fldSimple w:instr="TITLE">
+              <w:r><w:t>Cached title</w:t></w:r>
+            </w:fldSimple>
+          </w:sdtContent>
+        </w:sdt>
+      </w:p>
+    `);
+
+    expect(paragraph.content).toHaveLength(1);
+    const sdt = paragraph.content[0];
+    expect(sdt.type).toBe("inlineSdt");
+    if (sdt.type !== "inlineSdt") {
+      return;
+    }
+    expect(sdt.content).toHaveLength(1);
+    expect(sdt.content[0].type).toBe("simpleField");
+  });
+
+  test("keeps a complex field that lives inside an inline SDT", () => {
+    const paragraph = parseParagraphXml(`
+      <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:sdt>
+          <w:sdtPr><w:alias w:val="page-ref"/></w:sdtPr>
+          <w:sdtContent>
+            <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+            <w:r><w:instrText> PAGE </w:instrText></w:r>
+            <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+            <w:r><w:t>3</w:t></w:r>
+            <w:r><w:fldChar w:fldCharType="end"/></w:r>
+          </w:sdtContent>
+        </w:sdt>
+      </w:p>
+    `);
+
+    expect(paragraph.content).toHaveLength(1);
+    const sdt = paragraph.content[0];
+    expect(sdt.type).toBe("inlineSdt");
+    if (sdt.type !== "inlineSdt") {
+      return;
+    }
+    expect(sdt.content).toHaveLength(1);
+    expect(sdt.content[0].type).toBe("complexField");
+  });
+
+  test("keeps a nested inline SDT inside an inline SDT", () => {
+    const paragraph = parseParagraphXml(`
+      <w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:sdt>
+          <w:sdtPr><w:alias w:val="outer"/></w:sdtPr>
+          <w:sdtContent>
+            <w:sdt>
+              <w:sdtPr><w:alias w:val="inner"/></w:sdtPr>
+              <w:sdtContent>
+                <w:r><w:t>Nested text</w:t></w:r>
+              </w:sdtContent>
+            </w:sdt>
+          </w:sdtContent>
+        </w:sdt>
+      </w:p>
+    `);
+
+    const outer = paragraph.content[0];
+    expect(outer.type).toBe("inlineSdt");
+    if (outer.type !== "inlineSdt") {
+      return;
+    }
+    expect(outer.content).toHaveLength(1);
+    expect(outer.content[0].type).toBe("inlineSdt");
   });
 });

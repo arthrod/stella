@@ -26,8 +26,9 @@ import { useTranslations } from "use-intl";
 import { ColorPicker } from "@stll/ui/components/color-picker";
 import type { ColorPreset } from "@stll/ui/components/color-picker";
 import { Menu, MenuPopup, MenuTrigger } from "@stll/ui/components/menu";
+import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 
-import type { ColorValue, ParagraphAlignment } from "../core/types/document";
+import type { ParagraphAlignment } from "../core/types/document";
 import { cn } from "../lib/utils";
 import {
   ToolbarButton,
@@ -37,6 +38,7 @@ import {
 import type { ToolbarProps, FormattingAction } from "./toolbarPrimitives";
 import { AlignmentButtons } from "./ui/AlignmentButtons";
 import { FontPicker } from "./ui/FontPicker";
+import { FontSizePicker } from "./ui/FontSizePicker";
 import { ListButtons, createDefaultListState } from "./ui/ListButtons";
 import { StylePicker } from "./ui/StylePicker";
 
@@ -92,6 +94,7 @@ export function FormattingBar(props: FormattingBarProps) {
     children,
     showStylePicker = true,
     showFontPicker = true,
+    showFontSizePicker = true,
     showTextColorPicker = true,
     showAlignmentButtons = true,
     showListButtons = true,
@@ -140,6 +143,16 @@ export function FormattingBar(props: FormattingBarProps) {
     [disabled, onFormat, onRefocusEditor],
   );
 
+  const handleFontSizeChange = useCallback(
+    (sizePt: number) => {
+      if (!disabled && onFormat) {
+        onFormat({ type: "fontSize", value: sizePt });
+        requestAnimationFrame(() => onRefocusEditor?.());
+      }
+    },
+    [disabled, onFormat, onRefocusEditor],
+  );
+
   const handleTextColorSelect = useCallback(
     (hex: string) => {
       if (!disabled && onFormat) {
@@ -152,7 +165,7 @@ export function FormattingBar(props: FormattingBarProps) {
 
   const handleTextColorClear = useCallback(() => {
     if (!disabled && onFormat) {
-      onFormat({ type: "textColor", value: { auto: true } as ColorValue });
+      onFormat({ type: "textColor", value: { auto: true } });
       requestAnimationFrame(() => onRefocusEditor?.());
     }
   }, [disabled, onFormat, onRefocusEditor]);
@@ -354,10 +367,9 @@ export function FormattingBar(props: FormattingBarProps) {
     }
   }, []);
 
-  const handleBarMouseUp = useCallback(
-    () => requestAnimationFrame(() => onRefocusEditor?.()),
-    [onRefocusEditor],
-  );
+  const handleBarMouseUp = useCallback(() => {
+    requestAnimationFrame(() => onRefocusEditor?.());
+  }, [onRefocusEditor]);
 
   const secondaryControls = (
     <>
@@ -369,6 +381,18 @@ export function FormattingBar(props: FormattingBarProps) {
             disabled={disabled}
             width={108}
             placeholder="Arial"
+          />
+        )}
+        {showFontSizePicker && (
+          <FontSizePicker
+            value={
+              currentFormatting.fontSize !== undefined
+                ? currentFormatting.fontSize / 2
+                : undefined
+            }
+            onChange={handleFontSizeChange}
+            disabled={disabled}
+            placeholder={t("fontSize")}
           />
         )}
         {showTextColorPicker && (
@@ -451,11 +475,16 @@ export function FormattingBar(props: FormattingBarProps) {
       role="toolbar"
       aria-label={t("formattingToolbar")}
       tabIndex={-1}
-      onMouseDown={inline ? undefined : handleBarMouseDown}
-      onMouseUp={inline ? undefined : handleBarMouseUp}
+      data-folio-toolbar="true"
+      onMouseDown={
+        inline ? undefined : containedHandler(barRef, handleBarMouseDown)
+      }
+      onMouseUp={
+        inline ? undefined : containedHandler(barRef, handleBarMouseUp)
+      }
     >
       {/* Formatting controls */}
-      <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto overflow-y-hidden overscroll-x-contain">
+      <div className="flex min-w-0 flex-1 [scrollbar-width:none] items-center gap-0.5 overflow-x-auto overflow-y-hidden overscroll-x-contain [&::-webkit-scrollbar]:hidden">
         {/* Undo / Redo */}
         <ToolbarGroup className="gap-0" label={t("historyGroup")}>
           <ToolbarButton

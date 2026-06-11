@@ -10,9 +10,12 @@ import {
 } from "react";
 import type React from "react";
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import type { QueryKey } from "@tanstack/react-query";
-import { getRouteApi } from "@tanstack/react-router";
 import HardBreak from "@tiptap/extension-hard-break";
 import History from "@tiptap/extension-history";
 import Paragraph from "@tiptap/extension-paragraph";
@@ -25,6 +28,7 @@ import { panic, Result } from "better-result";
 import { useDebouncedCallback } from "use-debounce";
 import { useTranslations } from "use-intl";
 
+import { buildChatSlashItems } from "@/components/chat-editor-slash-items";
 import {
   ChatMention,
   createChatSuggestion,
@@ -44,9 +48,11 @@ import {
 import {
   createPromptSlashSuggestion,
   PromptSlash,
+  type SlashItem,
 } from "@/components/chat/prompt-slash-extension";
 import { createPromptEditorDocument } from "@/components/prompt-editor";
 import { getAnalytics } from "@/lib/analytics/provider";
+import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import {
   createChatDraftState,
   createEmptyChatDraftDoc,
@@ -55,7 +61,10 @@ import {
 import type { ChatThreadRef } from "@/lib/chat-thread-ref";
 import { getChatThreadKey } from "@/lib/chat-thread-ref";
 import type { WorkspaceEntity } from "@/lib/types";
-import { shortcutsOptions } from "@/routes/_protected.knowledge/-queries";
+import {
+  skillCommandsOptions,
+  skillsOptions,
+} from "@/routes/_protected.knowledge/-queries";
 import { entitiesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
 import { viewsOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/views";
 
@@ -211,8 +220,6 @@ const isSelectionAtStart = ({ selection }: EditorState) =>
 
 const isSelectionAtEnd = ({ doc, selection }: EditorState) =>
   selection.empty && selection.to >= doc.content.size - 1;
-
-const protectedRouteApi = getRouteApi("/_protected");
 
 export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
   const registrationsRef = useRef(new Map<string, RegisteredExtension>());
@@ -473,9 +480,7 @@ export const useChatEditor = ({
   const placeholderRef = useRef(resolvedPlaceholder);
   placeholderRef.current = resolvedPlaceholder;
   const queryClient = useQueryClient();
-  const activeOrganizationId = protectedRouteApi.useRouteContext({
-    select: (ctx) => ctx.user.activeOrganizationId,
-  });
+  const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const submitHandlerRef = useRef<(() => Promise<void>) | null>(null);
   const fileIdCounterRef = useRef(0);
@@ -692,22 +697,60 @@ export const useChatEditor = ({
     }
   });
 
-  const { data: shortcuts = [] } = useQuery(
-    shortcutsOptions(activeOrganizationId),
+  // Slash-command skills (formerly "prompt shortcuts") feed the chat
+  // composer's slash menu. After the prompts→skills consolidation
+  // they live in `agent_skills` and the dedicated commands endpoint
+  // returns only the command-bearing subset, so the slash menu
+  // doesn't pay for resource-heavy fields it doesn't render.
+  const { data: commandSkills = [] } = useQuery(
+    skillCommandsOptions(activeOrganizationId),
   );
-  const allPrompts = useMemo(
+  const {
+    data: skillPages,
+    fetchNextPage: fetchNextSkillPage,
+    hasNextPage: hasNextSkillPage,
+    isFetchingNextPage: isFetchingNextSkillPage,
+  } = useInfiniteQuery(skillsOptions(activeOrganizationId));
+
+  useEffect(() => {
+    if (!hasNextSkillPage || isFetchingNextSkillPage) {
+      return;
+    }
+    void fetchNextSkillPage();
+  }, [fetchNextSkillPage, hasNextSkillPage, isFetchingNextSkillPage]);
+
+  const skillPageRows = skillPages?.pages;
+  // Adapt the unified commands-endpoint shape to the legacy
+  // `SlashShortcutRow` contract `buildChatSlashItems` consumes.
+  // `body` (the prompt text) now lives on the skill row, where
+  // shortcuts called it `prompt`.
+  const slashShortcutRows = useMemo(
     () =>
-      shortcuts.map((s) => ({
-        id: s.id,
-        scope: s.scope,
-        name: s.name,
-        command: s.command,
-        body: s.prompt,
-      })),
-    [shortcuts],
+      commandSkills.flatMap((row) =>
+        row.command === null
+          ? []
+          : [
+              {
+                id: row.id,
+                scope: row.scope,
+                name: row.name,
+                command: row.command,
+                prompt: row.body,
+              },
+            ],
+      ),
+    [commandSkills],
   );
-  const promptsRef = useRef(allPrompts);
-  promptsRef.current = allPrompts;
+  const slashItems = useMemo<SlashItem[]>(
+    () =>
+      buildChatSlashItems({
+        shortcuts: slashShortcutRows,
+        skillPages: skillPageRows,
+      }),
+    [slashShortcutRows, skillPageRows],
+  );
+  const slashItemsRef = useRef(slashItems);
+  slashItemsRef.current = slashItems;
 
   const handleMessageHistoryKeyDown = useCallback(
     (state: EditorState, event: KeyboardEvent) => {
@@ -817,7 +860,7 @@ export const useChatEditor = ({
         deleteTriggerWithBackspace: true,
       }),
       PromptSlash.configure({
-        suggestion: createPromptSlashSuggestion(() => promptsRef.current),
+        suggestion: createPromptSlashSuggestion(() => slashItemsRef.current),
       }),
       PastedText,
     ],
@@ -830,6 +873,13 @@ export const useChatEditor = ({
     },
     editorProps: {
       attributes: {
+        // A contenteditable div has no implicit ARIA role, so without
+        // these the composer is invisible to assistive tech (and to
+        // role-based queries); the visible placeholder span is
+        // aria-hidden.
+        role: "textbox",
+        "aria-multiline": "true",
+        "aria-label": resolvedPlaceholder,
         class:
           "field-sizing-content max-h-48 min-h-10 overflow-y-auto text-sm focus-visible:outline-none",
       },

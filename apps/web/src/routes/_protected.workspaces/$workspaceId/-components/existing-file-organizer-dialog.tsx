@@ -554,6 +554,7 @@ export const ExistingFileOrganizerDialog = ({
           title: t("workspaces.importOrganizer.organized"),
           timeout: undefined,
         });
+        return;
       })
       .catch((error: unknown) => {
         analytics.captureError(error);
@@ -812,7 +813,7 @@ const FailureBanner = ({ disabled, onRetry }: FailureBannerProps) => {
         type="button"
         variant="outline"
       >
-        {t("workspaces.importOrganizer.retry")}
+        {t("common.retry")}
       </Button>
     </div>
   );
@@ -1204,6 +1205,7 @@ const OrganizerFileNode = ({
     >
       <EntityKindIcon
         className="text-muted-foreground mt-1.5 size-4 shrink-0"
+        fileName={row.originalName}
         kind="document"
         mimeType={row.mimeType}
       />

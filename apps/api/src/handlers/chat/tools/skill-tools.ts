@@ -32,7 +32,7 @@ export const createSkillTools = ({
   return {
     "load-skill": tool({
       description:
-        "Load the full instructions for one Stella skill. The system " +
+        "Load the full instructions for one stella skill. The system " +
         "prompt lists skill names and descriptions only; use this when " +
         "a skill is relevant to the user's task and you need its full " +
         "methodology or resource list.",
@@ -77,7 +77,7 @@ export const createSkillTools = ({
 
     "read-skill-resource": tool({
       description:
-        "Read one resource from a loaded Stella skill. Use only paths " +
+        "Read one resource from a loaded stella skill. Use only paths " +
         "returned by load-skill. Resources are read-only methodology, " +
         "knowledge, or prompt templates; they do not grant access to " +
         "matter data.",
@@ -123,16 +123,20 @@ export const createSkillTools = ({
           });
         }
 
+        const read = await readSkillResourceContent({
+          organizationId,
+          path,
+          safeDb,
+          skillName,
+          userId,
+        });
         return {
           skillName,
           path,
-          content: await readSkillResourceContent({
-            organizationId,
-            path,
-            safeDb,
-            skillName,
-            userId,
-          }),
+          mimeType: inferSkillResourceMimeType(path),
+          content: read.content,
+          skillId: read.skillId,
+          origin: read.origin,
         };
       },
     }),
@@ -166,6 +170,26 @@ const readSkillResourceContent = async ({
     });
   }
   return resourceResult.value;
+};
+
+const SKILL_RESOURCE_MIME_BY_EXT: Record<string, string> = {
+  md: "text/markdown",
+  markdown: "text/markdown",
+  txt: "text/plain",
+  json: "application/json",
+  yaml: "application/yaml",
+  yml: "application/yaml",
+  pdf: "application/pdf",
+};
+
+const inferSkillResourceMimeType = (path: string): string => {
+  const filename = path.split("/").pop() ?? "";
+  const lastDot = filename.lastIndexOf(".");
+  if (lastDot === -1) {
+    return "text/plain";
+  }
+  const ext = filename.slice(lastDot + 1).toLowerCase();
+  return SKILL_RESOURCE_MIME_BY_EXT[ext] ?? "text/plain";
 };
 
 const assertAvailableSkill = ({

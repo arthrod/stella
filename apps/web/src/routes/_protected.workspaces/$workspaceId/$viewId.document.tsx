@@ -3,6 +3,7 @@ import {
   Suspense,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -41,22 +42,23 @@ import {
 import "@stll/folio/editor.css";
 import { cn } from "@stll/ui/lib/utils";
 
+import {
+  useDocxFitZoom,
+  useDocxWheelZoom,
+} from "@/components/docx-preview-zoom";
+import { TranslateDocumentDialog } from "@/components/translate-document-dialog";
 import { api } from "@/lib/api";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
-import { toAPIError } from "@/lib/errors";
+import { ClientOperationError, toAPIError } from "@/lib/errors";
 import {
   PDFProvider,
   getPDFPageIdByNumber,
   usePDFStore,
 } from "@/lib/pdf/pdf-context";
 import { toSafeId } from "@/lib/safe-id";
-import { DocxBrowserEditor } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-browser-editor";
+import { composeRefs } from "@/lib/slot";
 import { shouldUseDocxBrowserEditor } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-browser-editor.logic";
 import { DocxLoadingShell } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-loading-shell";
-import {
-  useDocxFitZoom,
-  useDocxWheelZoom,
-} from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-preview-zoom";
 import { fileOptions } from "@/routes/_protected.workspaces/$workspaceId/-components/files/queries";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
 import PdfViewer, {
@@ -75,6 +77,17 @@ import "@/routes/_protected.workspaces/$workspaceId/-components/peek/peek-docx.c
 const ReadOnlyDocxViewer = lazy(async () => {
   const m = await import("@stll/folio");
   return { default: m.DocxEditor };
+});
+
+// Lazy-load DocxBrowserEditor so the @stll/folio editor graph
+// (DocxEditor, FormattingBar, prosemirror-tables, yjs, utif2, …)
+// stays out of the eager preload list. Without this the static
+// import below pulled the whole vendor-folio chunk (~490 KB gz)
+// into every page load via the route tree.
+const DocxBrowserEditor = lazy(async () => {
+  const m =
+    await import("@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-browser-editor");
+  return { default: m.DocxBrowserEditor };
 });
 
 export const Route = createFileRoute(
@@ -222,7 +235,7 @@ function RouteComponentInner({
   // `editing=true` in the URL means the user landed here from a
   // sidepeek that was already unlocked for editing. Honoring it
   // drops them straight back into the edit session instead of
-  // making them click Edit again on the now-fullscreen view.
+  // making them click into the doc again.
   const initialEditing = Route.useSearch({
     select: (s) => s.editing ?? false,
   });
@@ -230,9 +243,10 @@ function RouteComponentInner({
   const { data: entity } = useSuspenseQuery(
     entityOptions(workspaceId, entityId),
   );
-  const { data: versionData } = useQuery(
+  const versionDataQuery = useQuery(
     entityVersionsOptions({ workspaceId, entityId }),
   );
+  const versionData = versionDataQuery.data;
   const setActiveJustification = useWorkspaceStore(
     (s) => s.setActiveJustification,
   );
@@ -326,6 +340,18 @@ function RouteComponentInner({
     hasFilePropertyId: filePropertyId !== undefined,
     isComparing,
   });
+  const filePreviewState = (() => {
+    if (activeMimeType !== undefined) {
+      return "ready";
+    }
+    if (versionDataQuery.isError) {
+      return "error";
+    }
+    if (versionDataQuery.isPending) {
+      return "loading";
+    }
+    return "missing";
+  })();
   const shouldRenderDocxBrowserShell =
     isDocxFile &&
     filePropertyId !== undefined &&
@@ -395,6 +421,7 @@ function RouteComponentInner({
       id: fieldId,
       entityId,
       label: activeFileLabel,
+      fileName: activeFileLabel,
       workspaceId,
       mimeType: activeMimeType,
       pdfFileId: activePdfFileId,
@@ -433,6 +460,12 @@ function RouteComponentInner({
             >
               <PdfViewerControls
                 currentPage={pageNumber}
+                extraControls={
+                  <TranslateDocumentDialog
+                    fieldId={fieldId}
+                    workspaceId={workspaceId}
+                  />
+                }
                 fieldId={fieldId}
                 workspaceId={workspaceId}
               />
@@ -440,6 +473,31 @@ function RouteComponentInner({
           )}
           <div className="relative min-h-0 flex-1">
             {(() => {
+              if (filePreviewState === "error") {
+                const error = versionDataQuery.error;
+                if (error instanceof Error) {
+                  throw error;
+                }
+                throw new ClientOperationError({
+                  action: "load_document_version_metadata",
+                  message: "Failed to load document version metadata",
+                  cause: error,
+                });
+              }
+
+              if (filePreviewState === "loading") {
+                return <DocxLoadingShell scaleOffset={scaleOffset} />;
+              }
+
+              if (filePreviewState === "missing") {
+                return (
+                  <Navigate
+                    params={{ workspaceId }}
+                    to="/workspaces/$workspaceId"
+                  />
+                );
+              }
+
               if (shouldRenderDocxBrowserShell && filePropertyId) {
                 return (
                   <VersionDropZone
@@ -447,50 +505,59 @@ function RouteComponentInner({
                     entityId={entityId}
                     workspaceId={workspaceId}
                   >
-                    <DocxBrowserEditor
-                      actionBarControls={
-                        <PdfViewerControls
-                          currentPage={pageNumber}
-                          fieldId={fieldId}
-                          showFileActions={false}
-                          variant="inline"
-                          workspaceId={workspaceId}
-                        />
-                      }
-                      canUnlock={useDocxBrowserEditor}
-                      entityId={entityId}
-                      fieldId={fieldId}
-                      isEditing={initialEditing}
-                      onBlockedUnlock={() => {
-                        setDocxLatestVersionDialogOpen(true);
-                      }}
-                      onClose={() => {
-                        setDocxUnlocked(false);
-                        void navigate({
-                          search: (prev) => ({
-                            ...prev,
-                            editing: undefined,
-                          }),
-                        });
-                      }}
-                      onSaved={(savedFieldId) => {
-                        setDocxUnlocked(false);
-                        setActiveFieldId(savedFieldId);
-                        void navigate({
-                          replace: true,
-                          search: (prev) => ({
-                            ...prev,
-                            editing: undefined,
-                            field: savedFieldId,
-                            pdfPage: undefined,
-                          }),
-                        });
-                      }}
-                      onUnlockedChange={setDocxUnlocked}
-                      propertyId={filePropertyId}
-                      scaleOffset={scaleOffset}
-                      workspaceId={workspaceId}
-                    />
+                    <Suspense
+                      fallback={<DocxLoadingShell scaleOffset={scaleOffset} />}
+                    >
+                      <DocxBrowserEditor
+                        actionBarControls={
+                          <PdfViewerControls
+                            currentPage={pageNumber}
+                            extraControls={
+                              <TranslateDocumentDialog
+                                fieldId={fieldId}
+                                workspaceId={workspaceId}
+                              />
+                            }
+                            fieldId={fieldId}
+                            variant="inline"
+                            workspaceId={workspaceId}
+                          />
+                        }
+                        canUnlock={useDocxBrowserEditor}
+                        entityId={entityId}
+                        fieldId={fieldId}
+                        isEditing={initialEditing}
+                        onBlockedUnlock={() => {
+                          setDocxLatestVersionDialogOpen(true);
+                        }}
+                        onClose={() => {
+                          setDocxUnlocked(false);
+                          void navigate({
+                            search: (prev) => ({
+                              ...prev,
+                              editing: undefined,
+                            }),
+                          });
+                        }}
+                        onSaved={(savedFieldId) => {
+                          setDocxUnlocked(false);
+                          setActiveFieldId(savedFieldId);
+                          void navigate({
+                            replace: true,
+                            search: (prev) => ({
+                              ...prev,
+                              editing: undefined,
+                              field: savedFieldId,
+                              pdfPage: undefined,
+                            }),
+                          });
+                        }}
+                        onUnlockedChange={setDocxUnlocked}
+                        propertyId={filePropertyId}
+                        scaleOffset={scaleOffset}
+                        workspaceId={workspaceId}
+                      />
+                    </Suspense>
                   </VersionDropZone>
                 );
               }
@@ -620,7 +687,14 @@ const ReadOnlyDocxDocumentViewer = ({
 }) => {
   const editorRef = useRef<DocxEditorRef>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const targetZoom = useDocxFitZoom(containerRef, scaleOffset, 0.85);
+  const { containerRef: fitZoomRef, fitZoom: targetZoom } = useDocxFitZoom({
+    scaleOffset,
+    maxAutoZoom: 0.85,
+  });
+  const composedContainerRef = useMemo(
+    () => composeRefs(containerRef, fitZoomRef),
+    [fitZoomRef],
+  );
 
   useLayoutEffect(() => {
     editorRef.current?.setZoom(targetZoom);
@@ -628,7 +702,7 @@ const ReadOnlyDocxDocumentViewer = ({
   useDocxWheelZoom(containerRef, editorRef);
 
   return (
-    <div ref={containerRef} className="h-full overflow-auto">
+    <div ref={composedContainerRef} className="h-full overflow-auto">
       <ReadOnlyDocxViewer
         ref={editorRef}
         className="folio-docx-preview h-full"
@@ -685,7 +759,7 @@ const RedlineOverlay = ({
           {t("fileDetail.redlinePreview")}
         </span>
         <span
-          className="shrink-0 text-xs font-medium text-green-600 tabular-nums"
+          className="text-success shrink-0 text-xs font-medium tabular-nums"
           title={`${String(compareState.wordsAdded)} ${t("fileDetail.wordsAdded")}`}
         >
           +{compareState.wordsAdded}

@@ -12,9 +12,13 @@
  * - Inline properties (highest priority)
  */
 
-import type { Node as PMNode } from "prosemirror-model";
+import type { MarkType, Node as PMNode } from "prosemirror-model";
 
+import { createStyleEngine } from "../../style-engine";
+import type { StyleEngine } from "../../style-engine";
 import type {
+  BlockContent,
+  BlockSdt,
   Document,
   Paragraph,
   Run,
@@ -47,13 +51,14 @@ import { emuToPixels } from "../../utils/units";
 import { buildRunFormattingOverrideAttrs } from "../extensions/marks/RunFormattingOverrideExtension";
 import { schema } from "../schema";
 import type {
+  ImagePositionAttrs,
   ParagraphAttrs,
   TableAttrs,
   TableRowAttrs,
   TableCellAttrs,
 } from "../schema/nodes";
-import { createStyleResolver } from "../styles";
-import type { StyleResolver } from "../styles";
+import { assertValidProseMirrorDocument } from "../validation";
+import { shadingToRunShadingAttrs } from "./runShadingMark";
 
 /**
  * Options for document conversion
@@ -82,35 +87,102 @@ export function toProseDoc(
   const paragraphs = document.package.document.content;
   const nodes: PMNode[] = [];
 
-  const styleResolver = createStyleResolver(options?.styles);
+  const styleResolver = createStyleEngine(options?.styles);
   const theme = options?.theme ?? document.package.theme ?? null;
+  let textBoxGroupIndex = 0;
 
-  for (const block of paragraphs) {
-    if (block.type === "paragraph") {
-      // Convert paragraph and extract text boxes as sibling nodes
-      // If the paragraph starts with a page break (before any text),
-      // emit the break BEFORE the paragraph so the text lands on the
-      // next page — matching Word's rendering.
-      const pbPos = paragraphPageBreakPosition(block);
-      if (pbPos === "before") {
-        nodes.push(schema.node("pageBreak"));
+  const convertBodyBlocks = (blocks: BlockContent[]): PMNode[] => {
+    const out: PMNode[] = [];
+    for (const block of blocks) {
+      if (block.type === "paragraph") {
+        const pbPos = paragraphPageBreakPosition(block);
+        if (pbPos === "before") {
+          out.push(schema.node("pageBreak"));
+        }
+        out.push(
+          ...convertParagraphWithTextBoxes(
+            block,
+            styleResolver,
+            String(textBoxGroupIndex),
+          ),
+        );
+        textBoxGroupIndex += 1;
+        if (pbPos === "after") {
+          out.push(schema.node("pageBreak"));
+        }
+      } else if (block.type === "table") {
+        out.push(convertTable(block, styleResolver, theme));
+      } else {
+        out.push(convertBlockSdt(block, convertBodyBlocks));
       }
-      nodes.push(...convertParagraphWithTextBoxes(block, styleResolver));
-      if (pbPos === "after") {
-        nodes.push(schema.node("pageBreak"));
-      }
-    } else if (block.type === "table") {
-      const pmTable = convertTable(block, styleResolver, theme);
-      nodes.push(pmTable);
     }
-  }
+    return out;
+  };
+
+  nodes.push(...convertBodyBlocks(paragraphs));
+
+  // Caret-after-final-SDT affordance is provided by `prosemirror-gapcursor`
+  // at runtime; we previously injected a trailing empty paragraph here so
+  // the caret was not trapped inside an isolating blockSdt, but the
+  // synthetic paragraph survived `fromProseDoc` on save and silently
+  // appended a `<w:p/>` to the DOCX on every round trip (which adds blank
+  // space and shifts pagination in legal templates).
 
   // Ensure we have at least one paragraph
   if (nodes.length === 0) {
     nodes.push(schema.node("paragraph", {}, []));
   }
 
-  return schema.node("doc", null, nodes);
+  const pmDoc = schema.node("doc", null, nodes);
+  assertValidProseMirrorDocument(
+    pmDoc,
+    "Document conversion produced an invalid ProseMirror document",
+  );
+  return pmDoc;
+}
+
+/**
+ * Convert a `BlockSdt` model node into a `blockSdt` PM node, recursively
+ * converting its children with the caller-supplied block converter. Pass
+ * `rawPropertiesXml` / `rawEndPropertiesXml` through as attrs so the
+ * serializer can replay them verbatim after a save.
+ */
+function convertBlockSdt(
+  blockSdt: BlockSdt,
+  convertBlocks: (blocks: BlockContent[]) => PMNode[],
+): PMNode {
+  const props = blockSdt.properties;
+  const attrs: Record<string, unknown> = {
+    sdtType: props.sdtType,
+    alias: props.alias ?? null,
+    tag: props.tag ?? null,
+    id: props.id ?? null,
+    lock: props.lock ?? null,
+    placeholder: props.placeholder ?? null,
+    showingPlaceholder: props.showingPlaceholder ?? false,
+    dateFormat: props.dateFormat ?? null,
+    dateValueISO: props.dateValueISO ?? null,
+    listItems: props.listItems ? JSON.stringify(props.listItems) : null,
+    dropdownLastValue: props.dropdownLastValue ?? null,
+    checked: props.checked ?? null,
+    // Mark explicitly when the source content was empty. fromProseDoc reads
+    // this on save to drop the synthetic filler below — without an explicit
+    // marker we couldn't distinguish source `<w:sdtContent/>` (filler
+    // inserted here) from source `<w:sdtContent><w:p/></w:sdtContent>`
+    // (a real authored empty paragraph the user wants preserved).
+    _originallyEmpty: blockSdt.content.length === 0,
+    rawPropertiesXml: props.rawPropertiesXml ?? null,
+    rawEndPropertiesXml: props.rawEndPropertiesXml ?? null,
+    rawSdtChildrenBeforeContent: props.rawSdtChildrenBeforeContent ?? null,
+    rawSdtChildrenAfterContent: props.rawSdtChildrenAfterContent ?? null,
+  };
+  const children = convertBlocks(blockSdt.content);
+  // ProseMirror `blockSdt` requires at least one block child; insert an empty
+  // paragraph for a truly empty control rather than producing an invalid node.
+  if (children.length === 0) {
+    children.push(schema.node("paragraph", {}, []));
+  }
+  return schema.node("blockSdt", attrs, children);
 }
 
 /**
@@ -121,13 +193,18 @@ export function toProseDoc(
  */
 function convertParagraph(
   paragraph: Paragraph,
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
   activeCommentIds?: Set<number>,
   extraRunFormatting?: TextFormatting,
 ): PMNode {
   const attrs = paragraphFormattingToAttrs(paragraph, styleResolver);
   const inlineNodes: PMNode[] = [];
+  let inlineOffset = 0;
   let bookmarksArr: { id: number; name: string }[] | undefined;
+  let emptyHyperlinks:
+    | NonNullable<ParagraphAttrs["_emptyHyperlinks"]>
+    | undefined;
+  let hyperlinkIndex = 0;
 
   // Track active comment ranges for this paragraph
   const commentIds = activeCommentIds ?? new Set<number>();
@@ -135,7 +212,11 @@ function convertParagraph(
     if (nodes.length === 0) {
       return;
     }
-    inlineNodes.push(...applyCommentMarks(nodes, commentIds));
+    const markedNodes = applyCommentMarks(nodes, commentIds);
+    inlineNodes.push(...markedNodes);
+    for (const node of markedNodes) {
+      inlineOffset += node.nodeSize;
+    }
   };
   const emitInlineNode = (node: PMNode | null): void => {
     if (!node) {
@@ -156,20 +237,33 @@ function convertParagraph(
   const paragraphRunFormatting = paragraph.formatting?.runProperties
     ? resolveTextFormatting(paragraph.formatting.runProperties, styleResolver)
     : undefined;
+  // Word does not propagate paragraph-mark-only visual decorations
+  // (highlight, shading) to body runs — they paint the pilcrow alone. Strip
+  // them off the inheritance path so a `<w:pPr><w:rPr><w:highlight/></w:rPr>`
+  // used to mark just the paragraph glyph doesn't bleed onto every run.
+  const inheritableParagraphRunFormatting = paragraphRunFormatting
+    ? stripParagraphMarkOnlyFormatting(paragraphRunFormatting)
+    : undefined;
   const baseRunFormatting = mergeTextFormatting(
     styleRunFormatting,
     extraRunFormatting,
   );
   const defaultRunFormatting = mergeTextFormatting(
     baseRunFormatting,
-    paragraphRunFormatting,
+    inheritableParagraphRunFormatting,
   );
   const getInheritedRunFormatting = (
     formatting: TextFormatting | undefined,
-  ): TextFormatting | undefined =>
-    hasDirectRunFormatting(formatting)
-      ? baseRunFormatting
-      : defaultRunFormatting;
+  ): TextFormatting | undefined => {
+    if (!hasDirectRunFormatting(formatting)) {
+      return defaultRunFormatting;
+    }
+    return suppressParagraphMarkFormatting(
+      baseRunFormatting,
+      inheritableParagraphRunFormatting,
+      formatting,
+    );
+  };
   const emitTrackedChange = (
     change: Insertion | Deletion | MoveFrom | MoveTo,
     markType: "insertion" | "deletion",
@@ -202,9 +296,28 @@ function convertParagraph(
         ),
       );
     } else if (content.type === "hyperlink") {
-      emitInlineNodes(
-        convertHyperlink(content, getInheritedRunFormatting, styleResolver),
+      const currentHyperlinkIndex = hyperlinkIndex;
+      hyperlinkIndex += 1;
+      const linkNodes = convertHyperlink(
+        content,
+        getInheritedRunFormatting,
+        styleResolver,
+        currentHyperlinkIndex,
       );
+      if (linkNodes.length === 0) {
+        emptyHyperlinks ??= [];
+        emptyHyperlinks.push({
+          offset: inlineOffset,
+          ...(content.href !== undefined ? { href: content.href } : {}),
+          ...(content.anchor !== undefined ? { anchor: content.anchor } : {}),
+          ...(content.tooltip !== undefined
+            ? { tooltip: content.tooltip }
+            : {}),
+          ...(content.rId !== undefined ? { rId: content.rId } : {}),
+        });
+        continue;
+      }
+      emitInlineNodes(linkNodes);
     } else if (
       content.type === "simpleField" ||
       content.type === "complexField"
@@ -240,6 +353,9 @@ function convertParagraph(
 
   if (bookmarksArr) {
     attrs.bookmarks = bookmarksArr;
+  }
+  if (emptyHyperlinks) {
+    attrs._emptyHyperlinks = emptyHyperlinks;
   }
 
   return schema.node("paragraph", attrs, inlineNodes);
@@ -291,10 +407,11 @@ function convertTrackedChange(
   change: Insertion | Deletion | MoveFrom | MoveTo,
   markType: "insertion" | "deletion",
   getInheritedRunFormatting: RunFormattingResolver,
-  styleResolver?: StyleResolver | null,
+  styleResolver?: StyleEngine | null,
   moveKind: "moveFrom" | "moveTo" | null = null,
 ): PMNode[] {
   const nodes: PMNode[] = [];
+  let hyperlinkIndex = 0;
   for (const item of change.content) {
     if (item.type === "run") {
       nodes.push(
@@ -305,8 +422,15 @@ function convertTrackedChange(
         ),
       );
     } else {
+      const currentHyperlinkIndex = hyperlinkIndex;
+      hyperlinkIndex += 1;
       nodes.push(
-        ...convertHyperlink(item, getInheritedRunFormatting, styleResolver),
+        ...convertHyperlink(
+          item,
+          getInheritedRunFormatting,
+          styleResolver,
+          currentHyperlinkIndex,
+        ),
       );
     }
   }
@@ -320,11 +444,23 @@ function convertTrackedChange(
   });
 
   return nodes.map((node) => {
-    if (node.isText) {
+    if (canCarryTrackedRunMark(node, mark.type)) {
       return node.mark(mark.addToSet(node.marks));
     }
     return node;
   });
+}
+
+function canCarryTrackedRunMark(node: PMNode, markType: MarkType): boolean {
+  return (
+    node.isText ||
+    (node.isInline &&
+      node.type.allowsMarkType(markType) &&
+      (node.type.name === "image" ||
+        node.type.name === "shape" ||
+        node.type.name === "hardBreak" ||
+        node.type.name === "tab"))
+  );
 }
 
 /**
@@ -335,7 +471,7 @@ function convertTrackedChange(
  */
 function paragraphFormattingToAttrs(
   paragraph: Paragraph,
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
 ): ParagraphAttrs {
   const formatting = paragraph.formatting;
   const styleId = formatting?.styleId;
@@ -377,6 +513,20 @@ function paragraphFormattingToAttrs(
   if (paragraph.listRendering?.markerFontSize) {
     attrs.listMarkerFontSize = paragraph.listRendering.markerFontSize;
   }
+  if (paragraph.listRendering?.markerSuffix) {
+    attrs.listMarkerSuffix = paragraph.listRendering.markerSuffix;
+  }
+  if (paragraph.listRendering?.markerAllCaps) {
+    attrs.listMarkerAllCaps = paragraph.listRendering.markerAllCaps;
+  }
+  if (paragraph.listRendering?.implicitChildLevelAdvances !== undefined) {
+    attrs.listImplicitChildLevelAdvances =
+      paragraph.listRendering.implicitChildLevelAdvances;
+  }
+  if (paragraph.listRendering?.markerSecondSlotOffsetTwips !== undefined) {
+    attrs.listMarkerSecondSlotOffsetTwips =
+      paragraph.listRendering.markerSecondSlotOffsetTwips;
+  }
   if (paragraph.listRendering?.levelNumFmts) {
     attrs.listLevelNumFmts = paragraph.listRendering.levelNumFmts;
   }
@@ -398,6 +548,9 @@ function paragraphFormattingToAttrs(
   // through into PM attrs.
   if (paragraph.propertyChanges && paragraph.propertyChanges.length > 0) {
     attrs._propertyChanges = [...paragraph.propertyChanges];
+  }
+  if (paragraph.pPrMark) {
+    attrs.pPrMark = paragraph.pPrMark;
   }
 
   // Helper: assign a value only when defined
@@ -530,7 +683,7 @@ function paragraphFormattingToAttrs(
  * Resolve table style conditional formatting
  */
 function resolveTableStyleConditional(
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
   tableStyleId: string | undefined,
   conditionType: string,
 ): { tcPr?: TableCellFormatting; rPr?: TextFormatting } | undefined {
@@ -567,7 +720,7 @@ function resolveTableStyleConditional(
 }
 
 function resolveTableBaseStyle(
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
   tableStyleId: string | undefined,
 ): { tcPr?: TableCellFormatting; rPr?: TextFormatting } | undefined {
   if (!styleResolver || !tableStyleId) {
@@ -666,9 +819,75 @@ function hasDirectRunFormatting(
   );
 }
 
+function stripParagraphMarkOnlyFormatting(
+  formatting: TextFormatting,
+): TextFormatting | undefined {
+  const { highlight: _h, shading: _s, ...rest } = formatting;
+  return Object.keys(rest).length > 0 ? rest : undefined;
+}
+
+function suppressParagraphMarkFormatting(
+  base: TextFormatting | undefined,
+  paragraphMark: TextFormatting | undefined,
+  direct: TextFormatting | undefined,
+): TextFormatting | undefined {
+  if (!paragraphMark) {
+    return base;
+  }
+
+  const result: TextFormatting = { ...base };
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "bold");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "italic");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "strike");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "doubleStrike");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "allCaps");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "smallCaps");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "hidden");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "emboss");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "imprint");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "shadow");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "outline");
+  suppressBooleanParagraphMark(result, paragraphMark, direct, "rtl");
+
+  if (
+    paragraphMark.underline !== undefined &&
+    direct?.underline === undefined
+  ) {
+    result.underline = { style: "none" };
+  }
+
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function suppressBooleanParagraphMark(
+  result: TextFormatting,
+  paragraphMark: TextFormatting,
+  direct: TextFormatting | undefined,
+  key: keyof Pick<
+    TextFormatting,
+    | "bold"
+    | "italic"
+    | "strike"
+    | "doubleStrike"
+    | "allCaps"
+    | "smallCaps"
+    | "hidden"
+    | "emboss"
+    | "imprint"
+    | "shadow"
+    | "outline"
+    | "rtl"
+  >,
+): void {
+  if (paragraphMark[key] === undefined || direct?.[key] !== undefined) {
+    return;
+  }
+  result[key] = false;
+}
+
 function resolveTextFormatting(
   formatting: TextFormatting | undefined,
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
 ): TextFormatting | undefined {
   if (!formatting) {
     return styleResolver?.resolveRunStyle(null);
@@ -684,15 +903,28 @@ function resolveTextFormatting(
 function resolveParagraphDefaultTextFormatting(
   styleId: string | undefined,
   formatting: Paragraph["formatting"] | undefined,
-  styleResolver: StyleResolver,
+  styleResolver: StyleEngine,
 ): TextFormatting | undefined {
   const style = styleId
     ? (styleResolver.getStyle(styleId) ??
       styleResolver.getDefaultParagraphStyle())
     : styleResolver.getDefaultParagraphStyle();
   const paragraphStyleRpr = style?.type === "paragraph" ? style.rPr : undefined;
-  const paragraphRunProperties = formatting?.runProperties
-    ? resolveTextFormatting(formatting.runProperties, styleResolver)
+  // The pPr/rPr block describes the paragraph mark only — see the comment on
+  // `stripParagraphMarkOnlyFormatting`. We must NOT route this through
+  // `resolveTextFormatting` here, because that folds docDefaults back into
+  // the run properties and then overwrites the paragraph style's font
+  // (e.g. FootnoteText's Times New Roman) with the docDefault Calibri when
+  // merged into the cascade below.
+  const rawParagraphMarkRpr = formatting?.runProperties;
+  const characterStyleRpr =
+    rawParagraphMarkRpr?.styleId !== undefined
+      ? styleResolver.getRunStyleOwnProperties(rawParagraphMarkRpr.styleId)
+      : undefined;
+  const paragraphRunProperties = rawParagraphMarkRpr
+    ? stripParagraphMarkOnlyFormatting(
+        mergeTextFormatting(characterStyleRpr, rawParagraphMarkRpr) ?? {},
+      )
     : undefined;
 
   return mergeTextFormatting(
@@ -719,10 +951,15 @@ function resolveParagraphDefaultTextFormatting(
  * OOXML uses vMerge="restart" to start a vertical merge and vMerge="continue" for cells that should be merged.
  * This function converts that to rowSpan values and marks which cells should be skipped.
  */
-function calculateRowSpans(
-  table: Table,
-): Map<string, { rowSpan: number; skip: boolean }> {
-  const result = new Map<string, { rowSpan: number; skip: boolean }>();
+type RowSpanInfo = {
+  rowSpan: number;
+  skip: boolean;
+  preserveVMergeRestart?: boolean;
+  continuationCells?: TableCell[];
+};
+
+function calculateRowSpans(table: Table): Map<string, RowSpanInfo> {
+  const result = new Map<string, RowSpanInfo>();
   const numRows = table.rows.length;
 
   // Track active vertical merges per column (stores the row index where merge started)
@@ -732,46 +969,135 @@ function calculateRowSpans(
   for (let rowIndex = 0; rowIndex < numRows; rowIndex++) {
     // SAFETY: rowIndex < numRows <= table.rows.length
     const row = table.rows[rowIndex]!;
+    if (row.cells.length === 0) {
+      clearActiveVerticalMerges(activeMerges, result);
+      continue;
+    }
     let colIndex = 0;
-
-    for (const cellIndex_item of row.cells) {
-      const cell = cellIndex_item;
+    const rowCells = row.cells.map((cell) => {
       const colspan = cell.formatting?.gridSpan ?? 1;
       const vMerge = cell.formatting?.vMerge;
-      const key = `${rowIndex}-${colIndex}`;
+      const startRow =
+        vMerge === "continue" ? activeMerges.get(colIndex) : undefined;
+      const info = {
+        cell,
+        colIndex,
+        colspan,
+        vMerge,
+        startRow,
+        hasMeaningfulContent: tableCellHasMeaningfulContent(cell),
+        shouldSkip: vMerge === "continue" && startRow !== undefined,
+      };
+      colIndex += colspan;
+      return info;
+    });
+    const rowWouldBeEmpty =
+      rowCells.length > 0 && rowCells.every((cell) => cell.shouldSkip);
+
+    for (const cellInfo of rowCells) {
+      const {
+        colIndex: cellColIndex,
+        vMerge,
+        startRow,
+        hasMeaningfulContent,
+      } = cellInfo;
+      const key = `${rowIndex}-${cellColIndex}`;
 
       if (vMerge === "restart") {
         // Start of a new vertical merge
-        activeMerges.set(colIndex, rowIndex);
+        activeMerges.set(cellColIndex, rowIndex);
         result.set(key, { rowSpan: 1, skip: false });
       } else if (vMerge === "continue") {
-        // Continuation of a merge - this cell should be skipped
-        const startRow = activeMerges.get(colIndex);
-        if (startRow !== undefined) {
-          // Increment rowSpan of the starting cell
-          const startKey = `${startRow}-${colIndex}`;
-          const startCell = result.get(startKey);
-          if (startCell) {
-            startCell.rowSpan++;
+        // Continuation of a merge - only skip it when the parsed grid has a
+        // matching restart in this exact column and the continuation is only a
+        // structural placeholder. Real DOCX tables can be ragged, and some
+        // continuation cells contain drawings or other payload that must not be
+        // merged away.
+        if (startRow === undefined || rowWouldBeEmpty || hasMeaningfulContent) {
+          result.set(key, { rowSpan: 1, skip: false });
+          if (
+            (rowWouldBeEmpty || hasMeaningfulContent) &&
+            startRow !== undefined
+          ) {
+            const restartCell = result.get(`${startRow}-${cellColIndex}`);
+            if (restartCell) {
+              restartCell.preserveVMergeRestart = true;
+            }
+            activeMerges.delete(cellColIndex);
           }
+          continue;
+        }
+
+        // Increment rowSpan of the starting cell
+        const startKey = `${startRow}-${cellColIndex}`;
+        const startCell = result.get(startKey);
+        if (startCell) {
+          startCell.rowSpan++;
+          startCell.continuationCells ??= [];
+          startCell.continuationCells.push(cellInfo.cell);
         }
         result.set(key, { rowSpan: 1, skip: true });
       } else {
         // No vMerge - clear any active merge for this column
-        activeMerges.delete(colIndex);
+        activeMerges.delete(cellColIndex);
         result.set(key, { rowSpan: 1, skip: false });
       }
-
-      colIndex += colspan;
     }
   }
 
   return result;
 }
 
+function clearActiveVerticalMerges(
+  activeMerges: Map<number, number>,
+  result: Map<string, RowSpanInfo>,
+): void {
+  for (const [colIndex, startRow] of activeMerges) {
+    const restartCell = result.get(`${startRow}-${colIndex}`);
+    if (restartCell) {
+      restartCell.preserveVMergeRestart = true;
+    }
+  }
+  activeMerges.clear();
+}
+
+function tableCellHasMeaningfulContent(cell: TableCell): boolean {
+  return cell.content.some(blockHasMeaningfulContent);
+}
+
+function blockHasMeaningfulContent(block: Paragraph | Table): boolean {
+  if (block.type === "table") {
+    return block.rows.some((row) =>
+      row.cells.some((cell) => tableCellHasMeaningfulContent(cell)),
+    );
+  }
+
+  return block.content.some(paragraphContentHasMeaningfulContent);
+}
+
+function paragraphContentHasMeaningfulContent(
+  content: Paragraph["content"][number],
+): boolean {
+  if (content.type === "run") {
+    return content.content.length > 0;
+  }
+  if (content.type === "hyperlink") {
+    return content.children.some(paragraphContentHasMeaningfulContent);
+  }
+  if (
+    content.type === "insertion" ||
+    content.type === "deletion" ||
+    content.type === "moveFrom" ||
+    content.type === "moveTo"
+  ) {
+    return content.content.some(paragraphContentHasMeaningfulContent);
+  }
+  return true;
+}
+
 function convertTable(
   table: Table,
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
   theme: Theme | null | undefined,
 ): PMNode {
   // Calculate rowSpan values from vMerge
@@ -908,13 +1234,9 @@ function convertTable(
   // Track data row index (excluding header rows) for banding
   let dataRowIndex = 0;
   const totalRows = table.rows.length;
+  const gridColumnCount = columnWidths?.length ?? 0;
   const totalColumns =
-    columnWidths?.length ??
-    table.rows[0]?.cells.reduce(
-      (sum, cell) => sum + (cell.formatting?.gridSpan ?? 1),
-      0,
-    ) ??
-    0;
+    gridColumnCount > 0 ? gridColumnCount : countTableColumns(table.rows);
   const rows = table.rows.map((row, rowIndex) => {
     // Conditional formatting flag: firstRow in tblLook means "apply first-row styling"
     const isFirstRowStyled = rowIndex === 0 && !!look?.firstRow;
@@ -958,12 +1280,24 @@ function convertTable(
   return schema.node("table", attrs, rows);
 }
 
+function countTableColumns(rows: TableRow[]): number {
+  let maxColumns = 0;
+  for (const row of rows) {
+    let rowColumns = 0;
+    for (const cell of row.cells) {
+      rowColumns += cell.formatting?.gridSpan ?? 1;
+    }
+    maxColumns = Math.max(maxColumns, rowColumns);
+  }
+  return maxColumns;
+}
+
 /**
  * Convert a TableRow to a ProseMirror table row node
  */
 function convertTableRow(
   row: TableRow,
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
   isHeaderRow: boolean,
   columnWidths?: number[],
   totalWidth?: number,
@@ -989,7 +1323,7 @@ function convertTableRow(
   rowIndex?: number,
   totalRows?: number,
   totalColumns?: number,
-  rowSpanMap?: Map<string, { rowSpan: number; skip: boolean }>,
+  rowSpanMap?: Map<string, RowSpanInfo>,
   defaultCellMargins?: {
     top?: number;
     bottom?: number;
@@ -1020,13 +1354,31 @@ function convertTableRow(
   const rowCnf = row.formatting?.conditionalFormat;
   const rowIsFirstRow = rowCnf?.firstRow ?? isFirstRow;
   const rowIsLastRow = rowCnf?.lastRow ?? isLastRow;
-  const totalCols = totalColumns ?? numCells;
+  const totalCols =
+    totalColumns != null && totalColumns > 0
+      ? totalColumns
+      : Math.max(numCells, 1);
+
+  // A literal `<w:tr/>` from a non-Word producer parses with zero cells. PM's
+  // tableRow content is `(tableCell | tableHeader)+`, so emit one placeholder
+  // cell spanning the table's grid width to keep the row valid.
+  let effectiveCells: TableCell[] = row.cells;
+  if (effectiveCells.length === 0) {
+    const fallback: TableCell = {
+      type: "tableCell",
+      content: [{ type: "paragraph", content: [] }],
+    };
+    if (totalCols > 1) {
+      fallback.formatting = { gridSpan: totalCols };
+    }
+    effectiveCells = [fallback];
+  }
 
   // Track column index for mapping to columnWidths (accounting for colspan)
   let colIndex = 0;
   const cells: PMNode[] = [];
 
-  for (const cellIndex_item of row.cells) {
+  for (const cellIndex_item of effectiveCells) {
     const cell = cellIndex_item;
     const colspan = cell.formatting?.gridSpan ?? 1;
 
@@ -1035,6 +1387,7 @@ function convertTableRow(
     const rowSpanInfo = rowSpanMap?.get(rowSpanKey);
     const shouldSkip = rowSpanInfo?.skip ?? false;
     const calculatedRowSpan = rowSpanInfo?.rowSpan ?? 1;
+    const preserveVMergeRestart = rowSpanInfo?.preserveVMergeRestart ?? false;
 
     // Calculate the width for this cell from columnWidths if cell doesn't have own width
     let gridWidth: number | undefined;
@@ -1204,6 +1557,8 @@ function convertTableRow(
         isFirstCol,
         isLastCol,
         calculatedRowSpan,
+        preserveVMergeRestart,
+        rowSpanInfo?.continuationCells,
         defaultCellMargins,
         theme,
       ),
@@ -1254,7 +1609,7 @@ function resolveThemedBorderColors(
  */
 function convertTableCell(
   cell: TableCell,
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
   isHeader: boolean,
   gridWidthPercent?: number,
   conditionalStyle?: { tcPr?: TableCellFormatting; rPr?: TextFormatting },
@@ -1264,6 +1619,8 @@ function convertTableCell(
   isFirstCol?: boolean,
   isLastCol?: boolean,
   calculatedRowSpan?: number,
+  preserveVMergeRestart?: boolean,
+  vMergeContinuationCells?: TableCell[],
   defaultCellMargins?: {
     top?: number;
     bottom?: number;
@@ -1379,6 +1736,12 @@ function convertTableCell(
   if (formatting) {
     attrs._originalFormatting = formatting;
   }
+  if (preserveVMergeRestart) {
+    attrs._preserveVMergeRestart = true;
+  }
+  if (vMergeContinuationCells && vMergeContinuationCells.length > 0) {
+    attrs._docxVMergeContinuationCells = vMergeContinuationCells;
+  }
 
   // Convert cell content (paragraphs and nested tables)
   const contentNodes: PMNode[] = [];
@@ -1476,10 +1839,11 @@ function convertMathEquation(math: MathEquation): PMNode | null {
 function convertInlineSdt(
   sdt: InlineSdt,
   getInheritedRunFormatting: RunFormattingResolver,
-  styleResolver?: StyleResolver | null,
+  styleResolver?: StyleEngine | null,
 ): PMNode | null {
   const props = sdt.properties;
   const inlineNodes: PMNode[] = [];
+  let hyperlinkIndex = 0;
 
   for (const content of sdt.content) {
     if (content.type === "run") {
@@ -1489,13 +1853,40 @@ function convertInlineSdt(
         styleResolver,
       );
       inlineNodes.push(...runNodes);
-    } else {
+    } else if (content.type === "hyperlink") {
+      const currentHyperlinkIndex = hyperlinkIndex;
+      hyperlinkIndex += 1;
       const linkNodes = convertHyperlink(
         content,
         getInheritedRunFormatting,
         styleResolver,
+        currentHyperlinkIndex,
       );
       inlineNodes.push(...linkNodes);
+    } else if (
+      content.type === "simpleField" ||
+      content.type === "complexField"
+    ) {
+      const fieldNode = convertField(content, getInheritedRunFormatting);
+      if (fieldNode) {
+        inlineNodes.push(fieldNode);
+      }
+    } else if (content.type === "inlineSdt") {
+      const nestedSdt = convertInlineSdt(
+        content,
+        getInheritedRunFormatting,
+        styleResolver,
+      );
+      if (nestedSdt) {
+        inlineNodes.push(nestedSdt);
+      }
+    } else {
+      // content.type === "mathEquation" — narrowed by exhaustion of the
+      // InlineSdt['content'] union above.
+      const mathNode = convertMathEquation(content);
+      if (mathNode) {
+        inlineNodes.push(mathNode);
+      }
     }
   }
 
@@ -1509,6 +1900,7 @@ function convertInlineSdt(
       placeholder: props.placeholder ?? null,
       showingPlaceholder: props.showingPlaceholder ?? false,
       dateFormat: props.dateFormat ?? null,
+      dateValueISO: props.dateValueISO ?? null,
       listItems: props.listItems ? JSON.stringify(props.listItems) : null,
       checked: props.checked ?? null,
     },
@@ -1525,7 +1917,7 @@ function convertInlineSdt(
 function convertRun(
   run: Run,
   styleFormatting?: TextFormatting,
-  styleResolver?: StyleResolver | null,
+  styleResolver?: StyleEngine | null,
 ): PMNode[] {
   const nodes: PMNode[] = [];
 
@@ -1569,27 +1961,41 @@ function convertRunContent(
 
     case "break":
       if (content.breakType === "textWrapping" || !content.breakType) {
-        return [schema.node("hardBreak")];
+        return [withHyperlinkBoundaryMarks(schema.node("hardBreak"), marks)];
       }
-      // Page breaks not supported in inline content
+      if (content.breakType === "column") {
+        return [
+          withHyperlinkBoundaryMarks(
+            schema.node("hardBreak", { breakType: "column" }),
+            marks,
+          ),
+        ];
+      }
+      // Page breaks are represented as block separators by paragraphPageBreakPosition.
       return [];
 
     case "tab":
-      // Convert to tab node for proper rendering
-      return [schema.node("tab")];
+      // Convert to tab node for proper rendering. Keep the run marks because
+      // Word commonly represents signature blanks as underlined tab runs.
+      return [schema.node("tab").mark(marks)];
 
     case "drawing":
-      return [convertImage(content.image)];
+      return [
+        withHyperlinkBoundaryMarks(
+          convertImage(content.image, content.rawXml),
+          marks,
+        ),
+      ];
 
     case "shape": {
       // Shapes with text body are handled as text boxes at block level
       // Other shapes render as inline SVG
       const shp = content.shape;
-      if (shp.textBody && shp.textBody.content.length > 0) {
+      if (shp.textBody) {
         // Skip - handled by extractTextBoxesFromParagraph
         return [];
       }
-      return [convertShape(shp)];
+      return [withHyperlinkBoundaryMarks(convertShape(shp), marks)];
     }
 
     case "footnoteRef": {
@@ -1629,6 +2035,17 @@ function convertRunContent(
   }
 }
 
+function withHyperlinkBoundaryMarks(
+  node: PMNode,
+  marks: ReturnType<typeof schema.mark>[],
+): PMNode {
+  if (!marks.some((mark) => mark.type.name === "hyperlink")) {
+    return node;
+  }
+
+  return node.mark(marks);
+}
+
 /**
  * Convert an Image to a ProseMirror image node
  *
@@ -1649,7 +2066,7 @@ function convertRunContent(
 type PartialImagePosition = Partial<NonNullable<Image["position"]>>;
 type PartialImageSize = Partial<Image["size"]>;
 
-function convertImage(image: Image): PMNode {
+function convertImage(image: Image, rawXml?: string): PMNode {
   // Convert EMU to pixels for proper sizing
   const imageData: { size?: PartialImageSize } = image;
   const imageSize = imageData.size;
@@ -1708,7 +2125,7 @@ function convertImage(image: Image): PMNode {
   //   even though they don't carve a text-wrap exclusion zone)
   // - square / tight / through with cssFloat → float
   // - everything else (centered etc.) → block
-  let displayMode: "inline" | "block" | "float" = "inline";
+  let displayMode: "inline" | "block" | "float";
   if (wrapType === "inline") {
     displayMode = "inline";
   } else if (wrapType === "topAndBottom") {
@@ -1740,14 +2157,14 @@ function convertImage(image: Image): PMNode {
   }
 
   // Convert wrap distances from EMU to pixels for margins
-  const distTop = image.wrap.distT ? emuToPixels(image.wrap.distT) : undefined;
-  const distBottom = image.wrap.distB
-    ? emuToPixels(image.wrap.distB)
-    : undefined;
-  const distLeft = image.wrap.distL ? emuToPixels(image.wrap.distL) : undefined;
-  const distRight = image.wrap.distR
-    ? emuToPixels(image.wrap.distR)
-    : undefined;
+  const distTop =
+    image.wrap.distT != null ? emuToPixels(image.wrap.distT) : undefined;
+  const distBottom =
+    image.wrap.distB != null ? emuToPixels(image.wrap.distB) : undefined;
+  const distLeft =
+    image.wrap.distL != null ? emuToPixels(image.wrap.distL) : undefined;
+  const distRight =
+    image.wrap.distR != null ? emuToPixels(image.wrap.distR) : undefined;
 
   // Build position data for floating images
   let position:
@@ -1829,16 +2246,26 @@ function convertImage(image: Image): PMNode {
     displayMode,
     cssFloat,
     transform,
+    // eigenpal #424 (opacity render pipeline). PR #513 added Image.opacity
+    // on the model; thread it onto the PM node so the layout-bridge and
+    // painter can honor it.
+    opacity: image.opacity,
     distTop,
     distBottom,
     distLeft,
     distRight,
+    // eigenpal #424: thread wp:srcRect crop fractions through PM attrs.
+    cropTop: image.crop?.top,
+    cropRight: image.crop?.right,
+    cropBottom: image.crop?.bottom,
+    cropLeft: image.crop?.left,
     position,
     borderWidth,
     borderColor,
     borderStyle,
     wrapText,
     hlinkHref: image.hlinkHref,
+    _docxRawXml: rawXml,
   });
 }
 
@@ -1851,7 +2278,8 @@ function convertImage(image: Image): PMNode {
 function convertHyperlink(
   hyperlink: Hyperlink,
   getInheritedRunFormatting: RunFormattingResolver,
-  styleResolver?: StyleResolver | null,
+  styleResolver?: StyleEngine | null,
+  hyperlinkIndex?: number,
 ): PMNode[] {
   const nodes: PMNode[] = [];
 
@@ -1862,6 +2290,7 @@ function convertHyperlink(
     href,
     tooltip: hyperlink.tooltip,
     rId: hyperlink.rId,
+    _docxHyperlinkIndex: hyperlinkIndex,
   });
 
   for (const child of hyperlink.children) {
@@ -1959,6 +2388,15 @@ function textFormattingToMarks(
     );
   }
 
+  // Run shading (w:shd) used as a run background. Folio models highlight as a
+  // strict OOXML named-palette union, so an arbitrary fill (e.g. a Word/Google
+  // Docs run background) round-trips as a dedicated runShading mark instead of
+  // silently disappearing at PM conversion. eigenpal #722 (#712).
+  const runShadingMarkAttrs = shadingToRunShadingAttrs(formatting.shading);
+  if (runShadingMarkAttrs) {
+    marks.push(schema.mark("runShading", runShadingMarkAttrs));
+  }
+
   // Font size
   if (formatting.fontSize) {
     marks.push(
@@ -2025,6 +2463,11 @@ function textFormattingToMarks(
     );
   }
 
+  // Hidden text (w:vanish). eigenpal #424 (gap 9).
+  if (formatting.hidden === true) {
+    marks.push(schema.mark("hidden"));
+  }
+
   // Emboss (w:emboss)
   if (formatting.emboss) {
     marks.push(schema.mark("emboss"));
@@ -2048,6 +2491,16 @@ function textFormattingToMarks(
   // Text outline (w:outline)
   if (formatting.outline) {
     marks.push(schema.mark("textOutline"));
+  }
+
+  // eigenpal #424 (gap 10) — per-run RTL direction (w:rtl)
+  if (formatting.rtl) {
+    marks.push(schema.mark("rtl"));
+  }
+
+  // eigenpal #424 (gap 11) — text effect animation (w:effect)
+  if (formatting.effect && formatting.effect !== "none") {
+    marks.push(schema.mark("textEffect", { effect: formatting.effect }));
   }
 
   return marks;
@@ -2094,7 +2547,10 @@ function convertShape(shape: Shape): PMNode {
 
   let outlineWidth: number | undefined;
   let outlineColor: string | undefined;
-  let outlineStyle: string | undefined;
+  let outlineStyle: string | undefined = "none";
+  let outlineCap: NonNullable<Shape["outline"]>["cap"] | undefined;
+  let outlineHeadEnd: NonNullable<Shape["outline"]>["headEnd"] | undefined;
+  let outlineTailEnd: NonNullable<Shape["outline"]>["tailEnd"] | undefined;
   if (shape.outline) {
     if (shape.outline.width) {
       outlineWidth =
@@ -2104,6 +2560,11 @@ function convertShape(shape: Shape): PMNode {
       outlineColor = `#${shape.outline.color.rgb}`;
     }
     outlineStyle = shape.outline.style || "solid";
+    outlineCap = shape.outline.cap;
+    outlineHeadEnd = shape.outline.headEnd;
+    outlineTailEnd = shape.outline.tailEnd;
+  } else {
+    outlineWidth = 0;
   }
 
   let transform: string | undefined;
@@ -2123,6 +2584,39 @@ function convertShape(shape: Shape): PMNode {
     }
   }
 
+  const wrapType = shape.wrap?.type ?? "inline";
+  const displayMode = wrapType === "inline" ? "inline" : "float";
+  let cssFloat: "left" | "right" | "none" = "none";
+  if (shape.wrap?.wrapText === "left") {
+    cssFloat = "right";
+  } else if (shape.wrap?.wrapText === "right") {
+    cssFloat = "left";
+  }
+
+  let position: ImagePositionAttrs | undefined;
+  if (shape.position) {
+    position = {
+      horizontal: {
+        relativeTo: shape.position.horizontal.relativeTo,
+        ...(shape.position.horizontal.posOffset !== undefined
+          ? { posOffset: shape.position.horizontal.posOffset }
+          : {}),
+        ...(shape.position.horizontal.alignment
+          ? { align: shape.position.horizontal.alignment }
+          : {}),
+      },
+      vertical: {
+        relativeTo: shape.position.vertical.relativeTo,
+        ...(shape.position.vertical.posOffset !== undefined
+          ? { posOffset: shape.position.vertical.posOffset }
+          : {}),
+        ...(shape.position.vertical.alignment
+          ? { align: shape.position.vertical.alignment }
+          : {}),
+      },
+    };
+  }
+
   return schema.node("shape", {
     shapeType: shapeAttrs.shapeType ?? "rect",
     shapeId: shape.id,
@@ -2136,7 +2630,31 @@ function convertShape(shape: Shape): PMNode {
     outlineWidth,
     outlineColor,
     outlineStyle,
+    outlineCap,
+    outlineHeadEnd,
+    outlineTailEnd,
     transform,
+    displayMode,
+    cssFloat,
+    wrapType,
+    wrapText: shape.wrap?.wrapText,
+    distTop:
+      shape.wrap?.distT !== undefined
+        ? emuToPixels(shape.wrap.distT)
+        : undefined,
+    distBottom:
+      shape.wrap?.distB !== undefined
+        ? emuToPixels(shape.wrap.distB)
+        : undefined,
+    distLeft:
+      shape.wrap?.distL !== undefined
+        ? emuToPixels(shape.wrap.distL)
+        : undefined,
+    distRight:
+      shape.wrap?.distR !== undefined
+        ? emuToPixels(shape.wrap.distR)
+        : undefined,
+    position,
   });
 }
 
@@ -2150,20 +2668,45 @@ function convertShape(shape: Shape): PMNode {
  */
 function convertParagraphWithTextBoxes(
   block: Paragraph,
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
+  textBoxGroupId: string,
 ): PMNode[] {
   const textBoxes = extractTextBoxesFromParagraph(block);
   const pmParagraph = convertParagraph(block, styleResolver);
   const nodes: PMNode[] = [];
   const isEmptyAfterExtraction =
     textBoxes.length > 0 && pmParagraph.content.size === 0;
-  if (!isEmptyAfterExtraction) {
+  const keepWrapperParagraph =
+    isEmptyAfterExtraction && hasParagraphBoundaryPayload(block, pmParagraph);
+  if (!isEmptyAfterExtraction || keepWrapperParagraph) {
     nodes.push(pmParagraph);
   }
   for (const tb of textBoxes) {
-    nodes.push(convertTextBox(tb, styleResolver));
+    nodes.push(
+      convertTextBox(tb, styleResolver, {
+        placement:
+          isEmptyAfterExtraction && !keepWrapperParagraph
+            ? "standalone"
+            : "inlineWithPrevious",
+        groupId: textBoxGroupId,
+      }),
+    );
   }
   return nodes;
+}
+
+function hasParagraphBoundaryPayload(
+  block: Paragraph,
+  pmParagraph: PMNode,
+): boolean {
+  const bookmarks = pmParagraph.attrs["bookmarks"];
+  const emptyHyperlinks = pmParagraph.attrs["_emptyHyperlinks"];
+  return Boolean(
+    block.sectionProperties ||
+    block.propertyChanges?.length ||
+    (Array.isArray(bookmarks) && bookmarks.length > 0) ||
+    (Array.isArray(emptyHyperlinks) && emptyHyperlinks.length > 0),
+  );
 }
 
 /**
@@ -2176,9 +2719,9 @@ function extractTextBoxesFromParagraph(paragraph: Paragraph): TextBox[] {
   for (const content of paragraph.content) {
     if (content.type === "run") {
       for (const rc of content.content) {
-        if (rc.type === "shape" && "shape" in rc) {
+        if (rc.type === "shape") {
           const shape = rc.shape as Shape;
-          if (shape.textBody && shape.textBody.content.length > 0) {
+          if (shape.textBody) {
             // Convert shape with text body to TextBox
             const textBox: TextBox = {
               type: "textBox",
@@ -2217,7 +2760,11 @@ function extractTextBoxesFromParagraph(paragraph: Paragraph): TextBox[] {
  */
 function convertTextBox(
   textBox: TextBox,
-  styleResolver: StyleResolver | null,
+  styleResolver: StyleEngine | null,
+  options: {
+    placement?: "standalone" | "inlineWithPrevious";
+    groupId?: string;
+  } = {},
 ): PMNode {
   const textBoxData: { size?: Partial<TextBox["size"]> } = textBox;
   const textBoxSize = textBoxData.size;
@@ -2270,6 +2817,87 @@ function convertTextBox(
     contentNodes.push(schema.node("paragraph", {}, []));
   }
 
+  // Map wrap settings into the PM textBox attrs so the page renderer can
+  // build floating exclusion rects for body text wrapping (eigenpal #474).
+  // Mirrors the float/displayMode derivation used by `convertImage` above.
+  const wrapType = textBox.wrap?.type;
+  const wrapText = textBox.wrap?.wrapText;
+  const hAlign = textBox.position?.horizontal.alignment;
+  let position: ImagePositionAttrs | undefined;
+  if (textBox.position) {
+    position = {
+      horizontal: {
+        relativeTo: textBox.position.horizontal.relativeTo,
+        ...(textBox.position.horizontal.posOffset !== undefined
+          ? { posOffset: textBox.position.horizontal.posOffset }
+          : {}),
+        ...(textBox.position.horizontal.alignment
+          ? { align: textBox.position.horizontal.alignment }
+          : {}),
+      },
+      vertical: {
+        relativeTo: textBox.position.vertical.relativeTo,
+        ...(textBox.position.vertical.posOffset !== undefined
+          ? { posOffset: textBox.position.vertical.posOffset }
+          : {}),
+        ...(textBox.position.vertical.alignment
+          ? { align: textBox.position.vertical.alignment }
+          : {}),
+      },
+    };
+  }
+
+  let cssFloat: "left" | "right" | "none" | undefined;
+  if (wrapType === undefined || wrapType === "inline") {
+    cssFloat = "none";
+  } else if (wrapType === "topAndBottom") {
+    cssFloat = "none";
+  } else if (
+    wrapType === "square" ||
+    wrapType === "tight" ||
+    wrapType === "through"
+  ) {
+    if (wrapText === "left") {
+      cssFloat = "right";
+    } else if (wrapText === "right") {
+      cssFloat = "left";
+    } else if (hAlign === "left") {
+      cssFloat = "left";
+    } else if (hAlign === "right") {
+      cssFloat = "right";
+    } else {
+      cssFloat = "none";
+    }
+  } else {
+    cssFloat = "none";
+  }
+
+  let displayMode: "inline" | "block" | "float";
+  if (wrapType === undefined || wrapType === "inline") {
+    displayMode = "inline";
+  } else if (wrapType === "topAndBottom") {
+    displayMode = "block";
+  } else if (wrapType === "behind" || wrapType === "inFront") {
+    displayMode = "float";
+  } else if (cssFloat !== "none") {
+    displayMode = "float";
+  } else {
+    displayMode = "block";
+  }
+
+  const distTop = textBox.wrap?.distT
+    ? emuToPixels(textBox.wrap.distT)
+    : undefined;
+  const distBottom = textBox.wrap?.distB
+    ? emuToPixels(textBox.wrap.distB)
+    : undefined;
+  const distLeft = textBox.wrap?.distL
+    ? emuToPixels(textBox.wrap.distL)
+    : undefined;
+  const distRight = textBox.wrap?.distR
+    ? emuToPixels(textBox.wrap.distR)
+    : undefined;
+
   return schema.node(
     "textBox",
     {
@@ -2284,6 +2912,17 @@ function convertTextBox(
       marginBottom,
       marginLeft,
       marginRight,
+      displayMode,
+      cssFloat,
+      wrapType: wrapType ?? "inline",
+      wrapText,
+      distTop,
+      distBottom,
+      distLeft,
+      distRight,
+      position,
+      _docxPlacement: options.placement,
+      _docxGroupId: options.groupId,
     },
     contentNodes,
   );
@@ -2298,32 +2937,59 @@ function convertTextBox(
  * `convertTable` does not yet thread it (orthogonal upstream divergence).
  */
 export function headerFooterToProseDoc(
-  content: (Paragraph | Table)[],
+  content: BlockContent[],
   options?: ToProseDocOptions,
 ): PMNode {
   const nodes: PMNode[] = [];
   const styleResolver = options?.styles
-    ? createStyleResolver(options.styles)
+    ? createStyleEngine(options.styles)
     : null;
   const theme = options?.theme ?? null;
+  let textBoxGroupIndex = 0;
 
-  for (const block of content) {
-    if (block.type === "paragraph") {
-      nodes.push(...convertParagraphWithTextBoxes(block, styleResolver));
-    } else {
-      nodes.push(convertTable(block, styleResolver, theme));
+  const convertBlocks = (blocks: BlockContent[]): PMNode[] => {
+    const out: PMNode[] = [];
+    for (const block of blocks) {
+      if (block.type === "paragraph") {
+        out.push(
+          ...convertParagraphWithTextBoxes(
+            block,
+            styleResolver,
+            String(textBoxGroupIndex),
+          ),
+        );
+        textBoxGroupIndex += 1;
+      } else if (block.type === "table") {
+        out.push(convertTable(block, styleResolver, theme));
+      } else {
+        out.push(convertBlockSdt(block, convertBlocks));
+      }
     }
-  }
+    return out;
+  };
+
+  nodes.push(...convertBlocks(content));
+  // Caret affordance after a final isolating blockSdt is handled by
+  // prosemirror-gapcursor at runtime; we no longer pad the converted doc
+  // with a synthetic trailing paragraph because that paragraph survives
+  // the reverse pass and pollutes both round-trip saves and
+  // `setContentControlContent(filter, blocks)` callers that pass blocks
+  // ending in a nested blockSdt.
 
   if (nodes.length === 0) {
     nodes.push(schema.node("paragraph", {}, []));
   }
 
-  return schema.node("doc", null, nodes);
+  const pmDoc = schema.node("doc", null, nodes);
+  assertValidProseMirrorDocument(
+    pmDoc,
+    "Header/footer conversion produced an invalid ProseMirror document",
+  );
+  return pmDoc;
 }
 
 export function footnoteToProseDoc(
-  content: (Paragraph | Table)[],
+  content: BlockContent[],
   options?: ToProseDocOptions,
 ): PMNode {
   return headerFooterToProseDoc(content, options);
@@ -2332,27 +2998,137 @@ export function footnoteToProseDoc(
 /**
  * Determine where a page break appears inside a paragraph.
  *
+ * Per ECMA-376 §17.3.3.1, `<w:br w:type="page"/>` is always a forced break,
+ * including in a paragraph whose only content is the break itself. We previously
+ * searched only top-level runs and missed breaks nested in hyperlinks, tracked
+ * changes, or fields — so those paragraphs silently dropped their forced break
+ * and the following content collapsed onto the previous page (common on legal
+ * signature pages and exhibit covers).
+ * See eigenpal docx-editor #409 (break-only page break sub-fix).
+ *
  * Returns:
- *   "before" — the break is at the very start (before any text); the
- *              paragraph's text belongs on the NEXT page.
- *   "after"  — the break is after some text (or the paragraph is empty);
- *              the paragraph stays on the current page.
+ *   "before" — the break appears before any visible content; the paragraph's
+ *              content belongs on the NEXT page.
+ *   "after"  — the break follows some visible content; the paragraph stays
+ *              on the current page and the next block starts a new page.
  *   null     — no page break found.
  */
 function paragraphPageBreakPosition(
   paragraph: Paragraph,
 ): "before" | "after" | null {
-  let seenText = false;
-  for (const item of paragraph.content) {
+  // Mutated by visitRun during traversal. oxlint flow analysis can't see
+  // closure mutations, so a plain `let` here trips no-unnecessary-condition;
+  // wrap in an object to keep the flag genuinely opaque to the linter.
+  const state = { seenVisibleContent: false };
+
+  function isPageBreak(content: RunContent): boolean {
+    return content.type === "break" && content.breakType === "page";
+  }
+
+  function isVisibleRunContent(content: RunContent): boolean {
+    return (
+      (content.type === "text" && content.text.length > 0) ||
+      content.type === "tab" ||
+      content.type === "drawing" ||
+      content.type === "shape" ||
+      content.type === "symbol" ||
+      content.type === "fieldChar" ||
+      content.type === "instrText" ||
+      content.type === "footnoteRef" ||
+      content.type === "endnoteRef" ||
+      content.type === "noBreakHyphen" ||
+      content.type === "softHyphen"
+    );
+  }
+
+  function visitRun(run: Run): boolean {
+    for (const content of run.content) {
+      if (isPageBreak(content)) {
+        return true;
+      }
+      if (isVisibleRunContent(content)) {
+        state.seenVisibleContent = true;
+      }
+    }
+    return false;
+  }
+
+  // Walk a hyperlink's children — runs (which may carry the break) plus
+  // bookmark markers we ignore. Mirrors the inner shape of `Hyperlink`.
+  function visitHyperlinkChildren(hyperlink: Hyperlink): boolean {
+    for (const child of hyperlink.children) {
+      if (child.type === "run" && visitRun(child)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Walk a (Run | Hyperlink)[] list — the shared inner shape of tracked-change
+  // wrappers, simple fields, and inline SDTs. We rely on visitRun to set
+  // state.seenVisibleContent when (and only when) it encounters visible run
+  // content; an empty wrapper must not be treated as visible — an empty
+  // bookmark-only hyperlink before a page break should still classify the
+  // break as "before".
+  function visitRunOrHyperlinkList(children: (Run | Hyperlink)[]): boolean {
+    for (const child of children) {
+      if (child.type === "run" && visitRun(child)) {
+        return true;
+      }
+      if (child.type === "hyperlink" && visitHyperlinkChildren(child)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function visitItem(item: Paragraph["content"][number]): boolean {
     if (item.type === "run") {
-      for (const content of (item as Run).content) {
-        if (content.type === "break" && content.breakType === "page") {
-          return seenText ? "after" : "before";
-        }
-        if (content.type === "text" && content.text) {
-          seenText = true;
+      return visitRun(item);
+    }
+    if (item.type === "hyperlink") {
+      return visitHyperlinkChildren(item);
+    }
+    if (
+      item.type === "insertion" ||
+      item.type === "deletion" ||
+      item.type === "moveFrom" ||
+      item.type === "moveTo"
+    ) {
+      return visitRunOrHyperlinkList(item.content);
+    }
+    if (item.type === "simpleField") {
+      return visitRunOrHyperlinkList(item.content);
+    }
+    if (item.type === "complexField") {
+      for (const run of item.fieldResult) {
+        if (visitRun(run)) {
+          return true;
         }
       }
+      return false;
+    }
+    if (item.type === "inlineSdt") {
+      // SDT.content was widened in PR #508 to carry fields/math/nested SDTs;
+      // recurse via visitItem so each child uses its own visibility rule.
+      for (const child of item.content) {
+        if (visitItem(child)) {
+          return true;
+        }
+      }
+      return false;
+    }
+    if (item.type === "mathEquation") {
+      // OMML math is a visible inline node and cannot itself contain w:br.
+      state.seenVisibleContent = true;
+      return false;
+    }
+    return false;
+  }
+
+  for (const item of paragraph.content) {
+    if (visitItem(item)) {
+      return state.seenVisibleContent ? "after" : "before";
     }
   }
   return null;

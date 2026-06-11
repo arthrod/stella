@@ -49,7 +49,7 @@ const fingerprintDraft = (draft: ProviderCredentialDraft): string | null => {
     return null;
   }
   const keyFingerprint = fingerprintKey(apiKey);
-  if (draft.provider !== "azure_foundry") {
+  if (draft.provider !== "azure_foundry" && draft.provider !== "huggingface") {
     return keyFingerprint;
   }
   return `${keyFingerprint}:${draft.endpoint.trim()}`;
@@ -72,6 +72,7 @@ const INITIAL_ROW_STATES: RowStateMap = {
   openai: { status: "idle" },
   azure_foundry: { status: "idle" },
   openrouter: { status: "idle" },
+  huggingface: { status: "idle" },
 };
 
 export const AIStep = ({
@@ -182,6 +183,9 @@ export const AIStep = ({
               ...(draft.apiVersion ? { apiVersion: draft.apiVersion } : {}),
             }
           : {}),
+        ...(draft.provider === "huggingface"
+          ? { endpoint: draft.endpoint.trim() }
+          : {}),
         ...(draft.provider === "google" ? { region: draft.region } : {}),
       });
 
@@ -284,6 +288,9 @@ export const AIStep = ({
       openrouter: stillPresent.has("openrouter")
         ? prev.openrouter
         : { status: "idle" },
+      huggingface: stillPresent.has("huggingface")
+        ? prev.huggingface
+        : { status: "idle" },
     }));
   };
 
@@ -313,8 +320,7 @@ export const AIStep = ({
             compact
             onProvidersChange={updateProviders}
             onSaveRow={(index) => {
-              // eslint-disable-next-line typescript/no-floating-promises
-              saveRow(index);
+              void saveRow(index);
             }}
             providers={providers}
             rowStatuses={rowStatusList}
@@ -349,7 +355,7 @@ export const AIStep = ({
         )}
       </div>
 
-      <div className="mt-6 flex items-center justify-end gap-3">
+      <div className="mt-auto flex items-center justify-between gap-3 pt-6">
         <Button onClick={onSkip} type="button" variant="ghost">
           {t("onboarding.skipStep")}
         </Button>

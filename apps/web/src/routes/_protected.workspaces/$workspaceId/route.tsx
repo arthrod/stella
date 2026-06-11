@@ -24,8 +24,10 @@ import {
 } from "@/lib/react-query";
 import { useWorkspaceSSE } from "@/lib/sse";
 import { useWorkspaceChatMentionRegistration } from "@/routes/_protected.chat/-hooks/use-workspace-chat-mention-registration";
-import { DropZone } from "@/routes/_protected.workspaces/$workspaceId/-components/drop-zone";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
+import { WorkflowServiceTierPromptProvider } from "@/routes/_protected.workspaces/$workspaceId/-components/workflow-service-tier-prompt";
+import { WorkflowStartConfirmationPromptProvider } from "@/routes/_protected.workspaces/$workspaceId/-components/workflow-start-confirmation-prompt";
+import { WorkspaceDropZone } from "@/routes/_protected.workspaces/$workspaceId/-components/workspace-drop-zone";
 import { propertiesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/properties";
 import { viewsOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/views";
 import { workflowOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/workspace";
@@ -102,6 +104,7 @@ export const Route = createFileRoute("/_protected/workspaces/$workspaceId")({
           if (response.error) {
             onPrefetchError(toAPIError(response.error));
           }
+          return;
         })
         .catch(onPrefetchError);
     }
@@ -169,14 +172,16 @@ function RouteComponent() {
         return;
       }
 
+      // Backend sends "clear" right after the entity-invalidation
+      // broadcast, but the invalidation's refetch needs a network
+      // round-trip — clearing the preview synchronously here makes
+      // the cell flip preview → pending skeleton → final value, with
+      // the skeleton visible for the duration of the refetch. Hold
+      // the preview instead: CellResult only reads it while the
+      // field is still pending, so once the refetch lands and the
+      // field finalises, the preview becomes invisible automatically.
+      // The TTL below still cleans up if the stream is abandoned.
       if (data.status === "clear" || data.answer === null) {
-        const key = extractionPreviewKey(data.entityId, data.propertyId);
-        const timer = previewClearTimersRef.current.get(key);
-        if (timer !== undefined) {
-          clearTimeout(timer);
-          previewClearTimersRef.current.delete(key);
-        }
-        workspaceStore.clearExtractionPreview(data.entityId, data.propertyId);
         return;
       }
 
@@ -266,15 +271,22 @@ function RouteComponent() {
   // mounted at the protected layout level (`_protected.tsx`) so
   // its mount survives matter→matter switches without flinching.
   // Timesheets, invoices, and entity detail bypass the
-  // DropZone (they have their own layouts), but the inspector
+  // WorkspaceDropZone (they have their own layouts), but the inspector
   // pane is still available everywhere inside a workspace.
-  if (timesheetsMatch || invoicesMatch || entityDetailMatch) {
-    return <Outlet />;
-  }
+  const content =
+    timesheetsMatch || invoicesMatch || entityDetailMatch ? (
+      <Outlet />
+    ) : (
+      <WorkspaceDropZone workspaceId={workspaceId}>
+        <Outlet />
+      </WorkspaceDropZone>
+    );
 
   return (
-    <DropZone workspaceId={workspaceId}>
-      <Outlet />
-    </DropZone>
+    <WorkflowStartConfirmationPromptProvider>
+      <WorkflowServiceTierPromptProvider>
+        {content}
+      </WorkflowServiceTierPromptProvider>
+    </WorkflowStartConfirmationPromptProvider>
   );
 }

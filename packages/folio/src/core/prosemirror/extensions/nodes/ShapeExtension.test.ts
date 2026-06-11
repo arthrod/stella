@@ -4,11 +4,13 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  buildShapePolygonPoints,
   parseGradientStops,
   sanitizeColor,
   sanitizeShapeDimension,
   sanitizeSvgId,
   sanitizeTransform,
+  strokeDashArrayForOutlineStyle,
 } from "./ShapeExtension";
 
 describe("ShapeExtension.sanitizeColor", () => {
@@ -119,6 +121,18 @@ describe("ShapeExtension.sanitizeShapeDimension", () => {
   });
 });
 
+describe("ShapeExtension.strokeDashArrayForOutlineStyle", () => {
+  test("supports CSS and OOXML dash style tokens", () => {
+    expect(strokeDashArrayForOutlineStyle("dashed")).toBe("8 4");
+    expect(strokeDashArrayForOutlineStyle("dash")).toBe("8 4");
+    expect(strokeDashArrayForOutlineStyle("dotted")).toBe("2 2");
+    expect(strokeDashArrayForOutlineStyle("dot")).toBe("2 2");
+    expect(strokeDashArrayForOutlineStyle("dashDot")).toBe("8 4 2 4");
+    expect(strokeDashArrayForOutlineStyle("lgDashDotDot")).toBe("8 4 2 4 2 4");
+    expect(strokeDashArrayForOutlineStyle("solid")).toBeUndefined();
+  });
+});
+
 describe("ShapeExtension.parseGradientStops", () => {
   test("returns parsed stops when colors pass sanitization", () => {
     const raw = JSON.stringify([
@@ -151,5 +165,71 @@ describe("ShapeExtension.parseGradientStops", () => {
       parseGradientStops(JSON.stringify([{ position: "0", color: "#000" }])),
     ).toEqual([]);
     expect(parseGradientStops(JSON.stringify([{ position: 0 }]))).toEqual([]);
+  });
+});
+
+describe("ShapeExtension.buildShapePolygonPoints", () => {
+  test("triangle uses isosceles points", () => {
+    expect(buildShapePolygonPoints("triangle", 100, 80)).toBe(
+      "50,0 100,80 0,80",
+    );
+  });
+
+  test("diamond uses 4-point rhombus", () => {
+    expect(buildShapePolygonPoints("diamond", 100, 80)).toBe(
+      "50,0 100,40 50,80 0,40",
+    );
+  });
+
+  test("rightArrow has 7 points with head on the right edge", () => {
+    const points = buildShapePolygonPoints("rightArrow", 100, 80);
+    expect(points).not.toBeNull();
+    expect(points?.split(" ")).toHaveLength(7);
+    expect(points).toContain("100,40");
+    // Body top edge starts at the left
+    expect(points?.startsWith("0,24 ")).toBe(true);
+  });
+
+  test("leftArrow mirrors rightArrow on the X axis", () => {
+    const points = buildShapePolygonPoints("leftArrow", 100, 80);
+    expect(points).not.toBeNull();
+    expect(points?.split(" ")).toHaveLength(7);
+    // Head tip at the left edge
+    expect(points).toContain("0,40");
+  });
+
+  test("upArrow has head at the top", () => {
+    const points = buildShapePolygonPoints("upArrow", 100, 80);
+    expect(points).not.toBeNull();
+    expect(points?.startsWith("50,0 ")).toBe(true);
+  });
+
+  test("downArrow has head at the bottom", () => {
+    const points = buildShapePolygonPoints("downArrow", 100, 80);
+    expect(points).not.toBeNull();
+    expect(points).toContain("50,80");
+  });
+
+  test("leftRightArrow has two heads", () => {
+    const points = buildShapePolygonPoints("leftRightArrow", 100, 80);
+    expect(points).not.toBeNull();
+    expect(points?.split(" ")).toHaveLength(10);
+    expect(points).toContain("0,40");
+    expect(points).toContain("100,40");
+  });
+
+  test("upDownArrow has two heads", () => {
+    const points = buildShapePolygonPoints("upDownArrow", 100, 80);
+    expect(points).not.toBeNull();
+    expect(points?.split(" ")).toHaveLength(10);
+    expect(points).toContain("50,0");
+    expect(points).toContain("50,80");
+  });
+
+  test("returns null for non-polygon presets so the caller can fall back", () => {
+    expect(buildShapePolygonPoints("rect", 100, 80)).toBeNull();
+    expect(buildShapePolygonPoints("ellipse", 100, 80)).toBeNull();
+    expect(buildShapePolygonPoints("line", 100, 80)).toBeNull();
+    expect(buildShapePolygonPoints("flowChartProcess", 100, 80)).toBeNull();
   });
 });

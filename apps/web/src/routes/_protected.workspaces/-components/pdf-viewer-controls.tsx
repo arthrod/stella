@@ -79,8 +79,7 @@ export const PdfViewerControls = ({
   };
 
   const navigateToPage = (pageNumber: number) => {
-    // eslint-disable-next-line typescript/no-floating-promises
-    navigate({
+    void navigate({
       replace: true,
       search: (prev) =>
         produce(prev, (s) => {
@@ -105,7 +104,9 @@ export const PdfViewerControls = ({
         throw toAPIError(response.error);
       }
 
-      const fileResponse = await fetch(response.data.presignedUrl);
+      const fileResponse = await fetch(response.data.presignedUrl, {
+        signal: AbortSignal.timeout(60_000),
+      });
       if (!fileResponse.ok) {
         throw new ClientOperationError({
           action: "downloadFullViewFile",

@@ -4,7 +4,6 @@ import { useQuery } from "@tanstack/react-query";
 import {
   createFileRoute,
   getRouteApi,
-  Link,
   useNavigate,
 } from "@tanstack/react-router";
 import {
@@ -34,6 +33,7 @@ import type { TaskItem } from "@/routes/_protected.todos/-queries";
 import { myTasksOptions } from "@/routes/_protected.todos/-queries";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
 import { entitiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
+import { MatterRefLink } from "@/routes/_protected.workspaces/-components/matter-ref-link";
 import { workspacesOptions } from "@/routes/_protected.workspaces/-queries";
 
 const protectedRouteApi = getRouteApi("/_protected");
@@ -49,13 +49,10 @@ export const Route = createFileRoute("/_protected/todos/")({
 
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-muted-foreground",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- dark: variant present; rule false positive
-  in_progress: "bg-blue-500 dark:bg-blue-400",
-  in_review: "bg-amber-500",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- dark: variant present; rule false positive
-  done: "bg-green-500 dark:bg-green-400",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- dark: variant present; rule false positive
-  cancelled: "bg-red-400 dark:bg-red-300",
+  in_progress: "bg-foreground-strong-muted dark:bg-foreground-strong-muted",
+  in_review: "bg-warning",
+  done: "bg-success dark:bg-success",
+  cancelled: "bg-destructive dark:bg-destructive",
 };
 
 const PRIORITY_ICONS: Record<string, typeof MinusIcon> = {
@@ -68,12 +65,10 @@ const PRIORITY_ICONS: Record<string, typeof MinusIcon> = {
 
 const PRIORITY_COLORS: Record<string, string> = {
   none: "text-muted-foreground",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- dark: variant present; rule false positive
-  urgent: "text-red-500 dark:text-red-400",
-  high: "text-orange-500",
-  medium: "text-yellow-500",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- dark: variant present; rule false positive
-  low: "text-blue-400 dark:text-blue-300",
+  urgent: "text-destructive",
+  high: "text-warning",
+  medium: "text-warning",
+  low: "text-foreground-muted dark:text-foreground",
 };
 
 type ValidTask = TaskItem & {
@@ -148,7 +143,9 @@ function MyTodosPage() {
       to: "/workspaces/$workspaceId",
       params: { workspaceId: wsId },
     });
-    useInspectorStore.getState().openTask(entityId, "", true);
+    useInspectorStore
+      .getState()
+      .openTask({ taskId: entityId, workspaceId: wsId, isNew: true });
   };
 
   return (
@@ -282,13 +279,16 @@ const TaskRow = ({ task }: { task: ValidTask }) => {
     task.dueDate < new Date().toISOString().slice(0, 10);
 
   return (
-    <Link
+    <MatterRefLink
       className="group hover:bg-muted/50 flex items-center gap-3 rounded-md px-2 py-1.5 text-sm transition-colors"
       onClick={() => {
-        useInspectorStore.getState().openTask(task.id, task.name);
+        useInspectorStore.getState().openTask({
+          taskId: task.id,
+          workspaceId: task.workspaceId,
+          label: task.name,
+        });
       }}
-      params={{ workspaceId: task.workspaceId }}
-      to="/workspaces/$workspaceId"
+      workspaceId={task.workspaceId}
     >
       <span className={cn("size-2 shrink-0 rounded-full", statusColor)} />
       <span className="min-w-0 flex-1 truncate">{task.name}</span>
@@ -300,7 +300,7 @@ const TaskRow = ({ task }: { task: ValidTask }) => {
           className={cn(
             "flex shrink-0 items-center gap-1",
             "text-muted-foreground text-xs",
-            isOverdue && "text-red-500",
+            isOverdue && "text-destructive",
           )}
         >
           <CalendarIcon className="size-3" />
@@ -311,6 +311,6 @@ const TaskRow = ({ task }: { task: ValidTask }) => {
           })}
         </span>
       )}
-    </Link>
+    </MatterRefLink>
   );
 };

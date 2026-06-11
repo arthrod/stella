@@ -415,17 +415,20 @@ export function paragraphToStyle(
   // PAGE BREAK
   // ============================================================================
 
+  // Use the CSS Fragmentation `break-*` properties, not the deprecated
+  // `page-break-*` aliases. `page-break-before: always` maps to
+  // `break-before: page` (force a page break); `avoid` carries over unchanged.
   if (formatting.pageBreakBefore) {
-    style.pageBreakBefore = "always";
+    style.breakBefore = "page";
   }
 
   // Keep with next / keep lines together
   if (formatting.keepNext) {
-    style.pageBreakAfter = "avoid";
+    style.breakAfter = "avoid";
   }
 
   if (formatting.keepLines) {
-    style.pageBreakInside = "avoid";
+    style.breakInside = "avoid";
   }
 
   return style;
@@ -491,8 +494,13 @@ export function resolveShadingFill(
     return "";
   }
 
-  // Clear or nil pattern means transparent - check this FIRST
-  if (shading.pattern === "clear" || shading.pattern === "nil") {
+  // `nil` (ECMA-376 §17.18.78) means no shading at all — the fill is ignored.
+  // `clear` is NOT transparent: it means "no pattern", so the `w:fill` colour
+  // is shown as a solid background. It must fall through to the fill check
+  // below; returning early here dropped legitimate
+  // `<w:shd w:val="clear" w:fill="…"/>` backgrounds (the FFFFFF/auto fills that
+  // genuinely are no-ops are filtered inside the fill check).
+  if (shading.pattern === "nil") {
     return "";
   }
 

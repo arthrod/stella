@@ -10,6 +10,7 @@ import {
   TooltipPopup,
   TooltipTrigger,
 } from "@stll/ui/components/tooltip";
+import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 import { cn } from "@stll/ui/lib/utils";
 
 import type { DragPreviewData } from "@/components/drag-preview";
@@ -21,13 +22,10 @@ import type { CalendarTask } from "@/routes/_protected.workspaces/$workspaceId/-
 
 const TASK_STATUS_BORDER_COLORS: Record<string, string> = {
   open: "border-s-muted-foreground",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- dark: variant present; rule false positive
-  in_progress: "border-s-blue-500 dark:border-s-blue-400",
-  in_review: "border-s-amber-500",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- dark: variant present; rule false positive
-  done: "border-s-green-500 dark:border-s-green-400",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- dark: variant present; rule false positive
-  cancelled: "border-s-red-400 dark:border-s-red-300",
+  in_progress: "border-s-foreground-strong-muted",
+  in_review: "border-s-warning",
+  done: "border-s-success",
+  cancelled: "border-s-destructive",
 };
 
 export const TASK_STATUS_DOT_COLORS: Record<string, string> = {
@@ -41,11 +39,13 @@ export const TASK_STATUS_DOT_COLORS: Record<string, string> = {
 type CalendarEntityChipProps = {
   entity: CalendarTask;
   isEditable: boolean;
+  workspaceId: string;
 };
 
 export const CalendarEntityChip = ({
   entity,
   isEditable,
+  workspaceId,
 }: CalendarEntityChipProps) => {
   const t = useTranslations();
   const locale = useLocale();
@@ -88,7 +88,7 @@ export const CalendarEntityChip = ({
   }, [entity.taskId, isEditable, name]);
 
   const handleClick = () => {
-    openTask(entity.taskId, name);
+    openTask({ taskId: entity.taskId, workspaceId, label: name });
   };
 
   const createdLabel = new Date(entity.createdAt).toLocaleDateString(locale, {
@@ -109,7 +109,7 @@ export const CalendarEntityChip = ({
               "border-s-muted-foreground")
           : "border-s-muted-foreground",
       )}
-      onClick={handleClick}
+      onClick={containedHandler(dragRef, handleClick)}
       type="button"
     >
       <span className="flex min-w-0 items-center gap-1">

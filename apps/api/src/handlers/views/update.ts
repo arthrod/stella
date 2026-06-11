@@ -1,13 +1,18 @@
 import { Result } from "better-result";
 import { and, eq } from "drizzle-orm";
 
+import { roles } from "@stll/permissions";
+
 import { workspaceViews } from "@/api/db/schema";
+import { resolveTemplateProperties } from "@/api/handlers/view-templates/properties";
 import {
+  cleanStalePropertyIds,
   hasDuplicateSorts,
   hasMultipleKindFilters,
 } from "@/api/handlers/views/utils";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { tSafeId, workspaceParams } from "@/api/lib/custom-schema";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { broadcast } from "@/api/lib/sse";
@@ -22,7 +27,14 @@ const config = {
 
 const updateView = createSafeHandler(
   config,
-  async function* ({ safeDb, workspaceId, params: { viewId }, body }) {
+  async function* ({
+    safeDb,
+    workspaceId,
+    memberRole,
+    params: { viewId },
+    body,
+    recordAuditEvent,
+  }) {
     const existing = yield* Result.await(
       safeDb((tx) =>
         tx.query.workspaceViews.findFirst({
@@ -80,12 +92,34 @@ const updateView = createSafeHandler(
     }
 
     if (Object.keys(updates).length === 0) {
-      return Result.ok(undefined);
+      return Result.ok({});
     }
 
-    yield* Result.await(
-      safeDb((tx) =>
-        tx
+    const updateResult = yield* Result.await(
+      safeDb(async (tx) => {
+        if (parsedLayout !== undefined) {
+          const resolvedTemplateProperties = await resolveTemplateProperties({
+            tx,
+            workspaceId,
+            layout: parsedLayout,
+            templateProperties: body.templateProperties,
+            canCreateProperties: roles[memberRole.role].authorize({
+              property: ["create"],
+            }).success,
+            recordAuditEvent,
+          });
+
+          if (!resolvedTemplateProperties.ok) {
+            return resolvedTemplateProperties;
+          }
+          cleanStalePropertyIds(
+            parsedLayout,
+            resolvedTemplateProperties.propertyIds,
+          );
+          updates.layout = parsedLayout;
+        }
+
+        await tx
           .update(workspaceViews)
           .set(updates)
           .where(
@@ -93,16 +127,45 @@ const updateView = createSafeHandler(
               eq(workspaceViews.id, viewId),
               eq(workspaceViews.workspaceId, workspaceId),
             ),
-          ),
-      ),
+          );
+
+        const changes: Record<string, { old: unknown; new: unknown }> = {};
+        if (updates.name !== undefined) {
+          changes["name"] = { old: existing.name, new: updates.name };
+        }
+        if (updates.layout !== undefined) {
+          changes["layout"] = {
+            old: parseViewLayout(existing.layout),
+            new: updates.layout,
+          };
+        }
+
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.UPDATE,
+          resourceType: AUDIT_RESOURCE_TYPE.VIEW,
+          resourceId: viewId,
+          changes,
+        });
+
+        return { ok: true as const };
+      }),
     );
+
+    if (!updateResult.ok) {
+      return Result.err(
+        new HandlerError({
+          status: updateResult.status,
+          message: updateResult.message,
+        }),
+      );
+    }
 
     broadcast(workspaceId, {
       type: "invalidate-query",
       data: ["views", workspaceId],
     });
 
-    return Result.ok(undefined);
+    return Result.ok({});
   },
 );
 

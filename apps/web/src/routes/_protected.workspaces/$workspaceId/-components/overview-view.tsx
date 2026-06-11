@@ -49,6 +49,7 @@ import {
   Tooltip as TooltipRoot,
   TooltipTrigger,
 } from "@stll/ui/components/tooltip";
+import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 import { cn } from "@stll/ui/lib/utils";
 
 import { renderDragPreview } from "@/components/drag-preview";
@@ -164,11 +165,12 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
       title: t("success.taskCreated"),
       type: "success",
     });
-    // eslint-disable-next-line typescript/no-floating-promises
-    queryClient.invalidateQueries({
+    void queryClient.invalidateQueries({
       queryKey: workspacesKeys.overview(workspaceId),
     });
-    useInspectorStore.getState().openTask(entityId, "", true);
+    useInspectorStore
+      .getState()
+      .openTask({ taskId: entityId, workspaceId, isNew: true });
   }, [workspaceId, t, queryClient]);
 
   const updateTaskStatus = useMutation({
@@ -395,8 +397,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
           onClick={() => {
             const view = findViewByType("filesystem");
             if (view) {
-              // eslint-disable-next-line typescript/no-floating-promises
-              navigate({
+              void navigate({
                 to: "/workspaces/$workspaceId/$viewId",
                 params: { workspaceId, viewId: view.id },
               });
@@ -410,8 +411,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
           onClick={() => {
             const view = findViewByType("kanban");
             if (view) {
-              // eslint-disable-next-line typescript/no-floating-promises
-              navigate({
+              void navigate({
                 to: "/workspaces/$workspaceId/$viewId",
                 params: { workspaceId, viewId: view.id },
               });
@@ -425,7 +425,11 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
           onClick={() => {
             const task = tasksWithDue.at(0);
             if (task) {
-              useInspectorStore.getState().openTask(task.entityId, task.name);
+              useInspectorStore.getState().openTask({
+                taskId: task.entityId,
+                workspaceId,
+                label: task.name,
+              });
             }
           }}
           sublabel={tasksWithDue.at(0)?.name}
@@ -444,8 +448,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
           icon={<ClockIcon className="size-4" />}
           label={t("workspaces.overview.timeThisWeek")}
           onClick={() => {
-            // eslint-disable-next-line typescript/no-floating-promises
-            navigate({
+            void navigate({
               to: "/workspaces/$workspaceId/timesheets",
               params: { workspaceId },
             });
@@ -498,9 +501,11 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
                         className="hover:bg-accent/50 flex w-full items-center gap-3 px-3 py-2.5 text-start transition-colors"
                         key={task.entityId}
                         onClick={() =>
-                          useInspectorStore
-                            .getState()
-                            .openTask(task.entityId, task.name)
+                          useInspectorStore.getState().openTask({
+                            taskId: task.entityId,
+                            workspaceId,
+                            label: task.name,
+                          })
                         }
                         onContextMenu={handleTaskContextMenu({
                           entityId: task.entityId,
@@ -593,9 +598,11 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
                       if (task === null) {
                         return;
                       }
-                      useInspectorStore
-                        .getState()
-                        .openTask(task.entityId, task.name);
+                      useInspectorStore.getState().openTask({
+                        taskId: task.entityId,
+                        workspaceId,
+                        label: task.name,
+                      });
                     }}
                   >
                     <SquareCheckIcon />
@@ -841,8 +848,8 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
                         className={cn(
                           "text-xs font-medium",
                           totalHoursThisWeek > prevWeekHours
-                            ? "text-green-600"
-                            : "text-red-500",
+                            ? "text-success"
+                            : "text-destructive",
                         )}
                       >
                         {totalHoursThisWeek > prevWeekHours ? "▲" : "▼"}{" "}
@@ -885,6 +892,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
             icon: UploadIcon,
             onClick: () => fileInputRef.current?.click(),
           }}
+          showHelpBar={false}
           title={tWorkspaces("emptyDocuments.title")}
           video={{
             ...EMPTY_SCREEN_MATTERS_VIDEO,
@@ -927,7 +935,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
         onChange={(e) => {
           const files = e.target.files;
           if (files && files.length > 0) {
-            handleCreateFileEntities([...files]);
+            handleCreateFileEntities({ files: [...files], parentId: null });
           }
           e.target.value = "";
         }}
@@ -1096,6 +1104,7 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
     entity.mimeType !== null &&
     entity.fieldId !== null &&
     isFileDisplayable({
+      fileName: entity.name,
       mimeType: entity.mimeType,
       pdfFileId: entity.pdfFileId,
       encrypted: entity.encrypted,
@@ -1104,6 +1113,7 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
   const icon = (
     <EntityKindIcon
       className="size-4 shrink-0"
+      fileName={entity.name}
       kind={entity.kind}
       mimeType={entity.mimeType}
       status={entity.status}
@@ -1153,7 +1163,11 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
   const handleOpen = (() => {
     if (entity.kind === "task") {
       return () =>
-        useInspectorStore.getState().openTask(entity.entityId, entity.name);
+        useInspectorStore.getState().openTask({
+          taskId: entity.entityId,
+          workspaceId,
+          label: entity.name,
+        });
     }
     if (navigable && fieldId) {
       return () =>
@@ -1161,6 +1175,7 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
           id: fieldId,
           entityId: entity.entityId,
           label: entity.name,
+          fileName: entity.name,
           mimeType: entity.mimeType ?? undefined,
           pdfFileId: entity.pdfFileId,
           propertyId: entity.propertyId ?? undefined,
@@ -1205,7 +1220,26 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
         />
       )}
       <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-sm">
-        <span className="text-muted-foreground shrink-0">{activityLabel}</span>{" "}
+        {/* Grid overlays the active verb on invisible sizers of every verb, so
+            the column is as wide as the longest one and file names align across
+            rows regardless of locale. */}
+        <span className="text-muted-foreground grid shrink-0 justify-items-start">
+          <span
+            aria-hidden="true"
+            className="invisible col-start-1 row-start-1 whitespace-nowrap"
+          >
+            {t("workspaces.overview.uploaded")}
+          </span>
+          <span
+            aria-hidden="true"
+            className="invisible col-start-1 row-start-1 whitespace-nowrap"
+          >
+            {t("workspaces.overview.edited")}
+          </span>
+          <span className="col-start-1 row-start-1 whitespace-nowrap">
+            {activityLabel}
+          </span>
+        </span>
         {icon}
         <span className="truncate">{entity.name}</span>
       </span>
@@ -1259,7 +1293,7 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
         "group/row hover:bg-muted/50 flex items-center gap-3 px-4 py-2.5",
         handleOpen && "w-full cursor-pointer text-start",
       )}
-      onClick={handleOpen}
+      onClick={containedHandler(rowRef, handleOpen)}
       onContextMenu={handleContextMenu}
       onKeyDown={handleKeyDown}
       ref={rowRef}

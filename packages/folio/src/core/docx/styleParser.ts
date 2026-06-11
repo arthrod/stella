@@ -35,6 +35,7 @@ import type {
   TableLook,
   TableMeasurement,
 } from "../types/document";
+import { mergeParagraphFormatting } from "../utils/paragraphFormattingMerge";
 import { mergeTextFormatting } from "../utils/textFormattingMerge";
 import {
   BorderStyleSchema,
@@ -62,6 +63,7 @@ import {
   findChild,
   findChildren,
   getAttribute,
+  getLocalName,
   parseBooleanElement,
   parseNumericAttribute,
 } from "./xmlParser";
@@ -71,6 +73,11 @@ import type { XmlElement } from "./xmlParser";
  * Style map keyed by styleId
  */
 export type StyleMap = Map<string, Style>;
+
+export type ParsedStylesPackage = {
+  styleDefinitions: StyleDefinitions;
+  styles: StyleMap;
+};
 
 /**
  * Parse text formatting properties (w:rPr)
@@ -1237,6 +1244,88 @@ function parseTableCellProperties(
   return Object.keys(formatting).length > 0 ? formatting : undefined;
 }
 
+type StyleChildren = {
+  basedOn?: XmlElement;
+  hidden?: XmlElement;
+  link?: XmlElement;
+  name?: XmlElement;
+  next?: XmlElement;
+  personal?: XmlElement;
+  pPr?: XmlElement;
+  qFormat?: XmlElement;
+  rPr?: XmlElement;
+  semiHidden?: XmlElement;
+  tblPr?: XmlElement;
+  tblStylePrs: XmlElement[];
+  tcPr?: XmlElement;
+  trPr?: XmlElement;
+  uiPriority?: XmlElement;
+  unhideWhenUsed?: XmlElement;
+};
+
+function collectStyleChildren(styleEl: XmlElement): StyleChildren {
+  const children: StyleChildren = { tblStylePrs: [] };
+
+  for (const child of styleEl.elements ?? []) {
+    if (child.type !== "element") {
+      continue;
+    }
+
+    switch (getLocalName(child.name || "")) {
+      case "basedOn":
+        children.basedOn ??= child;
+        break;
+      case "hidden":
+        children.hidden ??= child;
+        break;
+      case "link":
+        children.link ??= child;
+        break;
+      case "name":
+        children.name ??= child;
+        break;
+      case "next":
+        children.next ??= child;
+        break;
+      case "personal":
+        children.personal ??= child;
+        break;
+      case "pPr":
+        children.pPr ??= child;
+        break;
+      case "qFormat":
+        children.qFormat ??= child;
+        break;
+      case "rPr":
+        children.rPr ??= child;
+        break;
+      case "semiHidden":
+        children.semiHidden ??= child;
+        break;
+      case "tblPr":
+        children.tblPr ??= child;
+        break;
+      case "tblStylePr":
+        children.tblStylePrs.push(child);
+        break;
+      case "tcPr":
+        children.tcPr ??= child;
+        break;
+      case "trPr":
+        children.trPr ??= child;
+        break;
+      case "uiPriority":
+        children.uiPriority ??= child;
+        break;
+      case "unhideWhenUsed":
+        children.unhideWhenUsed ??= child;
+        break;
+    }
+  }
+
+  return children;
+}
+
 /**
  * Parse a single style element (w:style)
  */
@@ -1253,8 +1342,10 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
     style.default = defaultAttr === "1" || defaultAttr === "true";
   }
 
+  const children = collectStyleChildren(styleEl);
+
   // Name
-  const nameEl = findChild(styleEl, "w", "name");
+  const nameEl = children.name;
   if (nameEl) {
     const nameVal = getAttribute(nameEl, "w", "val");
     if (nameVal) {
@@ -1263,7 +1354,7 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // Based on (inheritance)
-  const basedOn = findChild(styleEl, "w", "basedOn");
+  const basedOn = children.basedOn;
   if (basedOn) {
     const basedOnVal = getAttribute(basedOn, "w", "val");
     if (basedOnVal) {
@@ -1272,7 +1363,7 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // Next style
-  const next = findChild(styleEl, "w", "next");
+  const next = children.next;
   if (next) {
     const nextVal = getAttribute(next, "w", "val");
     if (nextVal) {
@@ -1281,7 +1372,7 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // Linked style
-  const link = findChild(styleEl, "w", "link");
+  const link = children.link;
   if (link) {
     const linkVal = getAttribute(link, "w", "val");
     if (linkVal) {
@@ -1290,7 +1381,7 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // UI Priority
-  const uiPriority = findChild(styleEl, "w", "uiPriority");
+  const uiPriority = children.uiPriority;
   if (uiPriority) {
     const val = parseNumericAttribute(uiPriority, "w", "val");
     if (val !== undefined) {
@@ -1299,36 +1390,36 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // Hidden/Semi-hidden
-  const hidden = findChild(styleEl, "w", "hidden");
+  const hidden = children.hidden;
   if (hidden) {
     style.hidden = parseBooleanElement(hidden);
   }
 
-  const semiHidden = findChild(styleEl, "w", "semiHidden");
+  const semiHidden = children.semiHidden;
   if (semiHidden) {
     style.semiHidden = parseBooleanElement(semiHidden);
   }
 
   // Unhide when used
-  const unhideWhenUsed = findChild(styleEl, "w", "unhideWhenUsed");
+  const unhideWhenUsed = children.unhideWhenUsed;
   if (unhideWhenUsed) {
     style.unhideWhenUsed = parseBooleanElement(unhideWhenUsed);
   }
 
   // Quick format
-  const qFormat = findChild(styleEl, "w", "qFormat");
+  const qFormat = children.qFormat;
   if (qFormat) {
     style.qFormat = parseBooleanElement(qFormat);
   }
 
   // Personal/custom style
-  const personal = findChild(styleEl, "w", "personal");
+  const personal = children.personal;
   if (personal) {
     style.personal = parseBooleanElement(personal);
   }
 
   // Paragraph properties
-  const pPr = findChild(styleEl, "w", "pPr");
+  const pPr = children.pPr;
   if (pPr) {
     const pPrResult = parseParagraphProperties(pPr, theme);
     if (pPrResult) {
@@ -1337,7 +1428,7 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // Run properties
-  const rPr = findChild(styleEl, "w", "rPr");
+  const rPr = children.rPr;
   if (rPr) {
     const rPrResult = parseRunProperties(rPr, theme);
     if (rPrResult) {
@@ -1346,7 +1437,7 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // Table properties (for table styles)
-  const tblPr = findChild(styleEl, "w", "tblPr");
+  const tblPr = children.tblPr;
   if (tblPr) {
     const tblPrResult = parseTableProperties(tblPr, theme);
     if (tblPrResult) {
@@ -1355,7 +1446,7 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // Table row properties
-  const trPr = findChild(styleEl, "w", "trPr");
+  const trPr = children.trPr;
   if (trPr) {
     const trPrResult = parseTableRowProperties(trPr);
     if (trPrResult) {
@@ -1364,7 +1455,7 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // Table cell properties
-  const tcPr = findChild(styleEl, "w", "tcPr");
+  const tcPr = children.tcPr;
   if (tcPr) {
     const tcPrResult = parseTableCellProperties(tcPr, theme);
     if (tcPrResult) {
@@ -1373,7 +1464,7 @@ function parseStyle(styleEl: XmlElement, theme: Theme | null): Style {
   }
 
   // Table style conditional formatting (tblStylePr)
-  const tblStylePrs = findChildren(styleEl, "w", "tblStylePr");
+  const tblStylePrs = children.tblStylePrs;
   if (tblStylePrs.length > 0) {
     style.tblStylePr = [];
 
@@ -1476,62 +1567,6 @@ function parseDocDefaults(
 }
 
 /**
- * Deep merge paragraph formatting (source overrides target)
- */
-function mergeParagraphFormatting(
-  target: ParagraphFormatting | undefined,
-  source: ParagraphFormatting | undefined,
-): ParagraphFormatting | undefined {
-  if (!source) {
-    return target;
-  }
-  if (!target) {
-    return { ...source };
-  }
-
-  const result: ParagraphFormatting = { ...target };
-
-  // SAFETY: Object.keys returns string[]; widening to ParagraphFormatting's
-  // keys is sound here because source is typed as ParagraphFormatting and
-  // own-enumerable string keys of a typed object are a subset of its keys.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
-  const sourceKeys = Object.keys(source) as (keyof ParagraphFormatting)[];
-
-  for (const key of sourceKeys) {
-    const value = source[key];
-    if (value === undefined) {
-      continue;
-    }
-    if (key === "runProperties") {
-      const mergedRunProps = mergeTextFormatting(
-        result.runProperties,
-        source.runProperties,
-      );
-      if (mergedRunProps) {
-        result.runProperties = mergedRunProps;
-      }
-    } else if (key === "borders" || key === "numPr" || key === "frame") {
-      // SAFETY: deep-merge known nested-object keys; both sides have the
-      // same shape per the union narrowing on `key`.
-      const baseValue = result[key] as Record<string, unknown> | undefined;
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion
-      const sourceValue = value as Record<string, unknown> | undefined;
-      (result as Record<string, unknown>)[key] = {
-        ...baseValue,
-        ...sourceValue,
-      };
-    } else if (key === "tabs" && Array.isArray(value)) {
-      result.tabs = [...value];
-    } else {
-      // SAFETY: dynamic property copy across matching ParagraphFormatting keys
-      (result as Record<string, unknown>)[key] = value;
-    }
-  }
-
-  return result;
-}
-
-/**
  * Resolve style inheritance chain
  */
 function resolveStyleInheritance(
@@ -1606,14 +1641,21 @@ function resolveStyleInheritance(
  * @returns StyleMap with resolved inheritance
  */
 export function parseStyles(stylesXml: string, theme: Theme | null): StyleMap {
+  const doc = parseXmlDocument(stylesXml);
+  if (!doc) {
+    return new Map();
+  }
+
+  return parseStylesFromDocument(doc, theme);
+}
+
+function parseStylesFromDocument(
+  doc: XmlElement,
+  theme: Theme | null,
+): StyleMap {
   const styleMap: StyleMap = new Map();
 
   try {
-    const doc = parseXmlDocument(stylesXml);
-    if (!doc) {
-      return styleMap;
-    }
-
     // First pass: parse all styles without inheritance resolution
     const styleElements = findChildren(doc, "w", "style");
     for (const styleEl of styleElements) {
@@ -1645,17 +1687,26 @@ export function parseStyles(stylesXml: string, theme: Theme | null): StyleMap {
 export function parseStyleDefinitions(
   stylesXml: string,
   theme: Theme | null,
+  resolvedStyles?: StyleMap,
+): StyleDefinitions {
+  const doc = parseXmlDocument(stylesXml);
+  if (!doc) {
+    return { styles: [] };
+  }
+
+  return parseStyleDefinitionsFromDocument(doc, theme, resolvedStyles);
+}
+
+function parseStyleDefinitionsFromDocument(
+  doc: XmlElement,
+  theme: Theme | null,
+  resolvedStyles?: StyleMap,
 ): StyleDefinitions {
   const result: StyleDefinitions = {
     styles: [],
   };
 
   try {
-    const doc = parseXmlDocument(stylesXml);
-    if (!doc) {
-      return result;
-    }
-
     // Parse document defaults
     const docDefaultsEl = findChild(doc, "w", "docDefaults");
     const parsedDocDefaults = parseDocDefaults(docDefaultsEl, theme);
@@ -1691,13 +1742,32 @@ export function parseStyleDefinitions(
     }
 
     // Parse styles with full inheritance resolution
-    const styleMap = parseStyles(stylesXml, theme);
+    const styleMap = resolvedStyles ?? parseStylesFromDocument(doc, theme);
     result.styles = Array.from(styleMap.values());
   } catch {
     // Malformed styles return the partial definitions parsed so far.
   }
 
   return result;
+}
+
+export function parseStylesPackage(
+  stylesXml: string,
+  theme: Theme | null,
+): ParsedStylesPackage {
+  const doc = parseXmlDocument(stylesXml);
+  if (!doc) {
+    return {
+      styleDefinitions: { styles: [] },
+      styles: new Map(),
+    };
+  }
+
+  const styles = parseStylesFromDocument(doc, theme);
+  return {
+    styleDefinitions: parseStyleDefinitionsFromDocument(doc, theme, styles),
+    styles,
+  };
 }
 
 /**

@@ -3,10 +3,35 @@ import { t } from "elysia";
 
 import { resolveChatScope } from "@/api/handlers/chat/chat-scope";
 import { normalizeLegacyToolInputs } from "@/api/handlers/chat/legacy-tool-compat";
+import { isWebSearchAvailable } from "@/api/handlers/chat/tools/chat-tools";
+import { getDisabledNativeToolSlugs } from "@/api/handlers/mcp-connectors/catalog-metadata";
+import { parseUserFileId } from "@/api/handlers/user-files/types";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
+import type { SafeId } from "@/api/lib/branded-types";
 import { tSafeId } from "@/api/lib/custom-schema";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
+
+type ChatPart = ReturnType<typeof normalizeLegacyToolInputs>[number];
+
+/**
+ * Attach the stored blur placeholder to image file parts so the client can
+ * render a blur-up while the thumbnail loads. The thumbnail URL itself is
+ * derived client-side from the user-file id, so only the DB-sourced
+ * placeholder needs to travel with the message.
+ */
+const attachPlaceholders = (
+  parts: ChatPart[],
+  placeholderById: Map<string, string>,
+): ChatPart[] =>
+  parts.map((part) => {
+    if (part.type !== "file") {
+      return part;
+    }
+    const fileId = parseUserFileId(part.url);
+    const placeholder = fileId ? placeholderById.get(fileId) : undefined;
+    return placeholder ? { ...part, placeholder } : part;
+  });
 
 const config = {
   permissions: { chat: ["create"] },
@@ -24,6 +49,7 @@ const getMessages = createSafeRootHandler(
     params: { threadId },
     query: { allowMissingThread, workspaceId },
     safeDb,
+    session,
     user,
   }) {
     const accessibleWorkspaceIds = activeWorkspaceIds;
@@ -39,13 +65,18 @@ const getMessages = createSafeRootHandler(
             id: { eq: threadId },
             userId: { eq: user.id },
           },
-          columns: { workspaceId: true, contextMatterIds: true },
+          columns: {
+            workspaceId: true,
+            contextMatterIds: true,
+            webSearchEnabled: true,
+          },
           with: {
             messages: {
               columns: {
                 id: true,
                 role: true,
                 content: true,
+                createdAt: true,
               },
               orderBy: { createdAt: "asc" },
             },
@@ -53,10 +84,34 @@ const getMessages = createSafeRootHandler(
         }),
       ),
     );
+    const orgSettingsForChat = yield* Result.await(
+      safeDb((tx) =>
+        tx.query.organizationSettings.findFirst({
+          where: {
+            organizationId: { eq: session.activeOrganizationId },
+          },
+          columns: {
+            practiceJurisdictions: true,
+            nativeToolOverrides: true,
+          },
+        }),
+      ),
+    );
+    const disabledNativeToolSlugs = getDisabledNativeToolSlugs({
+      practiceJurisdictions: orgSettingsForChat?.practiceJurisdictions ?? [],
+      nativeToolOverrides: orgSettingsForChat?.nativeToolOverrides ?? {},
+    });
+    const webSearchAvailable = isWebSearchAvailable(disabledNativeToolSlugs);
 
     if (!thread) {
       if (allowMissingThread) {
-        return Result.ok({ messages: [], contextMatterIds: [] });
+        return Result.ok({
+          messages: [],
+          contextMatterIds: [],
+          lastActivityAt: null,
+          webSearchAvailable,
+          webSearchEnabled: false,
+        });
       }
 
       return Result.err(
@@ -83,13 +138,57 @@ const getMessages = createSafeRootHandler(
       );
     }
 
+    // Most recent message timestamp; the client compares it against
+    // the recap staleness window to decide whether to ask for a recap.
+    const lastActivityAt =
+      thread.messages.at(-1)?.createdAt.toISOString() ?? null;
+
+    const referencedFileIds = new Set<SafeId<"userFile">>();
+    for (const row of thread.messages) {
+      for (const part of row.content.data) {
+        if (part.type !== "file") {
+          continue;
+        }
+        const fileId = parseUserFileId(part.url);
+        if (fileId) {
+          referencedFileIds.add(fileId);
+        }
+      }
+    }
+
+    const placeholderById = new Map<string, string>();
+    if (referencedFileIds.size > 0) {
+      const fileRows = yield* Result.await(
+        safeDb((tx) =>
+          tx.query.userFiles.findMany({
+            where: {
+              id: { in: [...referencedFileIds] },
+              userId: { eq: user.id },
+            },
+            columns: { id: true, placeholder: true },
+          }),
+        ),
+      );
+      for (const fileRow of fileRows) {
+        if (fileRow.placeholder !== null) {
+          placeholderById.set(fileRow.id, fileRow.placeholder);
+        }
+      }
+    }
+
     return Result.ok({
       messages: thread.messages.map((row) => ({
         id: row.id,
         role: row.role,
-        parts: normalizeLegacyToolInputs(row.content.data),
+        parts: attachPlaceholders(
+          normalizeLegacyToolInputs(row.content.data),
+          placeholderById,
+        ),
       })),
       contextMatterIds: thread.contextMatterIds,
+      lastActivityAt,
+      webSearchAvailable,
+      webSearchEnabled: thread.webSearchEnabled,
     });
   },
 );

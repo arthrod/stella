@@ -1,4 +1,4 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import type { PropertyContentType } from "@stll/api/types";
 
@@ -30,6 +30,7 @@ type CreatePropertyVars = {
 
 export const useCreateProperty = ({ workspaceId }: { workspaceId: string }) => {
   const analytics = useAnalytics();
+  const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async ({
@@ -69,6 +70,77 @@ export const useCreateProperty = ({ workspaceId }: { workspaceId: string }) => {
 
       return response.data;
     },
+    onSuccess: async () => {
+      // Reflect the actor's own write immediately instead of waiting on
+      // the server-pushed SSE invalidation round-trip; SSE remains the
+      // path that propagates the change to other users' tabs.
+      await queryClient.invalidateQueries({
+        queryKey: propertiesKeys.all(workspaceId),
+      });
+    },
+    onError: (error) => {
+      analytics.captureError(error);
+    },
+  });
+};
+
+export type CreatePropertySpec = {
+  name: string;
+  contentType: PropertyContentType;
+  toolType?: "ai-model" | "manual-input";
+  prompt?: string;
+  dependencies?: CreatePropertyDependency[];
+  options?: WorkspacePropertyOption[];
+  fallback?: string | null;
+};
+
+export const useCreatePropertiesBatch = ({
+  workspaceId,
+}: {
+  workspaceId: string;
+}) => {
+  const analytics = useAnalytics();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({ items }: { items: CreatePropertySpec[] }) => {
+      const response = await api
+        .properties({ workspaceId: toSafeId<"workspace">(workspaceId) })
+        .batch.put({
+          queryKey: propertiesKeys.all(workspaceId),
+          items: items.map((item) => ({
+            name: item.name,
+            contentType: item.contentType,
+            ...(item.toolType ? { toolType: item.toolType } : {}),
+            ...(item.prompt === undefined ? {} : { prompt: item.prompt }),
+            ...(item.dependencies && item.dependencies.length > 0
+              ? {
+                  dependencies: item.dependencies.map((dep) => ({
+                    dependsOnPropertyId: toSafeId<"property">(
+                      dep.dependsOnPropertyId,
+                    ),
+                    condition: dep.condition,
+                  })),
+                }
+              : {}),
+            ...(item.options && item.options.length > 0
+              ? { options: item.options }
+              : {}),
+            ...(item.fallback !== undefined ? { fallback: item.fallback } : {}),
+          })),
+        });
+
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+
+      return response.data;
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: propertiesKeys.all(workspaceId),
+      });
+    },
     onError: (error) => {
       analytics.captureError(error);
     },
@@ -85,6 +157,7 @@ type UpdatePropertyVars = {
 
 export const useUpdateProperty = () => {
   const analytics = useAnalytics();
+  const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async ({
@@ -118,6 +191,11 @@ export const useUpdateProperty = () => {
       if (response.error) {
         throw toAPIError(response.error);
       }
+    },
+    onSuccess: async (_data, { workspaceId }) => {
+      await queryClient.invalidateQueries({
+        queryKey: propertiesKeys.all(workspaceId),
+      });
     },
     onError: (error) => {
       analytics.captureError(error);
@@ -227,6 +305,7 @@ type DeletePropertyVars = {
 
 export const useDeleteProperty = () => {
   const analytics = useAnalytics();
+  const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async ({ workspaceId, propertyId }: DeletePropertyVars) => {
@@ -240,6 +319,11 @@ export const useDeleteProperty = () => {
       if (response.error) {
         throw toAPIError(response.error);
       }
+    },
+    onSuccess: async (_data, { workspaceId }) => {
+      await queryClient.invalidateQueries({
+        queryKey: propertiesKeys.all(workspaceId),
+      });
     },
     onError: (error) => {
       analytics.captureError(error);

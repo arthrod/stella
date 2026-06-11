@@ -57,7 +57,6 @@ describe("mcpConnectorCatalogMetadata", () => {
       expect.objectContaining({
         slug: "ares",
         isRecommended: true,
-        iconUrl: "https://ares.gov.cz/logo-ares-new.ico",
         recommendedJurisdictions: ["CZ"],
       }),
     );
@@ -85,6 +84,39 @@ describe("mcpConnectorCatalogMetadata", () => {
     expect(tools).toContainEqual(
       expect.objectContaining({ slug: "boe", isRecommended: false }),
     );
+  });
+
+  it("exposes Brreg as a chat-toggleable native tool", () => {
+    const tools = getNativeToolCatalog({
+      practiceJurisdictions: [{ countryCode: "NO", isPrimary: true }],
+    });
+
+    expect(tools).toContainEqual(
+      expect.objectContaining({
+        slug: "brreg",
+        isRecommended: true,
+      }),
+    );
+  });
+
+  it("shows only native tools that the MCP settings page can toggle", () => {
+    const toolSlugs = getNativeToolCatalog({
+      practiceJurisdictions: [{ countryCode: "CZ", isPrimary: true }],
+    }).map((tool) => tool.slug);
+
+    expect(toolSlugs).toContain("web-search");
+    expect(toolSlugs).toContain("brreg");
+    expect(toolSlugs).not.toContain("anonymize");
+    expect(toolSlugs).not.toContain("create-docx");
+  });
+
+  it("hides deploy-unavailable native tools from the MCP settings page", () => {
+    const toolSlugs = getNativeToolCatalog({
+      nativeToolDeployAvailable: (backendSlug) => backendSlug !== "edgar",
+      practiceJurisdictions: [{ countryCode: "US", isPrimary: true }],
+    }).map((tool) => tool.slug);
+
+    expect(toolSlugs).not.toContain("edgar");
   });
 });
 
@@ -135,6 +167,16 @@ describe("isNativeToolEnabledForOrg", () => {
         slug: "nonexistent",
         practiceJurisdictions: [{ countryCode: "CZ", isPrimary: true }],
         nativeToolOverrides: {},
+      }),
+    ).toBe(false);
+  });
+
+  it("respects explicit disable overrides for globally defaulted Web Search", () => {
+    expect(
+      isNativeToolEnabledForOrg({
+        slug: "web-search",
+        practiceJurisdictions: [{ countryCode: "CZ", isPrimary: true }],
+        nativeToolOverrides: { "web-search": false },
       }),
     ).toBe(false);
   });

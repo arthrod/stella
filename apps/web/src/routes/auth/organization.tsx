@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
 
-import { useForm, useStore } from "@tanstack/react-form";
+import { useForm } from "@tanstack/react-form";
 import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
+import { useSelector } from "@tanstack/react-store";
+import { panic } from "better-result";
 import { useTranslations } from "use-intl";
 import * as v from "valibot";
 
@@ -73,8 +75,7 @@ function Organization() {
 
   useEffect(() => {
     if (!isPending && !hasOrganizations && !isOauthPostLogin) {
-      // eslint-disable-next-line typescript/no-floating-promises
-      navigate({ to: "/onboarding", replace: true });
+      void navigate({ to: "/onboarding", replace: true });
     }
   }, [hasOrganizations, isOauthPostLogin, isPending, navigate]);
 
@@ -142,7 +143,7 @@ const completeOrganizationFlow = async ({
 
   const redirectUrl = getOauthRedirectUrl(result.data);
   if (!redirectUrl) {
-    throw new Error("Missing OAuth continuation redirect URL");
+    panic("Missing OAuth continuation redirect URL");
   }
 
   window.location.href = redirectUrl;
@@ -335,7 +336,7 @@ const CreateOrganizationForm = ({
     },
   });
 
-  const formErrors = useStore(form.store, (s) => toFormErrors(s.fieldMeta));
+  const formErrors = useSelector(form.store, (s) => toFormErrors(s.fieldMeta));
 
   return (
     <Frame className="w-full max-w-sm">
@@ -348,8 +349,7 @@ const CreateOrganizationForm = ({
           errors={formErrors}
           onSubmit={(event) => {
             event.preventDefault();
-            // eslint-disable-next-line typescript/no-floating-promises
-            form.handleSubmit();
+            void form.handleSubmit();
           }}
         >
           <form.Field name="name">

@@ -20,15 +20,20 @@ import {
   createMcpCorsHeaders,
   getMcpWwwAuthenticateHeader,
 } from "@/api/mcp/metadata";
-import type { McpToolDefinition } from "@/api/mcp/tool-types";
+import type { McpToolDefinition, ToolScope } from "@/api/mcp/tool-types";
 
 type McpServerDependencies = {
   authenticateMcpRequest: (token: string, mode: McpMode) => Promise<McpSession>;
   captureError: (error: unknown, context?: Record<string, string>) => void;
   getMcpToolDefinition: (
     toolName: string,
+    context: McpRequestContext,
     mode?: McpMode,
-  ) => McpToolDefinition | undefined;
+  ) => Promise<McpToolDefinition | undefined>;
+  getMcpToolScopeHint: (
+    toolName: string,
+    mode?: McpMode,
+  ) => ToolScope | undefined;
   handleMcpToolCall: ({
     args,
     context,
@@ -40,8 +45,15 @@ type McpServerDependencies = {
     mode?: McpMode;
     toolName: string;
   }) => Promise<CallToolResult>;
-  listMcpTools: (mode?: McpMode) => McpTool[];
-  resolveMcpSessionContext: (session: McpSession) => Promise<McpRequestContext>;
+  listMcpTools: (
+    context: McpRequestContext,
+    mode?: McpMode,
+    scopes?: readonly string[],
+  ) => Promise<McpTool[]>;
+  resolveMcpSessionContext: (
+    session: McpSession,
+    options: { request: Request },
+  ) => Promise<McpRequestContext>;
 };
 
 const MCP_SERVER_VERSION = "0.1.0";
@@ -95,18 +107,21 @@ export const createMcpHttpRequestHandler = ({
   authenticateMcpRequest,
   captureError,
   getMcpToolDefinition,
+  getMcpToolScopeHint,
   handleMcpToolCall,
   listMcpTools,
   resolveMcpSessionContext,
 }: McpServerDependencies) => {
   const createMcpServer = async ({
     mode,
+    request,
     session,
   }: {
     mode: McpMode;
+    request: Request;
     session: McpSession;
   }) => {
-    const context = await resolveMcpSessionContext(session);
+    const context = await resolveMcpSessionContext(session, { request });
 
     // The low-level Server API accepts JSON Schema directly, which keeps the
     // MCP surface independent from the AI SDK tool generics used elsewhere.
@@ -116,13 +131,26 @@ export const createMcpHttpRequestHandler = ({
       { capabilities: { tools: {} } },
     );
 
-    server.setRequestHandler(ListToolsRequestSchema, () => ({
-      tools: listMcpTools(mode),
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: await listMcpTools(context, mode, session.scopes),
     }));
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const toolName = request.params.name;
-      const definition = getMcpToolDefinition(toolName, mode);
+    server.setRequestHandler(CallToolRequestSchema, async (toolRequest) => {
+      const toolName = toolRequest.params.name;
+      const hintedScope = getMcpToolScopeHint(toolName, mode);
+      if (hintedScope && !session.scopes.includes(hintedScope)) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Insufficient permissions. Required scope: ${hintedScope}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const definition = await getMcpToolDefinition(toolName, context, mode);
       if (!definition) {
         return {
           content: [
@@ -145,7 +173,7 @@ export const createMcpHttpRequestHandler = ({
       }
 
       return await handleMcpToolCall({
-        args: request.params.arguments ?? {},
+        args: toolRequest.params.arguments ?? {},
         context,
         mode,
         toolName,
@@ -180,7 +208,7 @@ export const createMcpHttpRequestHandler = ({
 
     try {
       const session = await authenticateMcpRequest(token, mode);
-      server = await createMcpServer({ mode, session });
+      server = await createMcpServer({ mode, request, session });
       transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });

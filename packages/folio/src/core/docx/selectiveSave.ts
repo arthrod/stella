@@ -9,17 +9,23 @@
  */
 
 import type { Document, BlockContent } from "../types/document";
+import { validateFolioDocumentModel } from "./modelValidation";
 import { RELATIONSHIP_TYPES } from "./relsParser";
 import {
   applyUpdatesToZip,
   findMaxRId,
   updateCoreProperties,
   collectHeaderFooterUpdates,
+  hasUnmaterializedHeaderFooter,
+  hasModelDrivenPictureWatermark,
   COMMENTS_CONTENT_TYPE,
 } from "./rezip";
+import { DEFAULT_SELECTIVE_SAVE_MAX_BYTES } from "./selectiveSaveFlags";
 import { buildPatchedDocumentXml } from "./selectiveXmlPatch";
 import { serializeComments } from "./serializer/commentSerializer";
 import { serializeDocument } from "./serializer/documentSerializer";
+
+const SYNTHETIC_IMAGE_RID_PREFIX = "rId_img_";
 
 /**
  * Check if document content has new images (data: URL without rId) or
@@ -27,18 +33,22 @@ import { serializeDocument } from "./serializer/documentSerializer";
  * to avoid walking the block tree twice.
  */
 function hasNewImagesOrHyperlinks(blocks: BlockContent[]): boolean {
+  const runHasNewImage = (run: {
+    content: { type: string; image?: { src?: string; rId?: string } }[];
+  }): boolean =>
+    run.content.some(
+      (c) =>
+        c.type === "drawing" &&
+        c.image?.src?.startsWith("data:") === true &&
+        (!c.image.rId || c.image.rId.startsWith(SYNTHETIC_IMAGE_RID_PREFIX)),
+    );
+
   for (const block of blocks) {
     if (block.type === "paragraph") {
       for (const item of block.content) {
         if (item.type === "run") {
-          for (const c of item.content) {
-            if (
-              c.type === "drawing" &&
-              c.image.src?.startsWith("data:") &&
-              !c.image.rId
-            ) {
-              return true;
-            }
+          if (runHasNewImage(item)) {
+            return true;
           }
         } else if (
           item.type === "hyperlink" &&
@@ -47,6 +57,21 @@ function hasNewImagesOrHyperlinks(blocks: BlockContent[]): boolean {
           !item.anchor
         ) {
           return true;
+        } else if (
+          // A picture inserted/deleted/moved under track changes lives inside
+          // an ins/del/moveFrom/moveTo wrapper. Without descending into them,
+          // a freshly tracked image gets no rId allocated and the saved DOCX
+          // references missing media. eigenpal #641.
+          item.type === "insertion" ||
+          item.type === "deletion" ||
+          item.type === "moveFrom" ||
+          item.type === "moveTo"
+        ) {
+          for (const sub of item.content) {
+            if (sub.type === "run" && runHasNewImage(sub)) {
+              return true;
+            }
+          }
         }
       }
     } else if (block.type === "table") {
@@ -69,6 +94,12 @@ export type SelectiveSaveOptions = {
   structuralChange: boolean;
   /** Whether any changes affected paragraphs without paraId */
   hasUntrackedChanges: boolean;
+  /**
+   * Maximum allowed `originalBuffer.byteLength` for the selective path. Above
+   * this size the function returns null and the caller falls back to full
+   * repack. Defaults to {@link DEFAULT_SELECTIVE_SAVE_MAX_BYTES}.
+   */
+  maxBytes?: number;
 };
 
 /**
@@ -85,6 +116,7 @@ export async function attemptSelectiveSave(
   options: SelectiveSaveOptions,
 ): Promise<ArrayBuffer | null> {
   const { changedParaIds, structuralChange, hasUntrackedChanges } = options;
+  const maxBytes = options.maxBytes ?? DEFAULT_SELECTIVE_SAVE_MAX_BYTES;
 
   // Bail out conditions — fall back to full repack
   if (structuralChange) {
@@ -93,9 +125,27 @@ export async function attemptSelectiveSave(
   if (hasUntrackedChanges) {
     return null;
   }
+  // Refuse very large inputs: the JSZip overhead on top of the original buffer
+  // dominates memory cost, and full repack is the safer path at that scale.
+  if (originalBuffer.byteLength > maxBytes) {
+    return null;
+  }
   // Check for new images/hyperlinks that need relationship management
   const content = doc.package.document.content;
   if (hasNewImagesOrHyperlinks(content)) {
+    return null;
+  }
+  // A header/footer created in memory needs a new part + relationship +
+  // [Content_Types] Override, which only the full repack path writes.
+  if (hasUnmaterializedHeaderFooter(doc)) {
+    return null;
+  }
+  // A picture watermark spanning multiple headers needs per-header image
+  // relationship rebinding, which only the full repack path performs.
+  if (hasModelDrivenPictureWatermark(doc)) {
+    return null;
+  }
+  if (!validateFolioDocumentModel(doc).valid) {
     return null;
   }
 

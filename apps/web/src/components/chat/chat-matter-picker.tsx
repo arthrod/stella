@@ -1,7 +1,6 @@
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 
 import { useQuery } from "@tanstack/react-query";
-import { getRouteApi } from "@tanstack/react-router";
 import { ChevronDownIcon, LayersIcon, SearchIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
@@ -13,10 +12,9 @@ import {
   MenuTrigger,
 } from "@stll/ui/components/menu";
 
+import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { resolveMatterColor } from "@/lib/matter-colors";
 import { workspacesNavigationOptions } from "@/routes/_protected.workspaces/-queries";
-
-const protectedRouteApi = getRouteApi("/_protected");
 
 /**
  * Matter context picker rendered in the chat tab header.
@@ -73,9 +71,7 @@ export const ChatMatterPicker = ({
   // Cache hit thanks to chat-mention-providers and the app sidebar
   // — the navigation list is already in flight on any workspace
   // page.
-  const activeOrganizationId = protectedRouteApi.useRouteContext({
-    select: (ctx) => ctx.user.activeOrganizationId,
-  });
+  const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
   const { data } = useQuery(workspacesNavigationOptions(activeOrganizationId));
   const workspaces = data?.workspaces;
 
@@ -443,21 +439,21 @@ const MatterStackIcon = ({
     viewBox="0 0 24 24"
   >
     <path
-      d="m12 3 8 4-8 4-8-4 8-4Z"
+      d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"
       stroke={ALL_MATTERS_STACK_COLORS[0]}
       strokeLinecap="round"
       strokeLinejoin="round"
       strokeWidth="2"
     />
     <path
-      d="m4 12 8 4 8-4"
+      d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"
       stroke={ALL_MATTERS_STACK_COLORS[1]}
       strokeLinecap="round"
       strokeLinejoin="round"
       strokeWidth="2"
     />
     <path
-      d="m4 17 8 4 8-4"
+      d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"
       stroke={ALL_MATTERS_STACK_COLORS[2]}
       strokeLinecap="round"
       strokeLinejoin="round"

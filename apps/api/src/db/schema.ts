@@ -1,5 +1,6 @@
-import type { PersistedDecisionAnalysis } from "@stll/case-law/analysis";
-import type { DocumentAst } from "@stll/case-law/document-ast";
+import type { PersistedDecisionAnalysis } from "@stll/legal-ast/analysis";
+import type { DocumentAst } from "@stll/legal-ast/document-ast";
+import type { CountryCode } from "@stll/country-codes";
 import { panic } from "better-result";
 import { defineRelations, isNotNull, isNull, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
@@ -11,8 +12,11 @@ import { jsonb } from "@/api/db/columns";
 import {
   agentSkillPolicies,
   agentSkillResourcePolicies,
+  chatMessageSearchDocumentPolicies,
   chatMessagePolicies,
+  chatThreadCompactionPolicies,
   chatThreadPolicies,
+  chatThreadSearchDocumentPolicies,
   fileChatThreadPolicies,
   globalCaseLawPolicies,
   mcpConnectorPolicies,
@@ -25,6 +29,7 @@ import {
   stella,
   userPolicies,
   workspaceIdCheck,
+  workspaceViewTemplatePolicies,
   wsPolicies,
 } from "@/api/db/rls";
 import type {
@@ -42,9 +47,11 @@ import type {
   PropertyContent,
   PropertyTool,
 } from "@/api/db/schema-validators";
+import type { CorpusSourceDescriptor } from "@/api/handlers/case-law/corpus-source";
 import type { EmptyAst } from "@/api/handlers/case-law/ingestion/adapter";
 import type { DecisionSection } from "@/api/handlers/case-law/types";
 import type {
+  ChatCompactionSummary,
   ChatMessageRole,
   PersistedChatMessageContent,
 } from "@/api/handlers/chat/types";
@@ -55,7 +62,10 @@ import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId, SafeIdType } from "@/api/lib/branded-types";
 import type { CentsAmount } from "@/api/lib/money";
 import { unsafeCents } from "@/api/lib/money";
-import type { ViewLayout } from "@/api/lib/views-schema";
+import type {
+  ViewLayout,
+  ViewTemplateProperty,
+} from "@/api/lib/views-schema";
 
 /** Metadata stored on link entities created by the web clipper. */
 export type LinkMetadata = {
@@ -167,7 +177,7 @@ export type SchedulerSchedule =
 export type SchedulerPayload = Record<string, unknown>;
 
 export type PracticeJurisdiction = {
-  countryCode: string;
+  countryCode: CountryCode;
   isPrimary: boolean;
 };
 
@@ -407,6 +417,13 @@ export const workspaces = p.pgTable(
     clientId: safeUuid<"contact">("client_id").references(() => contacts.id, {
       onDelete: "restrict",
     }),
+    // Optional per-matter lead. Decouples the lead from the client's
+    // responsible attorney so co-counsels can split matters under a
+    // shared client. ON DELETE SET NULL: removing the user must not
+    // cascade-delete the matter.
+    leadUserId: p
+      .text("lead_user_id")
+      .references(() => user.id, { onDelete: "set null" }),
     billingReference: p.varchar("billing_reference", {
       length: 128,
     }),
@@ -1070,6 +1087,9 @@ export const DESKTOP_EDIT_SESSION_STATUSES = [
   "open",
   "finalized",
   "cancelled",
+  // Set by the scheduler sweep when a session's token TTL lapses while
+  // still "open"; treated as closed everywhere "open" is required.
+  "expired",
 ] as const;
 
 export const FOLIO_COLLAB_SESSION_STATUSES = [
@@ -1126,6 +1146,9 @@ export const desktopEditSessions = p.pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
     closedAt: p.timestamp("closed_at"),
+    expiryNotificationPublishedAt: p.timestamp(
+      "expiry_notification_published_at",
+    ),
   },
   (table) => [
     p.index("desktop_edit_sessions_workspace_id_idx").on(table.workspaceId),
@@ -1141,6 +1164,17 @@ export const desktopEditSessions = p.pgTable(
       .uniqueIndex("desktop_edit_sessions_open_uidx")
       .on(table.createdBy, table.entityId, table.propertyId)
       .where(sql`${table.status} = 'open'`),
+    // Serves the hourly expiry sweep: scan open sessions ordered by token TTL.
+    p
+      .index("desktop_edit_sessions_open_token_expires_idx")
+      .on(table.tokenExpiresAt)
+      .where(sql`${table.status} = 'open'`),
+    p
+      .index("desktop_edit_sessions_expired_unnotified_idx")
+      .on(table.closedAt)
+      .where(
+        sql`${table.status} = 'expired' AND ${table.expiryNotificationPublishedAt} IS NULL`,
+      ),
     p
       .foreignKey({
         columns: [table.entityId, table.workspaceId],
@@ -1332,6 +1366,131 @@ export const folioCollabSessionTokens = p.pgTable(
   ],
 );
 
+/**
+ * Lifecycle of a single presigned upload, from the moment the API
+ * issues a PUT URL to the moment the resulting entity (or version,
+ * skill, attachment...) is committed.
+ *
+ * - "pending":   URL issued, client may or may not have uploaded yet
+ * - "scanning":  finalize handler claimed the row and is doing S3 I/O
+ * - "finalized": domain rows committed; `finalizedResult` populated
+ * - "rejected":  scan refused the upload; tmp deleted; terminal
+ * - "failed":    transient error (S3 5xx, DB error after S3 success);
+ *                claim can re-fire after `claimedAt + grace`
+ */
+export const PENDING_UPLOAD_STATUSES = [
+  "pending",
+  "scanning",
+  "finalized",
+  "rejected",
+  "failed",
+] as const;
+
+/**
+ * Each upload purpose drives a different finalize transaction (entity
+ * vs. version vs. skill...). The discriminator lives in its own column
+ * so phase-2 surfaces (`entity_version`, `agent_skill`, `chat_attachment`)
+ * can be added without a schema migration — only `purposeData` and
+ * `finalizedResult` shapes change.
+ */
+export const PENDING_UPLOAD_PURPOSES = [
+  "entity_create",
+  "entity_version",
+  "agent_skill",
+] as const;
+
+export type PendingUploadPurposeData =
+  | {
+      type: "entity_create";
+      propertyId: SafeId<"property">;
+    }
+  | {
+      type: "entity_version";
+      entityId: SafeId<"entity">;
+    }
+  | {
+      type: "agent_skill";
+      // "team" requires admin/owner role; "private" is per-user.
+      // Kept inline (not aliased to `AgentSkillScope`) because that
+      // type is declared further down the file.
+      scope: "team" | "private";
+    };
+
+export type PendingUploadFinalizedResult =
+  | {
+      type: "entity_create";
+      entityId: SafeId<"entity">;
+      /** UUIDv7 stored on `fields.content.id`; not a branded SafeId. */
+      fileId: string;
+      fileName: string;
+      renamed: boolean;
+    }
+  | {
+      type: "entity_version";
+      entityId: SafeId<"entity">;
+      entityVersionId: SafeId<"entityVersion">;
+      versionNumber: number;
+      fileId: string;
+      fileName: string;
+    }
+  | {
+      type: "agent_skill";
+      skillId: SafeId<"agentSkill">;
+      name: string;
+      version: string;
+    };
+
+export const pendingUploads = p.pgTable(
+  "pending_uploads",
+  {
+    id: pUuid<"pendingUpload">().primaryKey(),
+    organizationId: safeOrganizationId("organization_id").notNull(),
+    workspaceId: safeWorkspaceId("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    userId: p
+      .text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    purpose: p
+      .text("purpose", { enum: PENDING_UPLOAD_PURPOSES })
+      .notNull(),
+    purposeData: jsonb("purpose_data")
+      .$type<PendingUploadPurposeData>()
+      .notNull(),
+    declaredName: p.varchar("declared_name", { length: 255 }).notNull(),
+    declaredMime: p.varchar("declared_mime", { length: 255 }).notNull(),
+    declaredSize: p.bigint("declared_size", { mode: "number" }).notNull(),
+    /** hex; matches `fields.content.sha256Hex` storage shape */
+    declaredSha256: p.varchar("declared_sha256", { length: 64 }).notNull(),
+    status: p
+      .text("status", { enum: PENDING_UPLOAD_STATUSES })
+      .notNull()
+      .default("pending"),
+    /** Populated on success so retries return the same response shape. */
+    finalizedResult: jsonb(
+      "finalized_result",
+    ).$type<PendingUploadFinalizedResult | null>(),
+    rejectReason: p.text("reject_reason"),
+    /** Set inside the claim transaction. Used to detect stuck `scanning` rows. */
+    claimedAt: p.timestamp("claimed_at"),
+    claimedByRequestId: p.varchar("claimed_by_request_id", { length: 64 }),
+    /** `createdAt + 5min`. A finalize after this rejects without touching S3. */
+    expiresAt: p.timestamp("expires_at").notNull(),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+    finalizedAt: p.timestamp("finalized_at"),
+  },
+  (table) => [
+    p
+      .index("pending_uploads_ws_status_created_idx")
+      .on(table.workspaceId, table.status, table.createdAt),
+    p
+      .index("pending_uploads_org_created_idx")
+      .on(table.organizationId, table.createdAt),
+    ...wsPolicies(),
+  ],
+);
+
 export const fields = p.pgTable(
   "fields",
   {
@@ -1351,6 +1510,10 @@ export const fields = p.pgTable(
     p
       .index("fields_ws_entity_version_property_idx")
       .on(table.workspaceId, table.entityVersionId, table.propertyId),
+    p
+      .index("fields_pending_workspace_idx")
+      .on(table.workspaceId)
+      .where(sql`${table.content}->>'type' = 'pending'`),
     p
       .foreignKey({
         columns: [table.propertyId, table.workspaceId],
@@ -1577,6 +1740,101 @@ export const workspaceSearchDocuments = p.pgTable(
     p.index("workspace_search_docs_org_idx").on(table.organizationId),
     p.index("workspace_search_docs_tsv_idx").using("gin", table.tsv),
     ...wsPolicies(),
+  ],
+);
+
+// One row per chat thread. Tenancy is intentionally not denormalised
+// here: the global-search query joins back to `chat_threads` and
+// filters by the owning thread's user/org/workspace scope, so this
+// table never drifts out of sync with thread ownership. Deletes
+// cascade from the thread.
+export const chatThreadSearchDocuments = p.pgTable(
+  "chat_thread_search_documents",
+  {
+    threadId: safeUuid<"chatThread">("thread_id")
+      .primaryKey()
+      .references(() => chatThreads.id, { onDelete: "cascade" }),
+    title: p.text().notNull().default(""),
+    searchableText: p.text("searchable_text").notNull().default(""),
+    tsv: tsvector(),
+    updatedAt: p.timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    p.index("chat_thread_search_docs_tsv_idx").using("gin", table.tsv),
+    ...chatThreadSearchDocumentPolicies(),
+  ],
+);
+
+export const chatMessageSearchDocuments = p.pgTable(
+  "chat_message_search_documents",
+  {
+    messageId: safeUuid<"chatMessage">("message_id")
+      .primaryKey()
+      .references(() => chatMessages.id, { onDelete: "cascade" }),
+    threadId: safeUuid<"chatThread">("thread_id")
+      .notNull()
+      .references(() => chatThreads.id, { onDelete: "cascade" }),
+    role: p.varchar({ length: 16 }).notNull().$type<ChatMessageRole>(),
+    searchableText: p.text("searchable_text").notNull().default(""),
+    tsv: tsvector(),
+    createdAt: p.timestamp("created_at").notNull(),
+    updatedAt: p.timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    p.index("chat_message_search_docs_tsv_idx").using("gin", table.tsv),
+    p
+      .index("chat_message_search_docs_thread_created_idx")
+      .on(table.threadId, table.createdAt, table.messageId),
+    ...chatMessageSearchDocumentPolicies(),
+  ],
+);
+
+export const chatThreadCompactions = p.pgTable(
+  "chat_thread_compactions",
+  {
+    id: pUuid<"chatThreadCompaction">().primaryKey(),
+    threadId: safeUuid<"chatThread">("thread_id")
+      .notNull()
+      .references(() => chatThreads.id, { onDelete: "cascade" }),
+    status: p
+      .varchar({ length: 16 })
+      .$type<"active" | "stale">()
+      .notNull()
+      .default("active"),
+    summary: jsonb().$type<ChatCompactionSummary>().notNull(),
+    summaryMarkdown: p.text("summary_markdown").notNull(),
+    firstSummarizedMessageId: safeUuid<"chatMessage">(
+      "first_summarized_message_id",
+    )
+      .notNull()
+      .references(() => chatMessages.id, { onDelete: "cascade" }),
+    lastSummarizedMessageId: safeUuid<"chatMessage">(
+      "last_summarized_message_id",
+    )
+      .notNull()
+      .references(() => chatMessages.id, { onDelete: "cascade" }),
+    firstKeptMessageId: safeUuid<"chatMessage">(
+      "first_kept_message_id",
+    )
+      .notNull()
+      .references(() => chatMessages.id, { onDelete: "cascade" }),
+    summarizedMessageCount: p.integer("summarized_message_count").notNull(),
+    totalTokens: p.integer("total_tokens").notNull(),
+    preservedTokens: p.integer("preserved_tokens").notNull(),
+    promptVersion: p.smallint("prompt_version").notNull(),
+    modelProvider: p.text("model_provider"),
+    modelId: p.text("model_id"),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    p
+      .uniqueIndex("chat_thread_compactions_active_thread_uidx")
+      .on(table.threadId)
+      .where(sql`status = 'active'`),
+    p
+      .index("chat_thread_compactions_thread_status_created_idx")
+      .on(table.threadId, table.status, table.createdAt),
+    ...chatThreadCompactionPolicies(),
   ],
 );
 
@@ -1944,6 +2202,21 @@ export const organizationSettings = p.pgTable(
     aiConfigEncrypted: bytea("ai_config_encrypted"),
     /** AES-GCM initialization vector for aiConfigEncrypted. */
     aiConfigIv: bytea("ai_config_iv"),
+    /** Encrypted DeepL API key (single opaque string, AES-256-GCM). */
+    deeplApiKeyEncrypted: bytea("deepl_api_key_encrypted"),
+    /** AES-GCM initialization vector for deeplApiKeyEncrypted. */
+    deeplApiKeyIv: bytea("deepl_api_key_iv"),
+    /**
+     * Whether stella may annotate AI requests with prompt-cache
+     * markers (Anthropic `cacheControl`, OpenAI `promptCacheKey`).
+     * Controls stella's wire behaviour only — providers may still
+     * auto-cache opportunistically; ZDR contracts are the only
+     * true server-side disable.
+     */
+    promptCachingEnabled: p
+      .boolean("prompt_caching_enabled")
+      .notNull()
+      .default(true),
     updatedAt: p.timestamp("updated_at").notNull().defaultNow(),
   },
   () => [...orgPolicies()],
@@ -2313,6 +2586,9 @@ export const caseLawSources = p.pgTable(
     syncCursor: p.text("sync_cursor"),
     lastSyncAt: p.timestamp("last_sync_at"),
     config: jsonb().$type<Record<string, unknown>>().default({}),
+    // License / redistribution terms. null = legacy source (public
+    // court records, treated as redistributable); see corpus-source.ts.
+    descriptor: jsonb().$type<CorpusSourceDescriptor>(),
     createdAt: p.timestamp("created_at").defaultNow().notNull(),
     updatedAt: p
       .timestamp("updated_at")
@@ -2374,6 +2650,41 @@ export const caseLawDecisions = p.pgTable(
     documentUrl: p.varchar("document_url", { length: 2048 }),
     metadata: jsonb().$type<Record<string, unknown>>().default({}),
     sourceHash: p.varchar("source_hash", { length: 64 }),
+    /**
+     * Materialized citation-authority ranking signal: the
+     * ln(1 + weighted-citation-density) value that `citationScore()`
+     * computes. Precomputed by the post-ingestion citation pass so
+     * search reads it instead of recomputing the citation-graph
+     * aggregate per query. Decays slowly with time; refreshed on a
+     * schedule. `citationAuthorityComputedAt` tracks staleness.
+     */
+    citationAuthority: p
+      .doublePrecision("citation_authority")
+      .default(0)
+      .notNull(),
+    citationCount: p.integer("citation_count").default(0).notNull(),
+    citationAuthorityComputedAt: p.timestamp("citation_authority_computed_at"),
+    /**
+     * Object-storage keys for the canonical corpus payloads. Populated
+     * by the corpus-storage backfill / ingestion write when
+     * CORPUS_STORAGE_ENABLED. Null = canonical text still lives only in
+     * the `fulltext`/`sections`/`documentAst` columns (pre-migration).
+     */
+    textS3Key: p.varchar("text_s3_key", { length: 512 }),
+    normalizedS3Key: p.varchar("normalized_s3_key", { length: 512 }),
+    astS3Key: p.varchar("ast_s3_key", { length: 512 }),
+    /**
+     * Incremental-indexing / blue-green bookkeeping. `contentHash` is
+     * the sha256 of the canonical payload (what S3 is keyed on);
+     * `indexedHash` is the last hash pushed to the search projection,
+     * so `indexedHash IS DISTINCT FROM contentHash` marks a stale row.
+     * `indexedGeneration` is which generation (e.g. case_law_v1) the
+     * row was last written into.
+     */
+    contentHash: p.varchar("content_hash", { length: 64 }),
+    indexedHash: p.varchar("indexed_hash", { length: 64 }),
+    indexedGeneration: p.varchar("indexed_generation", { length: 32 }),
+    indexedAt: p.timestamp("indexed_at"),
     createdAt: p.timestamp("created_at").defaultNow().notNull(),
     updatedAt: p
       .timestamp("updated_at")
@@ -2385,6 +2696,10 @@ export const caseLawDecisions = p.pgTable(
     p
       .uniqueIndex("case_law_decisions_source_case_lang_idx")
       .on(t.sourceId, t.caseNumber, t.language),
+    p
+      .uniqueIndex("case_law_decisions_slug_uidx")
+      .on(t.slug)
+      .where(isNotNull(t.slug)),
     p.index("case_law_decisions_case_number_idx").on(t.caseNumber),
     p.index("case_law_decisions_court_idx").on(t.court),
     p.index("case_law_decisions_country_idx").on(t.country),
@@ -2395,6 +2710,13 @@ export const caseLawDecisions = p.pgTable(
       .on(t.languageGroupKey)
       .where(isNotNull(t.languageGroupKey)),
     p.index("case_law_decisions_created_at_idx").on(t.createdAt),
+    p
+      .index("case_law_decisions_citation_authority_idx")
+      .on(t.citationAuthority),
+    // Supports the missing/stale scan the corpus index indexer loop runs
+    // (mirrors backfillSearchIndex): rows whose indexedHash differs
+    // from contentHash, or were never indexed.
+    p.index("case_law_decisions_indexed_idx").on(t.indexedHash, t.contentHash),
     ...globalCaseLawPolicies(),
   ],
 );
@@ -2614,6 +2936,206 @@ export const caseLawIngestionFailures = p.pgTable(
   ],
 );
 
+/**
+ * Append-only audit trail for search-index mutations across the
+ * object-store + corpus index boundary. Because canonical text and index
+ * state move out of the DB transaction log, this is the record of what
+ * entered, left, or was redacted from the corpus. `decisionId` is null
+ * for batch/full-rebuild rows.
+ */
+export const caseLawIndexJobs = p.pgTable(
+  "case_law_index_jobs",
+  {
+    id: pUuid<"caseLawIndexJob">().primaryKey(),
+    decisionId: safeUuid<"caseLawDecision">("decision_id").references(
+      () => caseLawDecisions.id,
+      { onDelete: "cascade" },
+    ),
+    generation: p.varchar({ length: 32 }).notNull(),
+    operation: p
+      .varchar({ length: 16 })
+      .notNull()
+      .$type<"index" | "delete" | "redact" | "rebuild">(),
+    status: p.varchar({ length: 16 }).notNull().$type<"succeeded" | "failed">(),
+    contentHash: p.varchar("content_hash", { length: 64 }),
+    errorMessage: p.varchar("error_message", { length: 2048 }),
+    createdAt: p.timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [
+    p.index("case_law_index_jobs_decision_idx").on(t.decisionId),
+    p.index("case_law_index_jobs_created_idx").on(t.createdAt),
+    p.check(
+      "case_law_index_jobs_operation_values",
+      sql`${t.operation} IN ('index','delete','redact','rebuild')`,
+    ),
+    p.check(
+      "case_law_index_jobs_status_values",
+      sql`${t.status} IN ('succeeded','failed')`,
+    ),
+    ...globalCaseLawPolicies(),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Legislation / statutes — global corpus (mirrors case law). Point-in-time
+// temporal model: each row is a consolidated expression of a work (`eli`),
+// valid over [version_valid_from, version_valid_to); version_valid_to NULL
+// = the current consolidation. status = current | historical | repealed |
+// draft. Shares the object-storage + corpus index substrate via the
+// `legislation` corpus family.
+// ---------------------------------------------------------------------------
+
+export const legislationSources = p.pgTable(
+  "legislation_sources",
+  {
+    id: pUuid<"legislationSource">().primaryKey(),
+    adapterKey: p.varchar("adapter_key", { length: 64 }).notNull(),
+    name: p.varchar({ length: 256 }).notNull(),
+    enabled: p.boolean().default(true).notNull(),
+    syncCursor: p.text("sync_cursor"),
+    lastSyncAt: p.timestamp("last_sync_at"),
+    config: jsonb().$type<Record<string, unknown>>().default({}),
+    descriptor: jsonb().$type<CorpusSourceDescriptor>(),
+    createdAt: p.timestamp("created_at").defaultNow().notNull(),
+    updatedAt: p
+      .timestamp("updated_at")
+      .defaultNow()
+      .notNull()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [
+    p.uniqueIndex("legislation_sources_adapter_key_idx").on(t.adapterKey),
+    ...globalCaseLawPolicies(),
+  ],
+);
+
+export const legislationDocuments = p.pgTable(
+  "legislation_documents",
+  {
+    id: pUuid<"legislationDocument">().primaryKey(),
+    sourceId: safeUuid<"legislationSource">("source_id")
+      .notNull()
+      .references(() => legislationSources.id, { onDelete: "cascade" }),
+    // European Legislation Identifier / national statute id — the work key
+    // shared across consolidations.
+    eli: p.varchar({ length: 512 }).notNull(),
+    title: p.varchar({ length: 1024 }).notNull(),
+    country: p.varchar({ length: 3 }).notNull(),
+    language: p.varchar({ length: 8 }).notNull(),
+    documentType: p.varchar("document_type", { length: 128 }),
+    status: p.varchar({ length: 32 }).notNull().default("current"),
+    effectiveDate: p.date("effective_date"),
+    versionValidFrom: p.date("version_valid_from"),
+    versionValidTo: p.date("version_valid_to"),
+    fulltext: p.text(),
+    sections: jsonb().$type<DecisionSection[]>(),
+    documentAst: jsonb("document_ast").$type<DocumentAst | EmptyAst>(),
+    sourceUrl: p.varchar("source_url", { length: 2048 }),
+    documentUrl: p.varchar("document_url", { length: 2048 }),
+    metadata: jsonb().$type<Record<string, unknown>>().default({}),
+    sourceHash: p.varchar("source_hash", { length: 64 }),
+    // Reuse the corpus ranking signal (cross-reference authority); 0 until
+    // a legislation-specific signal is computed.
+    citationAuthority: p
+      .doublePrecision("citation_authority")
+      .default(0)
+      .notNull(),
+    citationCount: p.integer("citation_count").default(0).notNull(),
+    citationAuthorityComputedAt: p.timestamp("citation_authority_computed_at"),
+    textS3Key: p.varchar("text_s3_key", { length: 512 }),
+    normalizedS3Key: p.varchar("normalized_s3_key", { length: 512 }),
+    astS3Key: p.varchar("ast_s3_key", { length: 512 }),
+    contentHash: p.varchar("content_hash", { length: 64 }),
+    indexedHash: p.varchar("indexed_hash", { length: 64 }),
+    indexedGeneration: p.varchar("indexed_generation", { length: 32 }),
+    indexedAt: p.timestamp("indexed_at"),
+    createdAt: p.timestamp("created_at").defaultNow().notNull(),
+    updatedAt: p
+      .timestamp("updated_at")
+      .defaultNow()
+      .notNull()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [
+    p
+      .uniqueIndex("legislation_documents_eli_version_lang_idx")
+      .on(t.sourceId, t.eli, t.versionValidFrom, t.language)
+      .where(isNotNull(t.versionValidFrom)),
+    p
+      .uniqueIndex("legislation_documents_eli_current_lang_idx")
+      .on(t.sourceId, t.eli, t.language)
+      .where(isNull(t.versionValidFrom)),
+    p.index("legislation_documents_eli_idx").on(t.eli),
+    p.index("legislation_documents_country_idx").on(t.country),
+    p.index("legislation_documents_status_idx").on(t.status),
+    p.index("legislation_documents_effective_date_idx").on(t.effectiveDate),
+    p.index("legislation_documents_created_at_idx").on(t.createdAt),
+    p
+      .index("legislation_documents_citation_authority_idx")
+      .on(t.citationAuthority),
+    p
+      .index("legislation_documents_indexed_idx")
+      .on(t.indexedHash, t.contentHash),
+    p.check(
+      "legislation_documents_status_values",
+      sql`${t.status} IN ('current','historical','repealed','draft')`,
+    ),
+    ...globalCaseLawPolicies(),
+  ],
+);
+
+export const legislationSearchDocuments = p.pgTable(
+  "legislation_search_documents",
+  {
+    documentId: safeUuid<"legislationDocument">("document_id")
+      .primaryKey()
+      .references(() => legislationDocuments.id, { onDelete: "cascade" }),
+    title: p.text().notNull().default(""),
+    searchableText: p.text("searchable_text").notNull().default(""),
+    language: p.varchar("language", { length: 10 }),
+    regconfig: p.varchar({ length: 64 }).notNull().default("simple"),
+    tsv: tsvector(),
+    updatedAt: p.timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    p.index("legislation_search_docs_tsv_idx").using("gin", table.tsv),
+    ...globalCaseLawPolicies(),
+  ],
+);
+
+export const legislationIndexJobs = p.pgTable(
+  "legislation_index_jobs",
+  {
+    id: pUuid<"legislationIndexJob">().primaryKey(),
+    documentId: safeUuid<"legislationDocument">("document_id").references(
+      () => legislationDocuments.id,
+      { onDelete: "cascade" },
+    ),
+    generation: p.varchar({ length: 32 }).notNull(),
+    operation: p
+      .varchar({ length: 16 })
+      .notNull()
+      .$type<"index" | "delete" | "redact" | "rebuild">(),
+    status: p.varchar({ length: 16 }).notNull().$type<"succeeded" | "failed">(),
+    contentHash: p.varchar("content_hash", { length: 64 }),
+    errorMessage: p.varchar("error_message", { length: 2048 }),
+    createdAt: p.timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => [
+    p.index("legislation_index_jobs_document_idx").on(t.documentId),
+    p.index("legislation_index_jobs_created_idx").on(t.createdAt),
+    p.check(
+      "legislation_index_jobs_operation_values",
+      sql`${t.operation} IN ('index','delete','redact','rebuild')`,
+    ),
+    p.check(
+      "legislation_index_jobs_status_values",
+      sql`${t.status} IN ('succeeded','failed')`,
+    ),
+    ...globalCaseLawPolicies(),
+  ],
+);
+
 // -- Chat --
 
 export const chatThreads = p.pgTable(
@@ -2634,6 +3156,11 @@ export const chatThreads = p.pgTable(
       .notNull()
       .references(() => organization.id, { onDelete: "cascade" }),
     title: p.varchar({ length: 255 }).notNull(),
+    titleSource: p
+      .varchar("title_source", { length: 4 })
+      .$type<"ai" | "user">()
+      .notNull()
+      .default("user"),
     /**
      * Matters the chat draws context from. Empty array (the
      * default) means "no specific matters pinned" — the AI
@@ -2659,6 +3186,37 @@ export const chatThreads = p.pgTable(
       .array()
       .notNull()
       .default([]),
+    /**
+     * Per-thread opt-in for the chat web-search tools. Combined with
+     * the FEATURE_WEB_SEARCH deploy gate and the org's
+     * disabled-native-tools list, all three must hold for web_search /
+     * fetch_url to be exposed to the model on a turn. Defaults to
+     * false so existing threads see no behaviour change after this
+     * column lands.
+     */
+    webSearchEnabled: p
+      .boolean("web_search_enabled")
+      .notNull()
+      .default(false),
+    /**
+     * Cached "where you left off" recap, shown as subtle grey text
+     * below the last message when the user reopens this thread after
+     * a gap (see RECAP_STALENESS_THRESHOLD_MS). Derived from the
+     * transcript and regenerated lazily when `recapMessageId` no
+     * longer matches the latest message or `recapPromptVersion`
+     * changes; all four columns stay null until the first stale
+     * revisit generates one. `recapMessageId` is a plain cache token
+     * (equality-compared only, no FK) so message truncation simply
+     * invalidates the cache rather than dangling a reference.
+     */
+    recapText: p.text("recap_text"),
+    recapMessageId: safeUuid<"chatMessage">("recap_message_id"),
+    recapPromptVersion: p.smallint("recap_prompt_version"),
+    recapGeneratedAt: p.timestamp("recap_generated_at"),
+    usedAnonymization: p
+      .boolean("used_anonymization")
+      .notNull()
+      .default(false),
     createdAt: p.timestamp("created_at").notNull().defaultNow(),
     updatedAt: p
       .timestamp("updated_at")
@@ -2813,6 +3371,10 @@ export const mcpConnectors = p.pgTable(
     documentationUrl: p.text("documentation_url"),
     tokenHelpUrl: p.text("token_help_url"),
     iconUrl: p.text("icon_url"),
+    // OAuth authorization-server issuer, captured at create time for
+    // oauth2 connectors. Surfaced as the connector's vendor. Server-level
+    // and identical for every member, so it lives on the shared row.
+    oauthIssuer: p.text("oauth_issuer"),
     createdAt: p.timestamp("created_at").notNull().defaultNow(),
     updatedAt: p
       .timestamp("updated_at")
@@ -2876,6 +3438,15 @@ export const mcpOAuthClients = p.pgTable(
   ],
 );
 
+export type CachedMcpToolDefinition = {
+  description?: string;
+  exposedName: string;
+  inputSchema: { type: "object"; [key: string]: unknown };
+  rawName: string;
+  readOnlyHint?: boolean;
+  title?: string;
+};
+
 export const mcpUserConnections = p.pgTable(
   "mcp_user_connections",
   {
@@ -2901,6 +3472,14 @@ export const mcpUserConnections = p.pgTable(
     resourceUrl: p.text("resource_url"),
     authorizationServerUrl: p.text("authorization_server_url"),
     expiresAt: p.timestamp("expires_at"),
+    cachedTools:
+      jsonb("cached_tools").$type<CachedMcpToolDefinition[] | null>(),
+    cachedToolsRefreshedAt: p.timestamp("cached_tools_refreshed_at"),
+    // Metadata the server reports during the MCP `initialize` handshake,
+    // captured with this user's credentials. Stored per-connection (not on
+    // the shared connector) since a server may personalise it per account.
+    serverVersion: p.text("server_version"),
+    instructions: p.text(),
     status: p
       .text("status", { enum: MCP_CONNECTION_STATUSES })
       .notNull()
@@ -2981,6 +3560,10 @@ export const userFiles = p.pgTable(
       .references(() => chatThreads.id, {
         onDelete: "restrict",
       }),
+    thumbnailFileId: p.text("thumbnail_file_id"),
+    // ThumbHash-rendered `data:image/png;base64,...` blur of the source
+    // image; rendered directly in an <img src> with no client decoder.
+    placeholder: p.text("placeholder"),
     scanWarnings: p.text("scan_warnings").array(),
     createdAt: p.timestamp("created_at").notNull().defaultNow(),
     updatedAt: p
@@ -3019,6 +3602,41 @@ export const workspaceViews = p.pgTable(
       .index("workspace_views_workspace_position_idx")
       .on(table.workspaceId, table.position),
     ...wsPolicies(),
+  ],
+);
+
+export const workspaceViewTemplates = p.pgTable(
+  "workspace_view_templates",
+  {
+    id: pUuid<"workspaceViewTemplate">().primaryKey(),
+    organizationId: safeOrganizationId("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    userId: p
+      .text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    name: p.varchar({ length: 256 }).notNull(),
+    layout: jsonb().$type<ViewLayout>().notNull(),
+    templateProperties: jsonb("template_properties")
+      .$type<ViewTemplateProperty[]>()
+      .notNull()
+      .default([]),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+    updatedAt: p
+      .timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    p
+      .uniqueIndex("workspace_view_templates_user_name_uidx")
+      .on(table.organizationId, table.userId, table.name),
+    p
+      .index("workspace_view_templates_user_created_idx")
+      .on(table.organizationId, table.userId, table.createdAt),
+    ...workspaceViewTemplatePolicies(),
   ],
 );
 
@@ -3078,7 +3696,15 @@ export const promptShortcuts = p.pgTable(
 export const AGENT_SKILL_SCOPES = ["team", "private"] as const;
 export type AgentSkillScope = (typeof AGENT_SKILL_SCOPES)[number];
 
-export const AGENT_SKILL_ORIGINS = ["upload", "url"] as const;
+// `authored` covers skills the user composes directly in the editor
+// (no uploaded bundle, no URL import). Migrated `prompt_shortcuts`
+// rows also use this origin.
+export const AGENT_SKILL_ORIGINS = [
+  "authored",
+  "bundled",
+  "upload",
+  "url",
+] as const;
 export type AgentSkillOrigin = (typeof AGENT_SKILL_ORIGINS)[number];
 
 export const AGENT_SKILL_RESOURCE_KINDS = [
@@ -3091,6 +3717,11 @@ export const AGENT_SKILL_RESOURCE_KINDS = [
 ] as const;
 export type AgentSkillResourceKind =
   (typeof AGENT_SKILL_RESOURCE_KINDS)[number];
+
+// Slash-command shape for `agentSkills.command`. Mirrors the legacy
+// `prompt_shortcuts.command` constraint so migrated rows remain valid.
+export const AGENT_SKILL_COMMAND_PATTERN = /^[a-z0-9][a-z0-9_-]{0,48}$/;
+export const RESERVED_AGENT_SKILL_COMMANDS = ["model", "new"] as const;
 
 export const agentSkills = p.pgTable(
   "agent_skills",
@@ -3116,6 +3747,16 @@ export const agentSkills = p.pgTable(
     contentHash: p.varchar("content_hash", { length: 64 }).notNull(),
     body: p.text().notNull(),
     enabled: p.boolean().notNull().default(true),
+    // Optional slash-command handle. When set, the skill surfaces in
+    // the chat slash menu. Uniqueness is enforced by partial indexes
+    // below: team commands are unique per org, private commands are
+    // unique per (org, user). Null means "no command" and never
+    // collides.
+    command: p.varchar({ length: 50 }),
+    // Optional hint surfaced to the model so it can decide whether
+    // to auto-invoke this skill. When null, the skill is only
+    // user-triggered (via slash command, picker, etc.).
+    autoInvokeHint: p.text("auto_invoke_hint"),
     createdAt: p.timestamp("created_at").notNull().defaultNow(),
     updatedAt: p
       .timestamp("updated_at")
@@ -3137,6 +3778,18 @@ export const agentSkills = p.pgTable(
       .index("agent_skills_org_enabled_idx")
       .on(table.organizationId, table.enabled),
     p.index("agent_skills_user_idx").on(table.userId),
+    p
+      .uniqueIndex("agent_skills_org_team_command_uidx")
+      .on(table.organizationId, table.command)
+      .where(sql`scope = 'team' AND command IS NOT NULL`),
+    p
+      .uniqueIndex("agent_skills_user_private_command_uidx")
+      .on(table.organizationId, table.userId, table.command)
+      .where(sql`scope = 'private' AND command IS NOT NULL`),
+    p
+      .index("agent_skills_org_command_idx")
+      .on(table.organizationId, table.command)
+      .where(sql`command IS NOT NULL`),
     ...agentSkillPolicies(),
   ],
 );
@@ -3172,6 +3825,354 @@ export const agentSkillResources = p.pgTable(
   ],
 );
 
+// -- Usage Entitlements & Ledger --
+
+export const USAGE_ENTITLEMENT_STATUSES = [
+  "trialing",
+  "active",
+  "past_due",
+  "cancelled",
+  "paused",
+] as const;
+export type UsageEntitlementStatus = (typeof USAGE_ENTITLEMENT_STATUSES)[number];
+
+export const USAGE_ENTITLEMENT_SOURCES = ["hosted", "manual"] as const;
+export type UsageEntitlementSource = (typeof USAGE_ENTITLEMENT_SOURCES)[number];
+
+export const USAGE_ALLOCATION_REASONS = [
+  "periodic",
+  "addon",
+  "manual",
+  "promo",
+] as const;
+export type UsageAllocationReason = (typeof USAGE_ALLOCATION_REASONS)[number];
+
+export const USAGE_ALLOCATION_SOURCES = [
+  "hosted_entitlement",
+  "hosted_allocation",
+  "admin",
+  "scheduler",
+] as const;
+export type UsageAllocationSource = (typeof USAGE_ALLOCATION_SOURCES)[number];
+
+export const USAGE_ACTION_TYPES = [
+  "chat",
+  "anonymise",
+  "doc_review",
+  "case_law",
+  "background",
+] as const;
+export type UsageActionType = (typeof USAGE_ACTION_TYPES)[number];
+
+export const USAGE_SERVICE_TIERS = ["standard", "flex", "batch"] as const;
+export type UsageServiceTier = (typeof USAGE_SERVICE_TIERS)[number];
+
+export const USAGE_PROVIDER_WEBHOOK_RESULTS = ["ok", "ignored", "error"] as const;
+export type UsageProviderWebhookResult = (typeof USAGE_PROVIDER_WEBHOOK_RESULTS)[number];
+
+export const usagePolicies = p.pgTable(
+  "usage_policies",
+  {
+    id: pUuid<"usagePolicy">().primaryKey(),
+    policyKey: p.varchar("policy_key", { length: 64 }).notNull(),
+    displayName: p.varchar("display_name", { length: 128 }).notNull(),
+    monthlyUsageUnits: p.integer("monthly_usage_units").notNull(),
+    hostedPolicyRef: p.text("hosted_policy_ref"),
+    active: p.boolean().notNull().default(true),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    p.index("usage_policies_key_active_idx").on(table.policyKey, table.active),
+    p.uniqueIndex("usage_policies_policy_key_uidx").on(table.policyKey),
+    p
+      .uniqueIndex("usage_policies_hosted_policy_ref_uidx")
+      .on(table.hostedPolicyRef)
+      .where(sql`hosted_policy_ref IS NOT NULL`),
+    p.check(
+      "usage_policies_policy_key_format",
+      sql`policy_key ~ '^[a-z0-9][a-z0-9_-]{0,63}$'`,
+    ),
+    p.check("usage_policies_monthly_usage_units_nonneg", sql`monthly_usage_units >= 0`),
+    // Global config: any authenticated stella session may read
+    // policies; writes are performed via migrations and the root connection,
+    // never via stella.
+    p.pgPolicy("usage_policies_select", {
+      for: "select",
+      to: stella,
+      using: sql`true`,
+    }),
+  ],
+);
+
+export const usageEntitlements = p.pgTable(
+  "usage_entitlements",
+  {
+    id: pUuid<"usageEntitlement">().primaryKey(),
+    organizationId: safeOrganizationId("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    usagePolicyId: safeUuid<"usagePolicy">("usage_policy_id")
+      .notNull()
+      .references(() => usagePolicies.id, { onDelete: "restrict" }),
+    status: p.text({ enum: USAGE_ENTITLEMENT_STATUSES }).notNull(),
+    seats: p.integer().notNull(),
+    currentPeriodStart: p
+      .timestamp("current_period_start", { withTimezone: true })
+      .notNull(),
+    currentPeriodEnd: p
+      .timestamp("current_period_end", { withTimezone: true })
+      .notNull(),
+    hostedAccountRef: p.text("hosted_account_ref"),
+    hostedEntitlementExternalId: p.text("hosted_entitlement_external_id"),
+    /**
+     * True when hosted access is scheduled to end but remains
+     * usable until `current_period_end`. UI surfaces it as
+     * "Ends on <date>" instead of bare "Cancelled". Mirrors the
+     * hosted-provider period-end cancellation state.
+     */
+    cancelAtPeriodEnd: p
+      .boolean("cancel_at_period_end")
+      .notNull()
+      .default(false),
+    source: p.text({ enum: USAGE_ENTITLEMENT_SOURCES }).notNull(),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+    updatedAt: p
+      .timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    p
+      .uniqueIndex("usage_entitlements_organization_id_uidx")
+      .on(table.organizationId),
+    p
+      .uniqueIndex("usage_entitlements_hosted_entitlement_external_id_uidx")
+      .on(table.hostedEntitlementExternalId)
+      .where(sql`hosted_entitlement_external_id IS NOT NULL`),
+    // A hosted account reference maps to exactly one Stella organisation.
+    // Without this constraint, account-to-entitlement lookup is
+    // non-deterministic when two rows share a reference, and a provider
+    // allocation could be attributed to the wrong org's period (the
+    // metadata mismatch check would then drop the allocation silently).
+    p
+      .uniqueIndex("usage_entitlements_hosted_account_ref_uidx")
+      .on(table.hostedAccountRef)
+      .where(sql`hosted_account_ref IS NOT NULL`),
+    p.check("usage_entitlements_seats_positive", sql`seats > 0`),
+    p.check(
+      "usage_entitlements_period_order",
+      sql`current_period_end > current_period_start`,
+    ),
+    // Entitlements are owned by system paths (hosted webhook adapter
+    // via rootDb, or future admin tools also via rootDb), not by org
+    // members. Org members must be able to READ their own entitlement
+    // state (settings page, usage UI) but never mutate it through any
+    // app-scoped path. RESTRICTIVE
+    // deny on INSERT/UPDATE/DELETE structurally backs that even
+    // if a future permissive policy is accidentally added.
+    p.pgPolicy("usage_entitlements_select", {
+      for: "select",
+      to: stella,
+      using: organizationCheck,
+    }),
+    p.pgPolicy("usage_entitlements_no_insert", {
+      as: "restrictive",
+      for: "insert",
+      to: stella,
+      withCheck: sql`false`,
+    }),
+    p.pgPolicy("usage_entitlements_no_update", {
+      as: "restrictive",
+      for: "update",
+      to: stella,
+      using: sql`false`,
+    }),
+    p.pgPolicy("usage_entitlements_no_delete", {
+      as: "restrictive",
+      for: "delete",
+      to: stella,
+      using: sql`false`,
+    }),
+  ],
+);
+
+export const usageAllocations = p.pgTable(
+  "usage_allocations",
+  {
+    id: pUuid<"usageAllocation">().primaryKey(),
+    organizationId: safeOrganizationId("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    periodStart: p
+      .timestamp("period_start", { withTimezone: true })
+      .notNull(),
+    periodEnd: p.timestamp("period_end", { withTimezone: true }).notNull(),
+    units: p.integer().notNull(),
+    reason: p.text({ enum: USAGE_ALLOCATION_REASONS }).notNull(),
+    sourceType: p.text("source_type", { enum: USAGE_ALLOCATION_SOURCES }).notNull(),
+    sourceRef: p.text("source_ref"),
+    /**
+     * For allocations attached to a specific initiating seat, this
+     * records that user's id for future per-seat attribution.
+     * Null = org pool. Plain text (no FK) so deleting a user
+     * doesn't break the ledger row.
+     */
+    seatScopeUserId: p.text("seat_scope_user_id"),
+    allocatedByUserId: p
+      .text("allocated_by_user_id")
+      .references(() => user.id, { onDelete: "set null" }),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    p
+      .index("usage_allocations_org_period_idx")
+      .on(table.organizationId, table.periodStart),
+    p
+      .uniqueIndex("usage_allocations_org_source_ref_uidx")
+      .on(table.organizationId, table.sourceType, table.sourceRef)
+      .where(sql`source_ref IS NOT NULL`),
+    p.check("usage_allocations_units_positive", sql`units > 0`),
+    p.check(
+      "usage_allocations_period_order",
+      sql`period_end > period_start`,
+    ),
+    p.pgPolicy("usage_allocations_select", {
+      for: "select",
+      to: stella,
+      using: organizationCheck,
+    }),
+    // Append-only AND system-owned. Legitimate writers run through
+    // rootDb (webhook adapter, admin allocation tool). The app role
+    // must never be able to mint an allocation for itself, even when the org id
+    // matches — RESTRICTIVE deny INSERT keeps that structurally
+    // impossible regardless of any future permissive policy.
+    p.pgPolicy("usage_allocations_no_insert", {
+      as: "restrictive",
+      for: "insert",
+      to: stella,
+      withCheck: sql`false`,
+    }),
+    p.pgPolicy("usage_allocations_no_update", {
+      as: "restrictive",
+      for: "update",
+      to: stella,
+      using: sql`false`,
+    }),
+    p.pgPolicy("usage_allocations_no_delete", {
+      as: "restrictive",
+      for: "delete",
+      to: stella,
+      using: sql`false`,
+    }),
+  ],
+);
+
+export const usageEvents = p.pgTable(
+  "usage_events",
+  {
+    id: pUuid<"usageEvent">().primaryKey(),
+    organizationId: safeOrganizationId("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    workspaceId: safeWorkspaceId("workspace_id").references(
+      () => workspaces.id,
+      { onDelete: "set null" },
+    ),
+    userId: p
+      .text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    periodStart: p
+      .timestamp("period_start", { withTimezone: true })
+      .notNull(),
+    periodEnd: p.timestamp("period_end", { withTimezone: true }).notNull(),
+    actionType: p
+      .text("action_type", { enum: USAGE_ACTION_TYPES })
+      .notNull(),
+    modelRole: p.varchar("model_role", { length: 32 }).notNull(),
+    unitsConsumed: p.integer("units_consumed").notNull(),
+    rawUsageMicroUnits: p.bigint("raw_usage_micro_units", { mode: "number" }),
+    serviceTier: p
+      .text("service_tier", { enum: USAGE_SERVICE_TIERS })
+      .notNull(),
+    isByok: p.boolean("is_byok").notNull().default(false),
+    traceId: p.text("trace_id"),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    p
+      .index("usage_events_org_period_idx")
+      .on(table.organizationId, table.periodStart),
+    p
+      .index("usage_events_org_user_period_idx")
+      .on(table.organizationId, table.userId, table.periodStart),
+    // BYOK rows land with units_consumed = 0: the work is attributed
+    // to the org's configured provider account. Platform-backed rows
+    // are floored at 1 in app code.
+    p.check(
+      "usage_events_units_nonneg",
+      sql`units_consumed >= 0`,
+    ),
+    p.check(
+      "usage_events_period_order",
+      sql`period_end > period_start`,
+    ),
+    p.pgPolicy("usage_events_select", {
+      for: "select",
+      to: stella,
+      using: organizationCheck,
+    }),
+    p.pgPolicy("usage_events_insert", {
+      for: "insert",
+      to: stella,
+      withCheck: organizationCheck,
+    }),
+    p.pgPolicy("usage_events_no_update", {
+      as: "restrictive",
+      for: "update",
+      to: stella,
+      using: sql`false`,
+    }),
+    p.pgPolicy("usage_events_no_delete", {
+      as: "restrictive",
+      for: "delete",
+      to: stella,
+      using: sql`false`,
+    }),
+  ],
+);
+
+export const hostedUsageWebhookEvents = p.pgTable(
+  "usage_provider_webhook_events",
+  {
+    // Provider event ID; making it the PK keeps duplicate deliveries
+    // structural no-ops via ON CONFLICT DO NOTHING.
+    eventId: p.text("event_id").primaryKey(),
+    eventType: p.text("event_type").notNull(),
+    payload: jsonb().$type<Record<string, unknown>>().notNull(),
+    processedAt: p
+      .timestamp("processed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    result: p.text({ enum: USAGE_PROVIDER_WEBHOOK_RESULTS }).notNull(),
+    errorMessage: p.text("error_message"),
+  },
+  (table) => [
+    p
+      .index("usage_provider_webhook_events_processed_at_idx")
+      .on(table.processedAt),
+    // System table: written and read only by the webhook handler via
+    // the root connection. Stella sessions have no business touching it.
+    p.pgPolicy("usage_provider_webhook_events_no_stella_access", {
+      for: "all",
+      to: stella,
+      using: sql`false`,
+      withCheck: sql`false`,
+    }),
+  ],
+);
+
 // -- Relations --
 
 export const relations = defineRelations(
@@ -3199,6 +4200,7 @@ export const relations = defineRelations(
     desktopEditHandoffs,
     folioCollabSessions,
     folioCollabSessionTokens,
+    pendingUploads,
     fields,
     justifications,
     templates,
@@ -3235,6 +4237,9 @@ export const relations = defineRelations(
     caseLawIngestionFailures,
     chatThreads,
     chatMessages,
+    chatMessageSearchDocuments,
+    chatThreadCompactions,
+    chatThreadSearchDocuments,
     fileChatThreads,
     mcpConnectors,
     mcpOAuthClients,
@@ -3242,6 +4247,7 @@ export const relations = defineRelations(
     mcpOAuthState,
     userFiles,
     workspaceViews,
+    workspaceViewTemplates,
     promptShortcuts,
   },
   (r) => ({
@@ -3909,9 +4915,21 @@ export const relations = defineRelations(
         from: r.chatThreads.id,
         to: r.chatMessages.threadId,
       }),
+      compactions: r.many.chatThreadCompactions({
+        from: r.chatThreads.id,
+        to: r.chatThreadCompactions.threadId,
+      }),
       fileChatThread: r.one.fileChatThreads({
         from: r.chatThreads.id,
         to: r.fileChatThreads.chatThreadId,
+      }),
+      messageSearchDocuments: r.many.chatMessageSearchDocuments({
+        from: r.chatThreads.id,
+        to: r.chatMessageSearchDocuments.threadId,
+      }),
+      searchDocument: r.one.chatThreadSearchDocuments({
+        from: r.chatThreads.id,
+        to: r.chatThreadSearchDocuments.threadId,
       }),
       userFiles: r.many.userFiles({
         from: r.chatThreads.id,
@@ -3926,6 +4944,32 @@ export const relations = defineRelations(
       workspace: r.one.workspaces({
         from: r.chatMessages.workspaceId,
         to: r.workspaces.id,
+      }),
+      searchDocument: r.one.chatMessageSearchDocuments({
+        from: r.chatMessages.id,
+        to: r.chatMessageSearchDocuments.messageId,
+      }),
+    },
+    chatMessageSearchDocuments: {
+      message: r.one.chatMessages({
+        from: r.chatMessageSearchDocuments.messageId,
+        to: r.chatMessages.id,
+      }),
+      thread: r.one.chatThreads({
+        from: r.chatMessageSearchDocuments.threadId,
+        to: r.chatThreads.id,
+      }),
+    },
+    chatThreadCompactions: {
+      thread: r.one.chatThreads({
+        from: r.chatThreadCompactions.threadId,
+        to: r.chatThreads.id,
+      }),
+    },
+    chatThreadSearchDocuments: {
+      thread: r.one.chatThreads({
+        from: r.chatThreadSearchDocuments.threadId,
+        to: r.chatThreads.id,
       }),
     },
     fileChatThreads: {
@@ -3990,6 +5034,12 @@ export const relations = defineRelations(
       workspace: r.one.workspaces({
         from: r.workspaceViews.workspaceId,
         to: r.workspaces.id,
+      }),
+    },
+    workspaceViewTemplates: {
+      user: r.one.user({
+        from: r.workspaceViewTemplates.userId,
+        to: r.user.id,
       }),
     },
     agentSkills: {

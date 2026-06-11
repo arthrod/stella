@@ -19,14 +19,24 @@ import type {
   TextRun,
   FootnoteContent,
 } from "../layout-engine/types";
-import { DEFAULT_TEXTBOX_MARGINS as TEXTBOX_MARGINS } from "../layout-engine/types";
+import {
+  DEFAULT_TEXTBOX_MARGINS as TEXTBOX_MARGINS,
+  FOOTNOTE_ENTRY_MARGIN_BOTTOM,
+  FOOTNOTE_FALLBACK_LINE_HEIGHT,
+  FOOTNOTE_SEPARATOR_HEIGHT,
+} from "../layout-engine/types";
 import { footnoteToProseDoc } from "../prosemirror/conversion/toProseDoc";
 import type { Footnote, StyleDefinitions, Theme } from "../types/document";
 import { measureParagraph } from "./measuring";
 import { toFlowBlocks } from "./toFlowBlocks";
 
-/** Separator line height + padding in pixels */
-const SEPARATOR_HEIGHT = 12;
+// Re-exported for back-compat with existing callers that imported the
+// constants from this module before they moved to `layout-engine/types`.
+export {
+  FOOTNOTE_SEPARATOR_HEIGHT,
+  FOOTNOTE_ENTRY_MARGIN_BOTTOM,
+  FOOTNOTE_FALLBACK_LINE_HEIGHT,
+};
 
 /** Default footnote font size in points */
 const FOOTNOTE_FONT_SIZE = 8;
@@ -40,6 +50,8 @@ export type ConvertFootnoteOptions = {
   styles?: StyleDefinitions | null;
   theme?: Theme | null;
   measureBlocks?: MeasureBlocksFn;
+  /** Document-wide `w:defaultTabStop` in twips — forwarded to toFlowBlocks. */
+  defaultTabStopTwips?: number;
 };
 
 // ============================================================================
@@ -49,26 +61,42 @@ export type ConvertFootnoteOptions = {
 /**
  * Scan FlowBlocks for runs with footnoteRefId set.
  * Returns a list of { footnoteId, pmPos } in document order.
+ *
+ * Recurses into table cells and text-box content so footnote references
+ * nested in tables (incl. tables-within-cells) and text boxes still reach
+ * the page-assignment step. Without this walk, inline footnote markers
+ * render inside the body but never get an entry in the per-page footnote
+ * area.
  */
 export function collectFootnoteRefs(
   blocks: FlowBlock[],
 ): { footnoteId: number; pmPos: number }[] {
   const refs: { footnoteId: number; pmPos: number }[] = [];
 
-  for (const block of blocks) {
-    if (block.kind !== "paragraph") {
-      continue;
-    }
-    for (const run of block.runs) {
-      if (run.kind === "text" && run.footnoteRefId !== undefined) {
-        refs.push({
-          footnoteId: run.footnoteRefId,
-          pmPos: run.pmStart ?? 0,
-        });
+  const walk = (containerBlocks: FlowBlock[]): void => {
+    for (const block of containerBlocks) {
+      if (block.kind === "paragraph") {
+        for (const run of block.runs) {
+          if (run.kind === "text" && run.footnoteRefId !== undefined) {
+            refs.push({
+              footnoteId: run.footnoteRefId,
+              pmPos: run.pmStart ?? 0,
+            });
+          }
+        }
+      } else if (block.kind === "table") {
+        for (const row of block.rows) {
+          for (const cell of row.cells) {
+            walk(cell.blocks);
+          }
+        }
+      } else if (block.kind === "textBox") {
+        walk(block.content);
       }
     }
-  }
+  };
 
+  walk(blocks);
   return refs;
 }
 
@@ -149,6 +177,9 @@ export function convertFootnoteToContent(
   const flowOptions: Parameters<typeof toFlowBlocks>[1] = {};
   if (options.theme !== undefined) {
     flowOptions.theme = options.theme;
+  }
+  if (options.defaultTabStopTwips !== undefined) {
+    flowOptions.defaultTabStopTwips = options.defaultTabStopTwips;
   }
   const blocks = applyFootnotePresentation(
     toFlowBlocks(pmDoc, flowOptions),
@@ -407,15 +438,9 @@ export function applyFootnotePresentation(
 
   const first = output[0];
   if (first?.kind === "paragraph") {
-    const numberRun: TextRun = {
-      kind: "text",
-      text: `${displayNumber}  `,
-      fontSize: FOOTNOTE_FONT_SIZE,
-      superscript: true,
-    };
     output[0] = {
       ...first,
-      runs: [numberRun, ...first.runs],
+      runs: [createFootnoteNumberRun(displayNumber, first), ...first.runs],
     };
   } else {
     output.unshift({
@@ -433,6 +458,34 @@ export function applyFootnotePresentation(
   }
 
   return output;
+}
+
+function createFootnoteNumberRun(
+  displayNumber: number,
+  paragraph: ParagraphBlock,
+): TextRun {
+  const firstTextRun = paragraph.runs.find((run) => run.kind === "text");
+  const firstFormattedRun = paragraph.runs.find(
+    (run) => run.kind === "text" || run.kind === "tab" || run.kind === "field",
+  );
+  const text = firstTextRun?.text.match(/^\s/u)
+    ? `${displayNumber}`
+    : `${displayNumber} `;
+  const numberRun: TextRun = {
+    kind: "text",
+    text,
+    fontSize:
+      firstFormattedRun?.fontSize ??
+      paragraph.attrs?.defaultFontSize ??
+      FOOTNOTE_FONT_SIZE,
+    superscript: true,
+  };
+  const fontFamily =
+    firstFormattedRun?.fontFamily ?? paragraph.attrs?.defaultFontFamily;
+  if (fontFamily) {
+    numberRun.fontFamily = fontFamily;
+  }
+  return numberRun;
 }
 
 function applyFootnoteBlockPresentation(block: FlowBlock): FlowBlock {
@@ -551,8 +604,12 @@ export function calculateFootnoteReservedHeights(
     }
 
     if (totalHeight > 0) {
-      // Add separator height
-      totalHeight += SEPARATOR_HEIGHT;
+      // Add separator + any wrapper margin so the static reservation matches
+      // what `renderFootnoteArea` actually paints. In Word-like rendering the
+      // wrapper margin is zero; paragraph spacing inside each footnote content
+      // carries the source DOCX spacing.
+      totalHeight += FOOTNOTE_SEPARATOR_HEIGHT;
+      totalHeight += footnoteIds.length * FOOTNOTE_ENTRY_MARGIN_BOTTOM;
       reserved.set(pageNumber, totalHeight);
     }
   }

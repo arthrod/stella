@@ -15,6 +15,14 @@ export {
 } from "./core/utils/createDocument";
 export type { Document } from "./core/types/document";
 export type { DocxCompatibility } from "./core/docx/compatibility";
+export {
+  deriveBlockId,
+  getFolioParaIdFromBlockId,
+  isFolioBlockId,
+  isSequentialFolioBlockId,
+  type DeriveBlockIdInput,
+  type FolioBlockId,
+} from "./core/types/block-id";
 
 // AI suggestion primitives — types, conflict resolution, apply, and
 // the prosemirror decoration plugin. The bar/panel UI itself lives in
@@ -57,6 +65,7 @@ export {
   type FolioAIEditSkipReason,
   type FolioAIEditSkippedOperation,
   type FolioAIEditSnapshot,
+  type FolioAISignatureParty,
 } from "./core/ai-edits";
 export {
   resolveSuggestionAnchor,
@@ -80,3 +89,39 @@ export {
   type AnonymizationMatch,
   type AnonymizationTerm,
 } from "./core/prosemirror/plugins/anonymizationDecorations";
+export {
+  acceptAutocompleteSuggestion,
+  acceptAutocompleteWord,
+  appendAutocompleteToken,
+  autocompleteSuggestionKey,
+  autocompleteSuggestionPlugin,
+  clearAutocompleteSuggestion,
+  DEFAULT_AUTOCOMPLETE_DEAD_ZONE_NODES,
+  finishAutocompleteSuggestion,
+  getAutocompleteSuggestion,
+  shouldTriggerAutocomplete,
+  startAutocompleteSuggestion,
+  type AcceptAutocompleteResult,
+  type AutocompleteSuggestionPluginOptions,
+  type AutocompleteSuggestionState,
+  type AutocompleteSuggestionStatus,
+  type AutocompleteTriggerCheck,
+  type AutocompleteTriggerOptions,
+  type AutocompleteTriggerSkipReason,
+} from "./core/prosemirror/plugins/autocompleteSuggestion";
+export {
+  AutocompleteCaretOverlay,
+  type AutocompleteCaretOverlayProps,
+  type AutocompleteCaretRect,
+} from "./paged-editor/AutocompleteCaretOverlay";
+
+// DOCX-document ↔ Markdown bridge (also available at `@stll/folio/markdown`).
+export {
+  fromMarkdown,
+  toMarkdown,
+  toMarkdownResult,
+  type ImageMeta,
+  type ImageRef,
+  type MarkdownOptions,
+  type MarkdownResult,
+} from "./core/markdown";

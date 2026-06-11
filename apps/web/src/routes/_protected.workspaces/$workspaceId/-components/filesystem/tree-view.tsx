@@ -21,7 +21,6 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
-  ChevronRightIcon,
   EyeOffIcon,
   FileIcon,
   FolderIcon,
@@ -50,6 +49,7 @@ import {
   renderMultiDragPreview,
 } from "@/components/drag-preview";
 import type { DragPreviewData } from "@/components/drag-preview";
+import { FileTreeNameCell } from "@/components/file-tree/file-tree";
 import { HOTKEYS } from "@/lib/hotkeys";
 import { isFileDisplayable } from "@/lib/types";
 import type {
@@ -75,7 +75,9 @@ import {
 } from "@/routes/_protected.workspaces/$workspaceId/-components/metadata-cells";
 import { RowActions } from "@/routes/_protected.workspaces/$workspaceId/-components/row-actions";
 import type { TableTreeNode } from "@/routes/_protected.workspaces/$workspaceId/-components/table/types";
+import { VersionOrNewFileDialog } from "@/routes/_protected.workspaces/$workspaceId/-components/version-or-new-file-dialog";
 import { useInspectorFlash } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-inspector-flash";
+import { useVersionOrNewFileDrop } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-version-or-new-file-drop";
 import {
   useMoveEntity,
   useRenameEntity,
@@ -99,9 +101,6 @@ import type { InternalPropertyId } from "@/routes/_protected.workspaces/$workspa
 
 const FILESYSTEM_ROW_HEIGHT_PX = 36;
 const FILESYSTEM_ROW_OVERSCAN = 16;
-const FILESYSTEM_INDENT_PX = 20;
-const FILESYSTEM_GUIDE_OFFSET_PX = 10;
-const FILESYSTEM_GUIDE_LINE_COLOR_CLASS = "bg-muted-foreground/30";
 const FILESYSTEM_CREATED_BY_ID = "_created-by" satisfies InternalPropertyId;
 const FILESYSTEM_UPDATED_AT_ID = "_updated-at" satisfies InternalPropertyId;
 const FILESYSTEM_VERSION_ID = "_version" satisfies InternalPropertyId;
@@ -388,6 +387,18 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
     }
     return map;
   }, [data]);
+  const tree = useMemo(() => buildTree(data), [data]);
+  const treeNodeMap = useMemo(() => {
+    const map = new Map<string, TableTreeNode>();
+    const visit = (nodes: readonly TableTreeNode[]) => {
+      for (const node of nodes) {
+        map.set(node.entityId, node);
+        visit(node.children);
+      }
+    };
+    visit(tree);
+    return map;
+  }, [tree]);
 
   const getSelectedDragItems = useCallback(
     (entityIds: Set<string>): DragPreviewData[] => {
@@ -412,17 +423,16 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
     (ids: Set<string>): WorkspaceEntity[] => {
       const entities: WorkspaceEntity[] = [];
       for (const id of ids) {
-        const entity = entityMap.get(id);
+        const entity = treeNodeMap.get(id);
         if (entity) {
           entities.push(entity);
         }
       }
       return entities;
     },
-    [entityMap],
+    [treeNodeMap],
   );
 
-  const tree = useMemo(() => buildTree(data), [data]);
   // Drill-down navigation (persisted in URL search params)
   const currentFolderId = useSearch({
     from: "/_protected/workspaces/$workspaceId/$viewId",
@@ -570,13 +580,17 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
 
   const handleHideColumn = useCallback(
     (propertyId: string) => {
+      // Generic helper preserves the union discriminant. A bare spread of
+      // `view.layout` plus an object literal would collapse the union.
+      const mergeLayout = <L extends ViewLayout>(
+        layout: L,
+        changes: Partial<L>,
+      ): L => ({ ...layout, ...changes });
       updateView.mutate({
         viewId: view.id,
-        // SAFETY: hiddenProperties is part of every layout discriminant.
-        layout: {
-          ...view.layout,
+        layout: mergeLayout(view.layout, {
           hiddenProperties: [...new Set([...hiddenProperties, propertyId])],
-        } as ViewLayout,
+        }),
       });
     },
     [hiddenProperties, updateView, view.id, view.layout],
@@ -869,8 +883,6 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
                     getSelectedDragItems={getSelectedDragItems}
                     getSelectedEntities={getSelectedEntities}
                     gridTemplate={gridTemplate}
-                    guideDepths={row.guideDepths}
-                    isLast={row.isLast}
                     node={row.node}
                     onNavigateToFolder={(folderId) => {
                       void navigateToFolder(folderId);
@@ -1070,8 +1082,6 @@ const ColumnHeaderCell = ({
 type FilesystemRowProps = {
   node: TableTreeNode;
   depth: number | undefined;
-  guideDepths: number[];
-  isLast: boolean;
   workspaceId: string;
   extraColumns: ExtraColumn[];
   gridTemplate: string;
@@ -1094,8 +1104,6 @@ type FilesystemRowProps = {
 const FilesystemRow = ({
   node,
   depth = 0,
-  guideDepths,
-  isLast,
   workspaceId,
   extraColumns,
   gridTemplate,
@@ -1180,10 +1188,13 @@ const FilesystemRow = ({
   // Drag + drop support via pragmatic-drag-and-drop.
   const rowRef = useRef<HTMLDivElement>(null);
 
-  useInspectorFlash(node.entityId, rowRef);
+  useInspectorFlash(node.entityId, rowRef, { enabled: false });
 
   const moveEntity = useMoveEntity();
-  const [isDropTarget, setIsDropTarget] = useState(false);
+  const [isFolderDropTarget, setIsFolderDropTarget] = useState(false);
+
+  const { isDropTarget: isExternalDropTarget, pendingDrop } =
+    useVersionOrNewFileDrop({ entity: node, workspaceId, rowRef });
 
   // Store volatile values in refs so the effect doesn't
   // re-register drag/drop handlers on every render.
@@ -1289,17 +1300,17 @@ const FilesystemRow = ({
               },
               getData: () => ({ entityId: node.entityId }),
               onDragEnter: () => {
-                setIsDropTarget(true);
+                setIsFolderDropTarget(true);
                 if (!expandedRef.current) {
                   scheduleAutoExpand();
                 }
               },
               onDragLeave: () => {
-                setIsDropTarget(false);
+                setIsFolderDropTarget(false);
                 scheduleAutoExpand.cancel();
               },
               onDrop: ({ source }) => {
-                setIsDropTarget(false);
+                setIsFolderDropTarget(false);
                 scheduleAutoExpand.cancel();
                 const entityIds = getDragEntityIds(source.data);
                 if (!entityIds) {
@@ -1349,24 +1360,14 @@ const FilesystemRow = ({
     scheduleAutoExpand,
   ]);
 
-  // Shared cells: Name + Type
+  // Shared cells: Name + Type. The presentation (indent, guide lines, chevron,
+  // icon slot) is the shared FileTreeNameCell; this row supplies the workspace
+  // entity's mime icon and the inline-rename / active-edit content.
   const nameCell = (
-    <span
-      className="relative flex h-full min-w-0 items-center gap-1.5 self-stretch"
-      style={{ paddingLeft: `${depth * FILESYSTEM_INDENT_PX}px` }}
-    >
-      <TreeGuideLines depth={depth} guideDepths={guideDepths} isLast={isLast} />
-      {isFolder ? (
-        <ChevronRightIcon
-          className={cn(
-            "size-3.5 shrink-0 transition-transform",
-            expanded && "rotate-90",
-          )}
-        />
-      ) : (
-        <span className="w-3.5 shrink-0" />
-      )}
-      {(() => {
+    <FileTreeNameCell
+      depth={depth}
+      expanded={expanded}
+      icon={(() => {
         if (isFolder) {
           if (expanded) {
             return (
@@ -1381,12 +1382,15 @@ const FilesystemRow = ({
           return (
             <DocumentIcon
               className="size-4 shrink-0"
+              fileName={file.fileName}
               mimeType={file.mimeType}
             />
           );
         }
         return <FileIcon className="text-muted-foreground size-4 shrink-0" />;
       })()}
+      isFolder={isFolder}
+    >
       {isEditing ? (
         <InlineEdit
           inputClassName="w-48"
@@ -1414,7 +1418,7 @@ const FilesystemRow = ({
           )}
         </span>
       )}
-    </span>
+    </FileTreeNameCell>
   );
 
   const extraCells = extraColumns.map((col) => (
@@ -1427,10 +1431,12 @@ const FilesystemRow = ({
   ));
 
   const gridCls = cn(
-    "hover:bg-muted grid h-full w-full items-center gap-x-4 rounded px-2 text-start text-sm",
-    isDropTarget && "bg-accent ring-primary ring-2",
+    "hover:bg-muted grid h-full w-full items-center gap-x-4 rounded px-2 text-start text-sm transition-colors duration-150",
+    (isFolderDropTarget || isExternalDropTarget) && "bg-accent",
     isSelected && "bg-accent",
   );
+  const rowButtonCls =
+    "min-w-0 rounded text-start outline-none focus-visible:bg-muted/70";
 
   // Content area: Name + Type + extras (interactive, clickable)
   // gridColumn spans all content columns (excluding the actions column)
@@ -1465,6 +1471,7 @@ const FilesystemRow = ({
           id: candidateFile.fieldId,
           entityId: entity.entityId,
           label: getEntityName(entity),
+          fileName: candidateFile.fileName,
           mimeType: candidateFile.mimeType,
           pdfFileId: candidateFile.pdfFileId,
           propertyId: candidateFile.propertyId,
@@ -1482,7 +1489,10 @@ const FilesystemRow = ({
       };
     }
     if (node.kind === "task") {
-      return () => useInspectorStore.getState().openTask(node.entityId, name);
+      return () =>
+        useInspectorStore
+          .getState()
+          .openTask({ taskId: node.entityId, workspaceId, label: name });
     }
     if (navigable) {
       return () =>
@@ -1490,6 +1500,7 @@ const FilesystemRow = ({
           id: file.fieldId,
           entityId: file.entityId,
           label: name,
+          fileName: file.fileName,
           mimeType: file.mimeType,
           pdfFileId: file.pdfFileId,
           propertyId: file.propertyId,
@@ -1541,114 +1552,77 @@ const FilesystemRow = ({
   );
 
   return (
-    <div
-      className="group/row relative h-full"
-      data-entity-row
-      onContextMenu={handleContextMenu}
-      ref={rowRef}
-    >
-      {isFolder ? (
-        <div className={gridCls} style={{ gridTemplateColumns: gridTemplate }}>
-          <button
-            className="text-start"
-            onClick={(e) => {
-              const intent = getFolderClickIntent({
-                currentFolderId,
-                hasModifier: e.metaKey || e.ctrlKey,
-              });
-
-              if (intent.type === "toggle-selection") {
-                onSelect(node.entityId, true);
-                return;
-              }
-
-              onClearSelection();
-              if (intent.type === "clear-and-navigate") {
-                onNavigateToFolder(node.entityId);
-              } else {
-                onToggleFolder(node.entityId);
-              }
-            }}
-            onDoubleClick={() => onNavigateToFolder(node.entityId)}
-            style={contentSpanStyle}
-            type="button"
+    <>
+      <div
+        className="group/row relative h-full"
+        data-entity-row
+        onContextMenu={handleContextMenu}
+        ref={rowRef}
+      >
+        {isFolder ? (
+          <div
+            className={gridCls}
+            style={{ gridTemplateColumns: gridTemplate }}
           >
-            {contentCells}
-          </button>
-          {rowActionsNode}
-        </div>
-      ) : (
-        <div className={gridCls} style={{ gridTemplateColumns: gridTemplate }}>
-          <button
-            onClick={(e) => onSelect(node.entityId, e.metaKey || e.ctrlKey)}
-            onDoubleClick={() => openInInspector?.()}
-            style={contentSpanStyle}
-            type="button"
+            <button
+              className={rowButtonCls}
+              onClick={(e) => {
+                const intent = getFolderClickIntent({
+                  currentFolderId,
+                  hasModifier: e.metaKey || e.ctrlKey,
+                });
+
+                if (intent.type === "toggle-selection") {
+                  onSelect(node.entityId, true);
+                  return;
+                }
+
+                onClearSelection();
+                if (intent.type === "clear-and-navigate") {
+                  onNavigateToFolder(node.entityId);
+                } else {
+                  onToggleFolder(node.entityId);
+                }
+              }}
+              onDoubleClick={() => onNavigateToFolder(node.entityId)}
+              style={contentSpanStyle}
+              type="button"
+            >
+              {contentCells}
+            </button>
+            {rowActionsNode}
+          </div>
+        ) : (
+          <div
+            className={gridCls}
+            style={{ gridTemplateColumns: gridTemplate }}
           >
-            {contentCells}
-          </button>
-          {rowActionsNode}
-        </div>
-      )}
-    </div>
-  );
-};
-
-type TreeGuideLinesProps = {
-  depth: number;
-  guideDepths: readonly number[];
-  isLast: boolean;
-};
-
-const TreeGuideLines = ({
-  depth,
-  guideDepths,
-  isLast,
-}: TreeGuideLinesProps) => {
-  if (depth === 0) {
-    return null;
-  }
-
-  const currentLineLeft =
-    depth * FILESYSTEM_INDENT_PX - FILESYSTEM_GUIDE_OFFSET_PX;
-  // The immediate parent's column is the same x as this row's own
-  // current line; rendering a full-height guide there would mask the
-  // half-height "L" stop on the last child.
-  const continuationGuideDepths = guideDepths.filter(
-    (guideDepth) => guideDepth !== depth - 1,
-  );
-
-  return (
-    <span aria-hidden="true" className="pointer-events-none absolute inset-y-0">
-      {continuationGuideDepths.map((guideDepth) => (
-        <span
-          className={cn(
-            FILESYSTEM_GUIDE_LINE_COLOR_CLASS,
-            "absolute top-0 bottom-0 w-px",
-          )}
-          key={guideDepth}
-          style={{
-            left:
-              guideDepth * FILESYSTEM_INDENT_PX + FILESYSTEM_GUIDE_OFFSET_PX,
-          }}
+            <button
+              className={rowButtonCls}
+              onClick={(e) => onSelect(node.entityId, e.metaKey || e.ctrlKey)}
+              onDoubleClick={() => openInInspector?.()}
+              style={contentSpanStyle}
+              type="button"
+            >
+              {contentCells}
+            </button>
+            {rowActionsNode}
+          </div>
+        )}
+      </div>
+      {pendingDrop && (
+        <VersionOrNewFileDialog
+          droppedFile={pendingDrop.droppedFile}
+          entityFileName={pendingDrop.entityFileName}
+          isReplacePending={pendingDrop.isReplacePending}
+          onCreateNewFile={pendingDrop.onCreateNewFile}
+          onOpenChange={pendingDrop.onOpenChange}
+          onOpenChangeComplete={pendingDrop.onOpenChangeComplete}
+          onReplaceVersion={pendingDrop.onReplaceVersion}
+          open={pendingDrop.open}
         />
-      ))}
-      <span
-        className={cn(
-          FILESYSTEM_GUIDE_LINE_COLOR_CLASS,
-          "absolute top-0 w-px",
-          isLast ? "h-1/2" : "bottom-0",
-        )}
-        style={{ left: currentLineLeft }}
-      />
-      <span
-        className={cn(
-          FILESYSTEM_GUIDE_LINE_COLOR_CLASS,
-          "absolute top-1/2 h-px w-2.5",
-        )}
-        style={{ left: currentLineLeft }}
-      />
-    </span>
+      )}
+    </>
   );
 };
 

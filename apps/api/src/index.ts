@@ -3,12 +3,14 @@ import { Elysia } from "elysia";
 import { rateLimit } from "elysia-rate-limit";
 
 import { env } from "@/api/env";
+import { aiAutocompleteRoute } from "@/api/handlers/ai-autocomplete/routes";
 import { aiConfigPublicRoute } from "@/api/handlers/ai-config/routes";
 import { auditLogsRoute } from "@/api/handlers/audit-logs/routes";
 import { authMetadataRoute } from "@/api/handlers/auth/routes";
 import { authUiRoute } from "@/api/handlers/auth/ui-routes";
 import { billingCodesRoute } from "@/api/handlers/billing-codes/routes";
 import { caseLawRoute } from "@/api/handlers/case-law/routes";
+import { catalogueRoute } from "@/api/handlers/catalogue/routes";
 import { chatRoute } from "@/api/handlers/chat/routes";
 import {
   clauseCategoriesRoute,
@@ -26,7 +28,9 @@ import { filesRoute } from "@/api/handlers/files/routes";
 import { isFolioCollabRateLimitedPath } from "@/api/handlers/folio-collab/rate-limit";
 import { folioCollabRoute } from "@/api/handlers/folio-collab/routes";
 import { healthRoute } from "@/api/handlers/health/routes";
+import { hostedUsageWebhookRoute } from "@/api/handlers/hosted-usage-webhook/routes";
 import { invoicesRoute } from "@/api/handlers/invoices/routes";
+import { legislationCorpusRoute } from "@/api/handlers/legislation/corpus-routes";
 import { legislationRoute } from "@/api/handlers/legislation/routes";
 import { mcpConnectorsRoute } from "@/api/handlers/mcp-connectors/routes";
 import { mcpRoute } from "@/api/handlers/mcp/routes";
@@ -36,6 +40,7 @@ import { ratesRoute } from "@/api/handlers/rates/routes";
 import { searchRoute } from "@/api/handlers/search/routes";
 import { shortcutsRoute } from "@/api/handlers/shortcuts/routes";
 import { skillsRoute } from "@/api/handlers/skills/routes";
+import { smokeRoute } from "@/api/handlers/smoke/routes";
 import { myTasksRoute } from "@/api/handlers/tasks/my-tasks-route";
 import { tasksRoute } from "@/api/handlers/tasks/routes";
 import {
@@ -43,15 +48,18 @@ import {
   templatesRoute,
 } from "@/api/handlers/templates/routes";
 import { timeEntriesRoute } from "@/api/handlers/time-entries/routes";
+import { uploadsRoute } from "@/api/handlers/uploads/routes";
+import { usageRoute } from "@/api/handlers/usage/routes";
 import { userFilesRoute } from "@/api/handlers/user-files/routes";
 import { verifyAuthRoute, verifyRoute } from "@/api/handlers/verify/routes";
+import { viewTemplatesRoute } from "@/api/handlers/view-templates/routes";
 import { viewsRoute } from "@/api/handlers/views/routes";
 import { workspaceEventsRoute } from "@/api/handlers/workspaces/events";
 import { workspacesRoute } from "@/api/handlers/workspaces/routes";
 import { captureRequestError, getAnalytics } from "@/api/lib/analytics";
 import { getAuth } from "@/api/lib/auth";
 import { assertMigrationsApplied } from "@/api/lib/db/assert-migrations-applied";
-import { DEV_INSPECTOR_ORIGINS } from "@/api/lib/dev-origins";
+import { DEV_INSPECTOR_ORIGINS, frontendOrigins } from "@/api/lib/dev-origins";
 import { httpError } from "@/api/lib/errors/http-error";
 import { errorTag } from "@/api/lib/errors/utils";
 import { initFileDerivativeWorker } from "@/api/lib/file-derivative-queue";
@@ -65,7 +73,12 @@ import {
   InMemoryRateLimitContext,
   scopedGenerator,
 } from "@/api/lib/rate-limit";
-import { isS3Stale, refreshS3 } from "@/api/lib/s3";
+import {
+  isCorpusS3Stale,
+  isS3Stale,
+  refreshCorpusS3,
+  refreshS3,
+} from "@/api/lib/s3";
 import { setSecurityHeaders } from "@/api/lib/security-headers";
 import { initWorkflowWorker } from "@/api/lib/workflow-queue";
 
@@ -75,6 +88,7 @@ const SESSION_ID_HEADER = "x-posthog-session-id";
 const SESSION_ID_MAX_LENGTH = 64;
 const SESSION_ID_PATTERN = /^[\w-]+$/u;
 const S3_REFRESH_CHECK_INTERVAL_MS = 60_000;
+const WORKER_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 const STATUS_BY_ELYSIA_CODE: Partial<Record<string, number>> = {
   VALIDATION: 422,
@@ -175,7 +189,10 @@ const api = new Elysia()
   .use(
     cors({
       origin: (() => {
-        const origins: (string | RegExp)[] = [env.FRONTEND_URL];
+        const origins: (string | RegExp)[] = frontendOrigins({
+          frontendUrl: env.FRONTEND_URL,
+          isDev: env.isDev,
+        });
         if (env.isDev) {
           origins.push(/^chrome-extension:\/\//u);
           origins.push(...DEV_INSPECTOR_ORIGINS);
@@ -286,8 +303,11 @@ const api = new Elysia()
   .use(authMetadataRoute)
   .use(healthRoute)
   .use(verifyRoute)
+  .use(hostedUsageWebhookRoute)
   .use(mcpRoute)
+  .use(aiAutocompleteRoute)
   .use(devPublicRoute)
+  .use(smokeRoute)
   .mount(getAuth().handler)
   .group("/v1", (app) =>
     app
@@ -332,6 +352,7 @@ const api = new Elysia()
           .use(folioCollabRoute),
       )
       .use(desktopEditSessionsRoute)
+      .use(uploadsRoute)
       .use(entitiesRoute)
       .use(fieldsRoute)
       .use(templatesRoute)
@@ -343,19 +364,23 @@ const api = new Elysia()
       .use(invoicesRoute)
       .use(externalPreviewRoute)
       .use(mcpConnectorsRoute)
+      .use(catalogueRoute)
       .use(organizationSettingsRoute)
       .use(aiConfigPublicRoute)
       .use(clauseCategoriesRoute)
       .use(clausesRoute)
       .use(contactsRoute)
       .use(legislationRoute)
+      .use(legislationCorpusRoute)
       .use(searchRoute)
       .use(auditLogsRoute)
       .use(caseLawRoute)
       .use(chatRoute)
       .use(userFilesRoute)
       .use(skillsRoute)
+      .use(usageRoute)
       .use(shortcutsRoute)
+      .use(viewTemplatesRoute)
       .use(viewsRoute)
       .use(tasksRoute)
       .use(myTasksRoute)
@@ -367,15 +392,21 @@ export default api;
 
 const startS3RefreshLoop = () => {
   const timer = setInterval(() => {
-    if (!isS3Stale()) {
-      return;
+    if (isS3Stale()) {
+      refreshS3().catch((error: unknown) => {
+        logger.error("s3.refresh_failed", {
+          "error.type": errorTag(error),
+        });
+      });
     }
 
-    refreshS3().catch((error: unknown) => {
-      logger.error("s3.refresh_failed", {
-        "error.type": errorTag(error),
+    if (isCorpusS3Stale()) {
+      refreshCorpusS3().catch((error: unknown) => {
+        logger.error("s3.corpus_refresh_failed", {
+          "error.type": errorTag(error),
+        });
       });
-    });
+    }
   }, S3_REFRESH_CHECK_INTERVAL_MS);
 
   timer.unref();
@@ -387,12 +418,47 @@ const startS3RefreshLoop = () => {
 await assertMigrationsApplied();
 
 await refreshS3();
+await refreshCorpusS3();
 startS3RefreshLoop();
 
 // BullMQ worker for asynchronous file derivatives.
-initFileDerivativeWorker();
+const fileDerivativeWorker = initFileDerivativeWorker();
 
 // BullMQ workflow worker for AI extraction.
-initWorkflowWorker();
+const workflowWorker = initWorkflowWorker();
 
 api.listen(getApiPort());
+
+// Graceful shutdown: stop accepting HTTP requests, then drain the BullMQ
+// workers on SIGTERM/SIGINT (deploy, container stop, or a local
+// `bun --watch` restart) so an in-flight job is not abandoned mid-write.
+// An abandoned job strands its workflow lock and leaves cells stuck
+// `pending` until the next boot reconciles them; draining avoids creating
+// that orphan in the common case. Worker draining is bounded so a slow job
+// can't hang shutdown; anything still in flight past the timeout is
+// reclaimed by the next boot's reconciler.
+let shuttingDown = false;
+const shutdownWorkers = async (signal: string): Promise<void> => {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  logger.info("api.shutdown_started", { signal });
+  await api.stop().catch((error: unknown) => {
+    logger.error("api.stop_failed", {
+      "error.type": errorTag(error),
+    });
+  });
+  await Promise.race([
+    Promise.allSettled([workflowWorker.close(), fileDerivativeWorker.close()]),
+    Bun.sleep(WORKER_SHUTDOWN_TIMEOUT_MS),
+  ]);
+  logger.info("api.shutdown_complete", { signal });
+  process.exit(0);
+};
+process.once("SIGTERM", () => {
+  void shutdownWorkers("SIGTERM");
+});
+process.once("SIGINT", () => {
+  void shutdownWorkers("SIGINT");
+});

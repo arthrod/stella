@@ -1,15 +1,11 @@
 import { Result } from "better-result";
 import { and, eq } from "drizzle-orm";
 
-import type { SafeDb } from "@/api/db";
+import type { SafeDb, Transaction } from "@/api/db";
 import { agentSkillResources, agentSkills } from "@/api/db/schema";
 import type { AgentSkillOrigin, AgentSkillScope } from "@/api/db/schema";
-import {
-  AUDIT_ACTION,
-  AUDIT_RESOURCE_TYPE,
-  createAuditContext,
-  writeAuditLog,
-} from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
+import type { AuditRecorder } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { DatabaseError, HandlerError } from "@/api/lib/errors/tagged-errors";
 import { LIMITS } from "@/api/lib/limits";
@@ -18,16 +14,24 @@ import { PG_ERROR } from "@/api/lib/pg-error";
 import type { ParsedSkillPackage } from "./skill-package";
 
 type InstallSkillProps = {
+  // Install as a draft (hidden until the user finishes). Defaults to true so
+  // existing upload/import callers keep installing enabled skills.
+  enabled?: boolean;
   memberRole: { role: string };
+  onInstalled?: (
+    tx: Transaction,
+    skill: { id: SafeId<"agentSkill"> },
+  ) => Promise<void>;
   origin: AgentSkillOrigin;
   parsed: ParsedSkillPackage;
-  request: Request;
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   scope: AgentSkillScope;
-  server: {
-    requestIP: (request: Request) => { address: string } | null;
-  } | null;
   session: { activeOrganizationId: SafeId<"organization"> };
+  // Override the stored slug. Defaults to the parsed name (the package's own
+  // identifier). Callers that instantiate the same package repeatedly (e.g.
+  // blueprints) pass a unique slug to avoid (org, scope, slug) collisions.
+  slug?: string;
   user: { id: SafeId<"user"> };
 };
 
@@ -37,14 +41,16 @@ type InstallSkillTransactionResult =
   | { type: "limit-reached" };
 
 export const installSkill = async ({
+  enabled = true,
   memberRole,
+  onInstalled,
   origin,
   parsed,
-  request,
+  recordAuditEvent,
   safeDb,
   scope,
-  server,
   session,
+  slug,
   user,
 }: InstallSkillProps) => {
   const authorization = authorizeSkillInstallScope({ memberRole, scope });
@@ -74,7 +80,7 @@ export const installSkill = async ({
               userId: user.id,
               scope,
               origin,
-              slug: parsed.name,
+              slug: slug ?? parsed.name,
               name: parsed.name,
               description: parsed.description,
               version: parsed.version,
@@ -84,7 +90,7 @@ export const installSkill = async ({
               sourceUrl: parsed.sourceUrl,
               contentHash: parsed.contentHash,
               body: parsed.body,
-              enabled: true,
+              enabled,
             })
             .returning({ id: agentSkills.id });
 
@@ -106,32 +112,24 @@ export const installSkill = async ({
             );
           }
 
-          await writeAuditLog(
-            {
-              ...createAuditContext({
-                organizationId: session.activeOrganizationId,
-                userId: user.id,
-                request,
-                server,
-              }),
-              action: AUDIT_ACTION.CREATE,
-              resourceType: AUDIT_RESOURCE_TYPE.AGENT_SKILL,
-              resourceId: row.id,
-              changes: {
-                created: {
-                  old: null,
-                  new: {
-                    contentHash: parsed.contentHash,
-                    origin,
-                    resourceCount: parsed.resources.length,
-                    scope,
-                    slug: parsed.name,
-                  },
+          await recordAuditEvent(innerTx, {
+            action: AUDIT_ACTION.CREATE,
+            resourceType: AUDIT_RESOURCE_TYPE.AGENT_SKILL,
+            resourceId: row.id,
+            changes: {
+              created: {
+                old: null,
+                new: {
+                  contentHash: parsed.contentHash,
+                  origin,
+                  resourceCount: parsed.resources.length,
+                  scope,
+                  slug: slug ?? parsed.name,
                 },
               },
             },
-            innerTx,
-          );
+          });
+          await onInstalled?.(innerTx, { id: row.id });
 
           return { id: row.id, type: "installed" };
         },
@@ -150,7 +148,13 @@ export const installSkill = async ({
         }),
       );
     }
-    return Result.err(insertResult.error);
+    return Result.err(
+      new HandlerError({
+        status: 500,
+        message: "Failed to install skill",
+        cause: insertResult.error,
+      }),
+    );
   }
 
   if (insertResult.value.type === "limit-reached") {

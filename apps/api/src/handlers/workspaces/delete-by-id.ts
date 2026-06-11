@@ -14,17 +14,18 @@ import {
   workspaces,
 } from "@/api/db/schema";
 import type { FieldContent } from "@/api/db/schema-validators";
-import { deleteS3Keys, deleteS3Objects } from "@/api/handlers/files/utils";
+import { THUMBNAIL_MIME_TYPE } from "@/api/handlers/files/image-derivative";
+import {
+  createUserFileKey,
+  deleteS3Keys,
+  deleteS3Objects,
+} from "@/api/handlers/files/utils";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
-import {
-  AUDIT_ACTION,
-  AUDIT_RESOURCE_TYPE,
-  createAuditContext,
-  writeAuditLog,
-} from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
+import { brandPersistedUserId } from "@/api/lib/safe-id-boundaries";
 import { PDF_MIME_TYPE } from "@/api/mime-types";
 
 const changeWorkspaceStatus = async (
@@ -32,12 +33,14 @@ const changeWorkspaceStatus = async (
   workspaceId: SafeId<"workspace">,
   newStatus: "deleting" | "active",
 ) =>
-  await scopedDb((tx) =>
-    tx
+  await scopedDb(async (tx) => {
+    // audit: skip — internal seal/unseal toggle wrapping the workspace
+    // delete; the audited DELETE below records the user-visible event.
+    await tx
       .update(workspaces)
       .set({ status: newStatus })
-      .where(eq(workspaces.id, workspaceId)),
-  );
+      .where(eq(workspaces.id, workspaceId));
+  });
 
 type FileRef = { fileId: string; mimeType: string };
 
@@ -56,6 +59,13 @@ const extractFileRefs = (content: FieldContent): FileRef[] => {
     });
   }
 
+  if (content.thumbnailFileId) {
+    refs.push({
+      fileId: content.thumbnailFileId,
+      mimeType: THUMBNAIL_MIME_TYPE,
+    });
+  }
+
   return refs;
 };
 
@@ -71,9 +81,7 @@ const deleteWorkspace = createSafeHandler(
     safeDb,
     workspaceId,
     session,
-    user,
-    request,
-    server,
+    recordAuditEvent,
   }) {
     const organizationId = session.activeOrganizationId;
 
@@ -103,6 +111,8 @@ const deleteWorkspace = createSafeHandler(
         .select({
           id: userFiles.id,
           s3Key: userFiles.s3Key,
+          thumbnailFileId: userFiles.thumbnailFileId,
+          userId: userFiles.userId,
         })
         .from(userFiles)
         .innerJoin(chatThreads, eq(userFiles.threadId, chatThreads.id))
@@ -140,9 +150,20 @@ const deleteWorkspace = createSafeHandler(
 
     if (chatFileRefs.length > 0) {
       s3Deletes.push(
-        deleteS3Keys(chatFileRefs.map((file) => file.s3Key)).then((result) =>
-          Result.unwrap(result),
-        ),
+        deleteS3Keys(
+          chatFileRefs.flatMap((file) =>
+            file.thumbnailFileId
+              ? [
+                  file.s3Key,
+                  createUserFileKey({
+                    fileId: file.thumbnailFileId,
+                    mimeType: THUMBNAIL_MIME_TYPE,
+                    userId: brandPersistedUserId(file.userId),
+                  }),
+                ]
+              : [file.s3Key],
+          ),
+        ).then((result) => Result.unwrap(result)),
       );
     }
 
@@ -229,27 +250,17 @@ const deleteWorkspace = createSafeHandler(
       // propertyDependencies. Entities already gone.
       await tx.delete(workspaces).where(eq(workspaces.id, workspaceId));
 
-      await writeAuditLog(
-        {
-          ...createAuditContext({
-            organizationId,
-            workspaceId,
-            userId: user.id,
-            request,
-            server,
-          }),
-          action: AUDIT_ACTION.DELETE,
-          resourceType: AUDIT_RESOURCE_TYPE.WORKSPACE,
-          resourceId: workspaceId,
-          changes: {
-            deleted: {
-              old: workspace,
-              new: null,
-            },
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.DELETE,
+        resourceType: AUDIT_RESOURCE_TYPE.WORKSPACE,
+        resourceId: workspaceId,
+        changes: {
+          deleted: {
+            old: workspace,
+            new: null,
           },
         },
-        tx,
-      );
+      });
     });
 
     if (Result.isError(deleteResult)) {
@@ -263,7 +274,7 @@ const deleteWorkspace = createSafeHandler(
       );
     }
 
-    return Result.ok(undefined);
+    return Result.ok({});
   },
 );
 

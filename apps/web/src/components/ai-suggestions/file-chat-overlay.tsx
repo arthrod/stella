@@ -39,6 +39,7 @@ import type {
 import { cn } from "@stll/ui/lib/utils";
 
 import { PromptBar } from "@/components/ai-suggestions/host";
+import { isNoopReviewOperation } from "@/components/ai-suggestions/review-operation-utils";
 import {
   REVIEW_UNSPECIFIED_AREA,
   useReviewStore,
@@ -97,20 +98,34 @@ type ActiveExternal = {
 
 type ToolInputOperation = ApplyActiveDocxEditsInput["operations"][number];
 
-const summarizeOperation = (operation: ToolInputOperation): string => {
+const summarizeOperation = (
+  operation: FolioAIEditOperation | ToolInputOperation,
+): string => {
   switch (operation.type) {
     case "replaceInBlock":
       return `Replace “${operation.find}” with “${operation.replace}”`;
     case "replaceBlock":
       return `Replace block ${operation.blockId}`;
     case "insertAfterBlock":
-      return `Insert after ${operation.blockId}: ${operation.text}`;
-    case "insertBeforeBlock":
-      return `Insert before ${operation.blockId}: ${operation.text}`;
+    case "insertBeforeBlock": {
+      const direction =
+        operation.type === "insertAfterBlock" ? "after" : "before";
+      if (operation.pageBreakBefore === true && operation.text.length === 0) {
+        return `Insert page break ${direction} ${operation.blockId}`;
+      }
+      if (operation.styleId !== undefined) {
+        return `Insert ${operation.styleId} ${direction} ${operation.blockId}: ${operation.text}`;
+      }
+      return `Insert ${direction} ${operation.blockId}: ${operation.text}`;
+    }
     case "deleteBlock":
       return `Delete block ${operation.blockId}`;
     case "commentOnBlock":
       return `Comment on ${operation.blockId}`;
+    case "insertSignatureTable": {
+      const names = operation.parties.map((p) => p.name).join(", ");
+      return `Insert signature table for ${names}`;
+    }
     default:
       operation satisfies never;
       return "";
@@ -132,12 +147,217 @@ const getOperationComment = (
     case "insertBeforeBlock":
     case "replaceBlock":
     case "deleteBlock":
+    case "insertSignatureTable":
       return operation.comment ? { text: operation.comment.text } : undefined;
     case "commentOnBlock":
       return { text: operation.comment.text };
     default:
       operation satisfies never;
       return undefined;
+  }
+};
+
+// Defense-in-depth: even with the structural ops below, the model can
+// still emit raw directive text inside `text` (older transcripts, or
+// when it forgets to use the canonical op). Strip directive markers
+// and unwrap `[[placeholders]]` so the text reads cleanly rather than
+// landing in the doc as literal `@pagebreak` / `[[date]]` characters.
+// Trim a leading `@directive` token from a line. Pure string-walking
+// to avoid the regex backtracking warning the linter flags on
+// `\s*`-flanked patterns even when the alternatives are fixed.
+const DIRECTIVE_NAMES = new Set([
+  "pagebreak",
+  "signature",
+  "signatures",
+  "signature_block",
+  "section",
+  "paragraph",
+  "clause",
+  "schedule",
+  "note",
+  "recital",
+  "recitals",
+]);
+const DIRECTIVE_NAME_CHAR_RE = /[a-z_]/iu;
+// oxlint-disable-next-line sonarjs/slow-regex -- input is single-line paragraph text; linear backtracking only
+const PLACEHOLDER_RE = /\[\[([^\]]+?)\]\]/gu;
+const CLAUSE_HEADING_RE = /^@clause +\d+ *"([^"]*)" *$/iu;
+const stripDirectivePrefix = (line: string): string => {
+  const trimmed = line.trimStart();
+  if (!trimmed.startsWith("@")) {
+    return line;
+  }
+  let nameEnd = 1;
+  while (
+    nameEnd < trimmed.length &&
+    DIRECTIVE_NAME_CHAR_RE.test(trimmed[nameEnd] ?? "")
+  ) {
+    nameEnd += 1;
+  }
+  if (nameEnd === 1) {
+    return line;
+  }
+  const directive = trimmed.slice(1, nameEnd).toLowerCase();
+  if (!DIRECTIVE_NAMES.has(directive)) {
+    return line;
+  }
+  // Require a word boundary (whitespace or end-of-line) right after
+  // the directive name so we don't strip e.g. `@paragraphical`.
+  const afterName = trimmed[nameEnd];
+  if (afterName !== undefined && afterName !== " " && afterName !== "\t") {
+    return line;
+  }
+  return trimmed.slice(nameEnd).trimStart().trimEnd();
+};
+
+const cleanDirectiveText = (text: string): string => {
+  const lines = text.split("\n").map((line) => {
+    const clauseMatch = CLAUSE_HEADING_RE.exec(line);
+    if (clauseMatch) {
+      return clauseMatch[1] ?? "";
+    }
+    return stripDirectivePrefix(line);
+  });
+  // Collapse runs of empty lines so stripped directives don't leave
+  // huge gaps.
+  const collapsed: string[] = [];
+  for (const line of lines) {
+    if (line.length === 0 && collapsed.at(-1)?.length === 0) {
+      continue;
+    }
+    collapsed.push(line);
+  }
+  return collapsed
+    .join("\n")
+    .replace(PLACEHOLDER_RE, (_, inner: string) => inner.trim())
+    .trim();
+};
+
+type PrepareOperationOptions = {
+  operation: ToolInputOperation;
+  id: string;
+  comment: { text: string } | undefined;
+};
+
+const toFolioOperation = ({
+  operation,
+  id,
+  comment,
+}: PrepareOperationOptions): FolioAIEditOperation | null => {
+  switch (operation.type) {
+    case "replaceInBlock": {
+      const next: FolioAIEditOperation = {
+        blockId: operation.blockId,
+        find: operation.find,
+        id,
+        replace: operation.replace,
+        type: operation.type,
+      };
+      if (comment) {
+        next.comment = comment;
+      }
+      return next;
+    }
+    case "insertAfterBlock":
+    case "insertBeforeBlock": {
+      const next: FolioAIEditOperation = {
+        blockId: operation.blockId,
+        id,
+        text: cleanDirectiveText(operation.text),
+        type: operation.type,
+      };
+      if (operation.inheritFormatting !== undefined) {
+        next.inheritFormatting = operation.inheritFormatting;
+      }
+      if (operation.pageBreakBefore !== undefined) {
+        next.pageBreakBefore = operation.pageBreakBefore;
+      }
+      if (operation.styleId !== undefined) {
+        next.styleId = operation.styleId;
+      }
+      if (comment) {
+        next.comment = comment;
+      }
+      return next;
+    }
+    case "replaceBlock": {
+      const cleanedText = cleanDirectiveText(operation.text);
+      // Empty replacement = remove the block. The canonical op for
+      // that is `deleteBlock`; normalize at the boundary so the model
+      // doesn't have to pick between two operations.
+      if (cleanedText.length === 0) {
+        const next: FolioAIEditOperation = {
+          blockId: operation.blockId,
+          id,
+          type: "deleteBlock",
+        };
+        if (comment) {
+          next.comment = comment;
+        }
+        return next;
+      }
+      const next: FolioAIEditOperation = {
+        blockId: operation.blockId,
+        id,
+        text: cleanedText,
+        type: operation.type,
+      };
+      if (operation.preserveFormatting !== undefined) {
+        next.preserveFormatting = operation.preserveFormatting;
+      }
+      if (operation.styleId !== undefined) {
+        next.styleId = operation.styleId;
+      }
+      if (comment) {
+        next.comment = comment;
+      }
+      return next;
+    }
+    case "insertSignatureTable": {
+      const next: FolioAIEditOperation = {
+        blockId: operation.blockId,
+        id,
+        parties: operation.parties.map((p) => ({
+          name: p.name,
+          ...(p.signatory !== undefined && { signatory: p.signatory }),
+          ...(p.title !== undefined && { title: p.title }),
+        })),
+        type: operation.type,
+      };
+      if (operation.position !== undefined) {
+        next.position = operation.position;
+      }
+      if (comment) {
+        next.comment = comment;
+      }
+      return next;
+    }
+    case "deleteBlock": {
+      const next: FolioAIEditOperation = {
+        blockId: operation.blockId,
+        id,
+        type: operation.type,
+      };
+      if (comment) {
+        next.comment = comment;
+      }
+      return next;
+    }
+    case "commentOnBlock": {
+      const next: FolioAIEditOperation = {
+        blockId: operation.blockId,
+        comment: { text: operation.comment.text },
+        id,
+        type: operation.type,
+      };
+      if (operation.quote !== undefined) {
+        next.quote = operation.quote;
+      }
+      return next;
+    }
+    default:
+      operation satisfies never;
+      return null;
   }
 };
 
@@ -149,84 +369,9 @@ const prepareOperations = (
   for (const [index, operation] of operations.entries()) {
     const id = `ai-docx-${String(index + 1)}-${uuidv7()}`;
     const comment = getOperationComment(operation);
-    let folio: FolioAIEditOperation;
-    switch (operation.type) {
-      case "replaceInBlock": {
-        const next: FolioAIEditOperation = {
-          blockId: operation.blockId,
-          find: operation.find,
-          id,
-          replace: operation.replace,
-          type: operation.type,
-        };
-        if (comment) {
-          next.comment = comment;
-        }
-        folio = next;
-        break;
-      }
-      case "insertAfterBlock":
-      case "insertBeforeBlock": {
-        const next: FolioAIEditOperation = {
-          blockId: operation.blockId,
-          id,
-          text: operation.text,
-          type: operation.type,
-        };
-        if (operation.inheritFormatting !== undefined) {
-          next.inheritFormatting = operation.inheritFormatting;
-        }
-        if (comment) {
-          next.comment = comment;
-        }
-        folio = next;
-        break;
-      }
-      case "replaceBlock": {
-        const next: FolioAIEditOperation = {
-          blockId: operation.blockId,
-          id,
-          text: operation.text,
-          type: operation.type,
-        };
-        if (operation.preserveFormatting !== undefined) {
-          next.preserveFormatting = operation.preserveFormatting;
-        }
-        if (comment) {
-          next.comment = comment;
-        }
-        folio = next;
-        break;
-      }
-      case "deleteBlock": {
-        const next: FolioAIEditOperation = {
-          blockId: operation.blockId,
-          id,
-          type: operation.type,
-        };
-        if (comment) {
-          next.comment = comment;
-        }
-        folio = next;
-        break;
-      }
-      case "commentOnBlock": {
-        const next: FolioAIEditOperation = {
-          blockId: operation.blockId,
-          comment: { text: operation.comment.text },
-          id,
-          type: operation.type,
-        };
-        if (operation.quote !== undefined) {
-          next.quote = operation.quote;
-        }
-        folio = next;
-        break;
-      }
-      default: {
-        operation satisfies never;
-        continue;
-      }
+    const folio = toFolioOperation({ operation, id, comment });
+    if (folio === null) {
+      continue;
     }
     prepared.push({ folio, input: operation, id });
   }
@@ -234,18 +379,24 @@ const prepareOperations = (
   return prepared;
 };
 
+// Defensive fallbacks: persisted tool calls predate the schema
+// requiring `severity`/`area`, so old stored approvals can still
+// reach this code with the fields missing. Type narrowing says
+// they're always present; the runtime check is for legacy data.
+/* oxlint-disable typescript/no-unnecessary-condition */
 const inputOperationSeverity = (
   operation: ToolInputOperation,
-): FolioAIEditSeverity | "unspecified" =>
-  "severity" in operation ? operation.severity : "unspecified";
+): FolioAIEditSeverity | "unspecified" => operation.severity ?? "unspecified";
 
 const inputOperationArea = (operation: ToolInputOperation): string =>
-  "area" in operation ? operation.area : REVIEW_UNSPECIFIED_AREA;
+  operation.area ?? REVIEW_UNSPECIFIED_AREA;
+/* oxlint-enable typescript/no-unnecessary-condition */
 
 type SnapshotBlock = {
   id: string;
   text: string;
   displayLabel?: string | undefined;
+  styleId?: string;
   previewRuns?: FolioAIEditSnapshot["blocks"][number]["previewRuns"];
 };
 
@@ -280,7 +431,7 @@ const PREVIEW_ANCHOR_CHARS = 80;
  * mid-stream and the AI got an outdated copy).
  */
 const buildPreview = (
-  operation: ToolInputOperation,
+  operation: FolioAIEditOperation,
   blocksById: Map<string, SnapshotBlock>,
 ): ReviewSuggestionPreview | null => {
   const block = blocksById.get(operation.blockId);
@@ -359,6 +510,21 @@ const buildPreview = (
             anchorEnd: Math.min(blockText.length, PREVIEW_ANCHOR_CHARS),
           }),
       };
+    case "insertSignatureTable":
+      return {
+        type: "insertSignatureTable",
+        anchor: blockText.slice(0, PREVIEW_ANCHOR_CHARS),
+        parties: operation.parties.map((p) => ({
+          name: p.name,
+          ...(p.signatory !== undefined && { signatory: p.signatory }),
+          ...(p.title !== undefined && { title: p.title }),
+        })),
+        position: operation.position ?? "after",
+        ...(block?.previewRuns !== undefined && {
+          anchorRuns: block.previewRuns,
+          anchorEnd: Math.min(blockText.length, PREVIEW_ANCHOR_CHARS),
+        }),
+      };
     default:
       operation satisfies never;
       return null;
@@ -384,27 +550,29 @@ const queueReviewSuggestions = ({
       labelsById.set(b.id, b.displayLabel);
     }
   }
+  const queuedIds: string[] = [];
+  const skipped: { id: string; reason: "noopOperation" | "missingBlock" }[] =
+    [];
   const items: ReviewSuggestion[] = prepared.flatMap(({ id, input, folio }) => {
     // Drop true no-ops before they ever reach the panel: the model
     // occasionally emits `find === replace` (or replaceBlock text
     // identical to the source) as a side effect of running through
     // every block. Showing them as "X → X" cards is noise.
-    if (
-      (input.type === "replaceInBlock" && input.find === input.replace) ||
-      (input.type === "replaceBlock" &&
-        input.text === (blocksById.get(input.blockId)?.text ?? ""))
-    ) {
+    if (isNoopReviewOperation(folio, blocksById)) {
+      skipped.push({ id, reason: "noopOperation" });
       return [];
     }
-    const preview = buildPreview(input, blocksById);
+    const preview = buildPreview(folio, blocksById);
     if (!preview) {
+      skipped.push({ id, reason: "missingBlock" });
       return [];
     }
+    queuedIds.push(id);
     const base: ReviewSuggestion = {
       id,
-      blockId: input.blockId,
-      type: input.type,
-      summary: summarizeOperation(input),
+      blockId: folio.blockId,
+      type: folio.type,
+      summary: summarizeOperation(folio),
       preview,
       severity: inputOperationSeverity(input),
       area: inputOperationArea(input),
@@ -418,8 +586,8 @@ const queueReviewSuggestions = ({
     if (label !== undefined) {
       base.blockLabel = label;
     }
-    if (input.comment) {
-      base.comment = input.comment.text;
+    if (folio.comment) {
+      base.comment = folio.comment.text;
     }
     return [base];
   });
@@ -438,6 +606,8 @@ const queueReviewSuggestions = ({
   if (tab) {
     inspectorState.setFileFacet(tab.id, "suggestions", { pulse: true });
   }
+
+  return { queuedIds, skipped };
 };
 
 const isApplyActiveDocxEditsInput = (
@@ -648,11 +818,21 @@ const FileChatOverlayInner = ({
   // with "editor is loading" instead of doing real work. Poll until
   // the first non-null snapshot lands, then stop — once ready stays
   // ready for the lifetime of the editor.
-  const [editorReady, setEditorReady] = useState(false);
+  // Initialize from the ref so a transition-induced remount of an
+  // already-ready editor starts ready (without this, useTransition's
+  // Suspense swap unmounts + remounts this subtree with fresh state,
+  // and the poller racing with a second rerender can leave the gate
+  // stuck closed even though the underlying view is live).
+  const [editorReady, setEditorReady] = useState(() =>
+    Boolean(docxEditorRef?.current?.createAIEditSnapshot()),
+  );
   useEffect(() => {
     if (editorReady || !hasDocxEditSurface) {
       return undefined;
     }
+    const ensure = () =>
+      docxEditorRef.current?.ensureEditorView({ focus: false });
+    ensure();
     const probe = () => {
       if (docxEditorRef.current?.createAIEditSnapshot()) {
         setEditorReady(true);
@@ -664,12 +844,28 @@ const FileChatOverlayInner = ({
       return undefined;
     }
     const id = window.setInterval(() => {
+      // Re-call ensure on each tick: when the surrounding tree is in
+      // a concurrent transition (e.g. right after the "new chat" swap),
+      // the first ensure can be coalesced away by React's batching.
+      // The state setter is a no-op once the view is already created.
+      ensure();
       if (probe()) {
         window.clearInterval(id);
       }
     }, 80);
+    // Safety net: never leave the chat input gated indefinitely. If the probe
+    // hasn't succeeded after a few seconds (e.g. an edge case where the
+    // virtualised paged editor hasn't surfaced a non-empty doc to
+    // `createAIEditSnapshot` yet), unlock the input anyway —
+    // `canSubmitWithCurrentDocxSnapshot` runs at submit time and re-checks
+    // the snapshot, so a stale unlock can't send unanchored edits.
+    const fallback = window.setTimeout(() => {
+      window.clearInterval(id);
+      setEditorReady(true);
+    }, 3000);
     return () => {
       window.clearInterval(id);
+      window.clearTimeout(fallback);
     };
   }, [editorReady, hasDocxEditSurface, docxEditorRef]);
   // Reset readiness when the active file changes — the new doc has
@@ -739,7 +935,7 @@ const FileChatOverlayInner = ({
       // empty list when the editor never produced a snapshot —
       // preview + apply both handle that defensively.
       const lastSnapshot = lastSentDocxEditSnapshotRef.current;
-      queueReviewSuggestions({
+      const { queuedIds, skipped } = queueReviewSuggestions({
         entityId: activeFile.entityId,
         prepared,
         snapshotBlocks: lastSnapshot?.blocks ?? [],
@@ -747,8 +943,8 @@ const FileChatOverlayInner = ({
       });
       return {
         applied: [],
-        queued: prepared.map(({ id }) => ({ id })),
-        skipped: [],
+        queued: queuedIds.map((id) => ({ id })),
+        skipped,
       };
     },
   );
@@ -800,6 +996,8 @@ const FileChatOverlayInner = ({
     messages,
     resendLatestMessage,
     sendMessage,
+    queuedMessages,
+    removeQueuedMessage,
     stop,
     isGenerating,
     alwaysApprovedTools,
@@ -808,6 +1006,7 @@ const FileChatOverlayInner = ({
     handleAllowInConversation,
     handleDeny,
     handleAskUserSubmit,
+    handleAskUserEditAndRerun,
     handleAlwaysAllow,
     handleCreateDocumentResolve,
     handleOpenCreatedDocument,
@@ -850,6 +1049,45 @@ const FileChatOverlayInner = ({
     placeholder: filePlaceholder,
     threadRef,
   });
+  // Focus the composer when the user explicitly starts a new thread,
+  // so they can type the first message without an extra click. The
+  // initial mount is skipped (entering the document should not steal
+  // focus from whatever the user was doing).
+  const previousChatThreadIdRef = useRef(chatThreadId);
+  const shouldFocusComposerAfterNewThreadRef = useRef(false);
+  const focusController = editorController.focus;
+  const editorInstance = editorController.editor;
+  useEffect(() => {
+    if (previousChatThreadIdRef.current === chatThreadId) {
+      return undefined;
+    }
+    if (!shouldFocusComposerAfterNewThreadRef.current) {
+      previousChatThreadIdRef.current = chatThreadId;
+      return undefined;
+    }
+    if (!editorInstance || editorInstance.isDestroyed) {
+      // The TipTap editor for the new thread isn't mounted yet; wait
+      // for the next render to retry (this effect re-runs when
+      // `editorInstance` becomes non-null).
+      return undefined;
+    }
+    previousChatThreadIdRef.current = chatThreadId;
+    shouldFocusComposerAfterNewThreadRef.current = false;
+    // rAF lets TipTap's DOM finish settling so `focus()` lands; without
+    // this, focus is silently dropped on the just-remounted instance.
+    // Re-check the editor inside the callback — between scheduling and
+    // firing, the user might have closed the overlay or swapped threads
+    // again, destroying the instance we captured.
+    const id = requestAnimationFrame(() => {
+      if (editorInstance.isDestroyed) {
+        return;
+      }
+      focusController();
+    });
+    return () => {
+      cancelAnimationFrame(id);
+    };
+  }, [chatThreadId, editorInstance, focusController]);
   const canSubmitWithCurrentDocxSnapshot = useEffectEvent(() => {
     if (!hasDocxEditSurface) {
       return true;
@@ -973,10 +1211,13 @@ const FileChatOverlayInner = ({
                 error={error}
                 isGenerating={isGenerating}
                 messages={messages}
+                onAskUserEditAndRerun={handleAskUserEditAndRerun}
                 onAskUserSubmit={handleAskUserSubmit}
                 onCreateDocumentResolve={handleCreateDocumentResolve}
                 onOpenCreatedDocument={handleOpenCreatedDocument}
+                onRemoveQueuedMessage={removeQueuedMessage}
                 onResend={resendLatestMessage}
+                queuedMessages={queuedMessages}
                 showThinkingIndicator
                 showToolCallDetails={showToolCallDetails}
                 streamdownComponents={streamdownComponents}
@@ -1008,6 +1249,7 @@ const FileChatOverlayInner = ({
           layout="floating"
           newThreadLabel={t("chat.newChat")}
           onNewThread={() => {
+            shouldFocusComposerAfterNewThreadRef.current = true;
             setPanelOpen(false);
             onNewThread();
           }}
@@ -1024,11 +1266,13 @@ const FileChatOverlayInner = ({
               // and want to see the response stream in.
               setPanelOpen(true);
               void sendMessage({ text: prompt });
+              return;
             });
           }}
           onTogglePanel={() => setPanelOpen((v) => !v)}
           panelOpen={panelOpen}
           pendingCount={0}
+          queueWhileGenerating
           sendDisabledReason={
             activeFile && docxEditorRef && !editorReady
               ? "editor-loading"

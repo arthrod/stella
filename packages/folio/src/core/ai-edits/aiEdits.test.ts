@@ -14,6 +14,7 @@ const schema = new Schema({
       group: "block",
       attrs: {
         listMarker: { default: null },
+        pageBreakBefore: { default: null },
         styleId: { default: null },
         // Identity attrs — must NOT be copied when a new block is
         // synthesized from a sibling, otherwise downstream tracking
@@ -24,6 +25,16 @@ const schema = new Schema({
       },
     },
     text: {},
+    table: {
+      content: "tableRow+",
+      group: "block",
+    },
+    tableRow: {
+      content: "tableCell+",
+    },
+    tableCell: {
+      content: "paragraph+",
+    },
   },
   marks: {
     insertion: {
@@ -89,7 +100,9 @@ type BlockSpec =
   | {
       text: string;
       listMarker?: string;
+      pageBreakBefore?: boolean;
       paraId?: string;
+      styleId?: string;
       textId?: string;
     };
 
@@ -106,7 +119,9 @@ const makeState = (blocks: BlockSpec[]) =>
             ? {}
             : {
                 listMarker: block.listMarker ?? null,
+                pageBreakBefore: block.pageBreakBefore ?? null,
                 paraId: block.paraId ?? null,
+                styleId: block.styleId ?? null,
                 textId: block.textId ?? null,
               };
         return schema.node(
@@ -184,18 +199,51 @@ describe("Folio AI edit operations", () => {
 
     expect(snapshot.blocks).toEqual([
       {
-        id: "b-0001",
+        id: "seq-0001",
         kind: "paragraph",
         text: "Opening paragraph.",
       },
       {
-        id: "b-0002",
+        id: "seq-0002",
         kind: "listItem",
         displayLabel: "7.5.1",
         text: "Payment one.",
       },
     ]);
-    expect(snapshot.anchors["b-0001"]?.textHash).toMatch(/^h/u);
+    expect(snapshot.anchors["seq-0001"]?.textHash).toMatch(/^h/u);
+  });
+
+  test("snapshot uses sequential fallback ids for duplicate paraIds", () => {
+    const state = makeState([
+      { text: "First paragraph.", paraId: "AAAA0001" },
+      { text: "Second paragraph.", paraId: "AAAA0001" },
+      { text: "Third paragraph.", paraId: "BBBB0002" },
+    ]);
+
+    const snapshot = createFolioAIEditSnapshot(state.doc);
+
+    expect(snapshot.blocks.map((block) => block.id)).toEqual([
+      "AAAA0001",
+      "seq-0002",
+      "BBBB0002",
+    ]);
+    expect(snapshot.anchors["AAAA0001"]?.text).toBe("First paragraph.");
+    expect(snapshot.anchors["seq-0002"]?.text).toBe("Second paragraph.");
+    expect(snapshot.anchors["BBBB0002"]?.text).toBe("Third paragraph.");
+  });
+
+  test("captures paragraph style ids in the AI-facing block snapshot", () => {
+    const state = makeState([
+      { styleId: "ClauseHeading1", text: "Payment terms" },
+    ]);
+
+    const snapshot = createFolioAIEditSnapshot(state.doc);
+
+    expect(snapshot.blocks[0]).toMatchObject({
+      id: "seq-0001",
+      styleId: "ClauseHeading1",
+      text: "Payment terms",
+    });
   });
 
   test("captures formatted preview runs in the AI-facing block snapshot", () => {
@@ -268,7 +316,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "shall",
           replace: "must",
           comment: { text: "Modernised obligation wording." },
@@ -308,7 +356,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "shall",
           replace: "must",
         },
@@ -335,7 +383,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "insertAfterBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           text: "Payment two.",
           inheritFormatting: true,
         },
@@ -365,7 +413,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "Payment",
           replace: "Charge",
         },
@@ -400,7 +448,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0002",
+          blockId: "seq-0002",
           find: "Target",
           replace: "Renamed",
         },
@@ -411,6 +459,111 @@ describe("Folio AI edit operations", () => {
     expect(result.applied).toHaveLength(1);
     expect(result.skipped).toEqual([]);
     expect(view.state.doc.child(2).textContent).toBe("Renamed paragraph.");
+  });
+
+  test("paraId-anchored op resolves the right block when a same-text duplicate appears before it", () => {
+    // Reproduces the chatgpt-codex review concern on #473: with
+    // hash+ordinal-only lookup, a duplicate of the snapshot block's
+    // text inserted BEFORE the target between snapshot and apply
+    // would steal the ordinal and the op would mutate the wrong
+    // block. The paraId-direct path keeps the lookup pinned to the
+    // originally-referenced paragraph.
+    const originalState = makeState([
+      { text: "Other paragraph.", paraId: "10000000" },
+      { text: "Payment.", paraId: "AAAA0001" },
+    ]);
+    const snapshot = createFolioAIEditSnapshot(originalState.doc);
+    // Live doc has a NEW paragraph with the same text "Payment."
+    // inserted BEFORE the original target. Hash+ordinal would now
+    // bucket [insertedDup, originalTarget] under the same hash and
+    // pick index 0 (the duplicate), mutating the wrong block.
+    const view = makeView(
+      makeState([
+        { text: "Other paragraph.", paraId: "10000000" },
+        { text: "Payment.", paraId: "BBBB0002" },
+        { text: "Payment.", paraId: "AAAA0001" },
+      ]),
+    );
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "replaceInBlock",
+          blockId: "AAAA0001",
+          find: "Payment",
+          replace: "Charge",
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.applied).toHaveLength(1);
+    expect(result.skipped).toEqual([]);
+    // The BBBB0002 block (live index 1) must stay untouched.
+    expect(view.state.doc.child(1).textContent).toBe("Payment.");
+    // The AAAA0001 block (live index 2) is the one that gets edited.
+    expect(view.state.doc.child(2).textContent).toBe("Charge.");
+  });
+
+  test("paraId-anchored op still skips when the target block changed after snapshot", () => {
+    const originalState = makeState([{ text: "Payment.", paraId: "AAAA0001" }]);
+    const snapshot = createFolioAIEditSnapshot(originalState.doc);
+    const view = makeView(
+      makeState([{ text: "Payment changed.", paraId: "AAAA0001" }]),
+    );
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "replaceInBlock",
+          blockId: "AAAA0001",
+          find: "Payment",
+          replace: "Charge",
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result).toEqual({
+      applied: [],
+      skipped: [{ id: "op-1", reason: "changedBlock" }],
+    });
+    expect(view.state.doc.child(0).textContent).toBe("Payment changed.");
+  });
+
+  test("paraId-anchored op skips when the live paraId is gone", () => {
+    const originalState = makeState([{ text: "Payment.", paraId: "AAAA0001" }]);
+    const snapshot = createFolioAIEditSnapshot(originalState.doc);
+    const view = makeView(
+      makeState([{ text: "Payment.", paraId: "BBBB0002" }]),
+    );
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "replaceInBlock",
+          blockId: "AAAA0001",
+          find: "Payment",
+          replace: "Charge",
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result).toEqual({
+      applied: [],
+      skipped: [{ id: "op-1", reason: "missingBlock" }],
+    });
+    expect(view.state.doc.child(0).textContent).toBe("Payment.");
   });
 
   test("applies multiple insertAfterBlock ops at the same position in document order", () => {
@@ -429,13 +582,13 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "insertAfterBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           text: "First inserted.",
         },
         {
           id: "op-2",
           type: "insertAfterBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           text: "Second inserted.",
         },
       ],
@@ -476,7 +629,9 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "insertAfterBlock",
-          blockId: "b-0001",
+          // Source paragraph carries `paraId: "para-source"`, so the
+          // snapshot keys it as `para-source` (paraId-anchored).
+          blockId: "para-source",
           text: "Inherited follow-up.",
           inheritFormatting: true,
         },
@@ -507,7 +662,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           text: "Now just plain text.",
           preserveFormatting: false,
         },
@@ -518,6 +673,31 @@ describe("Folio AI edit operations", () => {
     expect(result.skipped).toEqual([]);
     expect(view.state.doc.firstChild?.textContent).toBe("Now just plain text.");
     expect(view.state.doc.firstChild?.attrs["listMarker"]).toBeNull();
+  });
+
+  test("replaceBlock applies requested styleId in tracked-changes mode", () => {
+    const view = makeView(
+      makeState([{ styleId: "BodyText", text: "Intro paragraph." }]),
+    );
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "replaceBlock",
+          blockId: "seq-0001",
+          text: "Clause heading.",
+          styleId: "ClauseHeading1",
+        },
+      ],
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(result.applied[0]?.revisionIds).toHaveLength(2);
+    expect(view.state.doc.firstChild?.attrs["styleId"]).toBe("ClauseHeading1");
   });
 
   test("replaceBlock marks only diverging tokens, leaves shared runs untouched", () => {
@@ -537,7 +717,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           text: "The buyer must pay the seller within sixty days.",
         },
       ],
@@ -602,7 +782,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "must",
           replace: "should",
         },
@@ -645,7 +825,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "shall",
           replace: "must",
         },
@@ -676,7 +856,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "promptly",
           replace: "immediately",
         },
@@ -718,7 +898,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "buyer must",
           replace: "seller should",
         },
@@ -766,7 +946,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "shall",
           replace: "must",
         },
@@ -822,7 +1002,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "must",
           replace: "should",
         },
@@ -848,14 +1028,14 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceInBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           find: "Prodávající 3",
           replace: "Prodávající 3",
         },
         {
           id: "op-2",
           type: "replaceBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           text: "Prodávající 3.",
         },
       ],
@@ -894,7 +1074,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "insertAfterBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           text: "Inserted aside.",
         },
       ],
@@ -903,9 +1083,9 @@ describe("Folio AI edit operations", () => {
     expect(r1.skipped).toEqual([]);
     expect(view.state.doc.childCount).toBe(4);
 
-    // Second op references "b-0002" in the ORIGINAL snapshot
+    // Second op references "seq-0002" in the ORIGINAL snapshot
     // (which was Section 2). After the insertion above, a fresh
-    // snapshot would call Section 2 "b-0003" — but we use the
+    // snapshot would call Section 2 "seq-0003" — but we use the
     // original. The textHash lookup must find Section 2 at its
     // shifted position.
     const r2 = applyFolioAIEditOperations({
@@ -915,7 +1095,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-2",
           type: "replaceInBlock",
-          blockId: "b-0002",
+          blockId: "seq-0002",
           find: "Section 2",
           replace: "Section II",
         },
@@ -933,7 +1113,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-3",
           type: "replaceInBlock",
-          blockId: "b-0003",
+          blockId: "seq-0003",
           find: "Section 3",
           replace: "Section III",
         },
@@ -953,7 +1133,7 @@ describe("Folio AI edit operations", () => {
     // Locks in why the panel must hand the apply engine the
     // ORIGINAL snapshot the AI saw, not a freshly recomputed one:
     //
-    //   1. Block ids are sequential (b-0001, b-0002, ...). After
+    //   1. Fallback block ids are sequential (seq-0001, seq-0002, ...). After
     //      an insertAfterBlock accept, every block below shifts +1.
     //   2. The resolver looks up blocks by `textHash` (content
     //      hash), not by id position. So as long as the target
@@ -961,8 +1141,8 @@ describe("Folio AI edit operations", () => {
     //      its hash bucket is unchanged and the lookup succeeds —
     //      even if its absolute PM position moved.
     //   3. A fresh snapshot would re-number the target as a
-    //      different id (e.g. b-0003 → b-0004), and the queued
-    //      op's blockId="b-0003" would either miss or hit the
+    //      different id (e.g. seq-0003 → seq-0004), and the queued
+    //      op's blockId="seq-0003" would either miss or hit the
     //      wrong block.
     const view = makeView(
       makeState(["Alpha block.", "Bravo block.", "Charlie block."]),
@@ -979,7 +1159,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "ins-1",
           type: "insertAfterBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           text: "Inserted after Alpha.",
         },
       ],
@@ -987,8 +1167,8 @@ describe("Folio AI edit operations", () => {
     });
     expect(view.state.doc.childCount).toBe(4);
 
-    // A fresh snapshot would call Charlie "b-0004" now; the
-    // ORIGINAL snapshot still calls it "b-0003". Apply an op
+    // A fresh snapshot would call Charlie "seq-0004" now; the
+    // ORIGINAL snapshot still calls it "seq-0003". Apply an op
     // referencing the original id — must succeed against the
     // mutated doc.
     const result = applyFolioAIEditOperations({
@@ -998,7 +1178,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-charlie",
           type: "replaceInBlock",
-          blockId: "b-0003",
+          blockId: "seq-0003",
           find: "Charlie",
           replace: "Delta",
         },
@@ -1038,7 +1218,7 @@ describe("Folio AI edit operations", () => {
         {
           id: "op-1",
           type: "replaceBlock",
-          blockId: "b-0001",
+          blockId: "seq-0001",
           text: "Kupující musí zaplatit do šedesáti dnů.",
         },
       ],
@@ -1057,5 +1237,220 @@ describe("Folio AI edit operations", () => {
     expect(marksByText["Kupující musí zaplatit do "] ?? []).not.toContain(
       "deletion",
     );
+  });
+
+  test("insertAfterBlock anchored inside a table cell lands after the table, not in the cell", () => {
+    // The AI sometimes anchors an `insertAfterBlock` to a
+    // paragraph that lives inside a `tableCell` (e.g. when the
+    // last visible block before the desired insertion point is a
+    // cell line). Pre-fix, the new block would be inserted inside
+    // the cell — visually invisible and structurally wrong. The
+    // resolver now escapes outward to the enclosing `table` and
+    // places the synthesized sibling adjacent to the table.
+    const cellParagraph = schema.node(
+      "paragraph",
+      { listMarker: null, paraId: "cell-1", textId: null },
+      [schema.text("Cell text.")],
+    );
+    const table = schema.node("table", null, [
+      schema.node("tableRow", null, [
+        schema.node("tableCell", null, [cellParagraph]),
+      ]),
+    ]);
+    const docNode = schema.node("doc", null, [
+      schema.node(
+        "paragraph",
+        { listMarker: null, paraId: null, textId: null },
+        [schema.text("Before.")],
+      ),
+      table,
+      schema.node(
+        "paragraph",
+        { listMarker: null, paraId: null, textId: null },
+        [schema.text("After.")],
+      ),
+    ]);
+    const state = EditorState.create({ schema, doc: docNode });
+    const snapshot = createFolioAIEditSnapshot(state.doc);
+    const view = makeView(state);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertAfterBlock",
+          blockId: "cell-1",
+          text: "Inserted sibling.",
+          inheritFormatting: false,
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(result.applied).toHaveLength(1);
+
+    // Doc top-level shape: Before. | table | Inserted sibling. | After.
+    expect(view.state.doc.childCount).toBe(4);
+    expect(view.state.doc.child(0).textContent).toBe("Before.");
+    expect(view.state.doc.child(1).type.name).toBe("table");
+    expect(view.state.doc.child(2).type.name).toBe("paragraph");
+    expect(view.state.doc.child(2).textContent).toBe("Inserted sibling.");
+    expect(view.state.doc.child(3).textContent).toBe("After.");
+
+    // The cell itself must still hold only the original paragraph.
+    const liveTable = view.state.doc.child(1);
+    const liveRow = liveTable.child(0);
+    const liveCell = liveRow.child(0);
+    expect(liveCell.childCount).toBe(1);
+    expect(liveCell.child(0).textContent).toBe("Cell text.");
+  });
+
+  test("insertBeforeBlock anchored inside a table cell lands before the table, not in the cell", () => {
+    const cellParagraph = schema.node(
+      "paragraph",
+      { listMarker: null, paraId: "cell-2", textId: null },
+      [schema.text("Cell text.")],
+    );
+    const table = schema.node("table", null, [
+      schema.node("tableRow", null, [
+        schema.node("tableCell", null, [cellParagraph]),
+      ]),
+    ]);
+    const docNode = schema.node("doc", null, [
+      schema.node(
+        "paragraph",
+        { listMarker: null, paraId: null, textId: null },
+        [schema.text("Before.")],
+      ),
+      table,
+    ]);
+    const state = EditorState.create({ schema, doc: docNode });
+    const snapshot = createFolioAIEditSnapshot(state.doc);
+    const view = makeView(state);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertBeforeBlock",
+          blockId: "cell-2",
+          text: "Pre-table sibling.",
+          inheritFormatting: false,
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(view.state.doc.childCount).toBe(3);
+    expect(view.state.doc.child(0).textContent).toBe("Before.");
+    expect(view.state.doc.child(1).textContent).toBe("Pre-table sibling.");
+    expect(view.state.doc.child(2).type.name).toBe("table");
+  });
+
+  test("page-break-only inserts are skipped in tracked-changes mode", () => {
+    const view = makeView(makeState(["Anchor block."]));
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertAfterBlock",
+          blockId: "seq-0001",
+          text: "",
+          pageBreakBefore: true,
+        },
+      ],
+    });
+
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toEqual([
+      { id: "op-1", reason: "unsupportedBlock" },
+    ]);
+    expect(view.state.doc.childCount).toBe(1);
+  });
+
+  test("signature-table inserts are skipped in tracked-changes mode", () => {
+    const view = makeView(makeState(["Anchor block."]));
+    const snapshot = createFolioAIEditSnapshot(view.state.doc);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertSignatureTable",
+          blockId: "seq-0001",
+          parties: [{ name: "Buyer" }, { name: "Seller" }],
+        },
+      ],
+    });
+
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toEqual([
+      { id: "op-1", reason: "unsupportedBlock" },
+    ]);
+    expect(view.state.doc.childCount).toBe(1);
+  });
+
+  test("signature-table inserts anchored inside a table cell land after the table", () => {
+    const cellParagraph = schema.node(
+      "paragraph",
+      { listMarker: null, paraId: "cell-3", textId: null },
+      [schema.text("Cell text.")],
+    );
+    const table = schema.node("table", null, [
+      schema.node("tableRow", null, [
+        schema.node("tableCell", null, [cellParagraph]),
+      ]),
+    ]);
+    const docNode = schema.node("doc", null, [
+      schema.node(
+        "paragraph",
+        { listMarker: null, paraId: null, textId: null },
+        [schema.text("Before.")],
+      ),
+      table,
+      schema.node(
+        "paragraph",
+        { listMarker: null, paraId: null, textId: null },
+        [schema.text("After.")],
+      ),
+    ]);
+    const state = EditorState.create({ schema, doc: docNode });
+    const snapshot = createFolioAIEditSnapshot(state.doc);
+    const view = makeView(state);
+
+    const result = applyFolioAIEditOperations({
+      view,
+      snapshot,
+      operations: [
+        {
+          id: "op-1",
+          type: "insertSignatureTable",
+          blockId: "cell-3",
+          parties: [{ name: "Buyer" }, { name: "Seller" }],
+        },
+      ],
+      mode: "direct",
+    });
+
+    expect(result.skipped).toEqual([]);
+    expect(result.applied).toHaveLength(1);
+    expect(view.state.doc.childCount).toBe(4);
+    expect(view.state.doc.child(0).textContent).toBe("Before.");
+    expect(view.state.doc.child(1).type.name).toBe("table");
+    expect(view.state.doc.child(2).type.name).toBe("table");
+    expect(view.state.doc.child(2).textContent).toContain("Buyer");
+    expect(view.state.doc.child(3).textContent).toBe("After.");
   });
 });

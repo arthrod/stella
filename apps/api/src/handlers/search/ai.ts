@@ -1,5 +1,3 @@
-import type { GoogleGenerativeAIProviderOptions } from "@ai-sdk/google";
-import { valibotSchema } from "@ai-sdk/valibot";
 import { generateText, Output } from "ai";
 import { Result } from "better-result";
 import { and, eq, sql } from "drizzle-orm";
@@ -13,19 +11,19 @@ import {
   chatMessages,
   chatThreads,
   contactSearchDocuments,
+  ENTITY_KINDS,
   searchDocuments,
   workspaceSearchDocuments,
 } from "@/api/db/schema";
 import { resolveSelectedWorkspaceIds } from "@/api/handlers/search/search";
 import { aiErrorStatusBody } from "@/api/lib/ai-error";
 import type { OrgAIConfig } from "@/api/lib/ai-models";
-import {
-  getModelForRole,
-  getTemperatureForRole,
-  requireAIAvailable,
-} from "@/api/lib/ai-models";
+import { getModelForRole, requireAIAvailable } from "@/api/lib/ai-models";
+import { strictOutputSchema } from "@/api/lib/ai-output-schema";
 import { captureError } from "@/api/lib/analytics";
 import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
+import type { AuditRecorder } from "@/api/lib/audit-log";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { createSafeId } from "@/api/lib/branded-types";
 import { tSafeId, tUserId } from "@/api/lib/custom-schema";
@@ -36,19 +34,29 @@ import {
   brandPersistedEntityId,
   brandPersistedWorkspaceId,
 } from "@/api/lib/safe-id-boundaries";
+import { upsertChatThreadSearchDocument } from "@/api/lib/search/index-chat";
 import { searchGlobal } from "@/api/lib/search/index-global";
 import {
   buildSearchTsQuery,
   validateStellaSearchQuery,
 } from "@/api/lib/search/query";
-import type { GlobalSearchHit } from "@/api/lib/search/types";
-import { GLOBAL_SEARCH_RESULT_TYPES } from "@/api/lib/search/types";
+import {
+  GLOBAL_SEARCH_RESULT_TYPES,
+  type GlobalSearchHit,
+  type GlobalSearchResultType,
+} from "@/api/lib/search/types";
 
 const SEARCH_SUMMARY_RESULT_LIMIT = 5;
 const SEARCH_CONTEXT_CHARS_PER_RESULT = 3000;
 const SEARCH_CONTEXT_TOTAL_CHARS = 14_000;
 const SEARCH_REFINE_MAX_ATTEMPTS = 3;
 const SEARCH_SUMMARY_CITATION_LIMIT = 5;
+const CITABLE_SEARCH_RESULT_TYPES = [
+  "matter",
+  "contact",
+  "case-law",
+  ...ENTITY_KINDS,
+] as const satisfies readonly GlobalSearchResultType[];
 
 export const refineSearchOutputSchema = v.strictObject({
   query: v.pipe(
@@ -138,12 +146,21 @@ type SearchSummaryChatBody = Static<typeof searchSummaryChatBodySchema>;
 type SearchAIContext = {
   organizationId: SafeId<"organization">;
   orgAIConfig: OrgAIConfig | null;
+  promptCachingEnabled: boolean;
+  safeDb: SafeDb;
   scopedDb: ScopedDb;
+  userId: SafeId<"user">;
 };
 
 type SearchSummaryContext = SearchAIContext & {
   accessibleWorkspaceIds: SafeId<"workspace">[];
 };
+
+// Chat threads are searchable but are not citable summary sources:
+// a conversation is not a document to excerpt. They are dropped from
+// the AI summary context, so everything downstream sees only the
+// citable hit variants.
+type CitableSearchHit = Exclude<GlobalSearchHit, { type: "chat" }>;
 
 type SearchResultContext = {
   id: string;
@@ -152,7 +169,7 @@ type SearchResultContext = {
   type: string;
   headline: string | null;
   content: string;
-  hit: GlobalSearchHit;
+  hit: CitableSearchHit;
 };
 
 type SearchSummaryCitation = {
@@ -164,15 +181,26 @@ type SearchSummaryCitation = {
   reason: string;
 };
 
+const citableSummaryTypes = (
+  types: readonly GlobalSearchResultType[],
+): readonly GlobalSearchResultType[] => {
+  if (types.length === 0) {
+    return CITABLE_SEARCH_RESULT_TYPES;
+  }
+
+  return types.filter((type) => type !== "chat");
+};
+
 type SearchSummaryChatContext = {
   accessibleWorkspaceIds: SafeId<"workspace">[];
   organizationId: SafeId<"organization">;
   safeDb: SafeDb;
   scopedDb: ScopedDb;
   userId: SafeId<"user">;
+  recordAuditEvent: AuditRecorder;
 };
 
-const SEARCH_REFINE_SYSTEM = `You rewrite a legal workspace search request into Stella's boolean search syntax.
+const SEARCH_REFINE_SYSTEM = `You rewrite a legal workspace search request into stella's boolean search syntax.
 
 Supported syntax:
 - AND, OR, NOT must be uppercase.
@@ -214,20 +242,13 @@ const compactContent = (value: unknown): string => {
 const truncate = (text: string, maxLength: number): string =>
   text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
 
-const googleMinimalThinking = () => ({
-  google: {
-    thinkingConfig: {
-      thinkingLevel: "minimal",
-      includeThoughts: false,
-    },
-  } satisfies GoogleGenerativeAIProviderOptions,
-});
-
 type GenerateRefinedSearchQueryOptions = {
   attempt: number;
   body: RefineSearchBody;
   lastValidationError: string | null;
+  organizationId: SafeId<"organization">;
   orgAIConfig: OrgAIConfig | null;
+  promptCachingEnabled: boolean;
   stepCallbacks: ReturnType<typeof createAIAnalyticsCallbacks>["stepCallbacks"];
 };
 
@@ -251,14 +272,20 @@ const generateRefinedSearchQuery = async ({
   attempt,
   body,
   lastValidationError,
+  organizationId,
   orgAIConfig,
+  promptCachingEnabled,
   stepCallbacks,
 }: GenerateRefinedSearchQueryOptions) =>
   await Result.tryPromise({
     try: async () =>
       await generateText({
-        model: getModelForRole("fast", orgAIConfig),
-        temperature: getTemperatureForRole("fast"),
+        model: getModelForRole("fast", orgAIConfig, {
+          promptCachingEnabled,
+          scopeKey: null,
+          organizationId,
+          serviceTier: "standard",
+        }),
         system: SEARCH_REFINE_SYSTEM,
         prompt: JSON.stringify({
           attempt,
@@ -267,10 +294,9 @@ const generateRefinedSearchQuery = async ({
           previousValidationError: lastValidationError,
         }),
         output: Output.object({
-          schema: valibotSchema(refineSearchOutputSchema),
+          schema: strictOutputSchema(refineSearchOutputSchema),
         }),
         maxOutputTokens: 180,
-        providerOptions: googleMinimalThinking(),
         abortSignal: AbortSignal.timeout(20_000),
         ...stepCallbacks,
       }),
@@ -281,7 +307,10 @@ export const refineSearchQuery = async ({
   body,
   organizationId,
   orgAIConfig,
+  promptCachingEnabled,
+  safeDb,
   scopedDb,
+  userId,
 }: SearchAIContext & {
   body: RefineSearchBody;
 }) => {
@@ -291,6 +320,14 @@ export const refineSearchQuery = async ({
   }
 
   const aiAnalytics = createAIAnalyticsCallbacks({
+    usageMetering: {
+      actionType: "chat",
+      organizationId,
+      safeDb,
+      serviceTier: "standard",
+      userId,
+      workspaceId: null,
+    },
     feature: "search.refine",
     modelRole: "fast",
     orgAIConfig,
@@ -305,7 +342,9 @@ export const refineSearchQuery = async ({
       attempt,
       body,
       lastValidationError,
+      organizationId,
       orgAIConfig,
+      promptCachingEnabled,
       stepCallbacks: aiAnalytics.stepCallbacks,
     });
 
@@ -349,7 +388,7 @@ export const refineSearchQuery = async ({
     }
 
     lastValidationError =
-      "PostgreSQL rejected the generated tsquery. Use valid Stella syntax with balanced operators and searchable terms.";
+      "PostgreSQL rejected the generated tsquery. Use valid stella syntax with balanced operators and searchable terms.";
   }
 
   return status(502, { message: "Failed to improve search query" });
@@ -358,8 +397,11 @@ export const refineSearchQuery = async ({
 export const summarizeSearchResults = async ({
   body,
   organizationId,
+  userId,
   accessibleWorkspaceIds,
   orgAIConfig,
+  promptCachingEnabled,
+  safeDb,
   scopedDb,
 }: SearchSummaryContext & {
   body: SummarizeSearchBody;
@@ -383,6 +425,7 @@ export const summarizeSearchResults = async ({
     accessibleWorkspaceIds,
     filters: body,
     organizationId,
+    userId,
     selectedWorkspaceIds: resolved.ids,
     scopedDb,
   });
@@ -396,6 +439,14 @@ export const summarizeSearchResults = async ({
   }
 
   const aiAnalytics = createAIAnalyticsCallbacks({
+    usageMetering: {
+      actionType: "chat",
+      organizationId,
+      safeDb,
+      serviceTier: "standard",
+      userId,
+      workspaceId: null,
+    },
     feature: "search.summary",
     modelRole: "fast",
     orgAIConfig,
@@ -409,8 +460,12 @@ export const summarizeSearchResults = async ({
   const result = await Result.tryPromise({
     try: async () =>
       await generateText({
-        model: getModelForRole("fast", orgAIConfig),
-        temperature: getTemperatureForRole("fast"),
+        model: getModelForRole("fast", orgAIConfig, {
+          promptCachingEnabled,
+          scopeKey: null,
+          organizationId,
+          serviceTier: "standard",
+        }),
         system: SEARCH_SUMMARY_SYSTEM,
         prompt: JSON.stringify({
           locale: body.locale ?? "en",
@@ -419,10 +474,9 @@ export const summarizeSearchResults = async ({
           results: contextsResult.map(toModelSearchResultContext),
         }),
         output: Output.object({
-          schema: valibotSchema(searchSummaryOutputSchema),
+          schema: strictOutputSchema(searchSummaryOutputSchema),
         }),
         maxOutputTokens: 700,
-        providerOptions: googleMinimalThinking(),
         abortSignal: AbortSignal.timeout(30_000),
         ...aiAnalytics.stepCallbacks,
       }),
@@ -520,6 +574,7 @@ export const createSearchSummaryChatThread = async ({
   scopedDb,
   search = searchGlobal,
   userId,
+  recordAuditEvent,
 }: SearchSummaryChatContext & {
   body: SearchSummaryChatBody;
   search?: typeof searchGlobal;
@@ -538,6 +593,7 @@ export const createSearchSummaryChatThread = async ({
     accessibleWorkspaceIds,
     filters: body,
     organizationId,
+    userId,
     selectedWorkspaceIds: resolved.ids,
     scopedDb,
     search,
@@ -630,6 +686,33 @@ export const createSearchSummaryChatThread = async ({
         createdAt: new Date(now.getTime() + 1),
       },
     ]);
+
+    await recordAuditEvent(tx, [
+      {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CHAT_THREAD,
+        resourceId: threadId,
+        workspaceId: null,
+        metadata: {
+          source: "search-summary",
+          dataWorkspaceIds,
+        },
+      },
+      {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CHAT_MESSAGE,
+        resourceId: userMessageId,
+        workspaceId: null,
+        metadata: { threadId, role: "user" },
+      },
+      {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CHAT_MESSAGE,
+        resourceId: assistantMessageId,
+        workspaceId: null,
+        metadata: { threadId, role: "assistant" },
+      },
+    ]);
   });
 
   if (insertResult.isErr()) {
@@ -640,6 +723,10 @@ export const createSearchSummaryChatThread = async ({
     return status(500, { message: "Failed to create chat thread" });
   }
 
+  // Index the freshly seeded summary thread so it is findable in
+  // global search. Fire-and-forget: indexing must not fail the create.
+  upsertChatThreadSearchDocument(threadId).catch(captureError);
+
   return { threadId };
 };
 
@@ -647,6 +734,7 @@ const loadSummaryContexts = async ({
   accessibleWorkspaceIds,
   filters,
   organizationId,
+  userId,
   search = searchGlobal,
   selectedWorkspaceIds,
   scopedDb,
@@ -663,16 +751,23 @@ const loadSummaryContexts = async ({
     | "updatedTo"
   >;
   organizationId: SafeId<"organization">;
+  userId: SafeId<"user">;
   search?: typeof searchGlobal;
   selectedWorkspaceIds: readonly SafeId<"workspace">[];
   scopedDb: ScopedDb;
 }) => {
+  const types = citableSummaryTypes(filters.types);
+  if (filters.types.length > 0 && types.length === 0) {
+    return [];
+  }
+
   const searchResult = await search({
     query: filters.query,
     organizationId,
+    userId,
     accessibleWorkspaceIds,
     selectedWorkspaceIds,
-    types: filters.types,
+    types,
     editedByUserIds: filters.editedByUserIds,
     mimeTypes: filters.mimeTypes,
     updatedFrom: filters.updatedFrom,
@@ -738,7 +833,7 @@ const buildChatSummaryText = ({
 };
 
 const extractHitWorkspaceId = (
-  hit: GlobalSearchHit,
+  hit: CitableSearchHit,
 ): SafeId<"workspace"> | null => {
   if (hit.type === "case-law" || hit.type === "contact") {
     return null;
@@ -796,6 +891,12 @@ const buildSearchResultContexts = async ({
       break;
     }
 
+    // Chat threads are not citable summary sources; skip them so the
+    // remaining work narrows to the citable variants.
+    if (hit.type === "chat") {
+      continue;
+    }
+
     const content = await loadSearchHitContent({
       hit,
       organizationId,
@@ -827,7 +928,7 @@ const buildSearchResultContexts = async ({
 };
 
 type LoadSearchHitContentOptions = {
-  hit: GlobalSearchHit;
+  hit: CitableSearchHit;
   organizationId: SafeId<"organization">;
   accessibleWorkspaceIds: SafeId<"workspace">[];
   scopedDb: ScopedDb;

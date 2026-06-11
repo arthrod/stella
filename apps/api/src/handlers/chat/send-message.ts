@@ -1,5 +1,5 @@
 import { panic, Result } from "better-result";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Static } from "elysia";
 
 import { CHAT_SEND_MODE } from "@stll/anonymize-chat";
@@ -11,9 +11,15 @@ import { chatMessages, chatThreads } from "@/api/db/schema";
 import type { FieldContent } from "@/api/db/schema-validators";
 import { env } from "@/api/env";
 import {
+  appendAnonymizedModeHintToChatSafePrompt,
   buildChatPromptCacheKey,
   buildChatSystemPromptParts,
+  extendChatUntrustedPromptSuffix,
   extractTitle,
+} from "@/api/handlers/chat/chat-prompt";
+import type {
+  ChatSafePrompt,
+  ChatUntrustedPromptSuffix,
 } from "@/api/handlers/chat/chat-prompt";
 import type {
   IncomingActiveDecision,
@@ -27,23 +33,32 @@ import {
   validateMessage,
 } from "@/api/handlers/chat/chat-schema";
 import { resolveChatScope } from "@/api/handlers/chat/chat-scope";
+import { compactChatMessagesForModel } from "@/api/handlers/chat/compaction";
 import {
   expandThreadDataScope,
   extractAssistantWorkspaceIds,
   extractIncomingMessageWorkspaceIds,
+  extractThreadDataWorkspaceIds,
 } from "@/api/handlers/chat/data-scope";
 import { ChatError } from "@/api/handlers/chat/errors";
+import { generateThreadTitle } from "@/api/handlers/chat/generate-thread-title";
 import { isExternalMcpToolPart } from "@/api/handlers/chat/mcp-tool-parts";
 import type { MessagePersistencePlan } from "@/api/handlers/chat/persist-message";
 import {
   planAssistantFinishPersistence,
   planMessagePersistence,
 } from "@/api/handlers/chat/persist-message";
-import { hydrateMessages, streamChat } from "@/api/handlers/chat/stream-chat";
 import {
-  buildAnonymizedSystemHint,
-  createChatThirdPartyBoundary,
-} from "@/api/handlers/chat/third-party-boundary";
+  applyChatCompactionCheckpoint,
+  markActiveChatCompactionCheckpointStale,
+  persistChatCompactionCheckpoint,
+  readLatestChatCompaction,
+  shouldInvalidateChatCompactionCheckpoint,
+} from "@/api/handlers/chat/persistent-compaction";
+import { hydrateMessages, streamChat } from "@/api/handlers/chat/stream-chat";
+import { createChatThirdPartyBoundary } from "@/api/handlers/chat/third-party-boundary";
+import { shouldMarkThreadUsedAnonymization } from "@/api/handlers/chat/thread-anonymization";
+import { shouldRefreshEmptyThreadTitle } from "@/api/handlers/chat/thread-title";
 import {
   intersectAccessibleWorkspaceIds,
   resolveToolWorkspaceIds,
@@ -67,26 +82,34 @@ import type { UploadedChatFile } from "@/api/handlers/chat/upload-files";
 import { createFileKey } from "@/api/handlers/files/utils";
 import { getDisabledNativeToolSlugs } from "@/api/handlers/mcp-connectors/catalog-metadata";
 import {
+  getModelById,
+  getModelForRole,
   requireAIAvailable,
   validateDevModelOverride,
 } from "@/api/lib/ai-models";
+import type { OrgAIConfig } from "@/api/lib/ai-models";
 import { captureError } from "@/api/lib/analytics";
+import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
+import type { AuditRecorder } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { DatabaseError, HandlerError } from "@/api/lib/errors/tagged-errors";
 import { FILE_SIZE_LIMIT_BYTES, FILE_SIZE_LIMITS } from "@/api/lib/limits";
 import { PG_ERROR } from "@/api/lib/pg-error";
 import { getS3 } from "@/api/lib/s3";
 import { brandPersistedChatMessageId } from "@/api/lib/safe-id-boundaries";
+import { upsertChatThreadSearchDocument } from "@/api/lib/search/index-chat";
 import { PDF_MIME_TYPE } from "@/api/mime-types";
+
+const CHAT_COMPACTION_CHECKPOINT_TIMEOUT_MS = 120_000;
 
 const config = {
   permissions: { chat: ["create"] },
   body: sendMessageBodySchema,
+  requiresUsage: { actionType: "chat" },
 } satisfies HandlerConfig;
-
-const MESSAGE_WINDOW = 20;
 
 const sendMessage = createSafeRootHandler(
   config,
@@ -94,6 +117,8 @@ const sendMessage = createSafeRootHandler(
     activeWorkspaceIds,
     body,
     orgAIConfig,
+    promptCachingEnabled,
+    recordAuditEvent,
     request,
     safeDb,
     scopedDb,
@@ -123,6 +148,23 @@ const sendMessage = createSafeRootHandler(
     /* eslint-enable no-body-ownership-ids/no-body-ownership-ids */
 
     const workspaceId = scope.scope === "workspace" ? scope.workspaceId : null;
+    const orgSettingsForChat = yield* Result.await(
+      safeDb((tx) =>
+        tx.query.organizationSettings.findFirst({
+          where: {
+            organizationId: { eq: session.activeOrganizationId },
+          },
+          columns: {
+            practiceJurisdictions: true,
+            nativeToolOverrides: true,
+          },
+        }),
+      ),
+    );
+    const disabledNativeToolSlugs = getDisabledNativeToolSlugs({
+      practiceJurisdictions: orgSettingsForChat?.practiceJurisdictions ?? [],
+      nativeToolOverrides: orgSettingsForChat?.nativeToolOverrides ?? {},
+    });
 
     // The body's contextMatterIds is the AI's "draw-from" set —
     // distinct from the chat's own scope (workspaceId/global). It
@@ -143,6 +185,14 @@ const sendMessage = createSafeRootHandler(
     }
 
     const refRegistry = createChatRefRegistry();
+    const validationThreadState = yield* Result.await(
+      readThreadValidationState({
+        safeDb,
+        threadId: body.threadId,
+        userId: user.id,
+        workspaceId,
+      }),
+    );
     const validationExternalMcpTools = messageNeedsExternalMcpValidation(
       body.message,
     )
@@ -159,15 +209,15 @@ const sendMessage = createSafeRootHandler(
     // then rebuild the tools with the narrowed `effective` set
     // before streaming. This lets the picker's scope actually
     // govern tool authorization rather than just being persisted.
-    // Validation tools must include every tool that COULD have
-    // been called in this thread's history, otherwise valibot
-    // rejects past tool messages. Use the broadest set (always
-    // include the active-DOCX-edit tool).
+    // Validation tools include the broadest workspace surface, but
+    // still honor thread/org gates for tools whose presence is an
+    // explicit user or administrator opt-in.
     const validationTools = getChatTools({
       organizationId: session.activeOrganizationId,
       refRegistry,
       safeDb,
       scopedDb,
+      threadId: body.threadId,
       userId: user.id,
       // Schema validation runs against the user's full accessible
       // set; per-tool scope checks happen at execute time below.
@@ -176,7 +226,9 @@ const sendMessage = createSafeRootHandler(
         accessibleWorkspaceIds,
       }),
       hasActiveFileChat: true,
+      webSearchEnabled: validationThreadState.webSearchEnabled,
       externalTools: validationExternalMcpTools?.tools,
+      disabledNativeToolSlugs,
     });
 
     const validatedMessageResult = await validateMessage({
@@ -196,6 +248,7 @@ const sendMessage = createSafeRootHandler(
       loadThread({
         initialContextMatterIds: requestedContextMatterIds,
         organizationId: session.activeOrganizationId,
+        recordAuditEvent,
         safeDb,
         threadId: body.threadId,
         title: extractTitle(validatedMessage.message.parts),
@@ -220,18 +273,31 @@ const sendMessage = createSafeRootHandler(
     });
     if (
       thread.type === "existing" &&
-      !contextMatterIdsEqual(
+      !workspaceIdsEqual(
         thread.data.contextMatterIds,
         effectiveContextMatterIds,
       )
     ) {
       yield* Result.await(
-        safeDb((tx) =>
-          tx
+        safeDb(async (tx) => {
+          await tx
             .update(chatThreads)
             .set({ contextMatterIds: effectiveContextMatterIds })
-            .where(eq(chatThreads.id, body.threadId)),
-        ),
+            .where(eq(chatThreads.id, body.threadId));
+
+          await recordAuditEvent(tx, {
+            action: AUDIT_ACTION.UPDATE,
+            resourceType: AUDIT_RESOURCE_TYPE.CHAT_THREAD,
+            resourceId: body.threadId,
+            workspaceId,
+            changes: {
+              contextMatterIds: {
+                old: [...thread.data.contextMatterIds],
+                new: [...effectiveContextMatterIds],
+              },
+            },
+          });
+        }),
       );
     }
 
@@ -246,6 +312,7 @@ const sendMessage = createSafeRootHandler(
     const uploadResult = yield* Result.await(
       uploadMessageFilesWithRollback({
         message: validatedMessage.message,
+        recordAuditEvent,
         safeDb,
         threadId: thread.data.id,
         threadState: thread,
@@ -258,18 +325,105 @@ const sendMessage = createSafeRootHandler(
       message: uploadResult.message,
     });
 
+    let messagesForPersistence = thread.data.messages;
+    let deleteMessageIdsBeforeLatest: SafeId<"chatMessage">[] = [];
+    if (body.truncateAfterMessageId !== undefined) {
+      if (parsedMessage.message.id !== body.truncateAfterMessageId) {
+        return Result.err(
+          new HandlerError({
+            status: 400,
+            message: "Truncation target must match the incoming message",
+          }),
+        );
+      }
+
+      const truncateIndex = thread.data.messages.findIndex(
+        (message) => message.id === body.truncateAfterMessageId,
+      );
+      if (truncateIndex === -1) {
+        return Result.err(
+          new HandlerError({
+            status: 400,
+            message: "Truncation target was not found in the chat thread",
+          }),
+        );
+      }
+
+      messagesForPersistence = thread.data.messages.slice(0, truncateIndex + 1);
+      deleteMessageIdsBeforeLatest = thread.data.messages
+        .slice(truncateIndex + 1)
+        .map((message) => message.id);
+    }
+
     const latestMessagePlan = planMessagePersistence({
       message: parsedMessage.message,
-      storedMessages: thread.data.messages,
+      storedMessages: messagesForPersistence,
+    });
+    if (
+      body.truncateAfterMessageId !== undefined &&
+      latestMessagePlan.persistencePlan.type !== "update"
+    ) {
+      return Result.err(
+        new HandlerError({
+          status: 400,
+          message: "Truncation requires updating an existing message",
+        }),
+      );
+    }
+
+    const recomputedDataWorkspaceIds =
+      body.truncateAfterMessageId !== undefined
+        ? recomputeThreadDataScope({
+            accessibleSet,
+            baseWorkspaceId: workspaceId,
+            messages: latestMessagePlan.messages,
+          })
+        : null;
+
+    const messagesForContextInput = await selectMessagesForContextInput({
+      messages: latestMessagePlan.messages,
+      safeDb,
+      skipCheckpoint: body.truncateAfterMessageId !== undefined,
+      threadId: body.threadId,
     });
 
-    const messageWindow = latestMessagePlan.messages.slice(-MESSAGE_WINDOW);
+    const messagesForContextResult = await compactMessagesForContext({
+      abortSignal: request.signal,
+      boundary: thirdPartyBoundary,
+      devModelId: body.devModelId,
+      messages: messagesForContextInput,
+      organizationId: session.activeOrganizationId,
+      orgAIConfig,
+      safeDb,
+      threadId: body.threadId,
+      userId: user.id,
+      workspaceId,
+    });
+    if (Result.isError(messagesForContextResult)) {
+      const rollbackResult = await rollbackUnpersistedChatSideEffects({
+        recordAuditEvent,
+        safeDb,
+        threadId: body.threadId,
+        threadState: thread,
+        uploadedFiles: uploadResult.uploadedFiles,
+        userId: user.id,
+      });
+      if (Result.isError(rollbackResult)) {
+        captureError(messagesForContextResult.error, {
+          threadId: body.threadId,
+        });
+        return yield* Result.err(rollbackResult.error);
+      }
+
+      return yield* Result.err(messagesForContextResult.error);
+    }
+
     const chatContextResult = await prepareChatContext({
       activeDecision: body.activeDecision,
       activeExternal: body.activeExternal,
       activeFile: body.activeFile,
       contextMatterIds: effectiveContextMatterIds,
-      messageWindow,
+      messageWindow: messagesForContextResult.value,
       organizationId: session.activeOrganizationId,
       safeDb,
       sendMode: body.sendMode,
@@ -280,6 +434,7 @@ const sendMessage = createSafeRootHandler(
     });
     if (Result.isError(chatContextResult)) {
       const rollbackResult = await rollbackUnpersistedChatSideEffects({
+        recordAuditEvent,
         safeDb,
         threadId: body.threadId,
         threadState: thread,
@@ -295,13 +450,11 @@ const sendMessage = createSafeRootHandler(
     }
     const chatContext = chatContextResult.value;
 
-    // Widen the thread's data scope BEFORE persisting the incoming
-    // message so any workspace IDs it embeds are recorded on the
-    // thread row. User messages can embed entity/workspace mentions;
-    // assistant updates can embed client-executed tool outputs such
-    // as create-document results. Without this, a global thread
-    // could store workspace-scoped content while its data scope
-    // remains stale.
+    // Keep the thread's data scope aligned with the messages being
+    // stored. Normal sends append newly observed workspace IDs
+    // before persisting. Replay truncation recomputes the exact
+    // retained scope and writes it in the same transaction as the
+    // replay update below.
     //
     // Intersect with `accessibleWorkspaceIds` first: an unknown ID
     // (model hallucination, copy-pasted UUID from elsewhere) added
@@ -312,22 +465,39 @@ const sendMessage = createSafeRootHandler(
       mentions: parsedMessage.mentions,
       message: parsedMessage.message,
     }).filter((id) => accessibleSet.has(id));
-    const dataScopeAfterIncomingMessage = yield* Result.await(
-      expandThreadDataScope({
-        currentDataWorkspaceIds: thread.data.dataWorkspaceIds,
-        newWorkspaceIds: incomingMessageWorkspaceIds,
-        safeDb,
-        threadId: body.threadId,
-      }),
-    );
+    let dataScopeAfterIncomingMessage: SafeId<"workspace">[];
+    if (recomputedDataWorkspaceIds !== null) {
+      dataScopeAfterIncomingMessage = recomputedDataWorkspaceIds;
+    } else {
+      dataScopeAfterIncomingMessage = yield* Result.await(
+        expandThreadDataScope({
+          currentDataWorkspaceIds: thread.data.dataWorkspaceIds,
+          newWorkspaceIds: incomingMessageWorkspaceIds,
+          recordAuditEvent,
+          safeDb,
+          threadId: body.threadId,
+          threadWorkspaceId: workspaceId,
+        }),
+      );
+    }
 
     yield* Result.await(
       persistMessage({
+        acceptedSendMode: body.sendMode,
+        recordAuditEvent,
         safeDb,
         threadId: body.threadId,
         userId: user.id,
         workspaceId,
         persistencePlan: latestMessagePlan.persistencePlan,
+        deleteMessageIds: deleteMessageIdsBeforeLatest,
+        dataWorkspaceIdsChange:
+          recomputedDataWorkspaceIds === null
+            ? undefined
+            : {
+                oldDataWorkspaceIds: thread.data.dataWorkspaceIds,
+                newDataWorkspaceIds: recomputedDataWorkspaceIds,
+              },
       }),
     );
 
@@ -335,23 +505,6 @@ const sendMessage = createSafeRootHandler(
       organizationId: session.activeOrganizationId,
       safeDb,
       userId: user.id,
-    });
-    const orgSettingsForChat = yield* Result.await(
-      safeDb((tx) =>
-        tx.query.organizationSettings.findFirst({
-          where: {
-            organizationId: { eq: session.activeOrganizationId },
-          },
-          columns: {
-            practiceJurisdictions: true,
-            nativeToolOverrides: true,
-          },
-        }),
-      ),
-    );
-    const disabledNativeToolSlugs = getDisabledNativeToolSlugs({
-      practiceJurisdictions: orgSettingsForChat?.practiceJurisdictions ?? [],
-      nativeToolOverrides: orgSettingsForChat?.nativeToolOverrides ?? {},
     });
     // Streaming tools mirror the surface the user is on: only the
     // DOCX file-overlay client knows how to satisfy
@@ -364,12 +517,15 @@ const sendMessage = createSafeRootHandler(
       refRegistry,
       safeDb,
       scopedDb,
+      threadId: body.threadId,
+      excludedChatHistoryMessageIds: deleteMessageIdsBeforeLatest,
       userId: user.id,
       toolWorkspaceIds: resolveToolWorkspaceIds({
         pinnedIds: effectiveContextMatterIds,
         accessibleWorkspaceIds,
       }),
       hasActiveFileChat: body.activeFile?.supportsDocxEdits === true,
+      webSearchEnabled: thread.data.webSearchEnabled,
       externalTools: externalMcpTools.tools,
       disabledNativeToolSlugs,
       skillMetadata: chatContext.skillMetadata,
@@ -378,21 +534,20 @@ const sendMessage = createSafeRootHandler(
     const externalMcpSystemHint = buildExternalMcpSystemHint(
       externalMcpTools.connectors,
     );
-    const anonymizedSystemHint =
-      body.sendMode === CHAT_SEND_MODE.anonymized
-        ? buildAnonymizedSystemHint()
-        : null;
     // The "safe" half is whatever the prompt builder declared
-    // safe plus our own static anonymized-mode instructions. The
-    // external MCP catalog is organization/user-configured text, so
-    // it rides with the dynamic suffix and crosses the boundary in
+    // safe. The anonymized-mode hint is a fixed assembler-owned
+    // addition, so callers cannot brand arbitrary strings as safe.
+    // The external MCP catalog is organization/user-configured text,
+    // so it rides with the dynamic suffix and crosses the boundary in
     // anonymized mode.
-    const systemSafe = [chatContext.systemSafe, anonymizedSystemHint]
-      .filter((part): part is string => part !== null && part.length > 0)
-      .join("\n\n");
-    const systemUntrusted = [chatContext.systemUntrusted, externalMcpSystemHint]
-      .filter((part) => part.length > 0)
-      .join("\n\n");
+    const systemSafe =
+      body.sendMode === CHAT_SEND_MODE.anonymized
+        ? appendAnonymizedModeHintToChatSafePrompt(chatContext.systemSafe)
+        : chatContext.systemSafe;
+    const systemUntrusted = extendChatUntrustedPromptSuffix(
+      chatContext.systemUntrusted,
+      [externalMcpSystemHint],
+    );
     let externalMcpToolsClosed = false;
     const closeExternalMcpTools = async () => {
       if (externalMcpToolsClosed) {
@@ -466,8 +621,10 @@ const sendMessage = createSafeRootHandler(
                   const expandResult = await expandThreadDataScope({
                     currentDataWorkspaceIds: dataScopeAfterIncomingMessage,
                     newWorkspaceIds: assistantWorkspaceIds,
+                    recordAuditEvent,
                     safeDb,
                     threadId: body.threadId,
+                    threadWorkspaceId: workspaceId,
                   });
                   if (Result.isError(expandResult)) {
                     captureError(expandResult.error, {
@@ -475,9 +632,9 @@ const sendMessage = createSafeRootHandler(
                     });
                     return;
                   }
-
                   const persistResult = await persistMessage({
                     persistencePlan,
+                    recordAuditEvent,
                     safeDb,
                     threadId: body.threadId,
                     userId: user.id,
@@ -488,21 +645,69 @@ const sendMessage = createSafeRootHandler(
                     captureError(persistResult.error, {
                       threadId: body.threadId,
                     });
+                  } else {
+                    const messagesAfterAssistantPersist =
+                      applyAssistantPersistencePlan({
+                        messages: latestMessagePlan.messages,
+                        persistencePlan,
+                      });
+                    if (
+                      messagesAfterAssistantPersist !== null &&
+                      body.sendMode !== CHAT_SEND_MODE.anonymized
+                    ) {
+                      scheduleChatCompactionCheckpoint({
+                        abortSignal: AbortSignal.timeout(
+                          CHAT_COMPACTION_CHECKPOINT_TIMEOUT_MS,
+                        ),
+                        boundary: thirdPartyBoundary,
+                        devModelId: body.devModelId,
+                        messages: messagesAfterAssistantPersist,
+                        organizationId: session.activeOrganizationId,
+                        orgAIConfig,
+                        safeDb,
+                        threadId: body.threadId,
+                      });
+                    }
+
+                    if (
+                      thread.type === "created" &&
+                      body.sendMode !== CHAT_SEND_MODE.anonymized
+                    ) {
+                      void generateThreadTitle({
+                        messages: [
+                          parsedMessage.message,
+                          resolvedResponseMessage,
+                        ],
+                        organizationId: session.activeOrganizationId,
+                        orgAIConfig,
+                        promptCachingEnabled,
+                        recordAuditEvent,
+                        safeDb,
+                        threadId: body.threadId,
+                        threadWorkspaceId: workspaceId,
+                        userId: user.id,
+                      });
+                    }
                   }
                 } finally {
                   await closeExternalMcpTools();
                 }
               },
               orgAIConfig,
+              organizationId: session.activeOrganizationId,
               devModelId: body.devModelId,
               promptCacheKey: chatContext.promptCacheKey,
+              promptCachingEnabled,
               resolveAssistantTextRefs: refRegistry.resolveAssistantTextRefs,
               resolveAssistantValueRefs: refRegistry.resolveAssistantValueRefs,
+              safeDb,
               thirdPartyBoundary,
               threadId: body.threadId,
               tools: chatTools,
               systemSafe,
               systemUntrusted,
+              userId: user.id,
+              workspaceId,
             });
 
             if (!isChatStreamResponse(chatResponse)) {
@@ -530,6 +735,248 @@ const sendMessage = createSafeRootHandler(
 
 export default sendMessage;
 
+type ResolveChatCompactionModelProps = {
+  devModelId: string | undefined;
+  organizationId: SafeId<"organization">;
+  orgAIConfig: OrgAIConfig | null;
+};
+
+type CompactMessagesForContextProps = ResolveChatCompactionModelProps & {
+  abortSignal: AbortSignal;
+  boundary: ReturnType<typeof createChatThirdPartyBoundary>;
+  messages: ChatMessage[];
+  safeDb: SafeDb;
+  threadId: SafeId<"chatThread">;
+  userId: SafeId<"user">;
+  workspaceId: SafeId<"workspace"> | null;
+};
+
+type SelectMessagesForContextInputProps = {
+  messages: ChatMessage[];
+  safeDb: SafeDb;
+  skipCheckpoint: boolean;
+  threadId: SafeId<"chatThread">;
+};
+
+const selectMessagesForContextInput = async ({
+  messages,
+  safeDb,
+  skipCheckpoint,
+  threadId,
+}: SelectMessagesForContextInputProps): Promise<ChatMessage[]> => {
+  if (skipCheckpoint) {
+    return messages;
+  }
+
+  const checkpointResult = await readLatestChatCompaction({
+    safeDb,
+    threadId,
+  });
+  if (Result.isError(checkpointResult)) {
+    captureError(checkpointResult.error, {
+      threadId,
+      feature: "chat.compaction_checkpoint_read",
+    });
+    return messages;
+  }
+
+  if (checkpointResult.value === null) {
+    return messages;
+  }
+
+  return (
+    applyChatCompactionCheckpoint({
+      checkpoint: checkpointResult.value,
+      messages,
+    }) ?? messages
+  );
+};
+
+const compactMessagesForContext = async ({
+  abortSignal,
+  boundary,
+  devModelId,
+  messages,
+  organizationId,
+  orgAIConfig,
+  safeDb,
+  threadId,
+  userId,
+  workspaceId,
+}: CompactMessagesForContextProps): Promise<
+  Result<ChatMessage[], HandlerError>
+> => {
+  const modelResult = resolveChatCompactionModel({
+    devModelId,
+    organizationId,
+    orgAIConfig,
+  });
+  if (Result.isError(modelResult)) {
+    return Result.err(modelResult.error);
+  }
+
+  const aiAnalytics = createAIAnalyticsCallbacks({
+    usageMetering: {
+      actionType: "chat",
+      organizationId,
+      safeDb,
+      serviceTier: "standard",
+      userId,
+      workspaceId,
+    },
+    feature: "chat.context_compaction",
+    modelRole: "chat",
+    orgAIConfig,
+    properties: {
+      organization_id: organizationId,
+      ...(workspaceId ? { workspace_id: workspaceId } : {}),
+    },
+    sessionId: threadId,
+    traceId: Bun.randomUUIDv7(),
+  });
+
+  return await compactChatMessagesForModel({
+    abortSignal,
+    aiAnalytics,
+    boundary,
+    messages,
+    model: modelResult.value,
+    onSummaryError: (error) => {
+      captureError(error, {
+        threadId,
+        feature: "chat.compaction",
+      });
+    },
+  });
+};
+
+const resolveChatCompactionModel = ({
+  devModelId,
+  organizationId,
+  orgAIConfig,
+}: ResolveChatCompactionModelProps) =>
+  Result.try({
+    try: () =>
+      devModelId
+        ? getModelById(devModelId, orgAIConfig, {
+            organizationId,
+            promptCachingEnabled: false,
+            role: "chat",
+            scopeKey: null,
+            serviceTier: "standard",
+          })
+        : getModelForRole("chat", orgAIConfig, {
+            organizationId,
+            promptCachingEnabled: false,
+            scopeKey: null,
+            serviceTier: "standard",
+          }),
+    catch: (cause) =>
+      HandlerError.is(cause)
+        ? cause
+        : new HandlerError({
+            status: 500,
+            message: "Failed to initialize chat compaction model",
+            cause,
+          }),
+  });
+
+type ApplyAssistantPersistencePlanProps = {
+  messages: ChatMessage[];
+  persistencePlan: MessagePersistencePlan;
+};
+
+const applyAssistantPersistencePlan = ({
+  messages,
+  persistencePlan,
+}: ApplyAssistantPersistencePlanProps): ChatMessage[] | null => {
+  switch (persistencePlan.type) {
+    case "none":
+      return null;
+    case "insert":
+      return [...messages, persistencePlan.message];
+    case "update":
+      return messages.map((message) =>
+        message.id === persistencePlan.messageId
+          ? persistencePlan.message
+          : message,
+      );
+    case "replace-last-assistant":
+      return [
+        ...messages.filter(
+          (message) => message.id !== persistencePlan.deleteMessageId,
+        ),
+        persistencePlan.insertMessage,
+      ];
+    default: {
+      const exhaustive: never = persistencePlan;
+      return exhaustive;
+    }
+  }
+};
+
+type ScheduleChatCompactionCheckpointProps = ResolveChatCompactionModelProps & {
+  abortSignal: AbortSignal;
+  boundary: ReturnType<typeof createChatThirdPartyBoundary>;
+  messages: ChatMessage[];
+  safeDb: SafeDb;
+  threadId: SafeId<"chatThread">;
+};
+
+const scheduleChatCompactionCheckpoint = ({
+  abortSignal,
+  boundary,
+  devModelId,
+  messages,
+  organizationId,
+  orgAIConfig,
+  safeDb,
+  threadId,
+}: ScheduleChatCompactionCheckpointProps): void => {
+  const modelResult = resolveChatCompactionModel({
+    devModelId,
+    organizationId,
+    orgAIConfig,
+  });
+  if (Result.isError(modelResult)) {
+    captureError(modelResult.error, {
+      threadId,
+      feature: "chat.compaction_checkpoint_model",
+    });
+    return;
+  }
+
+  void persistChatCompactionCheckpoint({
+    abortSignal,
+    boundary,
+    messages,
+    model: modelResult.value,
+    onSummaryError: (error) => {
+      captureError(error, {
+        threadId,
+        feature: "chat.compaction_checkpoint_summary",
+      });
+    },
+    safeDb,
+    threadId,
+  })
+    .then((result) => {
+      if (Result.isError(result)) {
+        captureError(result.error, {
+          threadId,
+          feature: "chat.compaction_checkpoint_persist",
+        });
+      }
+      return undefined;
+    })
+    .catch((error: unknown) => {
+      captureError(error, {
+        threadId,
+        feature: "chat.compaction_checkpoint_persist",
+      });
+    });
+};
+
 const isChatStreamResponse = (response: Response): boolean => {
   const contentType = response.headers.get("content-type");
   return contentType !== null && contentType.includes("text/event-stream");
@@ -546,10 +993,64 @@ const messageNeedsExternalMcpValidation = (
   return parts.some(isExternalMcpToolPart);
 };
 
+type ReadThreadValidationStateProps = {
+  safeDb: SafeDb;
+  threadId: SafeId<"chatThread">;
+  userId: SafeId<"user">;
+  workspaceId: SafeId<"workspace"> | null;
+};
+
+type ThreadValidationState = {
+  webSearchEnabled: boolean;
+};
+
+const readThreadValidationState = async ({
+  safeDb,
+  threadId,
+  userId,
+  workspaceId,
+}: ReadThreadValidationStateProps): Promise<
+  Result<ThreadValidationState, HandlerError<400> | SafeDbError>
+> =>
+  await Result.gen(async function* () {
+    const thread = yield* Result.await(
+      safeDb((tx) =>
+        tx.query.chatThreads.findFirst({
+          where: {
+            id: { eq: threadId },
+            userId: { eq: userId },
+          },
+          columns: {
+            workspaceId: true,
+            webSearchEnabled: true,
+          },
+        }),
+      ),
+    );
+
+    if (!thread) {
+      return Result.ok({ webSearchEnabled: false });
+    }
+
+    const persistedWorkspaceId = thread.workspaceId ?? null;
+    if (persistedWorkspaceId !== workspaceId) {
+      return Result.err(
+        new HandlerError({
+          status: 400,
+          message: "Chat thread scope does not match request",
+        }),
+      );
+    }
+
+    return Result.ok({ webSearchEnabled: thread.webSearchEnabled });
+  });
+
 type ThreadRecord = {
   id: SafeId<"chatThread">;
+  workspaceId: SafeId<"workspace"> | null;
   contextMatterIds: SafeId<"workspace">[];
   dataWorkspaceIds: SafeId<"workspace">[];
+  webSearchEnabled: boolean;
   messages: {
     id: SafeId<"chatMessage">;
     role: ChatMessage["role"];
@@ -560,6 +1061,7 @@ type ThreadRecord = {
 type LoadThreadProps = {
   initialContextMatterIds: SafeId<"workspace">[];
   organizationId: SafeId<"organization">;
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   threadId: SafeId<"chatThread">;
   title: string;
@@ -580,6 +1082,7 @@ type LoadThreadResult =
 const loadThread = async ({
   initialContextMatterIds,
   organizationId,
+  recordAuditEvent,
   safeDb,
   threadId,
   title,
@@ -596,9 +1099,11 @@ const loadThread = async ({
     // clear 400 instead of a constraint violation 500.
     type ExistingThreadRow = {
       id: SafeId<"chatThread">;
+      title: string;
       workspaceId: SafeId<"workspace"> | null;
       contextMatterIds: SafeId<"workspace">[];
       dataWorkspaceIds: SafeId<"workspace">[];
+      webSearchEnabled: boolean;
       messages: ThreadRecord["messages"];
     };
 
@@ -611,9 +1116,11 @@ const loadThread = async ({
           },
           columns: {
             id: true,
+            title: true,
             workspaceId: true,
             contextMatterIds: true,
             dataWorkspaceIds: true,
+            webSearchEnabled: true,
           },
           with: {
             messages: {
@@ -644,8 +1151,10 @@ const loadThread = async ({
         type: "existing",
         data: {
           id: existing.id,
+          workspaceId: existing.workspaceId,
           contextMatterIds: existing.contextMatterIds,
           dataWorkspaceIds: existing.dataWorkspaceIds,
+          webSearchEnabled: existing.webSearchEnabled,
           messages: existing.messages,
         },
       });
@@ -653,15 +1162,44 @@ const loadThread = async ({
 
     const thread = yield* Result.await(lookup());
     if (thread) {
-      return buildExisting(thread);
+      const existingResult = buildExisting(thread);
+      if (Result.isError(existingResult)) {
+        return Result.err(existingResult.error);
+      }
+      if (
+        shouldRefreshEmptyThreadTitle({
+          messageCount: thread.messages.length,
+          title: thread.title,
+        })
+      ) {
+        yield* Result.await(
+          safeDb(async (tx) => {
+            await tx
+              .update(chatThreads)
+              .set({ title })
+              .where(eq(chatThreads.id, threadId));
+
+            await recordAuditEvent(tx, {
+              action: AUDIT_ACTION.UPDATE,
+              resourceType: AUDIT_RESOURCE_TYPE.CHAT_THREAD,
+              resourceId: threadId,
+              workspaceId,
+              changes: {
+                title: { old: thread.title, new: title },
+              },
+            });
+          }),
+        );
+      }
+      return Result.ok(existingResult.value);
     }
 
     const initialDataWorkspaceIds: SafeId<"workspace">[] = workspaceId
       ? [workspaceId]
       : [];
 
-    const insertResult = await safeDb((tx) =>
-      tx.insert(chatThreads).values({
+    const insertResult = await safeDb(async (tx) => {
+      await tx.insert(chatThreads).values({
         id: threadId,
         organizationId,
         title,
@@ -674,8 +1212,16 @@ const loadThread = async ({
         // this set via expandThreadDataScope when they reference
         // workspace assets (mentions, source-document parts).
         dataWorkspaceIds: initialDataWorkspaceIds,
-      }),
-    );
+      });
+
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CHAT_THREAD,
+        resourceId: threadId,
+        workspaceId,
+        metadata: { title },
+      });
+    });
     if (Result.isError(insertResult)) {
       if (
         !DatabaseError.is(insertResult.error) ||
@@ -713,8 +1259,10 @@ const loadThread = async ({
       type: "created",
       data: {
         id: threadId,
+        workspaceId,
         contextMatterIds: initialContextMatterIds,
         dataWorkspaceIds: initialDataWorkspaceIds,
+        webSearchEnabled: false,
         messages: [],
       },
     });
@@ -722,6 +1270,7 @@ const loadThread = async ({
 
 type UploadMessageFilesWithRollbackProps = {
   message: ChatMessage;
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   threadId: SafeId<"chatThread">;
   threadState: LoadThreadResult;
@@ -738,6 +1287,7 @@ type UploadMessageFilesWithRollbackResult = Result<
 
 const uploadMessageFilesWithRollback = async ({
   message,
+  recordAuditEvent,
   safeDb,
   threadId,
   threadState,
@@ -745,9 +1295,11 @@ const uploadMessageFilesWithRollback = async ({
 }: UploadMessageFilesWithRollbackProps): Promise<UploadMessageFilesWithRollbackResult> => {
   const uploadResult = await uploadMessageFiles({
     message,
+    recordAuditEvent,
     safeDb,
     threadId,
     userId,
+    workspaceId: threadState.data.workspaceId,
   });
 
   if (Result.isOk(uploadResult)) {
@@ -759,6 +1311,7 @@ const uploadMessageFilesWithRollback = async ({
   }
 
   const rollbackResult = await rollbackUnpersistedChatSideEffects({
+    recordAuditEvent,
     safeDb,
     threadId,
     threadState,
@@ -775,12 +1328,14 @@ const uploadMessageFilesWithRollback = async ({
 };
 
 const rollbackUnpersistedChatSideEffects = async ({
+  recordAuditEvent,
   safeDb,
   threadId,
   threadState,
   uploadedFiles,
   userId,
 }: {
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   threadId: SafeId<"chatThread">;
   threadState: LoadThreadResult;
@@ -789,9 +1344,11 @@ const rollbackUnpersistedChatSideEffects = async ({
 }): Promise<Result<void, HandlerError<500> | SafeDbError>> => {
   const fileRollbackResult = await deleteUploadedChatFiles({
     files: uploadedFiles,
+    recordAuditEvent,
     safeDb,
     threadId,
     userId,
+    workspaceId: threadState.data.workspaceId,
   });
   if (Result.isError(fileRollbackResult)) {
     return fileRollbackResult;
@@ -801,9 +1358,17 @@ const rollbackUnpersistedChatSideEffects = async ({
     return Result.ok();
   }
 
-  const threadRollbackResult = await safeDb((tx) =>
-    tx.delete(chatThreads).where(eq(chatThreads.id, threadId)),
-  );
+  const threadRollbackResult = await safeDb(async (tx) => {
+    await tx.delete(chatThreads).where(eq(chatThreads.id, threadId));
+
+    await recordAuditEvent(tx, {
+      action: AUDIT_ACTION.DELETE,
+      resourceType: AUDIT_RESOURCE_TYPE.CHAT_THREAD,
+      resourceId: threadId,
+      workspaceId: threadState.data.workspaceId,
+      metadata: { reason: "rollback_unpersisted_chat_side_effects" },
+    });
+  });
 
   return threadRollbackResult.andThen(() => Result.ok());
 };
@@ -830,14 +1395,14 @@ type PrepareChatContextResult = Result<
     /**
      * Server-built scaffold. Safe to send to the LLM verbatim.
      */
-    systemSafe: string;
+    systemSafe: ChatSafePrompt;
     /**
      * Dynamic user-supplied context (active file body, decision
      * text, external source, matter labels). Pass through the
      * boundary in anonymized mode before concatenating with
      * `systemSafe`.
      */
-    systemUntrusted: string;
+    systemUntrusted: ChatUntrustedPromptSuffix;
     skillMetadata: readonly SkillMetadata[];
   },
   HandlerError<422 | 500> | SafeDbError
@@ -1004,7 +1569,7 @@ const attachActivePdfWhenExtractionIsEmpty = async ({
         ...latestUserMessage.parts,
         {
           type: "text",
-          text: `The active file "${activePdf.fileName}" is attached directly as a PDF because Stella has no extracted text for it. Use the attached PDF itself for this question.`,
+          text: `The active file "${activePdf.fileName}" is attached directly as a PDF because stella has no extracted text for it. Use the attached PDF itself for this question.`,
         },
         createRawChatFilePart({
           bytes: activePdf.bytes,
@@ -1131,7 +1696,9 @@ const getPdfFileRefForModel = (
 };
 
 type InsertMessagesProps = {
+  acceptedSendMode: ChatSendMode | null;
   messages: ChatMessage[];
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   threadId: SafeId<"chatThread">;
   userId: SafeId<"user">;
@@ -1195,7 +1762,9 @@ const hydrateAssistantMessageRefs = ({
 };
 
 const insertMessages = async ({
+  acceptedSendMode,
   messages,
+  recordAuditEvent,
   safeDb,
   threadId,
   userId,
@@ -1221,31 +1790,76 @@ const insertMessages = async ({
     );
     await tx
       .update(chatThreads)
-      .set({ updatedAt: new Date() })
+      .set({
+        updatedAt: new Date(),
+        ...(shouldMarkThreadUsedAnonymization({
+          messages,
+          sendMode: acceptedSendMode,
+        })
+          ? { usedAnonymization: true }
+          : {}),
+      })
       .where(eq(chatThreads.id, threadId));
+
+    await recordAuditEvent(
+      tx,
+      messages.map((persistedMessage) => ({
+        action: AUDIT_ACTION.CREATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CHAT_MESSAGE,
+        resourceId: brandPersistedChatMessageId(persistedMessage.id),
+        workspaceId,
+        metadata: { threadId, role: persistedMessage.role },
+      })),
+    );
   });
 
   return insertResult.andThen(() => Result.ok());
 };
 
 type PersistMessageProps = {
+  acceptedSendMode?: ChatSendMode | null;
+  recordAuditEvent: AuditRecorder;
   safeDb: SafeDb;
   threadId: SafeId<"chatThread">;
   userId: SafeId<"user">;
   workspaceId: SafeId<"workspace"> | null;
   persistencePlan: MessagePersistencePlan;
+  deleteMessageIds?: SafeId<"chatMessage">[];
+  dataWorkspaceIdsChange?:
+    | {
+        oldDataWorkspaceIds: readonly SafeId<"workspace">[];
+        newDataWorkspaceIds: SafeId<"workspace">[];
+      }
+    | undefined;
 };
 
-const persistMessage = async ({
+const persistMessage = async (props: PersistMessageProps) => {
+  const result = await runPersistMessage(props);
+  // Refresh the thread's global-search document whenever its messages
+  // actually changed. Fire-and-forget: indexing must never block or
+  // fail a chat turn.
+  if (Result.isOk(result) && props.persistencePlan.type !== "none") {
+    upsertChatThreadSearchDocument(props.threadId).catch(captureError);
+  }
+  return result;
+};
+
+const runPersistMessage = async ({
+  acceptedSendMode = null,
+  recordAuditEvent,
   safeDb,
   threadId,
   userId,
   workspaceId,
   persistencePlan,
+  deleteMessageIds = [],
+  dataWorkspaceIdsChange,
 }: PersistMessageProps) => {
   if (persistencePlan.type === "insert") {
     return await insertMessages({
+      acceptedSendMode,
       messages: [persistencePlan.message],
+      recordAuditEvent,
       safeDb,
       threadId,
       userId,
@@ -1255,6 +1869,39 @@ const persistMessage = async ({
 
   if (persistencePlan.type === "update") {
     const updateResult = await safeDb(async (tx) => {
+      if (deleteMessageIds.length > 0) {
+        await tx
+          .delete(chatMessages)
+          .where(
+            and(
+              eq(chatMessages.threadId, threadId),
+              inArray(chatMessages.id, deleteMessageIds),
+            ),
+          );
+
+        for (const deletedMessageId of deleteMessageIds) {
+          await recordAuditEvent(tx, {
+            action: AUDIT_ACTION.DELETE,
+            resourceType: AUDIT_RESOURCE_TYPE.CHAT_MESSAGE,
+            resourceId: deletedMessageId,
+            workspaceId,
+            metadata: { threadId, reason: "truncate_for_replay" },
+          });
+        }
+      }
+
+      if (
+        shouldInvalidateChatCompactionCheckpoint({
+          deletedMessageCount: deleteMessageIds.length,
+          persistencePlan,
+        })
+      ) {
+        await markActiveChatCompactionCheckpointStale({ threadId, tx });
+      }
+
+      const updatedMessageId = brandPersistedChatMessageId(
+        persistencePlan.messageId,
+      );
       await tx
         .update(chatMessages)
         .set({
@@ -1264,16 +1911,51 @@ const persistMessage = async ({
             data: persistencePlan.message.parts,
           },
         })
-        .where(
-          eq(
-            chatMessages.id,
-            brandPersistedChatMessageId(persistencePlan.messageId),
-          ),
-        );
+        .where(eq(chatMessages.id, updatedMessageId));
       await tx
         .update(chatThreads)
-        .set({ updatedAt: new Date() })
+        .set({
+          updatedAt: new Date(),
+          ...(dataWorkspaceIdsChange === undefined
+            ? {}
+            : { dataWorkspaceIds: dataWorkspaceIdsChange.newDataWorkspaceIds }),
+          ...(shouldMarkThreadUsedAnonymization({
+            messages: [persistencePlan.message],
+            sendMode: acceptedSendMode,
+          })
+            ? { usedAnonymization: true }
+            : {}),
+        })
         .where(eq(chatThreads.id, threadId));
+
+      if (
+        dataWorkspaceIdsChange !== undefined &&
+        !workspaceIdsEqual(
+          dataWorkspaceIdsChange.oldDataWorkspaceIds,
+          dataWorkspaceIdsChange.newDataWorkspaceIds,
+        )
+      ) {
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.UPDATE,
+          resourceType: AUDIT_RESOURCE_TYPE.CHAT_THREAD,
+          resourceId: threadId,
+          workspaceId,
+          changes: {
+            dataWorkspaceIds: {
+              old: [...dataWorkspaceIdsChange.oldDataWorkspaceIds],
+              new: [...dataWorkspaceIdsChange.newDataWorkspaceIds],
+            },
+          },
+        });
+      }
+
+      await recordAuditEvent(tx, {
+        action: AUDIT_ACTION.UPDATE,
+        resourceType: AUDIT_RESOURCE_TYPE.CHAT_MESSAGE,
+        resourceId: updatedMessageId,
+        workspaceId,
+        metadata: { threadId, role: persistencePlan.message.role },
+      });
     });
 
     return updateResult.andThen(() => Result.ok());
@@ -1284,24 +1966,39 @@ const persistMessage = async ({
   }
 
   return await Result.gen(async function* () {
+    const deletedMessageId = brandPersistedChatMessageId(
+      persistencePlan.deleteMessageId,
+    );
     yield* Result.await(
-      safeDb((tx) =>
-        tx
+      safeDb(async (tx) => {
+        await tx
           .delete(chatMessages)
-          .where(
-            and(
-              eq(
-                chatMessages.id,
-                brandPersistedChatMessageId(persistencePlan.deleteMessageId),
-              ),
-            ),
-          ),
-      ),
+          .where(and(eq(chatMessages.id, deletedMessageId)));
+
+        if (
+          shouldInvalidateChatCompactionCheckpoint({
+            deletedMessageCount: 1,
+            persistencePlan,
+          })
+        ) {
+          await markActiveChatCompactionCheckpointStale({ threadId, tx });
+        }
+
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.DELETE,
+          resourceType: AUDIT_RESOURCE_TYPE.CHAT_MESSAGE,
+          resourceId: deletedMessageId,
+          workspaceId,
+          metadata: { threadId, reason: "delete_and_reinsert" },
+        });
+      }),
     );
 
     yield* Result.await(
       insertMessages({
+        acceptedSendMode,
         messages: [persistencePlan.insertMessage],
+        recordAuditEvent,
         safeDb,
         threadId,
         userId,
@@ -1313,9 +2010,32 @@ const persistMessage = async ({
   });
 };
 
-const contextMatterIdsEqual = (
-  a: SafeId<"workspace">[],
-  b: SafeId<"workspace">[],
+type RecomputeThreadDataScopeProps = {
+  accessibleSet: ReadonlySet<string>;
+  baseWorkspaceId: SafeId<"workspace"> | null;
+  messages: readonly ChatMessage[];
+};
+
+const recomputeThreadDataScope = ({
+  accessibleSet,
+  baseWorkspaceId,
+  messages,
+}: RecomputeThreadDataScopeProps): SafeId<"workspace">[] => {
+  const ids = new Set<SafeId<"workspace">>();
+  if (baseWorkspaceId !== null && accessibleSet.has(baseWorkspaceId)) {
+    ids.add(baseWorkspaceId);
+  }
+  for (const id of extractThreadDataWorkspaceIds(messages)) {
+    if (accessibleSet.has(id)) {
+      ids.add(id);
+    }
+  }
+  return Array.from(ids);
+};
+
+const workspaceIdsEqual = (
+  a: readonly SafeId<"workspace">[],
+  b: readonly SafeId<"workspace">[],
 ): boolean => {
   if (a.length !== b.length) {
     return false;

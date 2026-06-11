@@ -9,8 +9,6 @@ import {
   ClockIcon,
   DownloadIcon,
   EyeIcon,
-  FolderIcon,
-  FolderOpenIcon,
   HashIcon,
   Rows3Icon,
   SparklesIcon,
@@ -39,15 +37,22 @@ import {
 import { stellaToast } from "@stll/ui/components/toast";
 import { cn } from "@stll/ui/lib/utils";
 
+import { FolderExpandToggle } from "@/components/file-tree/folder-expand-toggle";
 import Tooltip from "@/components/tooltip";
 import type { TranslationKey } from "@/i18n/types";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { apiUrl } from "@/lib/api-url";
 import { ClientOperationError } from "@/lib/errors";
-import type { ViewLayout, WorkspaceProperty, WorkspaceView } from "@/lib/types";
-import { CreateProperty } from "@/routes/_protected.workspaces/$workspaceId/-components/create-property";
+import type {
+  ViewLayout,
+  WorkspaceEntity,
+  WorkspaceProperty,
+  WorkspaceView,
+} from "@/lib/types";
+import { BulkAddColumns } from "@/routes/_protected.workspaces/$workspaceId/-components/bulk-add-columns";
 import { ExistingFileOrganizerDialog } from "@/routes/_protected.workspaces/$workspaceId/-components/existing-file-organizer-dialog";
 import { PropertyIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/property-helpers";
+import { RowActions } from "@/routes/_protected.workspaces/$workspaceId/-components/row-actions";
 import { downloadFile } from "@/routes/_protected.workspaces/$workspaceId/-components/utils";
 import { FilterChips } from "@/routes/_protected.workspaces/$workspaceId/-components/view/view-toolbar-filters";
 import { SortChips } from "@/routes/_protected.workspaces/$workspaceId/-components/view/view-toolbar-sorts";
@@ -71,20 +76,26 @@ type ViewToolbarProps = {
 };
 
 export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
-  const t = useTranslations();
   const { data: properties } = useSuspenseQuery(propertiesOptions(workspaceId));
   const updateView = useUpdateView(workspaceId);
   const { filters, sorts, hiddenProperties } = view.layout;
   const folderState = useWorkspaceStore((s) => s.folderState);
   const toggleAllFolders = useWorkspaceStore((s) => s.toggleAllFolders);
+  const selectedEntities = useTableStore((s) => s.selectedEntities[view.id]);
 
+  // Generic helper preserves the union discriminant. A bare
+  // `{ ...layout, ...partial }` would collapse to an invalid union.
+  const mergeLayout = <L extends ViewLayout>(
+    layout: L,
+    changes: Partial<L>,
+  ): L => ({
+    ...layout,
+    ...changes,
+  });
   const handleUpdate = (changes: Partial<ViewLayout>) => {
     updateView.mutate({
       viewId: view.id,
-      // SAFETY: callers pass subsets matching the current layout
-      // discriminant; TS can't verify spread preserves a union.
-      // eslint-disable-next-line typescript/no-unsafe-type-assertion
-      layout: { ...view.layout, ...changes } as ViewLayout,
+      layout: mergeLayout(view.layout, changes),
     });
   };
 
@@ -92,22 +103,10 @@ export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
     <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 py-1">
       {view.layout.type === "filesystem" && folderState.hasFolders && (
         <>
-          <Button
-            onClick={toggleAllFolders}
-            size="icon-xs"
-            title={
-              folderState.allExpanded
-                ? t("workspaces.filesystem.collapseAll")
-                : t("workspaces.filesystem.expandAll")
-            }
-            variant="ghost"
-          >
-            {folderState.allExpanded ? (
-              <FolderOpenIcon className="size-3.5" />
-            ) : (
-              <FolderIcon className="size-3.5" />
-            )}
-          </Button>
+          <FolderExpandToggle
+            allExpanded={folderState.allExpanded}
+            onToggle={toggleAllFolders}
+          />
           <span className="bg-border mx-1 h-4 w-px" />
         </>
       )}
@@ -209,9 +208,55 @@ export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
           <span className="bg-border mx-1 h-4 w-px" />
           <TableContentModeControl viewId={view.id} />
           <TableExportMenu view={view} workspaceId={workspaceId} />
-          <CreateProperty triggerVariant="labelled" workspaceId={workspaceId} />
+          <BulkAddColumns triggerVariant="labelled" workspaceId={workspaceId} />
         </>
       )}
+
+      {view.layout.type === "table" && (
+        <SelectionActions
+          selectedEntities={selectedEntities}
+          workspaceId={workspaceId}
+        />
+      )}
+    </div>
+  );
+};
+
+type SelectionActionsProps = {
+  selectedEntities: WorkspaceEntity[] | undefined;
+  workspaceId: string;
+};
+
+/**
+ * Secondary actions for the current row selection (delete, copy/move
+ * to matter, download, …). Reuses the row actions menu so the
+ * toolbar and the row context menu cannot drift apart.
+ */
+const SelectionActions = ({
+  selectedEntities,
+  workspaceId,
+}: SelectionActionsProps) => {
+  const t = useTranslations();
+  const firstSelected = selectedEntities?.at(0);
+  if (!firstSelected || selectedEntities === undefined) {
+    return null;
+  }
+
+  return (
+    <div className="ms-auto flex items-center gap-1.5">
+      <span className="text-muted-foreground text-xs">
+        {t("workspaces.views.fieldsSelected", {
+          count: selectedEntities.length,
+        })}
+      </span>
+      <RowActions
+        entity={firstSelected}
+        selectedEntities={
+          selectedEntities.length > 1 ? selectedEntities : undefined
+        }
+        triggerClassName=""
+        workspaceId={workspaceId}
+      />
     </div>
   );
 };
@@ -304,6 +349,7 @@ const TableExportMenu = ({ view, workspaceId }: TableExportMenuProps) => {
         headers: {
           "Accept-Language": locale,
         },
+        signal: AbortSignal.timeout(60_000),
       });
       if (!response.ok) {
         throw new ClientOperationError({
@@ -697,6 +743,31 @@ const TASK_DATE_OPTIONS = [
   { id: "_start-date", labelKey: "workspaces.views.timeline.startDate" },
 ] as const satisfies readonly { id: string; labelKey: TranslationKey }[];
 
+type ResolveDatePropertyLabelArgs = {
+  dateProperties: WorkspaceProperty[];
+  id: string;
+  t: (key: TranslationKey) => string;
+};
+
+const resolveDatePropertyLabel = ({
+  dateProperties,
+  id,
+  t,
+}: ResolveDatePropertyLabelArgs) => {
+  const internal = INTERNAL_DATE_OPTIONS.find((o) => o.id === id);
+  if (internal) {
+    return t(internal.labelKey);
+  }
+  const taskDate = TASK_DATE_OPTIONS.find((o) => o.id === id);
+  if (taskDate) {
+    return t(taskDate.labelKey);
+  }
+  return (
+    dateProperties.find((p) => p.id === id)?.name ??
+    t("workspaces.views.selectProperty")
+  );
+};
+
 type CalendarDatePropertyControlProps = {
   properties: WorkspaceProperty[];
   datePropertyId: string;
@@ -712,21 +783,11 @@ const CalendarDatePropertyControl = ({
 }: CalendarDatePropertyControlProps) => {
   const t = useTranslations();
   const dateProperties = properties.filter((p) => p.content.type === "date");
-
-  const resolveLabel = (id: string) => {
-    const internal = INTERNAL_DATE_OPTIONS.find((o) => o.id === id);
-    if (internal) {
-      return t(internal.labelKey);
-    }
-    const taskDate = TASK_DATE_OPTIONS.find((o) => o.id === id);
-    if (taskDate) {
-      return t(taskDate.labelKey);
-    }
-    return (
-      dateProperties.find((p) => p.id === id)?.name ??
-      t("workspaces.views.selectProperty")
-    );
-  };
+  const datePropertyLabel = resolveDatePropertyLabel({
+    dateProperties,
+    id: datePropertyId,
+    t,
+  });
 
   return (
     <span className="flex items-center gap-1 text-xs">
@@ -742,8 +803,8 @@ const CalendarDatePropertyControl = ({
         value={datePropertyId}
       >
         <SelectTrigger className="h-6 min-h-0 min-w-24 text-xs" size="sm">
-          <SelectValue placeholder={resolveLabel(datePropertyId)}>
-            {resolveLabel(datePropertyId)}
+          <SelectValue placeholder={datePropertyLabel}>
+            {datePropertyLabel}
           </SelectValue>
         </SelectTrigger>
         <SelectPopup>
@@ -898,21 +959,16 @@ const TimelineDatePropertyControl = ({
 }: TimelineDatePropertyControlProps) => {
   const t = useTranslations();
   const dateProperties = properties.filter((p) => p.content.type === "date");
-
-  const resolveLabel = (id: string) => {
-    const internal = INTERNAL_DATE_OPTIONS.find((o) => o.id === id);
-    if (internal) {
-      return t(internal.labelKey);
-    }
-    const taskDate = TASK_DATE_OPTIONS.find((o) => o.id === id);
-    if (taskDate) {
-      return t(taskDate.labelKey);
-    }
-    return (
-      dateProperties.find((p) => p.id === id)?.name ??
-      t("workspaces.views.selectProperty")
-    );
-  };
+  const startDatePropertyLabel = resolveDatePropertyLabel({
+    dateProperties,
+    id: startDatePropertyId,
+    t,
+  });
+  const endDatePropertyLabel = resolveDatePropertyLabel({
+    dateProperties,
+    id: endDatePropertyId,
+    t,
+  });
 
   const dateOptions = (
     <>
@@ -945,8 +1001,8 @@ const TimelineDatePropertyControl = ({
         value={startDatePropertyId}
       >
         <SelectTrigger className="h-6 min-h-0 min-w-24 text-xs" size="sm">
-          <SelectValue placeholder={resolveLabel(startDatePropertyId)}>
-            {resolveLabel(startDatePropertyId)}
+          <SelectValue placeholder={startDatePropertyLabel}>
+            {startDatePropertyLabel}
           </SelectValue>
         </SelectTrigger>
         <SelectPopup>{dateOptions}</SelectPopup>
@@ -963,8 +1019,8 @@ const TimelineDatePropertyControl = ({
         value={endDatePropertyId}
       >
         <SelectTrigger className="h-6 min-h-0 min-w-24 text-xs" size="sm">
-          <SelectValue placeholder={resolveLabel(endDatePropertyId)}>
-            {resolveLabel(endDatePropertyId)}
+          <SelectValue placeholder={endDatePropertyLabel}>
+            {endDatePropertyLabel}
           </SelectValue>
         </SelectTrigger>
         <SelectPopup>{dateOptions}</SelectPopup>

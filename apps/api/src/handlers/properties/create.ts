@@ -1,193 +1,43 @@
-import { Value } from "@sinclair/typebox/value";
 import { Result } from "better-result";
 import { eq } from "drizzle-orm";
-import { t } from "elysia";
 
 import { properties, propertyDependencies } from "@/api/db/schema";
 import {
-  propertyContentSchema,
-  propertyContentTypeSchema,
-  propertyConditionSchema,
-} from "@/api/db/schema-validators";
-import type { PropertyContent, PropertyTool } from "@/api/db/schema-validators";
+  buildPropertyParts,
+  createPropertyBodySchema,
+} from "@/api/handlers/properties/create-schema";
+import { lockWorkspacePropertyWrites } from "@/api/handlers/properties/property-lock";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
-import {
-  AUDIT_ACTION,
-  AUDIT_RESOURCE_TYPE,
-  createAuditContext,
-  writeAuditLog,
-} from "@/api/lib/audit-log";
-import { tDefaultVarchar, tSafeId } from "@/api/lib/custom-schema";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { LIMITS } from "@/api/lib/limits";
-import { serializeAITool } from "@/api/lib/markdown/ai-tool";
-
-type SelectOption = {
-  color: string;
-  value: string;
-};
-
-const selectOptionSchema = t.Object({
-  color: t.String({ minLength: 1, maxLength: 64 }),
-  value: t.String({ minLength: 1, maxLength: 1000 }),
-});
-
-const createPropertyBodySchema = t.Object({
-  name: tDefaultVarchar,
-  contentType: propertyContentTypeSchema,
-  toolType: t.Optional(
-    t.Union([t.Literal("ai-model"), t.Literal("manual-input")]),
-  ),
-  prompt: t.Optional(t.String({ maxLength: 1000 })),
-  dependencies: t.Optional(
-    t.Array(
-      t.Object({
-        dependsOnPropertyId: tSafeId("property"),
-        condition: t.Nullable(propertyConditionSchema),
-      }),
-    ),
-  ),
-  options: t.Optional(t.Array(selectOptionSchema)),
-  // Used for select types only. `null` means "Keep empty" when the AI can't
-  // match any option; a string must equal one of the supplied option values.
-  fallback: t.Optional(t.Nullable(t.String({ minLength: 1, maxLength: 1000 }))),
-});
-
-// Re-validate options through the strict content schema before insert.
-const areSelectOptionsValid = (
-  rawOptions: SelectOption[],
-  contentType: "single-select" | "multi-select",
-): boolean =>
-  Value.Check(propertyContentSchema, {
-    version: 1,
-    type: contentType,
-    options: rawOptions,
-    fallback: null,
-  });
 
 const config = {
   permissions: { property: ["create"] },
   body: createPropertyBodySchema,
 } satisfies HandlerConfig;
 
-const createDefaultTool = ({
-  dependencies,
-  prompt,
-  toolType,
-}: {
-  dependencies: (typeof createPropertyBodySchema.static)["dependencies"];
-  prompt: string | undefined;
-  toolType: "ai-model" | "manual-input" | undefined;
-}): PropertyTool => {
-  if (toolType === "manual-input") {
-    return { version: 1, type: "manual-input" };
-  }
-
-  const serialized = serializeAITool({
-    version: 1,
-    type: "ai-model",
-    prompt: prompt?.trim() ?? "",
-    dependencies: dependencies ?? [],
-  });
-
-  return {
-    version: 1,
-    type: "ai-model",
-    prompt: serialized.prompt,
-  };
-};
-
 const createProperty = createSafeHandler(
   config,
-  async function* ({
-    safeDb,
-    session,
-    workspaceId,
-    user,
-    request,
-    server,
-    body,
-  }) {
-    let content: PropertyContent | null = null;
-    let tool: PropertyTool | null = null;
-    const defaultTool = () =>
-      createDefaultTool({
-        dependencies: body.dependencies,
-        prompt: body.prompt,
-        toolType: body.toolType,
-      });
-
-    switch (body.contentType) {
-      case "file":
-        content = { version: 1, type: "file" };
-        tool = { version: 1, type: "manual-input" };
-        break;
-      case "text":
-        content = { version: 1, type: "text" };
-        tool = defaultTool();
-        break;
-      case "single-select":
-      case "multi-select": {
-        const rawOptions = body.options ?? [];
-        if (!areSelectOptionsValid(rawOptions, body.contentType)) {
-          return Result.err(
-            new HandlerError({
-              status: 400,
-              message: "Invalid select options",
-            }),
-          );
-        }
-        const fallback = body.fallback ?? null;
-        if (
-          fallback !== null &&
-          !rawOptions.some((o) => o.value === fallback)
-        ) {
-          return Result.err(
-            new HandlerError({
-              status: 400,
-              message: "Fallback must match one of the supplied options",
-            }),
-          );
-        }
-        content = {
-          version: 1,
-          type: body.contentType,
-          options: rawOptions,
-          fallback,
-        };
-        tool = defaultTool();
-        break;
-      }
-      case "date":
-      case "int":
-        content = { version: 1, type: body.contentType };
-        tool = defaultTool();
-        break;
-      default:
-        content = null;
-    }
-
-    if (!content || !tool) {
+  async function* ({ safeDb, workspaceId, body, recordAuditEvent }) {
+    const built = buildPropertyParts(body);
+    if ("status" in built) {
       return Result.err(
-        new HandlerError({ status: 422, message: "Unsupported content type" }),
+        new HandlerError({ status: built.status, message: built.message }),
       );
     }
-
-    const dependencies =
-      tool.type === "ai-model" ? (body.dependencies ?? []) : [];
+    const { content, tool, dependencies } = built;
 
     const txResult = yield* Result.await(
       safeDb(async (tx) => {
-        // Lock rows then count to serialize concurrent adds.
-        // PG rejects FOR UPDATE with aggregate functions.
-        const lockedRows = await tx
+        await lockWorkspacePropertyWrites(tx, workspaceId);
+        const existingRows = await tx
           .select({ id: properties.id })
           .from(properties)
-          .where(eq(properties.workspaceId, workspaceId))
-          .for("update");
+          .where(eq(properties.workspaceId, workspaceId));
 
-        if (lockedRows.length >= LIMITS.propertiesCount) {
+        if (existingRows.length >= LIMITS.propertiesCount) {
           return {
             ok: false as const,
             status: 400 as const,
@@ -220,10 +70,6 @@ const createProperty = createSafeHandler(
           }
         }
 
-        // AI properties need a first computation; manual properties
-        // are ready as soon as the user types a value. Setting the
-        // status explicitly here is what keeps newly-created AI
-        // properties out of the workflow planner's skip-list.
         const initialStatus = tool.type === "ai-model" ? "stale" : "fresh";
 
         const [inserted] = await tx
@@ -256,31 +102,21 @@ const createProperty = createSafeHandler(
           );
         }
 
-        await writeAuditLog(
-          {
-            ...createAuditContext({
-              organizationId: session.activeOrganizationId,
-              workspaceId,
-              userId: user.id,
-              request,
-              server,
-            }),
-            action: AUDIT_ACTION.CREATE,
-            resourceType: AUDIT_RESOURCE_TYPE.PROPERTY,
-            resourceId: inserted.id,
-            changes: {
-              created: {
-                old: null,
-                new: {
-                  name: body.name,
-                  contentType: content.type,
-                  toolType: tool.type,
-                },
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.CREATE,
+          resourceType: AUDIT_RESOURCE_TYPE.PROPERTY,
+          resourceId: inserted.id,
+          changes: {
+            created: {
+              old: null,
+              new: {
+                name: body.name,
+                contentType: content.type,
+                toolType: tool.type,
               },
             },
           },
-          tx,
-        );
+        });
 
         return { ok: true as const, id: inserted.id };
       }),

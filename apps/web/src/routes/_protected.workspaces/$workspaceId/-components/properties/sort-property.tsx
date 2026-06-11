@@ -1,15 +1,14 @@
-import type { Column } from "@tanstack/react-table";
 import { ArrowDownIcon, ArrowUpIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
 
-import type { TableTreeNode } from "@/routes/_protected.workspaces/$workspaceId/-components/table/types";
+import type { TableColumn } from "@/routes/_protected.workspaces/$workspaceId/-components/table/types";
 
 export type SortHint = "text" | "date" | "number";
 
 type SortPropertyProps = {
-  column: Column<TableTreeNode>;
+  column: TableColumn;
   sortHint?: SortHint | undefined;
 };
 
@@ -41,7 +40,8 @@ export const SortProperty = ({ column, sortHint }: SortPropertyProps) => {
   return (
     <div className="flex flex-col p-1">
       <Button
-        className="justify-start font-semibold"
+        className="justify-start font-normal"
+        size="sm"
         disabled={disabled}
         onClick={() => {
           column.toggleSorting(false, false);
@@ -51,7 +51,8 @@ export const SortProperty = ({ column, sortHint }: SortPropertyProps) => {
         <ArrowUpIcon /> {ascLabel}
       </Button>
       <Button
-        className="justify-start font-semibold"
+        className="justify-start font-normal"
+        size="sm"
         disabled={disabled}
         onClick={() => {
           column.toggleSorting(true, false);

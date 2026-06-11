@@ -1,13 +1,13 @@
 import babel from "@rolldown/plugin-babel";
 import tailwindcss from "@tailwindcss/vite";
 import { devtools } from "@tanstack/devtools-vite";
-import { tanstackRouter } from "@tanstack/router-plugin/vite";
+import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { visualizer } from "rollup-plugin-visualizer";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 
 const APP_ROOT = import.meta.dirname;
 const ANALYZE_MODE = "analyze";
@@ -33,6 +33,23 @@ const readCommitSha = () => {
 };
 
 const APP_COMMIT_SHA = readCommitSha();
+
+// Emit a served version marker so deploy tooling can confirm which
+// frontend revision a CDN origin is actually serving (the commit is
+// otherwise only baked into the hashed JS bundles).
+const versionManifestPlugin = (): Plugin => ({
+  name: "stella-version-manifest",
+  generateBundle() {
+    this.emitFile({
+      type: "asset",
+      fileName: "version.json",
+      source: JSON.stringify({
+        commit: APP_COMMIT_SHA,
+        version: APP_VERSION,
+      }),
+    });
+  },
+});
 
 export default defineConfig(({ mode }) => {
   const shouldAnalyze = mode === ANALYZE_MODE || process.env["ANALYZE"] === "1";
@@ -95,6 +112,49 @@ export default defineConfig(({ mode }) => {
       },
     },
     optimizeDeps: {
+      // Pre-bundle deps that are only reached behind lazy/runtime imports so
+      // Vite's dep optimizer handles them during the cold pass, before any
+      // navigation. Two graphs trip this:
+      //
+      //   1. better-auth: src/lib/auth.ts statically imports the public
+      //      entrypoints, but better-auth reaches these deep subpaths only at
+      //      runtime, so the crawler misses them until a protected route runs.
+      //   2. @stll/folio: the document route lazy-loads it via
+      //      `await import("@stll/folio")` ($viewId.document.tsx), dragging in
+      //      the prosemirror family + jszip + fast-xml-parser, none of which
+      //      apps/web imports statically anywhere else.
+      //
+      // When that discovery happens mid-session, Vite kicks off a second
+      // optimize pass and forces a full-page reload ("optimized dependencies
+      // changed. reloading"), and stalls in-flight module/data requests with
+      // net::ERR_EMPTY_RESPONSE. In the e2e suite the reload/stall lands
+      // mid-test and tears the page down before the viewer paints, producing a
+      // flaky upload-docx failure (api.log is empty on these runs — the API
+      // never crashes; it is purely the dev server re-optimizing). Listing the
+      // deps here makes the optimizer finish them up front. Dev-only:
+      // production uses Rollup and ignores optimizeDeps.
+      include: [
+        "@better-auth/core/env",
+        "@better-auth/core/error",
+        "@better-auth/core/utils/error-codes",
+        "@better-auth/core/utils/string",
+        "@better-fetch/fetch",
+        "defu",
+        "nanostores",
+        "prosemirror-commands",
+        "prosemirror-dropcursor",
+        "prosemirror-gapcursor",
+        "prosemirror-history",
+        "prosemirror-keymap",
+        "prosemirror-model",
+        "prosemirror-state",
+        "prosemirror-tables",
+        "prosemirror-transform",
+        "prosemirror-view",
+        "jszip",
+        "fast-xml-parser",
+        "marked",
+      ],
       // @stll/*-wasm packages load their .wasm binaries via
       // `new URL("./foo.wasm32-wasi.wasm", import.meta.url)`. Vite's dep
       // optimizer would rewrite that URL into .vite/deps/, where the .wasm
@@ -120,11 +180,20 @@ export default defineConfig(({ mode }) => {
       ],
     },
     plugins: [
+      versionManifestPlugin(),
       devtools({ consolePiping: { enabled: false } }),
       tailwindcss(),
-      tanstackRouter({
-        target: "react",
-        autoCodeSplitting: true,
+      tanstackStart({
+        router: {
+          codeSplittingOptions: {
+            defaultBehavior: [
+              ["component"],
+              ["errorComponent"],
+              ["notFoundComponent"],
+              ["pendingComponent"],
+            ],
+          },
+        },
       }),
       react(),
       babel({

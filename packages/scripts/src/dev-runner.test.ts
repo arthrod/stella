@@ -15,9 +15,12 @@ import {
   infraPortsForOffset,
   isWorktreeCheckout,
   parseDockerComposePsJson,
+  loadEnvFile,
+  expandEnvMap,
   parseArgs,
   parseForeignPortOwners,
   portsForOffset,
+  readEnvFlag,
   requiredPortsForMode,
   resolveMainRootFromCommonDir,
   resolveOffset,
@@ -544,7 +547,11 @@ describe("worktree helpers", () => {
   });
 
   test("resolves the main root from the common git dir", () => {
-    expect(resolveMainRootFromCommonDir("/repo/.git")).toBe("/repo");
+    const mainRoot = createTempDir();
+
+    expect(resolveMainRootFromCommonDir(resolve(mainRoot, ".git"))).toBe(
+      mainRoot,
+    );
   });
 
   test("symlinks missing env files from the main worktree", () => {
@@ -621,6 +628,60 @@ describe("worktree helpers", () => {
     expect(Bun.file(resolve(worktreeRoot, "apps/api/.env")).size).toBe(
       "LOCAL=1\n".length,
     );
+  });
+});
+
+describe("env flag parsing", () => {
+  test("accepts single-quoted truthy values from env files", () => {
+    const rootDir = createTempDir();
+    const envFilePath = resolve(rootDir, ".env");
+    writeFileSync(envFilePath, "AI_DEVTOOLS_ENABLED='true'\n");
+
+    expect(
+      readEnvFlag({
+        envFilePath,
+        key: "AI_DEVTOOLS_ENABLED",
+        processEnv: {},
+      }),
+    ).toBe(true);
+  });
+
+  test("keeps hash characters inside quoted env file values", () => {
+    const rootDir = createTempDir();
+    const envFilePath = resolve(rootDir, ".env");
+    writeFileSync(envFilePath, 'AI_DEVTOOLS_ENABLED="true#still-value"\n');
+
+    expect(
+      readEnvFlag({
+        envFilePath,
+        key: "AI_DEVTOOLS_ENABLED",
+        processEnv: {},
+      }),
+    ).toBe(false);
+  });
+
+  test("strips comments from unquoted env file values", () => {
+    const rootDir = createTempDir();
+    const envFilePath = resolve(rootDir, ".env");
+    writeFileSync(envFilePath, "AI_DEVTOOLS_ENABLED=true # local devtools\n");
+
+    expect(
+      readEnvFlag({
+        envFilePath,
+        key: "AI_DEVTOOLS_ENABLED",
+        processEnv: {},
+      }),
+    ).toBe(true);
+  });
+
+  test("parses quoted process env values consistently", () => {
+    expect(
+      readEnvFlag({
+        envFilePath: resolve(createTempDir(), ".env"),
+        key: "AI_DEVTOOLS_ENABLED",
+        processEnv: { AI_DEVTOOLS_ENABLED: "'yes'" },
+      }),
+    ).toBe(true);
   });
 });
 
@@ -785,5 +846,75 @@ describe("browser behavior", () => {
         noBrowser: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe("loadEnvFile and expandEnvMap", () => {
+  test("correctly parses single and double quoted variables, and expands variables", () => {
+    const rootDir = createTempDir();
+    const envFilePath = resolve(rootDir, ".env");
+    writeFileSync(
+      envFilePath,
+      [
+        "PORT=3000",
+        'DB_USER="postgres"',
+        "DB_PASS='secret'",
+        "DATABASE_URL=postgres://$DB_USER:$DB_PASS@localhost:$PORT/stella",
+        "ESC_TEST=literal\\$value",
+      ].join("\n"),
+    );
+
+    const parsed = loadEnvFile(envFilePath);
+    expect(parsed).toEqual({
+      PORT: "3000",
+      DB_USER: "postgres",
+      DB_PASS: "secret",
+      DATABASE_URL: "postgres://$DB_USER:$DB_PASS@localhost:$PORT/stella",
+      ESC_TEST: "literal\\$value",
+    });
+
+    const expanded = expandEnvMap(parsed);
+    expect(expanded).toEqual({
+      PORT: "3000",
+      DB_USER: "postgres",
+      DB_PASS: "secret",
+      DATABASE_URL: "postgres://postgres:secret@localhost:3000/stella",
+      ESC_TEST: "literal$value",
+    });
+  });
+
+  test("handles nested dependencies recursively and respects overrides", () => {
+    const parsed = {
+      PUBLIC_URL: "$BETTER_AUTH_URL",
+      BETTER_AUTH_URL: "http://localhost:$PORT",
+      PORT: "3001",
+    };
+
+    // If PORT and BETTER_AUTH_URL are overwritten, expandEnvMap should resolve
+    // using the overwritten values.
+    const mergedWithOverrides = {
+      ...parsed,
+      PORT: "3005",
+      BETTER_AUTH_URL: "http://127.0.0.1:3005",
+    };
+
+    const expanded = expandEnvMap(mergedWithOverrides);
+    expect(expanded).toEqual({
+      PUBLIC_URL: "http://127.0.0.1:3005",
+      BETTER_AUTH_URL: "http://127.0.0.1:3005",
+      PORT: "3005",
+    });
+
+    // Test recursive expansion of nested vars:
+    const nested = {
+      A: "$B",
+      B: "$C",
+      C: "nested-value",
+    };
+    expect(expandEnvMap(nested)).toEqual({
+      A: "nested-value",
+      B: "nested-value",
+      C: "nested-value",
+    });
   });
 });

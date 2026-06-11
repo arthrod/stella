@@ -17,12 +17,16 @@ import { TextExtension } from "./core/TextExtension";
 import { BaseKeymapExtension } from "./features/BaseKeymapExtension";
 // oxlint-disable-next-line import/no-cycle
 import { BidiShortcutExtension } from "./features/BidiShortcutExtension";
+import { ContentControlWidgetsExtension } from "./features/ContentControlWidgetsExtension";
 import { DropCursorExtension } from "./features/DropCursorExtension";
+import { EmptyParagraphFormatExtension } from "./features/EmptyParagraphFormatExtension";
+import { GapCursorExtension } from "./features/GapCursorExtension";
 import { ImageDragExtension } from "./features/ImageDragExtension";
 import { ImagePasteExtension } from "./features/ImagePasteExtension";
 // Features
 import { ListExtension } from "./features/ListExtension";
 import { ParagraphChangeTrackerExtension } from "./features/ParagraphChangeTrackerExtension";
+import { ParaIdAllocatorExtension } from "./features/ParaIdAllocatorExtension";
 import { PasteStyleInlinerExtension } from "./features/PasteStyleInlinerExtension";
 import { SelectionTrackerExtension } from "./features/SelectionTrackerExtension";
 import { AllCapsExtension } from "./marks/AllCapsExtension";
@@ -33,15 +37,19 @@ import { CommentExtension } from "./marks/CommentExtension";
 import { FontFamilyExtension } from "./marks/FontFamilyExtension";
 import { FontSizeExtension } from "./marks/FontSizeExtension";
 import { FootnoteRefExtension } from "./marks/FootnoteRefExtension";
+import { HiddenTextExtension } from "./marks/HiddenTextExtension";
 import { HighlightExtension } from "./marks/HighlightExtension";
 import { HyperlinkExtension } from "./marks/HyperlinkExtension";
 import { ItalicExtension } from "./marks/ItalicExtension";
+import { RtlExtension } from "./marks/RtlExtension";
 import { RunFormattingOverrideExtension } from "./marks/RunFormattingOverrideExtension";
+import { RunShadingExtension } from "./marks/RunShadingExtension";
 import { SmallCapsExtension } from "./marks/SmallCapsExtension";
 import { StrikeExtension } from "./marks/StrikeExtension";
 import { SubscriptExtension } from "./marks/SubscriptExtension";
 import { SuperscriptExtension } from "./marks/SuperscriptExtension";
 import { TextColorExtension } from "./marks/TextColorExtension";
+import { TextEffectExtension } from "./marks/TextEffectExtension";
 import {
   EmbossExtension,
   ImprintExtension,
@@ -54,6 +62,7 @@ import {
   DeletionExtension,
 } from "./marks/TrackedChangeExtensions";
 import { UnderlineExtension } from "./marks/UnderlineExtension";
+import { BlockSdtExtension } from "./nodes/BlockSdtExtension";
 import { FieldExtension } from "./nodes/FieldExtension";
 // Nodes
 import { HardBreakExtension } from "./nodes/HardBreakExtension";
@@ -119,6 +128,10 @@ export function createStarterKit(
   add("underline", UnderlineExtension());
   add("strike", StrikeExtension());
   add("textColor", TextColorExtension());
+  // Register runShading BEFORE highlight: a later mark is the inner DOM span, so
+  // an explicit highlight (registered after) wins the background when a run has
+  // both — matching the paged painter's `run.highlight ?? run.shading`. (#722)
+  add("runShading", RunShadingExtension());
   add("highlight", HighlightExtension());
   add("fontSize", FontSizeExtension());
   add("fontFamily", FontFamilyExtension());
@@ -131,9 +144,12 @@ export function createStarterKit(
   add("characterSpacing", CharacterSpacingExtension());
   add("emboss", EmbossExtension());
   add("imprint", ImprintExtension());
+  add("hidden", HiddenTextExtension());
   add("textShadow", TextShadowExtension());
   add("emphasisMark", EmphasisMarkExtension());
   add("textOutline", TextOutlineExtension());
+  add("rtl", RtlExtension());
+  add("textEffect", TextEffectExtension());
   add("runFormattingOverride", RunFormattingOverrideExtension());
   add("comment", CommentExtension());
   add("insertion", InsertionExtension());
@@ -148,10 +164,12 @@ export function createStarterKit(
   add("imageDrag", ImageDragExtension());
   add("imagePaste", ImagePasteExtension());
   add("dropCursor", DropCursorExtension());
+  add("gapCursor", GapCursorExtension());
   add("horizontalRule", HorizontalRuleExtension());
   add("pageBreak", PageBreakExtension());
   add("field", FieldExtension());
   add("sdt", SdtExtension());
+  add("blockSdt", BlockSdtExtension());
   add("math", MathExtension());
 
   // Table (5 extensions grouped)
@@ -163,6 +181,7 @@ export function createStarterKit(
   add("pasteStyleInliner", PasteStyleInlinerExtension());
   add("list", ListExtension());
   add("baseKeymap", BaseKeymapExtension());
+  add("emptyParagraphFormat", EmptyParagraphFormatExtension());
   add(
     "selectionTracker",
     options.onSelectionChange === undefined
@@ -171,8 +190,14 @@ export function createStarterKit(
           onSelectionChange: options.onSelectionChange,
         }),
   );
+  // Register the paraId allocator BEFORE the change tracker so any
+  // freshly-allocated id is already on the paragraph when the tracker
+  // records it as changed. The plugin sets `addToHistory: false` so
+  // undo/redo doesn't trip on the allocation.
+  add("paraIdAllocator", ParaIdAllocatorExtension());
   add("paragraphChangeTracker", ParagraphChangeTrackerExtension());
   add("bidiShortcut", BidiShortcutExtension());
+  add("contentControlWidgets", ContentControlWidgetsExtension());
 
   return extensions;
 }

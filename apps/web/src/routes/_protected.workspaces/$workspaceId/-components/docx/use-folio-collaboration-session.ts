@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { HocuspocusProvider } from "@hocuspocus/provider";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
+import type * as HocuspocusProviderModule from "@hocuspocus/provider";
 import { useQueryClient } from "@tanstack/react-query";
-import { yCursorPlugin, ySyncPlugin, yUndoPlugin } from "y-prosemirror";
-import * as Y from "yjs";
+import { panic } from "better-result";
+import type * as YProseMirror from "y-prosemirror";
+import type * as Yjs from "yjs";
 
 import type { DocxEditorCollaboration } from "@stll/folio";
 
 import { env } from "@/env";
 import { api } from "@/lib/api";
 import { DOCX_MIME } from "@/lib/consts";
-import { userErrorMessage } from "@/lib/errors";
+import { FetchBoundaryError, userErrorMessage } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
 import { filesKeys } from "@/routes/_protected.workspaces/$workspaceId/-components/files/queries";
 import { entitiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
@@ -61,6 +63,35 @@ type UseFolioCollaborationSessionOptions = {
 const FOLIO_COLLAB_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 const SEED_DOCUMENT_DOWNLOAD_TIMEOUT_MS = 10_000;
 
+type CollaborationRuntimeModules = {
+  hocuspocus: typeof HocuspocusProviderModule;
+  yProseMirror: typeof YProseMirror;
+  yjs: typeof Yjs;
+};
+
+let collaborationRuntimeModulesPromise: Promise<CollaborationRuntimeModules> | null =
+  null;
+
+const loadCollaborationRuntimeModules =
+  async (): Promise<CollaborationRuntimeModules> => {
+    collaborationRuntimeModulesPromise ??= Promise.all([
+      import("@hocuspocus/provider"),
+      import("y-prosemirror"),
+      import("yjs"),
+    ])
+      .then(([hocuspocus, yProseMirror, yjs]) => ({
+        hocuspocus,
+        yProseMirror,
+        yjs,
+      }))
+      .catch((error: unknown) => {
+        collaborationRuntimeModulesPromise = null;
+        throw error;
+      });
+
+    return await collaborationRuntimeModulesPromise;
+  };
+
 const fetchSeedDocumentBuffer = async (seedDownloadUrl: string) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(
@@ -74,7 +105,12 @@ const fetchSeedDocumentBuffer = async (seedDownloadUrl: string) => {
     });
 
     if (!response.ok) {
-      throw new Error("Failed to download collaborative editing seed file.");
+      throw new FetchBoundaryError({
+        url: seedDownloadUrl,
+        status: response.status,
+        statusText: response.statusText,
+        message: "Failed to download collaborative editing seed file.",
+      });
     }
 
     return await response.arrayBuffer();
@@ -167,11 +203,20 @@ export const useFolioCollaborationSession = ({
         }
 
         if (response.data.seedDownloadUrl === null) {
-          throw new Error("Collaborative editing seed file is unavailable.");
+          panic("Collaborative editing seed file is unavailable.");
         }
 
         return await fetchSeedDocumentBuffer(response.data.seedDownloadUrl);
       })();
+
+      if (isDisposed()) {
+        await cancelOpeningSession();
+        return;
+      }
+
+      const collaborationRuntimeModules =
+        await loadCollaborationRuntimeModules();
+      const { hocuspocus, yProseMirror, yjs } = collaborationRuntimeModules;
 
       if (isDisposed()) {
         await cancelOpeningSession();
@@ -201,10 +246,10 @@ export const useFolioCollaborationSession = ({
         tokenExpiresAtMs = Date.parse(refreshed.data.tokenExpiresAt);
         return token;
       };
-      const ydoc = new Y.Doc();
-      const yXmlFragment = ydoc.get("prosemirror", Y.XmlFragment);
+      const ydoc = new yjs.Doc();
+      const yXmlFragment = ydoc.get("prosemirror", yjs.XmlFragment);
 
-      provider = new HocuspocusProvider({
+      provider = new hocuspocus.HocuspocusProvider({
         document: ydoc,
         name: response.data.roomName,
         token: async () => (await refreshTokenIfNeeded()) ?? "",
@@ -330,9 +375,9 @@ export const useFolioCollaborationSession = ({
       const collaboration = {
         awareness,
         plugins: [
-          ySyncPlugin(yXmlFragment),
-          yCursorPlugin(awareness),
-          yUndoPlugin(),
+          yProseMirror.ySyncPlugin(yXmlFragment),
+          yProseMirror.yCursorPlugin(awareness),
+          yProseMirror.yUndoPlugin(),
         ],
         shouldSeed: response.data.shouldSeed,
         yXmlFragment,

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { getAuthIssuerUrl } from "@/api/lib/auth-paths";
 import {
   MCP_ANONYMIZED_RESOURCE_SCOPES,
+  MCP_DEFAULT_RESOURCE_SCOPES,
   getMcpProtectedResourceMetadataUrl,
   getMcpResourceUrl,
 } from "@/api/mcp/constants";
@@ -14,12 +15,12 @@ import {
 } from "@/api/mcp/metadata";
 
 describe("MCP protected resource metadata", () => {
-  test("advertises Stella's MCP resource and supported scopes", () => {
+  test("advertises stella's MCP resource and supported scopes", () => {
     expect(getMcpProtectedResourceMetadata()).toEqual({
       authorization_servers: [getAuthIssuerUrl()],
       bearer_methods_supported: ["header"],
       resource: getMcpResourceUrl(),
-      scopes_supported: ["stella:search", "stella:read"],
+      scopes_supported: [...MCP_DEFAULT_RESOURCE_SCOPES],
     });
   });
 

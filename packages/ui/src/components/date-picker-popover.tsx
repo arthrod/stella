@@ -177,6 +177,7 @@ type DatePickerPopoverProps = {
   isOverdue?: boolean;
   showIcon?: boolean;
   clearLabel?: string;
+  defaultOpen?: boolean;
   /** Label for the "go to today" button. Auto-localized from the locale when omitted. */
   todayLabel?: string;
   overdueLabel?: string;
@@ -192,6 +193,7 @@ function DatePickerPopover({
   isOverdue = false,
   showIcon = true,
   clearLabel = "Clear date",
+  defaultOpen = false,
   todayLabel: todayLabelProp,
   overdueLabel,
   minDate,
@@ -427,7 +429,7 @@ function DatePickerPopover({
   };
 
   return (
-    <Popover onOpenChange={handleOpenChange}>
+    <Popover defaultOpen={defaultOpen} onOpenChange={handleOpenChange}>
       <PopoverTrigger
         render={
           <button
@@ -438,7 +440,7 @@ function DatePickerPopover({
               "hover:bg-muted transition-colors",
               (() => {
                 if (isOverdue) {
-                  return "text-red-500";
+                  return "text-destructive";
                 }
                 if (value) {
                   return "text-foreground";
@@ -455,7 +457,7 @@ function DatePickerPopover({
           {displayLabel}
         </span>
         {isOverdue && overdueLabel && (
-          <span className="text-xs text-red-500">{overdueLabel}</span>
+          <span className="text-destructive text-xs">{overdueLabel}</span>
         )}
       </PopoverTrigger>
       <PopoverPopup

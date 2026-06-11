@@ -154,6 +154,26 @@ export const fieldContentSchema = t.Union([
         }),
       ]),
     ),
+    thumbnailFileId: t.Optional(t.Nullable(t.String({ format: "uuid" }))),
+    // ThumbHash-rendered `data:image/png;base64,...` blur of the source
+    // image (~400-700 bytes); rendered directly in an <img src>.
+    placeholder: t.Optional(t.String({ maxLength: 2048 })),
+    thumbnailDerivative: t.Optional(
+      t.Union([
+        t.Object({
+          status: t.Literal("not-required"),
+        }),
+        t.Object({
+          status: t.Literal("pending"),
+        }),
+        t.Object({
+          status: t.Literal("ready"),
+        }),
+        t.Object({
+          status: t.Literal("failed"),
+        }),
+      ]),
+    ),
     scanWarnings: t.Optional(t.Array(t.String({ maxLength: 256 }))),
   }),
   t.Object({
@@ -195,6 +215,8 @@ export const fieldContentSchema = t.Union([
 
 export type FieldContent = Static<typeof fieldContentSchema>;
 
+const cellLockReasonSchema = t.UnionEnum(["manual-edit", "explicit"]);
+
 export const cellMetadataSchema = t.Object({
   version: v1,
   manualFlags: t.Array(t.String({ minLength: 1, maxLength: 64 }), {
@@ -208,6 +230,14 @@ export const cellMetadataSchema = t.Object({
         addedAt: t.String({ format: "date-time" }),
       }),
     ),
+  ),
+  locked: t.Optional(t.Boolean()),
+  lockProvenance: t.Optional(
+    t.Object({
+      lockedBy: t.String({ minLength: 1 }),
+      lockedAt: t.String({ format: "date-time" }),
+      reason: cellLockReasonSchema,
+    }),
   ),
 });
 

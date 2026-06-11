@@ -2,9 +2,11 @@ import { Value } from "@sinclair/typebox/value";
 import { matchError, Result } from "better-result";
 import { t } from "elysia";
 
-import { isMockAI } from "@/api/consts";
 import { propertyContentSchema } from "@/api/db/schema-validators";
-import { loadOrgAIConfig } from "@/api/lib/ai-config-loader";
+import {
+  loadOrgAIConfig,
+  loadPromptCachingPreference,
+} from "@/api/lib/ai-config-loader";
 import { aiHandlerError } from "@/api/lib/ai-error";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
@@ -12,8 +14,7 @@ import { createSafeId } from "@/api/lib/branded-types";
 import { tSafeId } from "@/api/lib/custom-schema";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { serializeAITool } from "@/api/lib/markdown/ai-tool";
-import { generateBatch } from "@/api/lib/workflow/generate-batch";
-import { generateBatchMock } from "@/api/lib/workflow/generate-batch-mock";
+import { getBatchGenerator } from "@/api/lib/workflow/generate-batch-provider";
 import type { AIResult } from "@/api/lib/workflow/generate-batch-shared";
 import type {
   BatchProperty,
@@ -182,8 +183,11 @@ const previewProperty = createSafeHandler(
       properties: [batchProperty],
     };
 
-    const orgAIConfig = await loadOrgAIConfig(session.activeOrganizationId);
-    const generateFn = isMockAI() ? generateBatchMock : generateBatch;
+    const [orgAIConfig, promptCachingEnabled] = await Promise.all([
+      loadOrgAIConfig(session.activeOrganizationId),
+      loadPromptCachingPreference(session.activeOrganizationId),
+    ]);
+    const generateFn = getBatchGenerator();
 
     const generateResult = await generateFn({
       abortSignal: AbortSignal.any([
@@ -196,6 +200,8 @@ const previewProperty = createSafeHandler(
       workspaceId,
       scopedDb,
       orgAIConfig,
+      promptCachingEnabled,
+      serviceTier: "standard",
     });
 
     if (Result.isError(generateResult)) {
@@ -211,7 +217,7 @@ const previewProperty = createSafeHandler(
       }
       // WorkflowIntegrationError carries the underlying AI provider
       // failure (if any) on its `cause` — classify against that so
-      // quota/credits errors propagate the right status to the UI.
+      // quota/usage-limit errors propagate the right status to the UI.
       return Result.err(
         aiHandlerError(generateResult.error.cause, {
           status: 502,

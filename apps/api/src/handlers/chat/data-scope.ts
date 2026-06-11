@@ -4,6 +4,8 @@ import { eq, sql } from "drizzle-orm";
 import type { SafeDb, SafeDbError } from "@/api/db";
 import { chatThreads } from "@/api/db/schema";
 import type { ChatMention, ChatMessage } from "@/api/handlers/chat/types";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
+import type { AuditRecorder } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { brandPersistedWorkspaceId } from "@/api/lib/safe-id-boundaries";
 
@@ -46,6 +48,22 @@ export const extractIncomingMessageWorkspaceIds = ({
   return [];
 };
 
+export const extractMessageWorkspaceIds = (
+  message: ChatMessage,
+): SafeId<"workspace">[] => collectPartsWorkspaceIds(message.parts);
+
+export const extractThreadDataWorkspaceIds = (
+  messages: readonly ChatMessage[],
+): SafeId<"workspace">[] => {
+  const ids = new Set<SafeId<"workspace">>();
+  for (const message of messages) {
+    for (const id of extractMessageWorkspaceIds(message)) {
+      ids.add(id);
+    }
+  }
+  return Array.from(ids);
+};
+
 // Walks an assistant message's parts for workspace-scoped data
 // embedded by the model. Two complementary carriers are scanned:
 //
@@ -66,6 +84,10 @@ export const extractIncomingMessageWorkspaceIds = ({
 // handles legacy/migrated message shapes without forcing callers to
 // pre-validate against the live `ChatMessage` union.
 export const extractAssistantWorkspaceIds = (
+  parts: readonly unknown[],
+): SafeId<"workspace">[] => collectPartsWorkspaceIds(parts);
+
+const collectPartsWorkspaceIds = (
   parts: readonly unknown[],
 ): SafeId<"workspace">[] => {
   const ids = new Set<SafeId<"workspace">>();
@@ -150,6 +172,11 @@ type ExpandThreadDataScopeInput = {
   // May overlap with the current set; only genuinely new IDs cause
   // an UPDATE.
   newWorkspaceIds: readonly SafeId<"workspace">[];
+  recordAuditEvent: AuditRecorder;
+  // Owning workspace of the thread (null for global threads). Used
+  // as the audit row's workspaceId so the event lands in the right
+  // tenant scope.
+  threadWorkspaceId: SafeId<"workspace"> | null;
 };
 
 type ExpandThreadDataScopeResult = Result<SafeId<"workspace">[], SafeDbError>;
@@ -164,6 +191,8 @@ export const expandThreadDataScope = async ({
   threadId,
   currentDataWorkspaceIds,
   newWorkspaceIds,
+  recordAuditEvent,
+  threadWorkspaceId,
 }: ExpandThreadDataScopeInput): Promise<ExpandThreadDataScopeResult> => {
   if (newWorkspaceIds.length === 0) {
     return Result.ok([...currentDataWorkspaceIds]);
@@ -178,8 +207,8 @@ export const expandThreadDataScope = async ({
     sql`, `,
   )}]::uuid[]`;
 
-  const updateResult = await safeDb((tx) =>
-    tx
+  const updateResult = await safeDb(async (tx) => {
+    await tx
       .update(chatThreads)
       .set({
         // Append-and-dedupe in SQL so concurrent persists on the
@@ -194,8 +223,21 @@ export const expandThreadDataScope = async ({
           )
         )`,
       })
-      .where(eq(chatThreads.id, threadId)),
-  );
+      .where(eq(chatThreads.id, threadId));
+
+    await recordAuditEvent(tx, {
+      action: AUDIT_ACTION.UPDATE,
+      resourceType: AUDIT_RESOURCE_TYPE.CHAT_THREAD,
+      resourceId: threadId,
+      workspaceId: threadWorkspaceId,
+      changes: {
+        dataWorkspaceIds: {
+          old: [...currentDataWorkspaceIds],
+          new: [...currentSet, ...additions],
+        },
+      },
+    });
+  });
 
   if (Result.isError(updateResult)) {
     return Result.err(updateResult.error);

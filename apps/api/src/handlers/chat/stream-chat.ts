@@ -23,6 +23,19 @@ import type { ChatSendMode } from "@stll/anonymize-chat";
 
 import type { SafeDb, SafeDbError } from "@/api/db";
 import { getUserFileIdFromPart } from "@/api/handlers/chat/attachment-validation";
+import type {
+  ChatSafePrompt,
+  ChatUntrustedPromptSuffix,
+} from "@/api/handlers/chat/chat-prompt";
+import { compactModelMessagesForModel } from "@/api/handlers/chat/compaction";
+import {
+  createLoopRecoverySystemPrompt,
+  detectModelLoop,
+  getLoopRecoveryKey,
+  shouldInjectLoopRecovery,
+  shouldSurfaceFinalContentLoop,
+  shouldStopLoopRecovery,
+} from "@/api/handlers/chat/loop-detector";
 import type { ChatThirdPartyBoundary } from "@/api/handlers/chat/third-party-boundary";
 import {
   deanonymizeFromBoundary,
@@ -42,18 +55,74 @@ import {
   getModelInfoById,
   getModelForRole,
   getModelInfoForRole,
-  getTemperatureForRole,
 } from "@/api/lib/ai-models";
 import { captureError } from "@/api/lib/analytics";
+import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
 import type { SafeId } from "@/api/lib/branded-types";
 import {
   ChatEmptyCompletionError,
+  ChatLoopDetectedError,
+  ChatToolError,
   HandlerError,
 } from "@/api/lib/errors/tagged-errors";
 
-const MAX_TOOL_STEPS = 8;
+const MAX_TOOL_STEPS = 100;
+const CHAT_TOOL_ERROR_UNWRAP_DEPTH = 8;
+
+const unwrapChatToolError = (error: unknown): ChatToolError | null => {
+  let current: unknown = error;
+  for (let depth = 0; depth < CHAT_TOOL_ERROR_UNWRAP_DEPTH; depth += 1) {
+    if (current instanceof ChatToolError) {
+      return current;
+    }
+    if (
+      current === null ||
+      typeof current !== "object" ||
+      !("cause" in current)
+    ) {
+      return null;
+    }
+    const cause: unknown = Reflect.get(current, "cause");
+    if (cause === undefined) {
+      return null;
+    }
+    current = cause;
+  }
+  return null;
+};
 const THIRD_PARTY_BOUNDARY_REFUSAL_MESSAGE =
-  "Cannot send this attachment to the AI in anonymized mode because Stella cannot extract and anonymize it safely.";
+  "Cannot send this attachment to the AI in anonymized mode because stella cannot extract and anonymize it safely.";
+
+const ORPHAN_TOOL_STATES = new Set<string>([
+  "input-streaming",
+  "input-available",
+]);
+
+const isOrphanToolPart = (part: ChatMessage["parts"][number]): boolean => {
+  const isToolPart =
+    part.type === "dynamic-tool" || part.type.startsWith("tool-");
+  if (!isToolPart) {
+    return false;
+  }
+  if (!("state" in part) || typeof part.state !== "string") {
+    return false;
+  }
+  return ORPHAN_TOOL_STATES.has(part.state);
+};
+
+export const pruneOrphanedToolParts = (
+  messages: readonly ChatMessage[],
+): ChatMessage[] =>
+  messages.map((message) => {
+    if (message.role !== "assistant") {
+      return message;
+    }
+    const kept = message.parts.filter((part) => !isOrphanToolPart(part));
+    if (kept.length === message.parts.length) {
+      return message;
+    }
+    return { ...message, parts: kept };
+  });
 
 type AssistantValueRefResolver = ChatRefRegistry["resolveAssistantValueRefs"];
 
@@ -63,6 +132,8 @@ type RunChatStreamArgs = {
       Parameters<typeof createUIMessageStream<ChatMessage>>[0]["execute"]
     >
   >[0]["writer"];
+  aiAnalytics: ReturnType<typeof createAIAnalyticsCallbacks>;
+  compactionAIAnalytics: ReturnType<typeof createAIAnalyticsCallbacks>;
   model: LanguageModel;
   modelInfo: ResolvedModelInfo;
   /**
@@ -77,7 +148,6 @@ type RunChatStreamArgs = {
   abortSignal: AbortSignal;
   system: string;
   tools: ToolSet;
-  promptCacheKey: string;
   modelMessages: Awaited<ReturnType<typeof convertToModelMessages>>;
   threadId: SafeId<"chatThread">;
   thirdPartyBoundary: ChatThirdPartyBoundary;
@@ -96,13 +166,14 @@ type RunChatStreamArgs = {
  */
 const runChatStream = async ({
   writer,
+  aiAnalytics,
+  compactionAIAnalytics,
   model,
   modelInfo,
   emitErrorOnEmpty,
   abortSignal,
   system,
   tools,
-  promptCacheKey,
   modelMessages,
   threadId,
   thirdPartyBoundary,
@@ -112,6 +183,8 @@ const runChatStream = async ({
   onAiError,
 }: RunChatStreamArgs): Promise<boolean> => {
   let emptyCompletion: ChatEmptyCompletionError | null = null;
+  let finalLoopDetection: ChatLoopDetectedError | null = null;
+  let lastLoopRecoveryKey: string | null = null;
   let flushResolve: (() => void) | null = null;
   const flushed = new Promise<void>((resolve) => {
     flushResolve = resolve;
@@ -119,16 +192,77 @@ const runChatStream = async ({
   const result = streamText({
     abortSignal,
     model,
-    temperature: getTemperatureForRole("chat"),
     system,
     tools,
     experimental_repairToolCall: async ({ toolCall }) =>
       await Promise.resolve(repairActiveDocxEditToolCall(toolCall)),
-    providerOptions: {
-      openai: { promptCacheKey },
+    prepareStep: async ({ messages }) => {
+      const loopDetection = detectModelLoop(messages);
+      if (shouldStopLoopRecovery(loopDetection)) {
+        throw new ChatLoopDetectedError({
+          message:
+            "The AI model repeated the same work and could not recover. Please try again with a narrower request.",
+        });
+      }
+
+      let nextSystem = system;
+      if (shouldInjectLoopRecovery(loopDetection)) {
+        const recoveryKey = getLoopRecoveryKey(loopDetection);
+        if (recoveryKey !== lastLoopRecoveryKey) {
+          lastLoopRecoveryKey = recoveryKey;
+          nextSystem = createLoopRecoverySystemPrompt({
+            baseSystem: system,
+            detection: loopDetection,
+          });
+        }
+      }
+
+      const compactedMessages = await compactModelMessagesForModel({
+        abortSignal,
+        aiAnalytics: compactionAIAnalytics,
+        messages,
+        model,
+        onSummaryError: (error) => {
+          captureError(error, {
+            threadId,
+            provider: modelInfo.provider,
+            modelId: modelInfo.modelId,
+            feature: "chat.step-compaction",
+          });
+        },
+      });
+      if (Result.isError(compactedMessages)) {
+        throw compactedMessages.error;
+      }
+      if (compactedMessages.value === messages && nextSystem === system) {
+        return undefined;
+      }
+
+      return {
+        messages: compactedMessages.value,
+        system: nextSystem,
+      };
     },
     stopWhen: [stepCountIs(MAX_TOOL_STEPS), hasToolCall("ask-user")],
     messages: modelMessages,
+    ...aiAnalytics.stepCallbacks,
+    onStepFinish: (event) => {
+      aiAnalytics.stepCallbacks.onStepFinish?.(event);
+      const { response, toolCalls } = event;
+      if (toolCalls.length > 0) {
+        return;
+      }
+
+      const loopDetection = detectModelLoop(response.messages);
+      if (!shouldSurfaceFinalContentLoop(loopDetection)) {
+        return;
+      }
+
+      finalLoopDetection = new ChatLoopDetectedError({
+        message:
+          "The AI model repeated the same work and could not recover. Please try again with a narrower request.",
+      });
+    },
     onFinish: ({ finishReason, totalUsage }) => {
       // `outputTokens` is `number | undefined` — only fire when
       // explicitly zero, otherwise providers that omit usage
@@ -175,6 +309,12 @@ const runChatStream = async ({
         controller.enqueue(chunk);
       },
       flush(controller) {
+        if (finalLoopDetection) {
+          controller.enqueue({
+            type: "error",
+            errorText: onAiError(finalLoopDetection),
+          });
+        }
         if (emptyCompletion && emitErrorOnEmpty) {
           controller.enqueue({
             type: "error",
@@ -205,44 +345,60 @@ type StreamChatProps = {
   devModelId?: string | undefined;
   messages: ChatMessage[];
   onFinish: UIMessageStreamOnFinishCallback<ChatMessage>;
+  organizationId: SafeId<"organization">;
   orgAIConfig: OrgAIConfig | null;
   promptCacheKey: string;
+  promptCachingEnabled: boolean;
   resolveAssistantTextRefs?: ((text: string) => string) | undefined;
   resolveAssistantValueRefs?: AssistantValueRefResolver | undefined;
   /**
    * Server-built scaffold half of the system prompt. Sent to the
    * model verbatim.
    */
-  systemSafe: string;
+  systemSafe: ChatSafePrompt;
   /**
    * Dynamic, user-supplied half of the system prompt (active file
    * body, decision text, external source content, matter labels).
    * In anonymized mode this passes through the boundary first;
    * otherwise it concatenates straight onto `systemSafe`.
    */
-  systemUntrusted: string;
+  systemUntrusted: ChatUntrustedPromptSuffix;
   thirdPartyBoundary: ChatThirdPartyBoundary;
   latestMessageId: string;
+  safeDb: SafeDb;
   threadId: SafeId<"chatThread">;
   tools: ToolSet;
+  userId: SafeId<"user">;
+  workspaceId: SafeId<"workspace"> | null;
 };
 
 export const streamChat = async ({
   abortSignal,
   devModelId,
-  messages,
+  messages: rawMessages,
   onFinish,
+  organizationId,
   orgAIConfig,
   promptCacheKey,
+  promptCachingEnabled,
   resolveAssistantTextRefs,
   resolveAssistantValueRefs,
+  safeDb,
   systemSafe,
   systemUntrusted,
   thirdPartyBoundary,
   latestMessageId,
   threadId,
   tools,
+  userId,
+  workspaceId,
 }: StreamChatProps) => {
+  // Strip persisted tool-call parts that never received a result
+  // (process killed mid-stream, provider threw before the result was
+  // written, etc.) — otherwise the AI SDK throws
+  // `AI_MissingToolResultsError` at prompt assembly and the whole
+  // thread becomes unsendable.
+  const messages = pruneOrphanedToolParts(rawMessages);
   // The prompt builder already split the system prompt into a safe
   // scaffold half (brand voice, skill catalog, jurisdictions) and
   // a dynamic-context half (active file body, decision text,
@@ -304,12 +460,16 @@ export const streamChat = async ({
   // `execute`, and the inner `result.toUIMessageStream({ onError })`
   // for errors emitted by the model stream itself. The inner one
   // defaults to `() => "An error occurred."` and *that* is the path a
-  // Gemini-quota / OpenRouter-credits failure actually takes — without
+  // Gemini-quota / provider-quota failure actually takes — without
   // wiring the same classifier on both, the chat client sees the
   // generic string and our frontend kind-mapping never fires.
   const onAiError = (error: unknown): string => {
     const kind = classifyAIError(error);
     captureError(error, { threadId, kind });
+    const toolError = unwrapChatToolError(error);
+    if (toolError) {
+      return toolError.message;
+    }
     return kind;
   };
 
@@ -323,8 +483,19 @@ export const streamChat = async ({
         ? getModelInfoById(devModelId, orgAIConfig)
         : getModelInfoForRole("chat", orgAIConfig);
       const primaryModel = devModelId
-        ? getModelById(devModelId, orgAIConfig)
-        : getModelForRole("chat", orgAIConfig);
+        ? getModelById(devModelId, orgAIConfig, {
+            promptCachingEnabled,
+            scopeKey: promptCacheKey,
+            role: "chat",
+            organizationId,
+            serviceTier: "standard",
+          })
+        : getModelForRole("chat", orgAIConfig, {
+            promptCachingEnabled,
+            scopeKey: promptCacheKey,
+            organizationId,
+            serviceTier: "standard",
+          });
       // Eligible fallback: a *different* model on the same orgAI
       // config. Skip when the user has pinned a specific dev
       // override (their choice is authoritative) and when the
@@ -337,9 +508,49 @@ export const streamChat = async ({
           : null;
       const fallbackEligible =
         fallbackInfo !== null && fallbackInfo.modelId !== primaryInfo.modelId;
+      const primaryAnalytics = createAIAnalyticsCallbacks({
+        usageMetering: {
+          actionType: "chat",
+          organizationId,
+          safeDb,
+          serviceTier: "standard",
+          userId,
+          workspaceId,
+        },
+        feature: "chat.stream",
+        modelRole: "chat",
+        orgAIConfig,
+        properties: {
+          organization_id: organizationId,
+          ...(workspaceId ? { workspace_id: workspaceId } : {}),
+        },
+        sessionId: threadId,
+        traceId: Bun.randomUUIDv7(),
+      });
+      const primaryCompactionAnalytics = createAIAnalyticsCallbacks({
+        usageMetering: {
+          actionType: "chat",
+          organizationId,
+          safeDb,
+          serviceTier: "standard",
+          userId,
+          workspaceId,
+        },
+        feature: "chat.step_compaction",
+        modelRole: "chat",
+        orgAIConfig,
+        properties: {
+          organization_id: organizationId,
+          ...(workspaceId ? { workspace_id: workspaceId } : {}),
+        },
+        sessionId: threadId,
+        traceId: Bun.randomUUIDv7(),
+      });
 
       const primaryEmpty = await runChatStream({
         writer,
+        aiAnalytics: primaryAnalytics,
+        compactionAIAnalytics: primaryCompactionAnalytics,
         model: primaryModel,
         modelInfo: primaryInfo,
         // Primary finalises on empty only when there's no fallback
@@ -348,7 +559,6 @@ export const streamChat = async ({
         abortSignal,
         system,
         tools: modelTools,
-        promptCacheKey,
         modelMessages,
         threadId,
         thirdPartyBoundary,
@@ -363,16 +573,60 @@ export const streamChat = async ({
         // returns empty we surface the error chunk; one automatic
         // retry on a different model is bounded and recoverable,
         // unlike the model-keeps-failing-on-cached-prefix case.
-        const fallbackModel = getModelForRole("reasoning", orgAIConfig);
+        const fallbackModel = getModelForRole("reasoning", orgAIConfig, {
+          promptCachingEnabled,
+          scopeKey: promptCacheKey,
+          organizationId,
+          serviceTier: "standard",
+        });
+        const fallbackAnalytics = createAIAnalyticsCallbacks({
+          usageMetering: {
+            actionType: "chat",
+            organizationId,
+            safeDb,
+            serviceTier: "standard",
+            userId,
+            workspaceId,
+          },
+          feature: "chat.stream_fallback",
+          modelRole: "reasoning",
+          orgAIConfig,
+          properties: {
+            organization_id: organizationId,
+            ...(workspaceId ? { workspace_id: workspaceId } : {}),
+          },
+          sessionId: threadId,
+          traceId: Bun.randomUUIDv7(),
+        });
+        const fallbackCompactionAnalytics = createAIAnalyticsCallbacks({
+          usageMetering: {
+            actionType: "chat",
+            organizationId,
+            safeDb,
+            serviceTier: "standard",
+            userId,
+            workspaceId,
+          },
+          feature: "chat.step_compaction_fallback",
+          modelRole: "reasoning",
+          orgAIConfig,
+          properties: {
+            organization_id: organizationId,
+            ...(workspaceId ? { workspace_id: workspaceId } : {}),
+          },
+          sessionId: threadId,
+          traceId: Bun.randomUUIDv7(),
+        });
         await runChatStream({
           writer,
+          aiAnalytics: fallbackAnalytics,
+          compactionAIAnalytics: fallbackCompactionAnalytics,
           model: fallbackModel,
           modelInfo: fallbackInfo,
           emitErrorOnEmpty: true,
           abortSignal,
           system,
           tools: modelTools,
-          promptCacheKey,
           modelMessages,
           threadId,
           thirdPartyBoundary,
