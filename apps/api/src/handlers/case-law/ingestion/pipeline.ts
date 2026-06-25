@@ -37,6 +37,7 @@ import { segmentDecision } from "@/api/handlers/case-law/ingestion/segmenter";
 import { captureError } from "@/api/lib/analytics";
 import type { SafeId } from "@/api/lib/branded-types";
 import { errorTag } from "@/api/lib/errors/utils";
+import { escapeLike } from "@/api/lib/escape-like";
 import { LIMITS } from "@/api/lib/limits";
 import { logger } from "@/api/lib/observability/logger";
 import { getS3 } from "@/api/lib/s3";
@@ -52,6 +53,15 @@ type PipelineInput = {
   scopedDb: ScopedDb;
   /** Per-cycle abort signal. Fires when the adapter's time budget is exhausted. */
   signal?: AbortSignal;
+  /**
+   * Hard caps for bounded sample runs (staging smoke): stop after this
+   * many pages / newly stored decisions without advancing the cursor
+   * past unprocessed work. Dedup-skipped and failed decisions do not
+   * count toward the cap, so a re-run with the same cap continues past
+   * already-ingested work. Defaults to the adapter's own cycle limits.
+   */
+  maxPages?: number;
+  maxDecisions?: number;
   /**
    * Optional concurrency limiter for DB-heavy operations.
    * When provided, the pipeline acquires a slot before
@@ -121,8 +131,16 @@ type ProcessResult = {
  *
  * Safe: won't touch normal text, digits, IČO numbers, or
  * case references (anchored by whitespace/string boundaries).
+ *
+ * Requires at least FOUR letters in the run. Czech/Slovak have many
+ * single-letter words (prepositions a, i, k, o, s, u, v, z), so a 2–3
+ * letter run like `u a v` ("u", "a", "v") is far more likely to be real
+ * words than letter-spaced emphasis; collapsing it to `uav` would corrupt
+ * the search text. Genuine spaced words ("z a m i e t a", "r o z h o d o l")
+ * are always longer, so the floor loses nothing in practice.
  */
-const SPACED_WORD = /(?<=\s|^)(\p{L} (?:\p{L} )*\p{L})( ?[,:;.!?])?(?=\s|$)/gu;
+const SPACED_WORD =
+  /(?<=\s|^)(?:\p{L} (?:\p{L} ){2,}\p{L})(?: ?[,:;.!?])?(?=\s|$)/gu;
 
 /**
  * Collapse multiple spaces to single. Applied to all
@@ -436,7 +454,7 @@ export const processDecision = async (
     const existingSlugRows = await tx
       .select({ slug: caseLawDecisions.slug })
       .from(caseLawDecisions)
-      .where(like(caseLawDecisions.slug, `${slugScanPrefix}%`))
+      .where(like(caseLawDecisions.slug, `${escapeLike(slugScanPrefix)}%`))
       .limit(LIMITS.caseLawSlugCollisionScanLimit);
     const slug = createAvailableCaseLawDecisionSlug(
       baseSlug,
@@ -556,6 +574,8 @@ export const runIngestionPipeline = async ({
   source,
   scopedDb,
   signal,
+  maxPages: maxPagesOverride,
+  maxDecisions,
   dbSlot,
 }: PipelineInput): Promise<PipelineResult> => {
   const adapter = getAdapter(source.adapterKey);
@@ -581,7 +601,7 @@ export const runIngestionPipeline = async ({
   const MAX_CONSECUTIVE_FAILURES = 10;
   let haltReason: string | null = null;
 
-  const maxPages = adapter.maxSyncPages ?? MAX_SYNC_PAGES;
+  const maxPages = maxPagesOverride ?? adapter.maxSyncPages ?? MAX_SYNC_PAGES;
 
   while (pagesProcessed < maxPages) {
     if (signal?.aborted) {
@@ -601,6 +621,7 @@ export const runIngestionPipeline = async ({
       ? AbortSignal.any([signal, AbortSignal.timeout(pageTimeout)])
       : AbortSignal.timeout(pageTimeout);
     recentCursors.add(cursor);
+    // oxlint-disable-next-line no-await-in-loop -- sequential paginated crawl (each page's cursor depends on the previous page)
     const pageResult = await adapter.fetchPage(
       cursor,
       source.config ?? {},
@@ -632,6 +653,7 @@ export const runIngestionPipeline = async ({
     // unexpected exceptions.
     if (dbSlot) {
       try {
+        // oxlint-disable-next-line no-await-in-loop -- sequential per-page DB-slot acquisition bounds concurrent DB pressure
         await dbSlot.acquire(signal);
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
@@ -647,7 +669,14 @@ export const runIngestionPipeline = async ({
     const s3FailuresBefore = s3UploadFailures;
     try {
       for (const result of page.decisions) {
+        if (maxDecisions !== undefined && inserted >= maxDecisions) {
+          // Halting (instead of breaking quietly) keeps the cursor at
+          // this page so the unprocessed remainder is not skipped.
+          haltReason = `Decision cap (${maxDecisions}) reached`;
+          break;
+        }
         try {
+          // oxlint-disable-next-line no-await-in-loop -- sequential decision inserts: consecutive-failure halting and per-page counters depend on ordering
           const outcome = await processDecision(result, source.id, scopedDb);
 
           if (outcome.inserted) {
@@ -687,6 +716,7 @@ export const runIngestionPipeline = async ({
 
           // Persist failure for later analysis
           try {
+            // oxlint-disable-next-line no-await-in-loop -- failure logged inline within the sequential decision loop
             await logIngestionFailure(scopedDb, {
               sourceId: source.id,
               caseNumber: result.caseNumber,
@@ -762,6 +792,7 @@ export const runIngestionPipeline = async ({
     }
 
     if (adapter.minRequestIntervalMs > 0) {
+      // oxlint-disable-next-line no-await-in-loop -- polite crawl delay between page fetches
       await Bun.sleep(adapter.minRequestIntervalMs);
     }
   }

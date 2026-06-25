@@ -11,6 +11,16 @@ import { expectFootnoteRefMarkAttrs } from "../../attrs";
 import { createMarkExtension } from "../create";
 import type { ExtensionContext, ExtensionRuntime } from "../types";
 
+const noteRefAttrsFromDom = (
+  dom: HTMLElement,
+  noteType: "footnote" | "endnote",
+  vertAlign?: "baseline" | "superscript",
+): Record<string, string> => ({
+  id: dom.dataset["id"] ?? "",
+  noteType: dom.dataset["noteType"] ?? noteType,
+  ...(vertAlign ? { vertAlign } : {}),
+});
+
 export const FootnoteRefExtension = createMarkExtension({
   name: "footnoteRef",
   schemaMarkName: "footnoteRef",
@@ -18,24 +28,39 @@ export const FootnoteRefExtension = createMarkExtension({
     attrs: {
       id: {},
       noteType: { default: "footnote" },
+      vertAlign: { default: null },
     },
     parseDOM: [
       {
         tag: "sup.docx-footnote-ref",
-        getAttrs: (dom) => ({
-          id: dom.dataset["id"] ?? "",
-          noteType: dom.dataset["noteType"] ?? "footnote",
-        }),
+        getAttrs: (dom) => noteRefAttrsFromDom(dom, "footnote", "superscript"),
+      },
+      {
+        tag: "sup.docx-endnote-ref",
+        getAttrs: (dom) => noteRefAttrsFromDom(dom, "endnote", "superscript"),
+      },
+      {
+        tag: "span.docx-footnote-ref",
+        getAttrs: (dom) => noteRefAttrsFromDom(dom, "footnote", "baseline"),
+      },
+      {
+        tag: "span.docx-endnote-ref",
+        getAttrs: (dom) => noteRefAttrsFromDom(dom, "endnote", "baseline"),
       },
     ],
     toDOM(mark) {
       const attrs = expectFootnoteRefMarkAttrs(mark);
       const id = String(attrs.id);
       const noteType = attrs.noteType ?? "footnote";
+      const isSuperscript = attrs.vertAlign === "superscript";
+      const tagName = isSuperscript ? "sup" : "span";
+      const alignClass = isSuperscript
+        ? "docx-note-ref-superscript"
+        : "docx-note-ref-baseline";
       return [
-        "sup",
+        tagName,
         {
-          class: `docx-${noteType}-ref`,
+          class: `docx-${noteType}-ref ${alignClass}`,
           "data-id": id,
           "data-note-type": noteType,
         },
@@ -62,6 +87,7 @@ export const FootnoteRefExtension = createMarkExtension({
           const mark = footnoteRefType.create({
             id: String(id),
             noteType,
+            vertAlign: "superscript",
           });
           const text = schema.text(String(id), [mark]);
           const tr = state.tr.replaceSelectionWith(text, false);

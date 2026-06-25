@@ -17,7 +17,7 @@ import {
 // organization-scoped workspaces query. The `member` table is not
 // needed for scoping in this code path. The disable directive sits on
 // the same line as the import so reordering imports cannot shift it.
-import { user } from "@/api/db/auth-schema"; // oxlint-disable-line security-guards/no-unscoped-user-query
+import { user } from "@/api/db/auth-schema"; // oxlint-disable-line security-guards/no-unscoped-user-query -- joined via RLS-scoped workspaceMembers filtered by org-derived wsIds (see comment above)
 import { entities, workspaceMembers } from "@/api/db/schema";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
@@ -125,6 +125,8 @@ const readWorkspaces = createSafeRootHandler(
                   user.name,
                   user.image,
                 )
+                // SAFETY: member rows fan out across the org's active workspaces; bounded by LIMITS.workspacesCount * LIMITS.workspaceMembersCount, and a single-workspace cap would truncate multi-workspace orgs.
+                // eslint-disable-next-line require-query-limit/require-query-limit
                 .orderBy(
                   workspaceMembers.workspaceId,
                   sql`${max(entities.updatedAt)} DESC NULLS LAST`,

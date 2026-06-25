@@ -5,7 +5,7 @@
  * underlying tracked changes are resolved on the editor.
  */
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { CSSProperties, RefObject } from "react";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -16,13 +16,14 @@ import {
   LoaderCircleIcon,
   XIcon,
 } from "lucide-react";
-import { useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 
 import { diffWordSegments } from "@stll/folio";
 import type { DocxEditorRef, FolioAIBlockPreviewRun } from "@stll/folio";
 import { Avatar, AvatarFallback } from "@stll/ui/components/avatar";
 import { Button } from "@stll/ui/components/button";
 import { Checkbox } from "@stll/ui/components/checkbox";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { Input } from "@stll/ui/components/input";
 import {
   Popover,
@@ -137,6 +138,7 @@ export const ReviewPanelImpl = ({
   embedded = false,
 }: ReviewPanelProps) => {
   const t = useTranslations();
+  const format = useFormatter();
   const severityLabels = useSeverityLabels();
 
   // The selector must return a stable reference for the same
@@ -174,13 +176,13 @@ export const ReviewPanelImpl = ({
   const [filter, setFilter] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const filtered = useMemo(
-    () =>
-      filterReviewSuggestions(suggestions, { hideAccepted, filter, groupAxis }),
-    [suggestions, hideAccepted, filter, groupAxis],
-  );
+  const filtered = filterReviewSuggestions(suggestions, {
+    hideAccepted,
+    filter,
+    groupAxis,
+  });
 
-  const groups = useMemo(() => {
+  const groups = (() => {
     const groupTone = (items: readonly ReviewSuggestion[]): SeverityTone => {
       const highest = SEVERITY_ORDER.find((sev) =>
         items.some((item) => item.severity === sev),
@@ -233,7 +235,7 @@ export const ReviewPanelImpl = ({
           : area;
       return { key: area, label, items, tone: groupTone(items) };
     });
-  }, [filtered, groupAxis, severityLabels, t]);
+  })();
 
   const pendingCount = suggestions.filter((s) => s.status === "pending").length;
   const total = suggestions.length;
@@ -299,8 +301,8 @@ export const ReviewPanelImpl = ({
       // Author the tracked-change marks as the user (their preferred
       // name from account settings) — they're reviewing and
       // accepting the AI's suggestion AS THEMSELVES, not as "AI".
-      // TODO: also surface `wordShortcut` as `<w:initials>` once the
-      // folio DOCX writer is plumbed for it (mark schema + serializer).
+      // Also surface `wordShortcut` as `<w:initials>` once the folio DOCX
+      // writer is plumbed for it (mark schema + serializer).
       ...(wordAuthor.length > 0 && { author: wordAuthor }),
     });
     const applied = result.applied.at(0);
@@ -466,6 +468,7 @@ export const ReviewPanelImpl = ({
             </div>
             <button
               aria-label={t("docxReview.dismiss")}
+              title={t("docxReview.dismiss")}
               className="text-muted-foreground hover:text-foreground rounded-md p-1"
               onClick={() => dismissPanel(entityId)}
               type="button"
@@ -593,7 +596,7 @@ export const ReviewPanelImpl = ({
                 />
                 <span>{group.label}</span>
                 <span className="text-foreground-ghost tabular-nums">
-                  {group.items.length}
+                  {format.number(group.items.length)}
                 </span>
                 <span
                   aria-hidden="true"
@@ -758,6 +761,7 @@ const IdentityPopoverBody = ({
             <Input
               autoComplete="off"
               className="h-8 text-xs uppercase"
+              dir="ltr"
               maxLength={6}
               onChange={(e) => setWordEditShortcut(e.target.value)}
               placeholder={t("docxReview.wordShortcutPlaceholder")}
@@ -935,9 +939,9 @@ const RedlinePreview = ({
     "bg-destructive/10 text-destructive line-through decoration-destructive/70 px-1 py-0.5 rounded-sm";
 
   const arrow = (
-    <ArrowRightIcon
-      aria-hidden="true"
+    <DirectionalIcon
       className="text-foreground-ghost mx-1 inline size-3.5 align-middle"
+      icon={ArrowRightIcon}
     />
   );
 

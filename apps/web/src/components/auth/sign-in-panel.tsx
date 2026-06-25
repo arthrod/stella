@@ -4,7 +4,6 @@ import type { ReactNode } from "react";
 import { useForm } from "@tanstack/react-form";
 import { useNavigate } from "@tanstack/react-router";
 import { useSelector } from "@tanstack/react-store";
-import { Result } from "better-result";
 import { useTranslations } from "use-intl";
 import * as v from "valibot";
 
@@ -12,6 +11,7 @@ import { Button } from "@stll/ui/components/button";
 import { Field, FieldError } from "@stll/ui/components/field";
 import { Form } from "@stll/ui/components/form";
 import { Input } from "@stll/ui/components/input";
+import { TextSeparator } from "@stll/ui/components/separator";
 import { stellaToast } from "@stll/ui/components/toast";
 import { cn } from "@stll/ui/lib/utils";
 
@@ -41,7 +41,7 @@ const renderTermsLink = (chunks: ReactNode) => (
   <a
     className="hover:text-foreground underline"
     href={termsUrl}
-    rel="noopener"
+    rel="noreferrer"
     target="_blank"
   >
     {chunks}
@@ -126,32 +126,6 @@ export function SignInPanel({
         return;
       }
 
-      if (import.meta.env.DEV) {
-        const probe = await Result.tryPromise(async () => {
-          const url = new URL("/dev-public/last-otp", env.VITE_API_URL);
-          url.searchParams.set("email", parsedValue.email);
-          const response = await fetch(url, {
-            credentials: "include",
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (!response.ok) {
-            return null;
-          }
-          const parsed = v.safeParse(
-            v.object({ otp: v.string() }),
-            await response.json(),
-          );
-          return parsed.success ? parsed.output.otp : null;
-        });
-        if (Result.isOk(probe) && probe.value !== null) {
-          stellaToast.add({
-            title: `Dev OTP: ${probe.value}`,
-            type: "info",
-            timeout: 8000,
-          });
-        }
-      }
-
       await handleOtpSent(parsedValue.email);
     },
   });
@@ -215,13 +189,7 @@ export function SignInPanel({
       )}
 
       {hasSocialProviders && (
-        <div className="flex items-center gap-3">
-          <div className="bg-border h-px flex-1" />
-          <span className="text-muted-foreground text-xs">
-            {t("auth.orSignInWithEmail")}
-          </span>
-          <div className="bg-border h-px flex-1" />
-        </div>
+        <TextSeparator>{t("auth.orSignInWithEmail")}</TextSeparator>
       )}
 
       <Form

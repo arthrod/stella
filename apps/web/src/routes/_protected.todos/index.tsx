@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -24,8 +24,10 @@ import {
   MenuPopup,
   MenuTrigger,
 } from "@stll/ui/components/menu";
+import { Skeleton } from "@stll/ui/components/skeleton";
 import { cn } from "@stll/ui/lib/utils";
 
+import { getFormattingLocale } from "@/i18n/i18n-store";
 import { api } from "@/lib/api";
 import { toAPIError } from "@/lib/errors";
 import { pageTitle } from "@/lib/page-title";
@@ -71,6 +73,16 @@ const PRIORITY_COLORS: Record<string, string> = {
   low: "text-foreground-muted dark:text-foreground",
 };
 
+const SKELETON_GROUP_KEYS = ["alpha", "beta", "gamma"];
+const SKELETON_ROW_KEYS = ["one", "two", "three"];
+// Vary the name-bar width per row so the skeleton reads as a real task list
+// rather than a uniform block.
+const SKELETON_ROW_NAME_WIDTHS: Record<string, string> = {
+  one: "w-48",
+  two: "w-64",
+  three: "w-40",
+};
+
 type ValidTask = TaskItem & {
   workspace: NonNullable<TaskItem["workspace"]>;
 };
@@ -110,7 +122,7 @@ function MyTodosPage() {
     workspacesOptions(activeOrganizationId),
   );
 
-  const filtered = useMemo(() => {
+  const filtered = (() => {
     if (!tasks) {
       return [];
     }
@@ -123,9 +135,9 @@ function MyTodosPage() {
       return valid;
     }
     return valid.filter((task) => task.status === filter);
-  }, [tasks, filter]);
+  })();
 
-  const groups = useMemo(() => groupByWorkspace(filtered), [filtered]);
+  const groups = groupByWorkspace(filtered);
 
   const handleCreateTask = async (wsId: string) => {
     const response = await api.tasks({ workspaceId: wsId }).put({
@@ -199,6 +211,8 @@ function MyTodosPage() {
           />
         </div>
       </div>
+
+      {isLoading && <TasksLoadingSkeleton />}
 
       {!isLoading && groups.length === 0 && (
         <div className="text-muted-foreground flex flex-col items-center justify-center gap-3 py-16">
@@ -304,7 +318,7 @@ const TaskRow = ({ task }: { task: ValidTask }) => {
           )}
         >
           <CalendarIcon className="size-3" />
-          {new Date(task.dueDate).toLocaleDateString(undefined, {
+          {new Date(task.dueDate).toLocaleDateString(getFormattingLocale(), {
             month: "short",
             day: "numeric",
             timeZone: "UTC",
@@ -314,3 +328,30 @@ const TaskRow = ({ task }: { task: ValidTask }) => {
     </MatterRefLink>
   );
 };
+
+// Mirrors the loaded grouped-list layout (group header + task rows) so only the
+// values fade in when data lands, instead of a layout shift from blank to list.
+const TasksLoadingSkeleton = () => (
+  <>
+    {SKELETON_GROUP_KEYS.map((groupKey) => (
+      <div className="flex flex-col gap-1" key={groupKey}>
+        <Skeleton className="mx-1 h-4 w-32" />
+        <div className="flex flex-col">
+          {SKELETON_ROW_KEYS.map((rowKey) => (
+            <div
+              className="flex items-center gap-3 px-2 py-1.5"
+              key={`${groupKey}-${rowKey}`}
+            >
+              <Skeleton className="size-2 shrink-0 rounded-full" />
+              <Skeleton
+                className={cn("h-4", SKELETON_ROW_NAME_WIDTHS[rowKey])}
+              />
+              <Skeleton className="ms-auto size-3.5 shrink-0 rounded-sm" />
+              <Skeleton className="h-4 w-14 shrink-0" />
+            </div>
+          ))}
+        </div>
+      </div>
+    ))}
+  </>
+);

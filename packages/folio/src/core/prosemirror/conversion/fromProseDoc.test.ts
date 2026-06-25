@@ -99,6 +99,398 @@ describe("fromProseDoc", () => {
     );
   });
 
+  test("round-trips unedited inherited auto spacing without inlining the style value", () => {
+    const document: Document = {
+      package: {
+        styles: {
+          styles: [
+            {
+              styleId: "Normal",
+              type: "paragraph",
+              default: true,
+              pPr: { spaceBefore: 200 },
+            },
+          ],
+        },
+        document: {
+          content: [
+            {
+              type: "paragraph",
+              formatting: {
+                styleId: "Normal",
+                beforeAutospacing: true,
+              },
+              content: [
+                {
+                  type: "run",
+                  content: [{ type: "text", text: "Auto spaced" }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const pmDoc = toProseDoc(document, { styles: document.package.styles });
+    const attrs = expectParagraphAttrs(pmDoc.child(0));
+    const roundTripped = fromProseDoc(pmDoc, document);
+    const block = roundTripped.package.document.content.at(0);
+
+    expect(attrs.spaceBefore).toBe(200);
+    expect(attrs._autospacingBase).toEqual({ before: 200 });
+    expect(block?.type).toBe("paragraph");
+    if (block?.type !== "paragraph") {
+      return;
+    }
+    expect(block.formatting?.beforeAutospacing).toBe(true);
+    expect(block.formatting?.spaceBefore).toBeUndefined();
+    expect(
+      (block.formatting as Record<string, unknown>)["_autospacingBase"],
+    ).toBeUndefined();
+  });
+
+  test("saves edited inherited auto spacing as direct spacing with auto disabled", () => {
+    const document: Document = {
+      package: {
+        styles: {
+          styles: [
+            {
+              styleId: "Normal",
+              type: "paragraph",
+              default: true,
+              pPr: { spaceBefore: 200 },
+            },
+          ],
+        },
+        document: {
+          content: [
+            {
+              type: "paragraph",
+              formatting: {
+                styleId: "Normal",
+                beforeAutospacing: true,
+              },
+              content: [
+                {
+                  type: "run",
+                  content: [{ type: "text", text: "Edited spacing" }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const pmDoc = toProseDoc(document, { styles: document.package.styles });
+    const paragraph = pmDoc.child(0);
+    const editedParagraph = schema.node(
+      "paragraph",
+      { ...paragraph.attrs, spaceBefore: 240 },
+      paragraph.content,
+    );
+    const editedPmDoc = schema.node("doc", null, [editedParagraph]);
+    const roundTripped = fromProseDoc(editedPmDoc, document);
+    const block = roundTripped.package.document.content.at(0);
+
+    expect(block?.type).toBe("paragraph");
+    if (block?.type !== "paragraph") {
+      return;
+    }
+    expect(block.formatting?.beforeAutospacing).toBe(false);
+    expect(block.formatting?.spaceBefore).toBe(240);
+  });
+
+  test("round-trips style-sourced auto spacing without inlining the style value", () => {
+    const document: Document = {
+      package: {
+        styles: {
+          styles: [
+            {
+              styleId: "AutoSpacing",
+              type: "paragraph",
+              pPr: { beforeAutospacing: true, spaceBefore: 200 },
+            },
+          ],
+        },
+        document: {
+          content: [
+            {
+              type: "paragraph",
+              formatting: { styleId: "AutoSpacing" },
+              content: [
+                {
+                  type: "run",
+                  content: [{ type: "text", text: "Style auto spaced" }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const pmDoc = toProseDoc(document, { styles: document.package.styles });
+    const attrs = expectParagraphAttrs(pmDoc.child(0));
+    const roundTripped = fromProseDoc(pmDoc, document);
+    const block = roundTripped.package.document.content.at(0);
+
+    expect(attrs.spaceBefore).toBe(200);
+    expect(attrs._autospacingBase).toEqual({ before: 200 });
+    expect(attrs._originalFormatting?.beforeAutospacing).toBeUndefined();
+    expect(block?.type).toBe("paragraph");
+    if (block?.type !== "paragraph") {
+      return;
+    }
+    expect(block.formatting?.styleId).toBe("AutoSpacing");
+    expect(block.formatting?.beforeAutospacing).toBeUndefined();
+    expect(block.formatting?.spaceBefore).toBeUndefined();
+  });
+
+  test("saves edited style-sourced auto spacing as direct spacing with auto disabled", () => {
+    const document: Document = {
+      package: {
+        styles: {
+          styles: [
+            {
+              styleId: "AutoSpacing",
+              type: "paragraph",
+              pPr: { beforeAutospacing: true, spaceBefore: 200 },
+            },
+          ],
+        },
+        document: {
+          content: [
+            {
+              type: "paragraph",
+              formatting: { styleId: "AutoSpacing" },
+              content: [
+                {
+                  type: "run",
+                  content: [{ type: "text", text: "Edited style auto" }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const pmDoc = toProseDoc(document, { styles: document.package.styles });
+    const paragraph = pmDoc.child(0);
+    const editedParagraph = schema.node(
+      "paragraph",
+      { ...paragraph.attrs, spaceBefore: 240 },
+      paragraph.content,
+    );
+    const editedPmDoc = schema.node("doc", null, [editedParagraph]);
+    const roundTripped = fromProseDoc(editedPmDoc, document);
+    const block = roundTripped.package.document.content.at(0);
+
+    expect(block?.type).toBe("paragraph");
+    if (block?.type !== "paragraph") {
+      return;
+    }
+    expect(block.formatting?.styleId).toBe("AutoSpacing");
+    expect(block.formatting?.beforeAutospacing).toBe(false);
+    expect(block.formatting?.spaceBefore).toBe(240);
+  });
+
+  test("saves edited docDefaults auto spacing with auto disabled", () => {
+    const document: Document = {
+      package: {
+        styles: {
+          docDefaults: {
+            pPr: { beforeAutospacing: true, spaceBefore: 200 },
+          },
+        },
+        document: {
+          content: [
+            {
+              type: "paragraph",
+              content: [
+                {
+                  type: "run",
+                  content: [{ type: "text", text: "Edited default auto" }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const pmDoc = toProseDoc(document, { styles: document.package.styles });
+    const paragraph = pmDoc.child(0);
+    const editedParagraph = schema.node(
+      "paragraph",
+      { ...paragraph.attrs, spaceBefore: 240 },
+      paragraph.content,
+    );
+    const editedPmDoc = schema.node("doc", null, [editedParagraph]);
+    const roundTripped = fromProseDoc(editedPmDoc, document);
+    const block = roundTripped.package.document.content.at(0);
+
+    expect(block?.type).toBe("paragraph");
+    if (block?.type !== "paragraph") {
+      return;
+    }
+    expect(block.formatting?.beforeAutospacing).toBe(false);
+    expect(block.formatting?.spaceBefore).toBe(240);
+  });
+
+  test("preserves direct auto spacing with no numeric spacing on a no-op save", () => {
+    const document: Document = {
+      package: {
+        document: {
+          content: [
+            {
+              type: "paragraph",
+              formatting: { beforeAutospacing: true },
+              content: [
+                {
+                  type: "run",
+                  content: [{ type: "text", text: "No numeric spacing" }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const pmDoc = toProseDoc(document);
+    const attrs = expectParagraphAttrs(pmDoc.child(0));
+    const roundTripped = fromProseDoc(pmDoc, document);
+    const block = roundTripped.package.document.content.at(0);
+
+    expect(typeof Reflect.get(attrs, "spaceBefore")).not.toBe("number");
+    expect(attrs._autospacingBase).toEqual({ before: null });
+    expect(block?.type).toBe("paragraph");
+    if (block?.type !== "paragraph") {
+      return;
+    }
+    expect(block.formatting?.beforeAutospacing).toBe(true);
+    expect(block.formatting?.spaceBefore).toBeUndefined();
+  });
+
+  test("saves a style reset from direct auto spacing with auto disabled", () => {
+    const document: Document = {
+      package: {
+        document: {
+          content: [
+            {
+              type: "paragraph",
+              formatting: { beforeAutospacing: true },
+              content: [
+                {
+                  type: "run",
+                  content: [{ type: "text", text: "Reset spacing" }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const pmDoc = toProseDoc(document);
+    const paragraph = pmDoc.child(0);
+    const resetParagraph = schema.node(
+      "paragraph",
+      {
+        ...paragraph.attrs,
+        styleId: "Normal",
+        spaceBefore: null,
+        _autospacingBase: null,
+      },
+      paragraph.content,
+    );
+    const resetPmDoc = schema.node("doc", null, [resetParagraph]);
+    const roundTripped = fromProseDoc(resetPmDoc, document);
+    const block = roundTripped.package.document.content.at(0);
+
+    expect(block?.type).toBe("paragraph");
+    if (block?.type !== "paragraph") {
+      return;
+    }
+    expect(block.formatting?.styleId).toBe("Normal");
+    expect(block.formatting?.beforeAutospacing).toBe(false);
+    expect(block.formatting?.spaceBefore).toBeUndefined();
+  });
+
+  test("round-trips explicit baseline footnote references", () => {
+    const document: Document = {
+      package: {
+        document: {
+          content: [
+            {
+              type: "paragraph",
+              content: [
+                {
+                  type: "run",
+                  formatting: { vertAlign: "baseline" },
+                  content: [{ type: "footnoteRef", id: 1 }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const pmDoc = toProseDoc(document);
+    const textNode = pmDoc.child(0).child(0);
+    const footnoteMark = textNode.marks.find(
+      (mark) => mark.type.name === "footnoteRef",
+    );
+    expect(footnoteMark?.attrs["vertAlign"]).toBe("baseline");
+
+    const roundTripped = fromProseDoc(pmDoc, document);
+    const block = roundTripped.package.document.content.at(0);
+
+    expect(block?.type).toBe("paragraph");
+    if (block?.type !== "paragraph") {
+      return;
+    }
+    const run = block.content.at(0);
+    expect(run?.type).toBe("run");
+    if (run?.type !== "run") {
+      return;
+    }
+    expect(run.formatting?.vertAlign).toBe("baseline");
+  });
+
+  test("exports subscript overrides on superscript note references", () => {
+    const footnoteRef = schema.mark("footnoteRef", {
+      id: "1",
+      noteType: "footnote",
+      vertAlign: "superscript",
+    });
+    const subscript = schema.mark("subscript");
+    const pmDoc = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("1", [footnoteRef, subscript]),
+      ]),
+    ]);
+
+    const roundTripped = fromProseDoc(pmDoc);
+    const block = roundTripped.package.document.content.at(0);
+
+    expect(block?.type).toBe("paragraph");
+    if (block?.type !== "paragraph") {
+      return;
+    }
+    const run = block.content.at(0);
+    expect(run?.type).toBe("run");
+    if (run?.type !== "run") {
+      return;
+    }
+    expect(run.content).toEqual([{ type: "footnoteRef", id: 1 }]);
+    expect(run.formatting?.vertAlign).toBe("subscript");
+  });
+
   test("round-trips tracked-change image atoms", () => {
     const document: Document = {
       package: {
@@ -1134,6 +1526,51 @@ describe("fromProseDoc", () => {
 
     expect(markedText?.text).toBe("commented");
     expect(comment?.attrs.commentId).toBe(123);
+  });
+
+  test("keeps one comment range across an interrupting tracked-change run (eigenpal/docx-editor#927)", () => {
+    const commentMark = schema.mark("comment", { commentId: 17 });
+    const insertionMark = schema.mark("insertion", {
+      revisionId: 1,
+      author: "Reviewer",
+      date: "2026-06-20T00:00:00Z",
+    });
+    const pmDoc = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("hello", [commentMark]),
+        schema.text("XXX", [insertionMark]),
+        schema.text("world", [commentMark]),
+      ]),
+    ]);
+
+    const document = fromProseDoc(pmDoc);
+    const paragraph = document.package.document.content[0];
+
+    expect(paragraph?.type).toBe("paragraph");
+    if (paragraph?.type !== "paragraph") {
+      return;
+    }
+
+    // A single comment id must yield exactly one range; the tracked-change run
+    // that drops the comment mark sits inside it, not between two ranges.
+    expect(paragraph.content.map((content) => content.type)).toEqual([
+      "commentRangeStart",
+      "run",
+      "insertion",
+      "run",
+      "commentRangeEnd",
+    ]);
+
+    const starts = paragraph.content.filter(
+      (content) => content.type === "commentRangeStart",
+    );
+    const ends = paragraph.content.filter(
+      (content) => content.type === "commentRangeEnd",
+    );
+    expect(starts).toHaveLength(1);
+    expect(ends).toHaveLength(1);
+    expect(starts[0]?.id).toBe(17);
+    expect(ends[0]?.id).toBe(17);
   });
 
   test("preserves comment ranges across multiple paragraphs", () => {

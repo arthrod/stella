@@ -4,18 +4,16 @@ import { t } from "elysia";
 import { queryEntities } from "@/api/handlers/entities/query-entities";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
+import { tConditionNode } from "@/api/lib/conditions/contract";
 import { tSafeId } from "@/api/lib/custom-schema";
 import { LIMITS } from "@/api/lib/limits";
-import {
-  tViewFilterConditionSchema,
-  tViewSortSchema,
-} from "@/api/lib/views-schema";
+import { tViewSortSchema } from "@/api/lib/views-schema";
 
 const readFilesystemTreeBodySchema = t.Object({
-  filters: t.Optional(t.Array(tViewFilterConditionSchema)),
+  filters: t.Optional(t.Array(tConditionNode)),
   sorts: t.Optional(t.Array(tViewSortSchema)),
   search: t.Optional(t.String({ maxLength: LIMITS.searchQueryMaxLength })),
-  fieldMode: t.Optional(t.UnionEnum(["full", "visible"])),
+  fieldMode: t.Optional(t.Union([t.Literal("full"), t.Literal("visible")])),
   fieldIds: t.Optional(
     t.Array(tSafeId("property"), {
       maxItems: LIMITS.propertiesCount,

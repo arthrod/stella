@@ -69,6 +69,16 @@ export const CLIPBOARD_TYPES = {
   PLAIN: "text/plain",
 } as const;
 
+const SKIPPED_CLIPBOARD_ELEMENTS = new Set([
+  "script",
+  "style",
+  "iframe",
+  "object",
+  "embed",
+  "svg",
+  "math",
+]);
+
 /**
  * Extract image files from clipboard data (if present).
  */
@@ -284,6 +294,7 @@ export async function writeToClipboard(
  */
 function writeToClipboardFallback(content: ClipboardContent): boolean {
   const tempDiv = document.createElement("div");
+  // safe-html: clipboard HTML is serialized by runsToHtml()/paragraphsToHtml(); text is HTML-escaped and formatting style fields are escaped or validated below
   tempDiv.innerHTML = content.html;
   tempDiv.style.position = "fixed";
   tempDiv.style.left = "-9999px";
@@ -343,13 +354,17 @@ async function parseClipboardItems(
   for (const item of items) {
     // Get HTML content
     if (item.types.includes(CLIPBOARD_TYPES.HTML)) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential reads from a shared clipboard item; html accumulates into one outer variable
       const blob = await item.getType(CLIPBOARD_TYPES.HTML);
+      // oxlint-disable-next-line no-await-in-loop -- sequential reads from a shared clipboard item; html accumulates into one outer variable
       html = await blob.text();
     }
 
     // Get plain text
     if (item.types.includes(CLIPBOARD_TYPES.PLAIN)) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential reads from a shared clipboard item; plainText accumulates into one outer variable
       const blob = await item.getType(CLIPBOARD_TYPES.PLAIN);
+      // oxlint-disable-next-line no-await-in-loop -- sequential reads from a shared clipboard item; plainText accumulates into one outer variable
       plainText = await blob.text();
     }
   }
@@ -391,11 +406,13 @@ export function parseClipboardHtml(
   // If from our editor, try to parse internal format
   if (fromEditor) {
     // Look for internal data in HTML comments or data attributes
-    const internalMatch = /data-folio-content="([^"]+)"/.exec(html);
+    const internalMatch = /data-folio-content="(?<content>[^"]+)"/.exec(html);
     if (internalMatch) {
       try {
-        // SAFETY: match group 1 always captures in this regex
-        const runs = JSON.parse(decodeURIComponent(internalMatch[1]!));
+        // SAFETY: `content` group always captures when this regex matches
+        const runs = JSON.parse(
+          decodeURIComponent(internalMatch.groups!["content"]!),
+        );
         return { runs, fromWord: false, fromEditor: true, plainText };
       } catch {
         // Fall through to HTML parsing
@@ -440,24 +457,132 @@ export function isEditorHtml(html: string): boolean {
 }
 
 /**
+ * Strip every HTML comment, including unterminated comments.
+ */
+function stripHtmlComments(html: string): string {
+  let result = "";
+  let cursor = 0;
+
+  while (cursor < html.length) {
+    const start = html.indexOf("<!--", cursor);
+    if (start === -1) {
+      result += html.slice(cursor);
+      break;
+    }
+
+    result += html.slice(cursor, start);
+    const end = html.indexOf("-->", start + 4);
+    if (end === -1) {
+      break;
+    }
+
+    cursor = end + 3;
+  }
+
+  return result;
+}
+
+const ASCII_UPPER_A = 65;
+const ASCII_UPPER_Z = 90;
+const ASCII_LOWERCASE_OFFSET = 32;
+
+function toAsciiLowerCode(code: number): number {
+  if (code < ASCII_UPPER_A || code > ASCII_UPPER_Z) {
+    return code;
+  }
+
+  return code + ASCII_LOWERCASE_OFFSET;
+}
+
+function indexOfAsciiCaseInsensitive(
+  text: string,
+  search: string,
+  fromIndex: number,
+): number {
+  const maxStart = text.length - search.length;
+
+  for (let index = fromIndex; index <= maxStart; index++) {
+    let matches = true;
+
+    for (let offset = 0; offset < search.length; offset++) {
+      const textCode = toAsciiLowerCode(text.codePointAt(index + offset) ?? -1);
+      const searchCode = search.codePointAt(offset) ?? -1;
+
+      if (textCode !== searchCode) {
+        matches = false;
+        break;
+      }
+    }
+
+    if (matches) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+/**
+ * Remove paired namespace blocks such as Word/Office `<w:...>` and `<o:...>`
+ * tags without regex backtracking on hostile clipboard HTML.
+ */
+function stripPairedNamespaceTags(html: string, prefix: string): string {
+  const open = `<${prefix}`;
+  const close = `</${prefix}`;
+  let result = "";
+  let cursor = 0;
+
+  while (cursor < html.length) {
+    const start = indexOfAsciiCaseInsensitive(html, open, cursor);
+    if (start === -1) {
+      result += html.slice(cursor);
+      break;
+    }
+
+    const openTagEnd = html.indexOf(">", start);
+    if (openTagEnd === -1) {
+      result += html.slice(cursor);
+      break;
+    }
+    const openingTag = html.slice(start, openTagEnd).trimEnd();
+    if (openingTag.endsWith("/")) {
+      result += html.slice(cursor, start);
+      cursor = openTagEnd + 1;
+      continue;
+    }
+
+    const closeStart = indexOfAsciiCaseInsensitive(html, close, openTagEnd + 1);
+    const closeTagEnd = closeStart === -1 ? -1 : html.indexOf(">", closeStart);
+    if (closeTagEnd === -1) {
+      result += html.slice(cursor);
+      break;
+    }
+
+    result += html.slice(cursor, start);
+    cursor = closeTagEnd + 1;
+  }
+
+  return result;
+}
+
+/**
  * Clean Microsoft Word HTML
  */
 export function cleanWordHtml(html: string): string {
   let cleaned = html;
 
-  // Remove Word-specific comments
-  cleaned = cleaned.replace(/<!--\[if[\s\S]*?<!\[endif\]-->/gi, "");
-  cleaned = cleaned.replace(/<!--[\s\S]*?-->/g, "");
+  // Remove Word-specific comments and any other HTML comments.
+  cleaned = stripHtmlComments(cleaned);
 
   // Remove XML declarations
   cleaned = cleaned.replace(/<\?xml[^>]*>/gi, "");
 
-  // Remove o: (Office) namespace tags
-  cleaned = cleaned.replace(/<o:[^>]*>[\s\S]*?<\/o:[^>]*>/gi, "");
+  // Remove o: (Office) namespace tags.
+  cleaned = stripPairedNamespaceTags(cleaned, "o:");
   cleaned = cleaned.replace(/<o:[^>]*\/>/gi, "");
 
-  // Remove w: (Word) namespace tags
-  cleaned = cleaned.replace(/<w:[^>]*>[\s\S]*?<\/w:[^>]*>/gi, "");
+  // Remove w: (Word) namespace tags.
+  cleaned = stripPairedNamespaceTags(cleaned, "w:");
   cleaned = cleaned.replace(/<w:[^>]*\/>/gi, "");
 
   cleaned = cleanWordAttributes(cleaned);
@@ -554,6 +679,9 @@ function processNode(
 
   const element = node;
   const tagName = element.tagName.toLowerCase();
+  if (SKIPPED_CLIPBOARD_ELEMENTS.has(tagName)) {
+    return;
+  }
 
   // Merge formatting from this element
   const formatting = { ...inheritedFormatting, ...extractFormatting(element) };
@@ -703,12 +831,13 @@ function colorToHex(color: string): string | null {
   }
 
   // RGB/RGBA
-  const rgbMatch = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(color);
+  const rgbMatch = /rgba?\((?<r>\d+),\s*(?<g>\d+),\s*(?<b>\d+)/.exec(color);
   if (rgbMatch) {
-    // SAFETY: regex has 3 capture groups; all present when match succeeds
-    const r = Number.parseInt(rgbMatch[1]!, 10).toString(16).padStart(2, "0");
-    const g = Number.parseInt(rgbMatch[2]!, 10).toString(16).padStart(2, "0");
-    const b = Number.parseInt(rgbMatch[3]!, 10).toString(16).padStart(2, "0");
+    // SAFETY: `r`/`g`/`b` groups all present when match succeeds
+    const groups = rgbMatch.groups!;
+    const r = Number.parseInt(groups["r"]!, 10).toString(16).padStart(2, "0");
+    const g = Number.parseInt(groups["g"]!, 10).toString(16).padStart(2, "0");
+    const b = Number.parseInt(groups["b"]!, 10).toString(16).padStart(2, "0");
     return (r + g + b).toUpperCase();
   }
 
@@ -811,28 +940,51 @@ function runToHtml(run: Run): string {
   // Build inline styles
   const styles: string[] = [];
 
-  if (formatting.fontSize) {
-    const sizePt = formatting.fontSize / 2;
+  const fontSize = formatting.fontSize;
+  if (fontSize !== undefined && Number.isFinite(fontSize) && fontSize > 0) {
+    const sizePt = fontSize / 2;
     styles.push(`font-size: ${sizePt}pt`);
   }
 
   if (formatting.fontFamily?.ascii) {
-    styles.push(`font-family: "${formatting.fontFamily.ascii}"`);
+    styles.push(
+      `font-family: "${escapeCssString(formatting.fontFamily.ascii)}"`,
+    );
   }
 
-  if (formatting.color?.rgb) {
-    styles.push(`color: #${formatting.color.rgb}`);
+  const textColor = formatCssRgb(formatting.color?.rgb);
+  if (textColor !== null) {
+    styles.push(`color: ${textColor}`);
   }
 
-  if (formatting.shading?.fill?.rgb) {
-    styles.push(`background-color: #${formatting.shading.fill.rgb}`);
+  const fillColor = formatCssRgb(formatting.shading?.fill?.rgb);
+  if (fillColor !== null) {
+    styles.push(`background-color: ${fillColor}`);
   }
 
   if (styles.length > 0) {
-    html = `<span style="${styles.join("; ")}">${html}</span>`;
+    html = `<span style="${escapeHtml(styles.join("; "))}">${html}</span>`;
   }
 
   return html;
+}
+
+const CSS_RGB_RE = /^[\dA-F]{6}$/iu;
+
+function formatCssRgb(value: string | undefined): string | null {
+  if (value === undefined || !CSS_RGB_RE.test(value)) {
+    return null;
+  }
+  return `#${value}`;
+}
+
+function escapeCssString(value: string): string {
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("\n", "\\A ")
+    .replaceAll("\r", "\\D ")
+    .replaceAll("\f", "\\C ");
 }
 
 /**

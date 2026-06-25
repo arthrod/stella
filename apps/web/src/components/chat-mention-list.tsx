@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useImperativeHandle,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { Ref } from "react";
 
 import { useQuery } from "@tanstack/react-query";
@@ -21,6 +15,7 @@ import {
 import { useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { Popover, PopoverPopup } from "@stll/ui/components/popover";
 import { cn } from "@stll/ui/lib/utils";
 
@@ -28,8 +23,362 @@ import type {
   ChatMentionOption,
   ChatReferenceCategory,
 } from "@/components/chat-mention-extension";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { getMatterColor } from "@/lib/matter-colors";
 import { DocumentIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/document-icon";
+
+export const ChatMentionList = ({
+  items,
+  command,
+  clientRect,
+  loadWorkspaceEntities,
+  query,
+  ref,
+}: ChatMentionListProps) => {
+  const t = useTranslations();
+  const categoryLabel = useCategoryLabel();
+  const [isOpen, setIsOpen] = useState(true);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [drillTarget, setDrillTarget] = useState<DrillTarget | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const lastClientRectRef = useRef<DOMRect | null>(null);
+  const latestClientRect = clientRect?.() ?? null;
+  if (latestClientRect) {
+    lastClientRectRef.current = latestClientRect;
+  }
+  // Stable virtual-anchor identity for the Base UI positioner (Floating UI).
+  const anchor = useMemo(
+    () => ({
+      getBoundingClientRect: () => {
+        const nextClientRect = clientRect?.() ?? null;
+        if (nextClientRect) {
+          lastClientRectRef.current = nextClientRect;
+          return nextClientRect;
+        }
+
+        return lastClientRectRef.current ?? new DOMRect();
+      },
+    }),
+    [clientRect],
+  );
+
+  const drillDownQuery = useQuery({
+    queryKey: [
+      "chat-mention-entities",
+      drillTarget,
+      query,
+      loadWorkspaceEntities,
+    ],
+    queryFn: async () => {
+      if (drillTarget === null) {
+        return [];
+      }
+      return await loadWorkspaceEntities(
+        {
+          id: drillTarget.workspaceId,
+          label: drillTarget.name,
+          category: "workspace",
+          kind: "workspace",
+          mimeType: null,
+          sourceViewId: drillTarget.viewId,
+        },
+        query,
+      );
+    },
+    enabled: drillTarget !== null,
+    staleTime: 0,
+    refetchOnWindowFocus: false,
+  });
+
+  const drillState: DrillState = (() => {
+    if (drillTarget === null) {
+      return { kind: "none" };
+    }
+    if (drillDownQuery.isError) {
+      return { kind: "error", target: drillTarget };
+    }
+    if (drillDownQuery.isSuccess) {
+      return {
+        kind: "loaded",
+        target: drillTarget,
+        items: drillDownQuery.data,
+      };
+    }
+    return { kind: "loading", target: drillTarget };
+  })();
+
+  const drillItems = drillState.kind === "loaded" ? drillState.items : [];
+  const activeItems = drillTarget ? drillItems : items;
+  const safeIndex = Math.min(
+    selectedIndex,
+    Math.max(0, activeItems.length - 1),
+  );
+
+  // Scroll the selected item into view on index change
+  useExternalSyncEffect(() => {
+    const el = listRef.current?.querySelector(
+      `[data-mention-index="${safeIndex}"]`,
+    );
+    el?.scrollIntoView({ block: "nearest" });
+  }, [safeIndex]);
+
+  const selectItem = (index: number) => {
+    const item = activeItems.at(index);
+    if (item !== undefined) {
+      command(item);
+    }
+  };
+
+  const handleDrillDown = (workspace: ChatMentionOption) => {
+    if (!workspace.sourceViewId) {
+      return;
+    }
+
+    setDrillTarget({
+      workspaceId: workspace.id,
+      viewId: workspace.sourceViewId,
+      name: workspace.label,
+    });
+    setSelectedIndex(0);
+  };
+
+  const handleBack = () => {
+    setDrillTarget(null);
+    setSelectedIndex(0);
+  };
+
+  useImperativeHandle(ref, () => ({
+    onKeyDown: ({ event }) => {
+      if (event.key === "Escape") {
+        if (drillTarget) {
+          handleBack();
+          return true;
+        }
+        event.stopPropagation();
+        setIsOpen(false);
+        return true;
+      }
+
+      if (event.key === "ArrowUp") {
+        if (activeItems.length > 0) {
+          setSelectedIndex(
+            (safeIndex + activeItems.length - 1) % activeItems.length,
+          );
+        }
+        return true;
+      }
+
+      if (event.key === "ArrowDown") {
+        if (activeItems.length > 0) {
+          setSelectedIndex((safeIndex + 1) % activeItems.length);
+        }
+        return true;
+      }
+
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        selectItem(safeIndex);
+        return true;
+      }
+
+      if (
+        event.key === "Tab" &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey &&
+        activeItems.length > 0
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        selectItem(safeIndex);
+        return true;
+      }
+
+      // The drill-down chevron mirrors under RTL (DirectionalIcon), so the
+      // horizontal arrows must follow visual direction: the key pointing
+      // "into" the group is ArrowRight under LTR and ArrowLeft under RTL.
+      // Read the rendered list's computed direction so this stays correct
+      // regardless of how the host app or an enclosing subtree sets `dir`.
+      const isRtl =
+        listRef.current !== null &&
+        getComputedStyle(listRef.current).direction === "rtl";
+      const drillInKey = isRtl ? "ArrowLeft" : "ArrowRight";
+      const drillOutKey = isRtl ? "ArrowRight" : "ArrowLeft";
+
+      // The inline-forward arrow on a workspace item drills down
+      if (event.key === drillInKey && !drillTarget) {
+        const item = activeItems.at(safeIndex);
+        if (item?.category === "workspace") {
+          handleDrillDown(item);
+          return true;
+        }
+      }
+
+      // The inline-back arrow exits drill-down
+      if (event.key === drillOutKey && drillTarget) {
+        handleBack();
+        return true;
+      }
+
+      return false;
+    },
+  }));
+
+  const groups = groupByCategory(activeItems);
+  const hasMultipleCategories = groups.length > 1;
+
+  if (!lastClientRectRef.current) {
+    return null;
+  }
+
+  return (
+    <Popover modal={true} onOpenChange={setIsOpen} open={isOpen}>
+      <PopoverPopup
+        align="start"
+        anchor={anchor}
+        className="w-96 max-w-[min(24rem,calc(100vw-2rem))] *:data-[slot=popover-positioner]:transition-none! *:data-[slot=popover-viewport]:p-1!"
+        initialFocus={false}
+        side="top"
+      >
+        <div
+          className="flex max-h-64 w-full min-w-0 flex-col gap-0.5 overflow-x-hidden overflow-y-auto"
+          ref={listRef}
+        >
+          {drillTarget && (
+            <Button
+              className="text-muted-foreground justify-start gap-2 font-normal"
+              onClick={handleBack}
+              size="sm"
+              variant="ghost"
+            >
+              <DirectionalIcon
+                className="size-3.5 shrink-0"
+                icon={ArrowLeftIcon}
+              />
+              <LayersIcon className="size-3.5 shrink-0" />
+              <span className="truncate">{drillTarget.name}</span>
+            </Button>
+          )}
+
+          {drillState.kind === "loading" && (
+            <div className="flex items-center justify-center p-2">
+              <LoaderIcon className="text-muted-foreground size-4 animate-spin" />
+            </div>
+          )}
+
+          {drillState.kind === "error" && (
+            <div className="text-destructive flex items-center justify-center p-2 text-center text-sm">
+              {t("chat.mention.loadError")}
+            </div>
+          )}
+
+          {drillState.kind === "none" && activeItems.length === 0 && (
+            <div className="text-muted-foreground flex items-center justify-center p-2 text-center text-sm">
+              {t("common.noResults")}
+            </div>
+          )}
+
+          {drillState.kind === "loaded" && drillState.items.length === 0 && (
+            <div className="text-muted-foreground flex items-center justify-center p-2 text-center text-sm">
+              {t("common.noResults")}
+            </div>
+          )}
+
+          {drillState.kind === "none" &&
+            groups.map((group) => {
+              const firstItem = group.items[0];
+              const groupStartIndex = firstItem
+                ? activeItems.indexOf(firstItem)
+                : -1;
+
+              return (
+                <div key={group.category}>
+                  {hasMultipleCategories && (
+                    <div className="text-muted-foreground px-2 pt-1.5 pb-0.5 text-xs font-medium">
+                      {categoryLabel(group.category)}
+                    </div>
+                  )}
+                  {group.items.map((item, i) => {
+                    const flatIndex = groupStartIndex + i;
+                    const isWorkspace = item.category === "workspace";
+
+                    return (
+                      <div
+                        className="flex min-w-0 items-center"
+                        data-mention-index={flatIndex}
+                        key={item.id}
+                      >
+                        <Button
+                          className={cn(
+                            "min-w-0 flex-1 justify-start gap-2 overflow-hidden font-normal",
+                            safeIndex === flatIndex &&
+                              "bg-accent text-accent-foreground",
+                          )}
+                          key={item.id}
+                          onClick={() => selectItem(flatIndex)}
+                          size="sm"
+                          variant="ghost"
+                        >
+                          <MentionIcon
+                            category={item.category}
+                            id={item.id}
+                            kind={item.kind}
+                            mimeType={item.mimeType}
+                          />
+                          <span className="min-w-0 flex-1 truncate">
+                            {item.label}
+                          </span>
+                        </Button>
+                        {isWorkspace && (
+                          <Button
+                            aria-label={t("common.open")}
+                            className="text-muted-foreground size-7 shrink-0"
+                            onClick={() => handleDrillDown(item)}
+                            size="icon-sm"
+                            variant="ghost"
+                          >
+                            <DirectionalIcon
+                              className="size-3.5"
+                              icon={ChevronRightIcon}
+                            />
+                          </Button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+
+          {drillState.kind === "loaded" &&
+            drillState.items.map((item, i) => (
+              <Button
+                className={cn(
+                  "min-w-0 justify-start gap-2 overflow-hidden font-normal",
+                  safeIndex === i && "bg-accent text-accent-foreground",
+                )}
+                data-mention-index={i}
+                key={item.id}
+                onClick={() => selectItem(i)}
+                size="sm"
+                variant="ghost"
+              >
+                <MentionIcon
+                  category={item.category}
+                  id={item.id}
+                  kind={item.kind}
+                  mimeType={item.mimeType}
+                />
+                <span className="min-w-0 flex-1 truncate">{item.label}</span>
+              </Button>
+            ))}
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+};
 
 const CATEGORY_ORDER: ChatReferenceCategory[] = [
   "entity",
@@ -141,338 +490,4 @@ type ChatMentionListProps = SuggestionProps<ChatMentionOption> & {
     query: string,
   ) => Promise<ChatMentionOption[]>;
   ref?: Ref<ChatMentionListHandle>;
-};
-
-export const ChatMentionList = ({
-  items,
-  command,
-  clientRect,
-  loadWorkspaceEntities,
-  query,
-  ref,
-}: ChatMentionListProps) => {
-  const t = useTranslations();
-  const categoryLabel = useCategoryLabel();
-  const [isOpen, setIsOpen] = useState(true);
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const [drillTarget, setDrillTarget] = useState<DrillTarget | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
-  const lastClientRectRef = useRef<DOMRect | null>(null);
-  const latestClientRect = clientRect?.() ?? null;
-  if (latestClientRect) {
-    lastClientRectRef.current = latestClientRect;
-  }
-  const anchor = useMemo(
-    () => ({
-      getBoundingClientRect: () => {
-        const nextClientRect = clientRect?.() ?? null;
-        if (nextClientRect) {
-          lastClientRectRef.current = nextClientRect;
-          return nextClientRect;
-        }
-
-        return lastClientRectRef.current ?? new DOMRect();
-      },
-    }),
-    [clientRect],
-  );
-
-  const drillDownQuery = useQuery({
-    queryKey: [
-      "chat-mention-entities",
-      drillTarget,
-      query,
-      loadWorkspaceEntities,
-    ],
-    queryFn: async () => {
-      if (drillTarget === null) {
-        return [];
-      }
-      return await loadWorkspaceEntities(
-        {
-          id: drillTarget.workspaceId,
-          label: drillTarget.name,
-          category: "workspace",
-          kind: "workspace",
-          mimeType: null,
-          sourceViewId: drillTarget.viewId,
-        },
-        query,
-      );
-    },
-    enabled: drillTarget !== null,
-    staleTime: 0,
-    refetchOnWindowFocus: false,
-  });
-
-  const drillState: DrillState = (() => {
-    if (drillTarget === null) {
-      return { kind: "none" };
-    }
-    if (drillDownQuery.isError) {
-      return { kind: "error", target: drillTarget };
-    }
-    if (drillDownQuery.isSuccess) {
-      return {
-        kind: "loaded",
-        target: drillTarget,
-        items: drillDownQuery.data,
-      };
-    }
-    return { kind: "loading", target: drillTarget };
-  })();
-
-  const drillItems = drillState.kind === "loaded" ? drillState.items : [];
-  const activeItems = drillTarget ? drillItems : items;
-  const safeIndex = Math.min(
-    selectedIndex,
-    Math.max(0, activeItems.length - 1),
-  );
-
-  // Scroll the selected item into view on index change
-  useEffect(() => {
-    const el = listRef.current?.querySelector(
-      `[data-mention-index="${safeIndex}"]`,
-    );
-    el?.scrollIntoView({ block: "nearest" });
-  }, [safeIndex]);
-
-  const selectItem = (index: number) => {
-    const item = activeItems.at(index);
-    if (item !== undefined) {
-      command(item);
-    }
-  };
-
-  const handleDrillDown = (workspace: ChatMentionOption) => {
-    if (!workspace.sourceViewId) {
-      return;
-    }
-
-    setDrillTarget({
-      workspaceId: workspace.id,
-      viewId: workspace.sourceViewId,
-      name: workspace.label,
-    });
-    setSelectedIndex(0);
-  };
-
-  const handleBack = () => {
-    setDrillTarget(null);
-    setSelectedIndex(0);
-  };
-
-  useImperativeHandle(ref, () => ({
-    onKeyDown: ({ event }) => {
-      if (event.key === "Escape") {
-        if (drillTarget) {
-          handleBack();
-          return true;
-        }
-        event.stopPropagation();
-        setIsOpen(false);
-        return true;
-      }
-
-      if (event.key === "ArrowUp") {
-        if (activeItems.length > 0) {
-          setSelectedIndex(
-            (safeIndex + activeItems.length - 1) % activeItems.length,
-          );
-        }
-        return true;
-      }
-
-      if (event.key === "ArrowDown") {
-        if (activeItems.length > 0) {
-          setSelectedIndex((safeIndex + 1) % activeItems.length);
-        }
-        return true;
-      }
-
-      if (event.key === "Enter") {
-        event.preventDefault();
-        event.stopPropagation();
-        selectItem(safeIndex);
-        return true;
-      }
-
-      if (
-        event.key === "Tab" &&
-        !event.altKey &&
-        !event.ctrlKey &&
-        !event.metaKey &&
-        !event.shiftKey &&
-        activeItems.length > 0
-      ) {
-        event.preventDefault();
-        event.stopPropagation();
-        selectItem(safeIndex);
-        return true;
-      }
-
-      // ArrowRight on a workspace item drills down
-      if (event.key === "ArrowRight" && !drillTarget) {
-        const item = activeItems.at(safeIndex);
-        if (item?.category === "workspace") {
-          handleDrillDown(item);
-          return true;
-        }
-      }
-
-      // ArrowLeft exits drill-down
-      if (event.key === "ArrowLeft" && drillTarget) {
-        handleBack();
-        return true;
-      }
-
-      return false;
-    },
-  }));
-
-  const groups = groupByCategory(activeItems);
-  const hasMultipleCategories = groups.length > 1;
-
-  if (!lastClientRectRef.current) {
-    return null;
-  }
-
-  return (
-    <Popover modal={true} onOpenChange={setIsOpen} open={isOpen}>
-      <PopoverPopup
-        align="start"
-        anchor={anchor}
-        className="w-96 max-w-[min(24rem,calc(100vw-2rem))] *:data-[slot=popover-positioner]:transition-none! *:data-[slot=popover-viewport]:p-1!"
-        initialFocus={false}
-        side="top"
-      >
-        <div
-          className="flex max-h-64 w-full min-w-0 flex-col gap-0.5 overflow-x-hidden overflow-y-auto"
-          ref={listRef}
-        >
-          {drillTarget && (
-            <Button
-              className="text-muted-foreground justify-start gap-2 font-normal"
-              onClick={handleBack}
-              size="sm"
-              variant="ghost"
-            >
-              <ArrowLeftIcon className="size-3.5 shrink-0" />
-              <LayersIcon className="size-3.5 shrink-0" />
-              <span className="truncate">{drillTarget.name}</span>
-            </Button>
-          )}
-
-          {drillState.kind === "loading" && (
-            <div className="flex items-center justify-center p-2">
-              <LoaderIcon className="text-muted-foreground size-4 animate-spin" />
-            </div>
-          )}
-
-          {drillState.kind === "error" && (
-            <div className="text-destructive flex items-center justify-center p-2 text-center text-sm">
-              {t("chat.mention.loadError")}
-            </div>
-          )}
-
-          {drillState.kind === "none" && activeItems.length === 0 && (
-            <div className="text-muted-foreground flex items-center justify-center p-2 text-center text-sm">
-              {t("common.noResults")}
-            </div>
-          )}
-
-          {drillState.kind === "loaded" && drillState.items.length === 0 && (
-            <div className="text-muted-foreground flex items-center justify-center p-2 text-center text-sm">
-              {t("common.noResults")}
-            </div>
-          )}
-
-          {drillState.kind === "none" &&
-            groups.map((group) => {
-              const firstItem = group.items[0];
-              const groupStartIndex = firstItem
-                ? activeItems.indexOf(firstItem)
-                : -1;
-
-              return (
-                <div key={group.category}>
-                  {hasMultipleCategories && (
-                    <div className="text-muted-foreground px-2 pt-1.5 pb-0.5 text-xs font-medium">
-                      {categoryLabel(group.category)}
-                    </div>
-                  )}
-                  {group.items.map((item, i) => {
-                    const flatIndex = groupStartIndex + i;
-                    const isWorkspace = item.category === "workspace";
-
-                    return (
-                      <div
-                        className="flex min-w-0 items-center"
-                        data-mention-index={flatIndex}
-                        key={item.id}
-                      >
-                        <Button
-                          className={cn(
-                            "min-w-0 flex-1 justify-start gap-2 overflow-hidden font-normal",
-                            safeIndex === flatIndex &&
-                              "bg-accent text-accent-foreground",
-                          )}
-                          key={item.id}
-                          onClick={() => selectItem(flatIndex)}
-                          size="sm"
-                          variant="ghost"
-                        >
-                          <MentionIcon
-                            category={item.category}
-                            id={item.id}
-                            kind={item.kind}
-                            mimeType={item.mimeType}
-                          />
-                          <span className="min-w-0 flex-1 truncate">
-                            {item.label}
-                          </span>
-                        </Button>
-                        {isWorkspace && (
-                          <Button
-                            className="text-muted-foreground size-7 shrink-0"
-                            onClick={() => handleDrillDown(item)}
-                            size="icon-sm"
-                            variant="ghost"
-                          >
-                            <ChevronRightIcon className="size-3.5" />
-                          </Button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-
-          {drillState.kind === "loaded" &&
-            drillState.items.map((item, i) => (
-              <Button
-                className={cn(
-                  "min-w-0 justify-start gap-2 overflow-hidden font-normal",
-                  safeIndex === i && "bg-accent text-accent-foreground",
-                )}
-                data-mention-index={i}
-                key={item.id}
-                onClick={() => selectItem(i)}
-                size="sm"
-                variant="ghost"
-              >
-                <MentionIcon
-                  category={item.category}
-                  id={item.id}
-                  kind={item.kind}
-                  mimeType={item.mimeType}
-                />
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              </Button>
-            ))}
-        </div>
-      </PopoverPopup>
-    </Popover>
-  );
 };

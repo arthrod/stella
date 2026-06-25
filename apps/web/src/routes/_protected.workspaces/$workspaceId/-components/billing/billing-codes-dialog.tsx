@@ -245,6 +245,7 @@ export const BillingCodesDialog = ({
                       <Checkbox checked={code.active} />
                     </Button>
                     <Button
+                      aria-label={t("common.delete")}
                       className="text-destructive size-7"
                       onClick={() => handleDelete(code.id)}
                       size="icon"
@@ -306,7 +307,7 @@ const CreateCodeForm = ({
                 autoFocus
                 maxLength={20}
                 onChange={(e) => field.handleChange(e.currentTarget.value)}
-                placeholder="L110"
+                placeholder={t("billing.codes.codePlaceholder")}
                 value={field.state.value}
               />
             )}
@@ -319,7 +320,7 @@ const CreateCodeForm = ({
               <Input
                 maxLength={256}
                 onChange={(e) => field.handleChange(e.currentTarget.value)}
-                placeholder="Research"
+                placeholder={t("billing.codes.labelPlaceholder")}
                 value={field.state.value}
               />
             )}

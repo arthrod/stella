@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 
 import {
@@ -15,6 +15,7 @@ import {
 import { MessageSquareIcon, TrashIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 import {
   Sheet,
@@ -27,9 +28,11 @@ import {
 import { stellaToast } from "@stll/ui/components/toast";
 import { cn } from "@stll/ui/lib/utils";
 
+import { getFormattingLocale } from "@/i18n/i18n-store";
 import { api } from "@/lib/api";
 import type { ChatThreadId, ChatThreadRef } from "@/lib/chat-thread-ref";
 import { toChatThreadId } from "@/lib/chat-thread-ref";
+import { isPlaceholderThreadTitle } from "@/lib/chat-thread-title";
 import { toAPIError } from "@/lib/errors";
 import type { SafeId } from "@/lib/safe-id";
 import { toSafeId } from "@/lib/safe-id";
@@ -87,10 +90,7 @@ export const ThreadsSheet = ({
 
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage } =
     useInfiniteQuery(groupedChatThreadsOptions(activeOrganizationId));
-  const groupedThreads = useMemo(
-    () => mergeGroupedChatThreadPages(data?.pages),
-    [data?.pages],
-  );
+  const groupedThreads = mergeGroupedChatThreadPages(data?.pages);
 
   return (
     <Sheet onOpenChange={setIsOpen} open={isOpen}>
@@ -116,7 +116,7 @@ export const ThreadsSheet = ({
           {triggerLabel}
         </SheetTrigger>
       )}
-      <SheetPopup side="right">
+      <SheetPopup side="inline-end">
         <SheetHeader>
           <SheetTitle>{triggerLabel}</SheetTitle>
         </SheetHeader>
@@ -224,6 +224,7 @@ const DeleteThreadButton = ({
 
   return (
     <Button
+      aria-label={t("chat.deleteThread")}
       className="me-1 opacity-0 group-hover:opacity-100"
       disabled={deleteThread.isPending}
       onClick={() =>
@@ -274,6 +275,8 @@ const ThreadGroup = ({
   scope,
   threads,
 }: ThreadGroupProps) => {
+  const t = useTranslations();
+
   if (threads.length === 0) {
     if (!emptyLabel) {
       return null;
@@ -282,7 +285,7 @@ const ThreadGroup = ({
     return (
       <div className="flex flex-col gap-1">
         <p className="text-muted-foreground px-1 text-xs font-medium uppercase">
-          {heading}
+          <BidiText>{heading}</BidiText>
         </p>
         <p className="text-muted-foreground py-4 text-center text-sm">
           {emptyLabel}
@@ -294,7 +297,7 @@ const ThreadGroup = ({
   return (
     <div className="flex flex-col gap-1">
       <p className="text-muted-foreground px-1 text-xs font-medium uppercase">
-        {heading}
+        <BidiText>{heading}</BidiText>
       </p>
       {threads.map((thread) => {
         const threadRef: ChatThreadRef =
@@ -334,11 +337,15 @@ const ThreadGroup = ({
                     },
                   })}
             >
-              <span className="truncate text-sm font-medium">
-                {thread.title}
-              </span>
+              <BidiText as="span" className="truncate text-sm font-medium">
+                {isPlaceholderThreadTitle(thread.title)
+                  ? t("chat.newChat")
+                  : thread.title}
+              </BidiText>
               <span className="text-muted-foreground text-xs">
-                {new Date(thread.createdAt).toLocaleDateString()}
+                {new Date(thread.createdAt).toLocaleDateString(
+                  getFormattingLocale(),
+                )}
               </span>
             </Link>
             <DeleteThreadButton

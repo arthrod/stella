@@ -5,12 +5,14 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { CalendarIcon, ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 
 import { Button } from "@stll/ui/components/button";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import {
   Popover,
   PopoverPopup,
   PopoverTrigger,
 } from "@stll/ui/components/popover";
 import { cn } from "@stll/ui/lib/utils";
+import { getLocaleWeekInfo, getWeekendDays } from "@stll/ui/lib/week";
 
 // ---------------------------------------------------------------------------
 // Calendar utilities
@@ -29,35 +31,14 @@ type CalendarWeekday = {
 };
 
 const toISODate = (d: Date): string => d.toISOString().slice(0, 10);
-const DEFAULT_WEEKEND_DAYS = new Set([0, 6]); // Sunday, Saturday
 
 const getFirstDayOfWeek = (locale: string): number => {
-  try {
-    const loc = new Intl.Locale(locale);
-    const info =
-      typeof loc.getWeekInfo === "function" ? loc.getWeekInfo() : undefined;
-    if (info) {
-      return info.firstDay === 7 ? 6 : info.firstDay - 1;
-    }
-  } catch {
-    // fall back to Monday
+  const info = getLocaleWeekInfo(locale);
+  if (!info) {
+    return 0;
   }
-  return 0;
-};
-
-const getWeekendDays = (locale: string): ReadonlySet<number> => {
-  try {
-    const loc = new Intl.Locale(locale);
-    const info =
-      typeof loc.getWeekInfo === "function" ? loc.getWeekInfo() : undefined;
-    const weekend = info?.weekend;
-    if (Array.isArray(weekend) && weekend.length > 0) {
-      return new Set(weekend.map((day) => day % 7));
-    }
-  } catch {
-    // fall back to Saturday/Sunday
-  }
-  return DEFAULT_WEEKEND_DAYS;
+  // Convert Intl's 1=Mon … 7=Sun firstDay to the picker's 0=Mon … 6=Sun index.
+  return info.firstDay === 7 ? 6 : info.firstDay - 1;
 };
 
 const getMonthDays = (
@@ -113,6 +94,9 @@ const getMonthLabels = (
 ): string[] => {
   const fmt = new Intl.DateTimeFormat(locale, {
     month: format,
+    // The picker grid is Gregorian; pin labels so a Hijri locale preference
+    // does not mislabel Gregorian months (numerals still follow the locale).
+    calendar: "gregory",
     timeZone: "UTC",
   });
   return Array.from({ length: 12 }, (_, i) =>
@@ -124,6 +108,7 @@ const formatMonthYear = (locale: string, year: number, month: number): string =>
   new Intl.DateTimeFormat(locale, {
     month: "long",
     year: "numeric",
+    calendar: "gregory",
     timeZone: "UTC",
   }).format(new Date(Date.UTC(year, month, 1)));
 
@@ -176,6 +161,10 @@ type DatePickerPopoverProps = {
   locale?: string;
   isOverdue?: boolean;
   showIcon?: boolean;
+  /** Shown in the trigger when no date is set. Falls back to an em dash so
+   *  the control still has height; pass a call-to-action ("Select date…") to
+   *  make the empty state self-explanatory. */
+  placeholderLabel?: string;
   clearLabel?: string;
   defaultOpen?: boolean;
   /** Label for the "go to today" button. Auto-localized from the locale when omitted. */
@@ -192,6 +181,7 @@ function DatePickerPopover({
   locale: localeProp,
   isOverdue = false,
   showIcon = true,
+  placeholderLabel,
   clearLabel = "Clear date",
   defaultOpen = false,
   todayLabel: todayLabelProp,
@@ -250,9 +240,10 @@ function DatePickerPopover({
         month: "short",
         day: "numeric",
         year: "numeric",
+        calendar: "gregory",
         timeZone: "UTC",
       })
-    : "\u2014";
+    : (placeholderLabel ?? "\u2014");
 
   const formatDayLabel = useCallback(
     (iso: string): string =>
@@ -261,6 +252,7 @@ function DatePickerPopover({
         month: "long",
         day: "numeric",
         year: "numeric",
+        calendar: "gregory",
         timeZone: "UTC",
       }),
     [locale],
@@ -276,10 +268,21 @@ function DatePickerPopover({
       const current = focusedDate || value || firstDay.date;
       let next: string | null = null;
 
+      // The day grid lays out inline (right-to-left under RTL), so the
+      // horizontal arrows must follow visual direction: ArrowLeft advances
+      // a day when the grid flows right-to-left. Read the rendered grid's
+      // computed direction so this stays correct regardless of how the host
+      // app or an enclosing subtree sets `dir`. Up/Down are block-axis and
+      // never mirror.
+      const isRtl =
+        gridRef.current !== null &&
+        getComputedStyle(gridRef.current).direction === "rtl";
+      const horizontalStep = isRtl ? -1 : 1;
+
       if (e.key === "ArrowRight") {
-        next = addDays(current, 1);
+        next = addDays(current, horizontalStep);
       } else if (e.key === "ArrowLeft") {
-        next = addDays(current, -1);
+        next = addDays(current, -horizontalStep);
       } else if (e.key === "ArrowDown") {
         next = addDays(current, 7);
       } else if (e.key === "ArrowUp") {
@@ -482,7 +485,7 @@ function DatePickerPopover({
               size="icon-xs"
               variant="ghost"
             >
-              <ChevronLeftIcon />
+              <DirectionalIcon icon={ChevronLeftIcon} />
             </Button>
             <button
               className={cn(
@@ -511,7 +514,7 @@ function DatePickerPopover({
               size="icon-xs"
               variant="ghost"
             >
-              <ChevronRightIcon />
+              <DirectionalIcon icon={ChevronRightIcon} />
             </Button>
           </div>
 

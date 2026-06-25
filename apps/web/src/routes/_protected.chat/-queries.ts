@@ -19,6 +19,7 @@ import type {
 import {
   hasApprovalResponseAwaitingModelStep,
   hasApprovedActiveDocxEditAwaitingClientOutput,
+  isChatTurnInFlight,
 } from "@/components/chat/chat-ui-tools";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
@@ -51,6 +52,17 @@ type ActiveFileContext = {
   supportsDocxEdits?: boolean | undefined;
 };
 
+/**
+ * Template Studio surface: same snapshot shape as `ActiveFileContext`
+ * so `apply-active-docx-edits` operations share the block-id space,
+ * but keyed by templateId (org-scoped, no entity).
+ */
+type ActiveTemplateContext = {
+  templateId: string;
+  fileName: string;
+  docxEditSnapshot?: ActiveFileContext["docxEditSnapshot"];
+};
+
 type ActiveDecisionContext = {
   decisionId: string;
 };
@@ -65,12 +77,21 @@ type ActiveExternalContext = {
   url: string;
 };
 
+export type ActiveSkillContext = {
+  skillId?: string | undefined;
+  skillName: string;
+};
+
 type ChatThreadKey = ChatThreadRef;
 
 type FileChatThreadKey = {
   entityId: string;
   fieldId: string;
   workspaceId: string;
+};
+
+type TemplateChatThreadKey = {
+  templateId: string;
 };
 
 type GroupedChatThreadsPage = Awaited<
@@ -85,6 +106,22 @@ const APPLY_ACTIVE_DOCX_EDITS_TOOL_NAME = "apply-active-docx-edits";
 const CHAT_THREADS_PAGE_SIZE = 50;
 const CHAT_TRANSPORT_VERSION = 2;
 
+/**
+ * Named tool scope for the Template Studio's "Suggest fields" preset.
+ * Sent as `body.toolScope` on the preset turn; the backend maps the
+ * name to a fixed allowlist (`suggest_template_fields` +
+ * `apply-active-docx-edits`) so the scoped turn cannot wander into
+ * other tools. Must match `CHAT_TOOL_SCOPE.suggestTemplateFields` in
+ * `apps/api/src/handlers/chat/tools/tool-scope.ts`.
+ */
+export const SUGGEST_TEMPLATE_FIELDS_TOOL_SCOPE =
+  "suggest-template-fields" as const;
+
+type ChatToolScope = typeof SUGGEST_TEMPLATE_FIELDS_TOOL_SCOPE;
+
+const isChatToolScope = (value: unknown): value is ChatToolScope =>
+  value === SUGGEST_TEMPLATE_FIELDS_TOOL_SCOPE;
+
 export type ApplyActiveDocxEditsInput =
   ChatUITools[typeof APPLY_ACTIVE_DOCX_EDITS_TOOL_NAME]["input"];
 
@@ -96,6 +133,8 @@ type ChatThreadOptionsContext = {
   getActiveDecision?: (() => ActiveDecisionContext | undefined) | undefined;
   getActiveExternal?: (() => ActiveExternalContext | undefined) | undefined;
   getActiveFile?: (() => ActiveFileContext | undefined) | undefined;
+  getActiveSkill?: (() => ActiveSkillContext | undefined) | undefined;
+  getActiveTemplate?: (() => ActiveTemplateContext | undefined) | undefined;
   /**
    * Matters this chat draws context from. The transport sends the
    * current value (an empty array means "no matters pinned"). The
@@ -117,6 +156,8 @@ type ChatRuntimeContextKind =
   | "active-docx-edit"
   | "active-external"
   | "active-file"
+  | "active-skill"
+  | "active-template"
   | "plain";
 
 type ChatThreadQueryKey = ChatThreadRef & {
@@ -127,6 +168,10 @@ type ChatThreadQueryKey = ChatThreadRef & {
 const getChatRuntimeContextKind = (
   context: ChatThreadOptionsContext | undefined,
 ): ChatRuntimeContextKind => {
+  if (context?.getActiveTemplate) {
+    return "active-template";
+  }
+
   if (context?.handleActiveDocxEditToolCall) {
     return "active-docx-edit";
   }
@@ -137,6 +182,10 @@ const getChatRuntimeContextKind = (
 
   if (context?.getActiveExternal) {
     return "active-external";
+  }
+
+  if (context?.getActiveSkill) {
+    return "active-skill";
   }
 
   return "plain";
@@ -151,6 +200,15 @@ export const chatKeys = {
     key.workspaceId,
     key.entityId,
     key.fieldId,
+  ],
+  templateThread: (
+    activeOrganizationId: string,
+    key: TemplateChatThreadKey,
+  ) => [
+    ...chatKeys.all,
+    activeOrganizationId,
+    "template-thread",
+    key.templateId,
   ],
   groupedThreads: (activeOrganizationId: string) => [
     ...chatKeys.all,
@@ -209,6 +267,31 @@ export const chatKeys = {
           "recap",
           lastMessageId,
         ],
+  suggestedPrompts: (
+    activeOrganizationId: string,
+    threadRef: ChatThreadRef,
+    lastMessageId: string,
+  ) =>
+    threadRef.scope === "global"
+      ? [
+          ...chatKeys.all,
+          activeOrganizationId,
+          "thread",
+          threadRef.scope,
+          threadRef.threadId,
+          "suggestedPrompts",
+          lastMessageId,
+        ]
+      : [
+          ...chatKeys.all,
+          activeOrganizationId,
+          "thread",
+          threadRef.scope,
+          threadRef.workspaceId,
+          threadRef.threadId,
+          "suggestedPrompts",
+          lastMessageId,
+        ],
 };
 
 type ChatThreadOptionsInput = QueryOptionsInput<
@@ -218,6 +301,8 @@ type ChatThreadOptionsInput = QueryOptionsInput<
 
 type ThreadFetch = {
   messages: PersistedChatMessage[];
+  /** Cursor for the page before the oldest loaded message; null when none. */
+  olderCursor: string | null;
   contextMatterIds: string[];
   /** ISO timestamp of the most recent message, or null when empty. */
   lastActivityAt: string | null;
@@ -250,6 +335,7 @@ const fetchThreadMessages = async (
     if (allowMissingThread && APIError.is(error) && error.status === 404) {
       return {
         messages: [],
+        olderCursor: null,
         contextMatterIds: [],
         lastActivityAt: null,
         webSearchAvailable: false,
@@ -262,10 +348,44 @@ const fetchThreadMessages = async (
 
   return {
     messages: response.data.messages,
+    olderCursor: response.data.olderCursor,
     contextMatterIds: response.data.contextMatterIds,
     lastActivityAt: response.data.lastActivityAt,
     webSearchAvailable: response.data.webSearchAvailable,
     webSearchEnabled: response.data.webSearchEnabled,
+  };
+};
+
+type OlderMessagesFetch = {
+  messages: PersistedChatMessage[];
+  olderCursor: string | null;
+};
+
+export const fetchOlderMessages = async ({
+  key,
+  before,
+}: {
+  key: ChatThreadKey;
+  before: string;
+}): Promise<OlderMessagesFetch> => {
+  const response = await api.chat
+    .threads({ threadId: key.threadId })
+    .messages.older.get({
+      query: {
+        before,
+        ...(key.scope === "workspace"
+          ? { workspaceId: toSafeId<"workspace">(key.workspaceId) }
+          : {}),
+      },
+    });
+
+  if (response.error) {
+    throw toAPIError(response.error);
+  }
+
+  return {
+    messages: response.data.messages,
+    olderCursor: response.data.olderCursor,
   };
 };
 
@@ -302,6 +422,20 @@ const fetchFileChatThread = async ({
       entityId: toSafeId<"entity">(entityId),
       fieldId: toSafeId<"field">(fieldId),
     });
+
+  if (response.error) {
+    throw toAPIError(response.error);
+  }
+
+  return toChatThreadId(response.data.threadId);
+};
+
+const fetchTemplateChatThread = async ({
+  templateId,
+}: TemplateChatThreadKey): Promise<ChatThreadId> => {
+  const response = await api.chat["template-thread"].post({
+    templateId: toSafeId<"template">(templateId),
+  });
 
   if (response.error) {
     throw toAPIError(response.error);
@@ -379,11 +513,14 @@ export const buildSendRequestBody = ({
     activeDecision?: ActiveDecisionContext | undefined;
     activeExternal?: ActiveExternalContext | undefined;
     activeFile?: ActiveFileContext | undefined;
+    activeSkill?: ActiveSkillContext | undefined;
+    activeTemplate?: ActiveTemplateContext | undefined;
     contextMatterIds?: string[] | undefined;
     devModelId?: string | undefined;
     message: PersistedChatMessage;
     sendMode: ChatSendMode;
     threadId: string;
+    toolScope?: ChatToolScope | undefined;
     userContext?: ChatUserContext | undefined;
     workspaceId?: string | undefined;
   } = {
@@ -396,6 +533,11 @@ export const buildSendRequestBody = ({
     }),
     threadId: key.threadId,
   };
+
+  const toolScope = resolveChatRequestToolScope({ key, messages, requestBody });
+  if (toolScope !== null) {
+    body.toolScope = toolScope;
+  }
 
   if (key.scope === "workspace") {
     body.workspaceId = key.workspaceId;
@@ -411,6 +553,11 @@ export const buildSendRequestBody = ({
     body.activeFile = activeFile;
   }
 
+  const activeTemplate = context?.getActiveTemplate?.();
+  if (activeTemplate) {
+    body.activeTemplate = activeTemplate;
+  }
+
   const activeDecision = context?.getActiveDecision?.();
   if (activeDecision) {
     body.activeDecision = activeDecision;
@@ -419,6 +566,11 @@ export const buildSendRequestBody = ({
   const activeExternal = context?.getActiveExternal?.();
   if (activeExternal) {
     body.activeExternal = activeExternal;
+  }
+
+  const activeSkill = context?.getActiveSkill?.();
+  if (activeSkill) {
+    body.activeSkill = activeSkill;
   }
 
   const contextMatterIds = context?.getContextMatterIds?.();
@@ -478,6 +630,55 @@ const resolveChatRequestSendMode = ({
   return sendMode;
 };
 
+const getRequestToolScope = (
+  requestBody: object | undefined,
+): ChatToolScope | null => {
+  if (!requestBody || !("toolScope" in requestBody)) {
+    return null;
+  }
+
+  return isChatToolScope(requestBody.toolScope) ? requestBody.toolScope : null;
+};
+
+type ResolveChatRequestToolScopeProps = {
+  key: ChatThreadKey;
+  messages: readonly PersistedChatMessage[];
+  requestBody: object | undefined;
+};
+
+/**
+ * Same per-turn stickiness as `resolveChatRequestSendMode`: the AI
+ * SDK does not replay request options on automatic continuation
+ * sends (tool outputs, approval responses), so the scope chosen at
+ * send time is snapshotted per user message and reapplied while
+ * that turn is still the latest one. Without this, the continuation
+ * after `apply-active-docx-edits` would stream with the full tool
+ * surface again.
+ */
+const resolveChatRequestToolScope = ({
+  key,
+  messages,
+  requestBody,
+}: ResolveChatRequestToolScopeProps): ChatToolScope | null => {
+  const explicitToolScope = getRequestToolScope(requestBody);
+  const threadKey = getChatThreadKey(key);
+  const userMessageId = getLatestUserMessageId(messages);
+  const activeTurn = activeTurnToolScopes.get(threadKey);
+  const toolScope =
+    explicitToolScope ??
+    (activeTurn?.userMessageId === userMessageId ? activeTurn.toolScope : null);
+
+  if (userMessageId) {
+    if (toolScope === null) {
+      activeTurnToolScopes.delete(threadKey);
+    } else {
+      activeTurnToolScopes.set(threadKey, { toolScope, userMessageId });
+    }
+  }
+
+  return toolScope;
+};
+
 const getLatestUserMessageId = (
   messages: readonly PersistedChatMessage[],
 ): string | null => {
@@ -525,6 +726,10 @@ const activeTurnSendModes = new Map<
   string,
   { sendMode: ChatSendMode; userMessageId: string }
 >();
+const activeTurnToolScopes = new Map<
+  string,
+  { toolScope: ChatToolScope; userMessageId: string }
+>();
 
 /**
  * Test-only escape hatch. The module-level cache is intentionally
@@ -533,15 +738,12 @@ const activeTurnSendModes = new Map<
  */
 export const __resetChatRequestStateForTests = (): void => {
   activeTurnSendModes.clear();
+  activeTurnToolScopes.clear();
   threadAutoFireState.clear();
 };
 
-const getThreadAutoFireKey = (
-  messages: readonly PersistedChatMessage[],
-): string | null => messages[0]?.id ?? null;
-
 export const createSendAutomaticallyPredicate =
-  () =>
+  (threadId: string) =>
   ({ messages }: { messages: PersistedChatMessage[] }) => {
     if (hasApprovedActiveDocxEditAwaitingClientOutput({ messages })) {
       return false;
@@ -551,10 +753,10 @@ export const createSendAutomaticallyPredicate =
     if (!fingerprint) {
       return false;
     }
-    const threadKey = getThreadAutoFireKey(messages);
-    if (!threadKey) {
-      return false;
-    }
+    // Key the one-fire budget on the stable thread id, not messages[0].id:
+    // loading older history prepends messages, which would otherwise hand the
+    // same assistant-tail fingerprint a fresh budget and re-fire the turn.
+    const threadKey = threadId;
     const state = threadAutoFireState.get(threadKey) ?? {
       fingerprint: null,
       fires: 0,
@@ -565,10 +767,10 @@ export const createSendAutomaticallyPredicate =
       state.fires = 0;
     }
     // Hard cap: any future regression that reopens the loop hits
-    // this ceiling and stops automatically. 3 covers the
-    // legitimate sequential-tool-call case (each tool result lands
-    // with a new fingerprint, so each new fingerprint gets its own
-    // budget).
+    // this ceiling and stops automatically. One fire per fingerprint
+    // is enough — each tool result lands with a new fingerprint (new
+    // message id or tool part), so every legitimate step gets its own
+    // budget.
     if (state.fires >= MAX_AUTO_FIRES_PER_FINGERPRINT) {
       threadAutoFireState.set(threadKey, state);
       return false;
@@ -621,6 +823,13 @@ const getAutoSendFingerprint = (
 export type ChatThreadFetched = {
   chat: Chat<PersistedChatMessage>;
   /**
+   * Cursor for the page of messages immediately older than the
+   * oldest message in `chat`. Null when the thread's full history
+   * is already loaded. Consumers seed local load-older state from
+   * this and replace it with each older-page response's cursor.
+   */
+  olderCursor: string | null;
+  /**
    * Persisted contextMatterIds for this thread, fresh from the
    * server. Consumers feed this into local picker state on mount;
    * subsequent changes flow back through `getContextMatterIds` on
@@ -658,9 +867,38 @@ export const fileChatThreadOptions = ({
     queryFn: async () => await fetchFileChatThread(key),
   });
 
+type TemplateChatThreadOptionsArgs = {
+  activeOrganizationId: string;
+  key: TemplateChatThreadKey;
+};
+
+/** Latest Template Studio thread for a template (server creates the
+ *  thread + mapping on first visit). "New chat" rotates the mapping
+ *  server-side and writes the fresh id into this cache entry. */
+export const templateChatThreadOptions = ({
+  activeOrganizationId,
+  key,
+}: TemplateChatThreadOptionsArgs) =>
+  queryOptions({
+    staleTime: STALE_TIME.FIVETEEN.MINUTES,
+    gcTime: STALE_TIME.FIVETEEN.MINUTES,
+    queryKey: chatKeys.templateThread(activeOrganizationId, key),
+    queryFn: async () => await fetchTemplateChatThread(key),
+  });
+
 export type ChatThreadOptionsArgs = ChatThreadOptionsInput & {
   activeOrganizationId: string;
 };
+
+/**
+ * Whether the Chat instance still has a turn in flight (an active
+ * request, or the windows between response streams in multi-step
+ * tool turns). An errored Chat is never in flight: reusing a dead
+ * instance here would keep serving its stuck state on every refetch,
+ * so it gets replaced by a fresh one built from persisted messages.
+ */
+const isChatInstanceInFlight = (chat: Chat<PersistedChatMessage>): boolean =>
+  isChatTurnInFlight({ status: chat.status, messages: chat.messages });
 
 export const chatThreadOptions = ({
   activeOrganizationId,
@@ -675,9 +913,13 @@ export const chatThreadOptions = ({
       allowMissingThread: context.allowMissingThread,
       contextKind: getChatRuntimeContextKind(context),
     }),
-    queryFn: async ({ client: queryClient }): Promise<ChatThreadFetched> => {
+    queryFn: async ({
+      client: queryClient,
+      queryKey,
+    }): Promise<ChatThreadFetched> => {
       const {
         messages,
+        olderCursor,
         contextMatterIds,
         lastActivityAt,
         webSearchAvailable,
@@ -685,6 +927,28 @@ export const chatThreadOptions = ({
       } = await fetchThreadMessages(key, {
         allowMissingThread: context.allowMissingThread,
       });
+
+      // `Chat.onFinish` invalidates this query after EVERY response
+      // stream, and multi-step tool turns (tool output → approval
+      // response → automatic continuation) keep generating on the
+      // instance this query already holds while the refetch runs.
+      // Swapping in a fresh idle instance mid-flight would orphan
+      // the running stream: the surfaces rebind to a Chat whose
+      // status is "ready", the stop control disappears and streamed
+      // parts stop rendering. Reuse the live instance instead; idle
+      // threads recreate below as before (message resync + fresh
+      // auto-send predicate state).
+      const previous = queryClient.getQueryData<ChatThreadFetched>(queryKey);
+      if (previous !== undefined && isChatInstanceInFlight(previous.chat)) {
+        return {
+          chat: previous.chat,
+          contextMatterIds,
+          lastActivityAt,
+          olderCursor: previous.olderCursor,
+          webSearchAvailable,
+          webSearchEnabled,
+        };
+      }
 
       const chat = new Chat<PersistedChatMessage>({
         generateId: uuidv7,
@@ -717,11 +981,12 @@ export const chatThreadOptions = ({
             }),
           }),
         }),
-        sendAutomaticallyWhen: createSendAutomaticallyPredicate(),
+        sendAutomaticallyWhen: createSendAutomaticallyPredicate(key.threadId),
       });
 
       return {
         chat,
+        olderCursor,
         contextMatterIds,
         lastActivityAt,
         webSearchAvailable,
@@ -777,6 +1042,55 @@ export const chatThreadRecapOptions = ({
     gcTime: STALE_TIME.FIVETEEN.MINUTES,
     queryKey: chatKeys.recap(activeOrganizationId, threadRef, lastMessageId),
     queryFn: async () => await fetchThreadRecap(threadRef),
+  });
+
+type ChatThreadSuggestedPromptsFetched = {
+  prompts: string[];
+};
+
+const fetchThreadSuggestedPrompts = async (
+  threadRef: ChatThreadRef,
+): Promise<ChatThreadSuggestedPromptsFetched> => {
+  const response = await api.chat
+    .threads({ threadId: toSafeId<"chatThread">(threadRef.threadId) })
+    ["suggested-prompts"].post(undefined, {
+      query:
+        threadRef.scope === "workspace"
+          ? { workspaceId: toSafeId<"workspace">(threadRef.workspaceId) }
+          : {},
+    });
+
+  if (response.error) {
+    getAnalytics().captureError(toAPIError(response.error));
+    return { prompts: [] };
+  }
+
+  return { prompts: response.data.prompts };
+};
+
+type ChatThreadSuggestedPromptsOptionsArgs = {
+  activeOrganizationId: string;
+  enabled: boolean;
+  lastMessageId: string;
+  threadRef: ChatThreadRef;
+};
+
+export const chatThreadSuggestedPromptsOptions = ({
+  activeOrganizationId,
+  enabled,
+  lastMessageId,
+  threadRef,
+}: ChatThreadSuggestedPromptsOptionsArgs) =>
+  queryOptions({
+    enabled,
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: STALE_TIME.FIVETEEN.MINUTES,
+    queryKey: chatKeys.suggestedPrompts(
+      activeOrganizationId,
+      threadRef,
+      lastMessageId,
+    ),
+    queryFn: async () => await fetchThreadSuggestedPrompts(threadRef),
   });
 
 export const groupedChatThreadsOptions = (activeOrganizationId: string) =>

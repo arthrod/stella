@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffectEvent, useRef, useState } from "react";
 
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import {
   draggable,
   dropTargetForElements,
 } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   BookmarkIcon,
   BookmarkPlusIcon,
@@ -50,6 +50,7 @@ import { Tabs, TabsList, TabsTab } from "@stll/ui/components/tabs";
 import { stellaToast } from "@stll/ui/components/toast";
 import { cn } from "@stll/ui/lib/utils";
 
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { usePermissions } from "@/hooks/use-permissions";
 import type { TranslationKey } from "@/i18n/types";
 import type { WorkspaceView } from "@/lib/types";
@@ -164,7 +165,7 @@ export const ViewSwitcher = ({
 }: ViewSwitcherProps) => {
   const t = useTranslations();
   const canCreateView = usePermissions({ view: ["create"] });
-  const { data: views } = useSuspenseQuery(viewsOptions(workspaceId));
+  const { data: views = [] } = useQuery(viewsOptions(workspaceId));
   const createView = useCreateView(workspaceId);
   const reorderViews = useReorderViews(workspaceId);
   const [isTemplatePickerOpen, setIsTemplatePickerOpen] = useState(false);
@@ -237,6 +238,7 @@ export const ViewSwitcher = ({
           }}
         >
           <MenuTrigger
+            aria-label={t("common.add")}
             render={
               <Button
                 disabled={createView.isPending}
@@ -346,10 +348,9 @@ const ViewTab = ({
   const [isDropTarget, setIsDropTarget] = useState(false);
   const updateView = useUpdateView(workspaceId);
   const containerRef = useRef<HTMLDivElement>(null);
-  const onReorderRef = useRef(onReorder);
-  onReorderRef.current = onReorder;
+  const handleReorder = useEffectEvent(onReorder);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = containerRef.current;
     if (!el) {
       return undefined;
@@ -379,7 +380,7 @@ const ViewTab = ({
           if (typeof draggedViewId !== "string") {
             return;
           }
-          onReorderRef.current(draggedViewId, id);
+          handleReorder(draggedViewId, id);
         },
       }),
     );
@@ -544,6 +545,7 @@ const ViewTabMenu = ({
       )}
       <Menu>
         <MenuTrigger
+          aria-label={t("common.actions")}
           render={
             <Button className={className} size="icon-xs" variant="ghost" />
           }

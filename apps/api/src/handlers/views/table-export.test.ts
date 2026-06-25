@@ -94,6 +94,7 @@ const entity = (
   createdAt: "2026-01-01T00:00:00.000Z",
   createdBy: "Alice",
   createdByImage: null,
+  createdByDeletedAt: null,
   version: 3,
   updatedAt: "2026-01-02T00:00:00.000Z",
   status: null,
@@ -411,6 +412,7 @@ describe("table export", () => {
       Object.keys(zip.files).some((path) => path.includes("externalLink")),
     ).toBe(false);
     for (const relFile of relFiles) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential test assertions over the archive's .rels entries
       const relXml = await zip.file(relFile)?.async("text");
       expect(relXml).not.toContain('TargetMode="External"');
       expect(relXml).not.toContain("hyperlink");

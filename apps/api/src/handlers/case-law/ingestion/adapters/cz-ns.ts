@@ -26,6 +26,7 @@ import {
 } from "@/api/handlers/case-law/ingestion/adapters/utils";
 import { parseNsDecisionHtml } from "@/api/handlers/case-law/ingestion/parsers/cz-ns";
 import { AdapterFetchError } from "@/api/lib/errors/tagged-errors";
+import { logger } from "@/api/lib/observability/logger";
 import { isRecord } from "@/api/lib/type-guards";
 
 const COMMON_HEADERS = {
@@ -115,17 +116,18 @@ const entryField = (
 /** Metadata label patterns on detail pages. */
 const LABEL_PATTERNS: Record<string, RegExp> = {
   decisionDate:
-    /Datum rozhodnutí:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>([\s\S]*?)<\/font>/iu,
-  ecli: /ECLI:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>([\s\S]*?)<\/font>/iu,
+    /Datum rozhodnutí:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>(?<value>[\s\S]*?)<\/font>/iu,
+  ecli: /ECLI:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>(?<value>[\s\S]*?)<\/font>/iu,
   decisionType:
-    /Typ rozhodnutí:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>([\s\S]*?)<\/font>/iu,
+    /Typ rozhodnutí:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>(?<value>[\s\S]*?)<\/font>/iu,
   keywords:
-    /Heslo:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>([\s\S]*?)<\/font>/iu,
+    /Heslo:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>(?<value>[\s\S]*?)<\/font>/iu,
   statutes:
-    /Dotčené předpisy:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>([\s\S]*?)<\/font>/iu,
+    /Dotčené předpisy:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>(?<value>[\s\S]*?)<\/font>/iu,
   category:
-    /Kategorie rozhodnutí:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>([\s\S]*?)<\/font>/iu,
-  legalSentence: /Právní věta:<\/font><\/b><\/td><td[^>]*>([\s\S]*?)<\/td>/iu,
+    /Kategorie rozhodnutí:<\/font><\/b><\/td><td[^>]*><b><font[^>]*>(?<value>[\s\S]*?)<\/font>/iu,
+  legalSentence:
+    /Právní věta:<\/font><\/b><\/td><td[^>]*>(?<value>[\s\S]*?)<\/td>/iu,
 };
 
 /**
@@ -137,7 +139,6 @@ const LABEL_PATTERNS: Record<string, RegExp> = {
  * "předseda/předsedkyně senátu" label.
  */
 const JUDGE_RE =
-  // oxlint-disable-next-line sonarjs/slow-regex -- signature extraction scans one bounded decision text
   /(?:JUDr\.|Mgr\.|doc\.|prof\.)\s+[\p{L}\s,.-]+?(?=\s*předsed[ay]\s+senátu)/iu;
 
 const extractJudge = (text: string): string | undefined => {
@@ -160,7 +161,7 @@ const BODY_END_MARKER = "Citace rozhodnutí";
 const extractFulltext = (html: string): string | undefined => {
   // Decision text is in <font face="Times New Roman"> tags
   const parts = html.match(
-    /<font[^>]*face="Times New Roman"[^>]*>([\s\S]*?)<\/font>/giu,
+    /<font[^>]*face="Times New Roman"[^>]*>(?:[\s\S]*?)<\/font>/giu,
   );
   if (!parts || parts.length === 0) {
     return undefined;
@@ -192,8 +193,8 @@ const parseDetailPage = (html: string): Record<string, string | undefined> => {
 
   for (const [key, pattern] of Object.entries(LABEL_PATTERNS)) {
     const match = html.match(pattern);
-    if (match?.[1]) {
-      const text = stripHtml(match[1]).trim();
+    if (match?.groups?.["value"]) {
+      const text = stripHtml(match.groups["value"]).trim();
       if (text) {
         result[key] = text;
       }
@@ -308,6 +309,7 @@ export const czNsAdapter: SourceAdapter = {
                 ])
               : AbortSignal.timeout(ADAPTER_TIMEOUT.REQUEST);
 
+            // oxlint-disable-next-line no-await-in-loop -- polite sequential crawl of one court detail page per entry, rate-limited via Bun.sleep below
             const [detailResponse, printResponse] = await Promise.all([
               fetch(webUrl, { signal: requestSignal, headers: COMMON_HEADERS }),
               fetch(printUrl, {
@@ -317,10 +319,13 @@ export const czNsAdapter: SourceAdapter = {
             ]);
 
             if (detailResponse.ok) {
+              // oxlint-disable-next-line no-await-in-loop -- reads the body of the per-entry detail fetch in this sequential crawl loop
               const webHtml = await detailResponse.text();
-              const printHtml = printResponse.ok
-                ? await printResponse.text()
-                : "";
+              let printHtml = "";
+              if (printResponse.ok) {
+                // oxlint-disable-next-line no-await-in-loop -- reads the body of the per-entry print fetch in this sequential crawl loop
+                printHtml = await printResponse.text();
+              }
 
               const meta = parseDetailPage(webHtml);
               const raw = `${caseNumber}|${meta["ecli"] ?? ""}|${meta["decisionDate"] ?? ""}`;
@@ -389,10 +394,11 @@ export const czNsAdapter: SourceAdapter = {
                 sourceRawContentType: "text/html",
               });
             } else {
-              // eslint-disable-next-line no-console -- adapter diagnostic
-              console.warn(
-                `CZ Supreme: detail fetch for ${unid} returned ${detailResponse.status}`,
-              );
+              logger.warn("case_law.ingestion.detail_fetch_failed", {
+                adapterKey: ADAPTER_KEYS.CZ_NS,
+                documentId: unid,
+                httpStatus: detailResponse.status,
+              });
             }
           } catch (error) {
             // Caller cancelled: return partial results
@@ -422,6 +428,7 @@ export const czNsAdapter: SourceAdapter = {
 
           // Rate limit between detail fetches (skip for last entry)
           if (i < entries.length - 1) {
+            // oxlint-disable-next-line no-await-in-loop -- deliberate crawl delay between sequential court detail fetches
             await Bun.sleep(50);
           }
         }

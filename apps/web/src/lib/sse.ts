@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffectEvent } from "react";
 
 import { useQueryClient } from "@tanstack/react-query";
 
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { apiUrl } from "@/lib/api-url";
 
@@ -54,18 +55,23 @@ export const useWorkspaceSSE = (
   const queryClient = useQueryClient();
   const analytics = useAnalytics();
 
-  // Use refs so the EventSource event handler always reads
-  // the latest queryClient without re-creating the connection.
-  const queryClientRef = useRef(queryClient);
-  queryClientRef.current = queryClient;
+  const handleParsedEvent = useEffectEvent((event: WorkspaceSSEEvent) => {
+    options.onEvent?.(event);
 
-  const analyticsRef = useRef(analytics);
-  analyticsRef.current = analytics;
+    if (
+      event.type === INVALIDATE_QUERY_EVENT_TYPE &&
+      Array.isArray(event.data)
+    ) {
+      void queryClient.invalidateQueries({ queryKey: event.data });
+    }
+  });
+  const captureClosedConnection = useEffectEvent(() => {
+    analytics.captureError(
+      new Error(`SSE connection closed for workspace ${workspaceId}`),
+    );
+  });
 
-  const onEventRef = useRef(options.onEvent);
-  onEventRef.current = options.onEvent;
-
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const source = new EventSource(
       getWorkspaceSSEUrl(workspaceId),
       WORKSPACE_SSE_EVENT_SOURCE_INIT,
@@ -78,16 +84,7 @@ export const useWorkspaceSSE = (
           return;
         }
 
-        onEventRef.current?.(parsed);
-
-        if (
-          parsed.type === INVALIDATE_QUERY_EVENT_TYPE &&
-          Array.isArray(parsed.data)
-        ) {
-          void queryClientRef.current.invalidateQueries({
-            queryKey: parsed.data,
-          });
-        }
+        handleParsedEvent(parsed);
       } catch {
         // Malformed SSE data; ignore.
       }
@@ -97,9 +94,7 @@ export const useWorkspaceSSE = (
       // EventSource auto-reconnects; capture for observability
       // only if the connection is fully closed.
       if (source.readyState === EventSource.CLOSED) {
-        analyticsRef.current.captureError(
-          new Error(`SSE connection closed for workspace ${workspaceId}`),
-        );
+        captureClosedConnection();
       }
     };
 

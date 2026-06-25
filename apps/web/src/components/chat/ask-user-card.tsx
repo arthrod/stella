@@ -12,6 +12,7 @@ import { Streamdown } from "streamdown";
 import type { PluggableList } from "unified";
 import { useTranslations } from "use-intl";
 
+import { contentDir } from "@stll/ui/hooks/use-content-dir";
 import { cn } from "@stll/ui/lib/utils";
 
 import { AnonymizedSpan } from "@/components/chat/anonymized-span";
@@ -172,7 +173,10 @@ export const AskUserCard = ({
   });
   // Seed defaults once the full input arrives (after streaming).
   // The useState initializer only runs on mount, when input may
-  // still be null.
+  // still be null. `answers` is user-mutated interactive state set in
+  // several handlers, so this is a one-shot prop-arrival merge into
+  // existing state, not a plain compute-in-render or key reset.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- one-shot merge of question defaults into shared user-edited answers state once input arrives; setter is shared across handlers so it cannot be derived in render or lifted to a key
   useEffect(() => {
     if (!input) {
       return;
@@ -402,6 +406,7 @@ export const AskUserCard = ({
                 <div className="flex gap-1.5">
                   <input
                     className="bg-background focus-visible:ring-ring flex-1 rounded-md border px-2 py-1 text-xs focus-visible:ring-1 focus-visible:outline-none"
+                    dir={contentDir(answers[i] ?? "")}
                     onChange={(e) => setAnswer(i, e.target.value)}
                     placeholder={q.default ?? t("chat.askUser.placeholder")}
                     type="text"

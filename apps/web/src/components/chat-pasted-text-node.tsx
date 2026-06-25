@@ -4,6 +4,7 @@ import { NodeViewWrapper } from "@tiptap/react";
 import type { NodeViewProps } from "@tiptap/react";
 import {
   ClipboardPasteIcon,
+  CommandIcon,
   SparklesIcon,
   WandSparklesIcon,
   XIcon,
@@ -16,6 +17,7 @@ import {
   PopoverPopup,
   PopoverTrigger,
 } from "@stll/ui/components/popover";
+import { contentDir } from "@stll/ui/hooks/use-content-dir";
 import { cn } from "@stll/ui/lib/utils";
 
 import type {
@@ -25,12 +27,23 @@ import type {
 
 const CHIP_MAX_LABEL_WIDTH_CLASS = "max-w-48";
 
+// Shared chip shell so the interactive paste/prompt/skill trigger and the
+// static command chip stay visually identical.
+const CHIP_BASE_CLASS = cn(
+  "inline-flex max-w-full items-center gap-1 align-middle",
+  "bg-muted/60 rounded-md border px-1.5 py-0.5",
+  "text-foreground text-xs font-medium",
+);
+
 const pickChipIcon = (source: PastedTextSource) => {
   if (source === "skill") {
     return WandSparklesIcon;
   }
   if (source === "prompt") {
     return SparklesIcon;
+  }
+  if (source === "command") {
+    return CommandIcon;
   }
   return ClipboardPasteIcon;
 };
@@ -39,6 +52,7 @@ const PASTED_TEXT_SOURCE_VALUES: ReadonlySet<string> = new Set([
   "paste",
   "prompt",
   "skill",
+  "command",
 ]);
 
 const isPastedTextSource = (value: unknown): value is PastedTextSource =>
@@ -72,6 +86,7 @@ export const ChatPastedTextNode = (props: NodeViewProps) => {
   // when the popover closes), so each keystroke doesn't dispatch a
   // ProseMirror transaction + draft re-sync.
   const [draftText, setDraftText] = useState(attrs.text);
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- resets the editable draft when the node attr changes upstream (undo/redo, external edits); can't compute inline (draftText is controlled by the textarea, setDraftText also used in onChange) and can't key (rendered by TipTap's ReactNodeViewRenderer, no JSX call-site)
   useEffect(() => {
     setDraftText(attrs.text);
   }, [attrs.text]);
@@ -91,15 +106,33 @@ export const ChatPastedTextNode = (props: NodeViewProps) => {
 
   const Icon = pickChipIcon(attrs.source);
 
+  // Reserved slash commands (`/new`, `/model`) are action triggers, not
+  // editable content, so they render as a static chip without the expand/edit
+  // popover the other sources use.
+  if (attrs.source === "command") {
+    return (
+      <NodeViewWrapper className="inline" data-source="command">
+        <span
+          className={cn(CHIP_BASE_CLASS, "select-none")}
+          contentEditable={false}
+        >
+          <Icon className="text-muted-foreground size-3 shrink-0" />
+          <span className={cn("truncate", CHIP_MAX_LABEL_WIDTH_CLASS)}>
+            {chipLabel}
+          </span>
+        </span>
+      </NodeViewWrapper>
+    );
+  }
+
   return (
     <NodeViewWrapper className="inline" data-source={attrs.source}>
       <Popover>
         <PopoverTrigger
           aria-label={t("chat.pastedText.expand")}
           className={cn(
-            "inline-flex max-w-full items-center gap-1 align-middle",
-            "bg-muted/60 hover:bg-muted rounded-md border px-1.5 py-0.5",
-            "text-foreground text-xs font-medium",
+            CHIP_BASE_CLASS,
+            "hover:bg-muted",
             "focus-visible:ring-ring transition-colors focus-visible:ring-2 focus-visible:outline-none",
             "cursor-pointer select-none",
           )}
@@ -130,6 +163,7 @@ export const ChatPastedTextNode = (props: NodeViewProps) => {
             <textarea
               aria-label={t("common.edit")}
               className="bg-muted/40 focus-visible:ring-ring max-h-60 min-h-32 resize-none overflow-auto rounded-md border p-2 font-mono text-[11px] whitespace-pre-wrap focus-visible:ring-2 focus-visible:outline-none"
+              dir={contentDir(draftText)}
               onBlur={commitDraft}
               onChange={(event) => {
                 setDraftText(event.target.value);

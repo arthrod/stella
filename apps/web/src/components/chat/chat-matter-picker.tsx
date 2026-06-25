@@ -1,8 +1,8 @@
-import { useDeferredValue, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useRef, useState } from "react";
 
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDownIcon, LayersIcon, SearchIcon } from "lucide-react";
-import { useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 
 import {
   Menu,
@@ -11,6 +11,7 @@ import {
   MenuPopup,
   MenuTrigger,
 } from "@stll/ui/components/menu";
+import { contentDir } from "@stll/ui/hooks/use-content-dir";
 
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { resolveMatterColor } from "@/lib/matter-colors";
@@ -64,6 +65,7 @@ export const ChatMatterPicker = ({
   onChange,
 }: ChatMatterPickerProps) => {
   const t = useTranslations();
+  const format = useFormatter();
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -76,39 +78,32 @@ export const ChatMatterPicker = ({
   const workspaces = data?.workspaces;
 
   const personalLabel = t("workspaces.parties.personalLabel");
-  const matters = useMemo<Matter[]>(() => {
-    if (!workspaces) {
-      return [];
-    }
-    return workspaces.map((w) => ({
-      id: w.id,
-      name: w.name,
-      color: w.color,
-      clientKey: w.client?.id ?? NO_CLIENT_KEY,
-      clientLabel: w.client?.displayName ?? personalLabel,
-    }));
-  }, [workspaces, personalLabel]);
+  const matters: Matter[] = workspaces
+    ? workspaces.map((w) => ({
+        id: w.id,
+        name: w.name,
+        color: w.color,
+        clientKey: w.client?.id ?? NO_CLIENT_KEY,
+        clientLabel: w.client?.displayName ?? personalLabel,
+      }))
+    : [];
 
-  const matterById = useMemo(() => {
+  const matterById = (() => {
     const map = new Map<string, Matter>();
     for (const m of matters) {
       map.set(m.id, m);
     }
     return map;
-  }, [matters]);
+  })();
 
   // Resolve selected ids → records, dropping any the org no longer
   // recognises (matter deleted, permissions changed) so the trigger
   // never shows a phantom name.
-  const selected = useMemo(
-    () =>
-      matterIds
-        .map((id) => matterById.get(id))
-        .filter((m): m is Matter => m !== undefined),
-    [matterIds, matterById],
-  );
+  const selected = matterIds
+    .map((id) => matterById.get(id))
+    .filter((m): m is Matter => m !== undefined);
 
-  const filtered = useMemo(() => {
+  const filtered = (() => {
     const q = deferredSearch.trim().toLowerCase();
     if (q.length === 0) {
       return matters;
@@ -118,9 +113,9 @@ export const ChatMatterPicker = ({
         m.name.toLowerCase().includes(q) ||
         m.clientLabel.toLowerCase().includes(q),
     );
-  }, [matters, deferredSearch]);
+  })();
 
-  const mattersByClient = useMemo(() => {
+  const mattersByClient = (() => {
     const map = new Map<string, Matter[]>();
     for (const m of matters) {
       const clientMatters = map.get(m.clientKey);
@@ -131,9 +126,9 @@ export const ChatMatterPicker = ({
       }
     }
     return map;
-  }, [matters]);
+  })();
 
-  const groups = useMemo<Group[]>(() => {
+  const groups: Group[] = (() => {
     const map = new Map<string, Group>();
     for (const m of filtered) {
       let group = map.get(m.clientKey);
@@ -159,10 +154,10 @@ export const ChatMatterPicker = ({
       }
       return a.label.localeCompare(b.label);
     });
-  }, [filtered, mattersByClient]);
+  })();
 
   const allSelected = matters.length > 0 && selected.length === matters.length;
-  const selectedIdSet = useMemo(() => new Set(matterIds), [matterIds]);
+  const selectedIdSet = new Set(matterIds);
   const triggerLabel = (() => {
     if (selected.length === 0) {
       return t("inspector.matterPicker.noMatter");
@@ -257,7 +252,7 @@ export const ChatMatterPicker = ({
             className="bg-muted text-foreground rounded-sm px-1 text-[10px] font-medium tabular-nums"
             style={extraCountStyle}
           >
-            +{extraCount}
+            +{format.number(extraCount)}
           </span>
         )}
         <ChevronDownIcon
@@ -280,6 +275,7 @@ export const ChatMatterPicker = ({
             />
             <input
               className="placeholder:text-foreground-placeholder h-7 w-full min-w-0 bg-transparent text-xs outline-none"
+              dir={contentDir(search)}
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={(e) => {
                 // base-ui's Menu listens for keystrokes (typeahead
@@ -374,7 +370,9 @@ export const ChatMatterPicker = ({
                             color: swatch,
                           }}
                         />
-                        <span className="truncate text-xs">{m.name}</span>
+                        <span className="truncate text-xs" dir="auto">
+                          {m.name}
+                        </span>
                       </span>
                     </MenuCheckboxItem>
                   );
@@ -399,6 +397,7 @@ const ClientMatterToggle = ({
   isSelected,
   onToggle,
 }: ClientMatterToggleProps) => {
+  const format = useFormatter();
   const groupAllSelected = group.allMatters.every((m) => isSelected(m.id));
   const groupSelectedCount = group.allMatters.filter((m) =>
     isSelected(m.id),
@@ -415,7 +414,8 @@ const ClientMatterToggle = ({
         <span className="min-w-0 truncate">{group.label}</span>
         {groupSelectedCount > 0 && !groupAllSelected && (
           <span className="text-muted-foreground ms-auto shrink-0 text-[10px] tabular-nums">
-            {groupSelectedCount}/{group.allMatters.length}
+            {format.number(groupSelectedCount)}/
+            {format.number(group.allMatters.length)}
           </span>
         )}
       </span>

@@ -43,6 +43,7 @@ describe("buildEntityMentionOption", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       createdBy: null,
       createdByImage: null,
+      createdByDeletedAt: null,
       updatedAt: null,
       version: 1,
       status: null,
@@ -113,9 +114,8 @@ describe("getMentionViewScope", () => {
       getMentionViewScope({
         filters: [
           {
-            id: "filter-1",
-            field: "property",
-            propertyId: "name",
+            type: "predicate",
+            operand: { type: "property", propertyId: "name" },
             op: "contains",
             value: "nda",
           },
@@ -125,9 +125,8 @@ describe("getMentionViewScope", () => {
     ).toEqual({
       filters: [
         {
-          id: "filter-1",
-          field: "property",
-          propertyId: "name",
+          type: "predicate",
+          operand: { type: "property", propertyId: "name" },
           op: "contains",
           value: "nda",
         },

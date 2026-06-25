@@ -46,13 +46,15 @@ import type {
  * real `Worker`. Mirrors the subset of `Worker` we use.
  */
 export type MeasureWorkerTransport = {
-  postMessage(message: MeasureWorkerRequest): void;
-  addEventListener(
-    type: "message",
-    listener: (event: { data: MeasureWorkerResponse }) => void,
-  ): void;
-  addEventListener(type: "error", listener: (event: unknown) => void): void;
-  terminate(): void;
+  postMessage: (message: MeasureWorkerRequest) => void;
+  addEventListener: {
+    (
+      type: "message",
+      listener: (event: { data: MeasureWorkerResponse }) => void,
+    ): void;
+    (type: "error", listener: (event: unknown) => void): void;
+  };
+  terminate: () => void;
 };
 
 type TransportFactory = () => MeasureWorkerTransport;
@@ -275,7 +277,7 @@ function flush(current: ProxyState): void {
   try {
     // The unicorn `targetOrigin` lint targets `window.postMessage`;
     // `Worker.postMessage` does not accept that argument.
-    // eslint-disable-next-line unicorn/require-post-message-target-origin
+    // eslint-disable-next-line unicorn/require-post-message-target-origin -- Worker.postMessage takes no targetOrigin.
     current.transport.postMessage({ type: "measure", id, entries });
   } catch {
     current.inFlightGenerations.delete(id);

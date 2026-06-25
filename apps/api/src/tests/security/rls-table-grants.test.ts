@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import nodePath from "node:path";
 
-const DRIZZLE_DIR = resolve(import.meta.dir, "../../../drizzle");
+const DRIZZLE_DIR = nodePath.resolve(import.meta.dir, "../../../drizzle");
 const BOOTSTRAP_MIGRATION = "20260510140000_document_rls_role_bootstrap";
 
 // These migrations were already in the tree when the bootstrap migration
@@ -47,7 +47,8 @@ const POST_BOOTSTRAP_SELECT_ONLY_TABLES = new Set([
   "legislation_index_jobs",
 ]);
 
-const SQL_IDENTIFIER_PATTERN = /"([^"]+)"|([a-z_][a-z0-9_]*)/giu;
+const SQL_IDENTIFIER_PATTERN =
+  /"(?<quoted>[^"]+)"|(?<unquoted>[a-z_][a-z0-9_]*)/giu;
 
 type RlsTableIntroduction = {
   migration: string;
@@ -56,11 +57,11 @@ type RlsTableIntroduction = {
 
 const identifierNamesFromSql = (sqlList: string): string[] =>
   [...sqlList.matchAll(SQL_IDENTIFIER_PATTERN)].map((match) => {
-    if (match[1] !== undefined) {
-      return match[1];
+    if (match.groups?.["quoted"] !== undefined) {
+      return match.groups["quoted"];
     }
 
-    return match[2]?.toLowerCase() ?? "";
+    return match.groups?.["unquoted"]?.toLowerCase() ?? "";
   });
 
 const tableNameFromSql = (sqlTarget: string): string | null =>
@@ -90,7 +91,7 @@ const isStellaIdentifier = (value: string): boolean =>
 const migrationSqlFiles = () =>
   readdirSync(DRIZZLE_DIR, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .map((entry) => resolve(DRIZZLE_DIR, entry.name, "migration.sql"))
+    .map((entry) => nodePath.resolve(DRIZZLE_DIR, entry.name, "migration.sql"))
     .filter((path) => existsSync(path))
     .toSorted();
 
@@ -158,7 +159,7 @@ const collectRlsGrantState = () => {
   const explicitGrantMigrationsByTable = new Map<string, string[]>();
 
   for (const path of migrationSqlFiles()) {
-    const migration = basename(resolve(path, ".."));
+    const migration = nodePath.basename(nodePath.resolve(path, ".."));
     const statements = sqlStatements(readFileSync(path, "utf-8"));
 
     for (const statement of statements) {

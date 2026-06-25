@@ -202,6 +202,7 @@ const readInput = async (args: Args): Promise<string> => {
     const decoder = new TextDecoder();
 
     while (true) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential stream reads: each chunk depends on the previous read advancing the stdin reader
       const { done, value } = await reader.read();
       if (done) {
         break;
@@ -256,11 +257,11 @@ const main = async () => {
         const end = Math.min(text.length, idx + args.citation.length + 200);
         const context = text.slice(start, end);
 
-        const result = await classifyWithLLM(
+        const result = await classifyWithLLM({
           context,
-          args.citation,
-          args.language,
-        );
+          citationText: args.citation,
+          language: args.language,
+        });
 
         if (result.isErr()) {
           console.log("LLM classification failed.");

@@ -39,10 +39,10 @@ const mapHitRow = (row: RawRow): SearchHit => ({
   workspaceName: String(row["workspace_name"]),
   kind: parseEntityKind(row["kind"]),
   title: String(row["title"]),
-  // oxlint-disable-next-line typescript/strict-boolean-expressions -- row.headline from DB (any)
-  headline: row["headline"]
-    ? escapeAndHighlight(JSON.stringify(row["headline"]))
-    : null,
+  headline:
+    typeof row["headline"] === "string" && row["headline"].length > 0
+      ? escapeAndHighlight(JSON.stringify(row["headline"]))
+      : null,
   updatedAt:
     row["updated_at"] instanceof Date
       ? row["updated_at"].toISOString()
@@ -243,8 +243,10 @@ const searchContent = async (
     entityId: String(row["entity_id"]),
     kind: parseEntityKind(row["kind"]),
     title: String(row["title"]),
-    // oxlint-disable-next-line typescript/strict-boolean-expressions -- row.passage from DB (any)
-    passage: row["passage"] ? JSON.stringify(row["passage"]) : "",
+    passage:
+      typeof row["passage"] === "string" && row["passage"].length > 0
+        ? JSON.stringify(row["passage"])
+        : "",
   }));
 
   const totalCount = Number(countResult.at(0)?.["total"]) || 0;
@@ -286,6 +288,7 @@ const rebuildIndex = async (orgId: SafeId<"organization">): Promise<void> => {
     let hasMore = true;
     while (hasMore) {
       // Keyset pagination: O(1) per batch vs O(N) for offset
+      // oxlint-disable-next-line no-await-in-loop -- keyset pagination: each batch depends on the previous lastId cursor
       const batch = await rootDb
         .select({ id: entities.id })
         .from(entities)
@@ -298,6 +301,7 @@ const rebuildIndex = async (orgId: SafeId<"organization">): Promise<void> => {
         .limit(REINDEX_BATCH_SIZE);
 
       for (const entity of batch) {
+        // oxlint-disable-next-line no-await-in-loop -- sequential per-entity reindex writes bound DB load during rebuild
         await indexEntity(entity.id);
       }
 

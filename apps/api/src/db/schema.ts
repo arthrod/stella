@@ -1,3 +1,4 @@
+import type { ConditionNode } from "@stll/conditions";
 import type { PersistedDecisionAnalysis } from "@stll/legal-ast/analysis";
 import type { DocumentAst } from "@stll/legal-ast/document-ast";
 import type { CountryCode } from "@stll/country-codes";
@@ -27,6 +28,7 @@ import {
   orgPolicies,
   promptShortcutPolicies,
   stella,
+  templateChatThreadPolicies,
   userPolicies,
   workspaceIdCheck,
   workspaceViewTemplatePolicies,
@@ -43,7 +45,7 @@ import type {
   ContactPhone,
   EntityKind,
   FieldContent,
-  PropertyCondition,
+  PlaybookBundle,
   PropertyContent,
   PropertyTool,
 } from "@/api/db/schema-validators";
@@ -58,6 +60,7 @@ import type {
 import type { ClauseMetadata } from "@/api/handlers/clauses/metadata";
 import type { ClauseBody } from "@/api/handlers/clauses/types";
 import type { TemplateManifest } from "@/api/handlers/docx/types";
+import type { TemplateRecipeDefinition } from "@/api/handlers/template-recipes/definition";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId, SafeIdType } from "@/api/lib/branded-types";
 import type { CentsAmount } from "@/api/lib/money";
@@ -179,6 +182,19 @@ export type SchedulerPayload = Record<string, unknown>;
 export type PracticeJurisdiction = {
   countryCode: CountryCode;
   isPrimary: boolean;
+};
+
+export const ACCOUNT_DELETION_REQUEST_STATUSES = [
+  "pending",
+  "processing",
+  "completed",
+  "failed",
+] as const;
+export type AccountDeletionRequestStatus =
+  (typeof ACCOUNT_DELETION_REQUEST_STATUSES)[number];
+
+export type AccountDeletionStorageCleanup = {
+  s3Keys: string[];
 };
 
 const tsvector = customType<{ data: string }>({
@@ -736,6 +752,12 @@ export const properties = p.pgTable(
     tool: jsonb().$type<PropertyTool>().notNull(),
     system: p.boolean().notNull().default(false),
     kinds: p.varchar({ length: 64 }).array().$type<EntityKind>(),
+    // Correlates a property materialized by a playbook back to the bundle
+    // column (its `sourceId`) that produced it, so re-applying matches by
+    // identity rather than name: survives renames and never collides across
+    // playbooks or with manually-created columns. Null for any property not
+    // created by a playbook.
+    playbookSourceId: p.uuid("playbook_source_id"),
     createdAt: p.timestamp("created_at").notNull().defaultNow(),
   },
   (table) => [
@@ -754,7 +776,7 @@ export const propertyDependencies = p.pgTable(
     dependsOnPropertyId: safeUuid<"property">(
       "depends_on_property_id",
     ).notNull(),
-    condition: jsonb().$type<PropertyCondition>(),
+    condition: jsonb().$type<ConditionNode>(),
   },
   (table) => [
     p
@@ -783,6 +805,44 @@ export const propertyDependencies = p.pgTable(
       })
       .onDelete("restrict"),
     p.index("property_dependencies_workspace_id_idx").on(table.workspaceId),
+    ...wsPolicies(),
+  ],
+);
+
+// -- Playbooks --
+
+/**
+ * A playbook binds a Document Type option value to a reusable bundle
+ * of AI columns. Applying it materializes each bundle column as a
+ * property gated by `typePropertyId eq typeValue`, so the columns
+ * auto-fill only for documents classified as that type.
+ */
+export const playbooks = p.pgTable(
+  "playbooks",
+  {
+    id: pUuid<"playbook">().primaryKey(),
+    workspaceId: safeWorkspaceId("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: p.varchar({ length: 256 }).notNull(),
+    typePropertyId: safeUuid<"property">("type_property_id").notNull(),
+    typeValue: p.varchar("type_value", { length: 1000 }).notNull(),
+    bundle: jsonb().$type<PlaybookBundle>().notNull(),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+    updatedAt: p.timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    p.index("playbooks_workspace_id_idx").on(table.workspaceId),
+    p
+      .index("playbooks_workspace_created_idx")
+      .on(table.workspaceId, table.createdAt, table.id),
+    p
+      .foreignKey({
+        name: "playbooks_type_property_fk",
+        columns: [table.typePropertyId, table.workspaceId],
+        foreignColumns: [properties.id, properties.workspaceId],
+      })
+      .onDelete("cascade"),
     ...wsPolicies(),
   ],
 );
@@ -1607,6 +1667,14 @@ export const templates = p.pgTable(
     manifest: jsonb().$type<TemplateManifest>(),
     fieldCount: p.integer("field_count").notNull().default(0),
     currentVersion: p.integer("current_version").notNull().default(1),
+    tags: p.text().array(),
+    /** Ordered BCP-47 tags of the document text (bilingual templates list
+     *  every language, primary first). */
+    languages: p.text().array().notNull().default([]),
+    whenToUse: p.text("when_to_use"),
+    whenNotToUse: p.text("when_not_to_use"),
+    useCount: p.integer("use_count").notNull().default(0),
+    lastUsedAt: p.timestamp("last_used_at"),
     createdBy: p
       .text("created_by")
       .notNull()
@@ -2491,6 +2559,37 @@ export const templateCategories = p.pgTable(
   ],
 );
 
+/**
+ * Saved structural-block recipes: a named, org-wide snapshot of
+ * pre-configured template fields (optionally wrapped in a `{{#each}}`
+ * loop) that can be inserted into any template in one click.
+ */
+export const templateRecipes = p.pgTable(
+  "template_recipes",
+  {
+    id: pUuid<"templateRecipe">().primaryKey(),
+    organizationId: safeOrganizationId("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    name: p.varchar({ length: 256 }).notNull(),
+    description: p.text(),
+    definition: jsonb().$type<TemplateRecipeDefinition>().notNull(),
+    createdBy: p
+      .text("created_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+    updatedAt: p.timestamp("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    p.index("template_recipes_organization_id_idx").on(table.organizationId),
+    p
+      .index("template_recipes_organization_id_name_idx")
+      .on(table.organizationId, table.name),
+    ...orgPolicies(),
+  ],
+);
+
 export const templateClauses = p.pgTable(
   "template_clauses",
   {
@@ -2506,6 +2605,10 @@ export const templateClauses = p.pgTable(
         onDelete: "set null",
       },
     ),
+    /** Label snapshot taken at link time. Survives variant deletion
+     *  (the FK nulls `clauseVariantId`) so dangling variant links can
+     *  be surfaced instead of silently falling back to the clause. */
+    clauseVariantLabel: p.varchar("clause_variant_label", { length: 256 }),
     clauseVersionId: safeUuid<"clauseVersion">("clause_version_id").references(
       () => clauseVersions.id,
       {
@@ -3335,6 +3438,51 @@ export const fileChatThreads = p.pgTable(
   ],
 );
 
+/**
+ * Per-user mapping of an org-scoped template to its latest chat
+ * thread, so reopening a template in the Template Studio resumes
+ * the conversation. "New chat" repoints `chatThreadId` at a fresh
+ * thread; older threads stay reachable from the chat history list.
+ */
+export const templateChatThreads = p.pgTable(
+  "template_chat_threads",
+  {
+    id: pUuid<"templateChatThread">().primaryKey(),
+    organizationId: safeOrganizationId("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    userId: p
+      .text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    templateId: safeUuid<"template">("template_id").notNull(),
+    chatThreadId: safeUuid<"chatThread">("chat_thread_id")
+      .notNull()
+      .references(() => chatThreads.id, { onDelete: "cascade" }),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+    updatedAt: p
+      .timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    p
+      .uniqueIndex("template_chat_threads_scope_uidx")
+      .on(table.organizationId, table.userId, table.templateId),
+    p
+      .uniqueIndex("template_chat_threads_chat_thread_id_uidx")
+      .on(table.chatThreadId),
+    p
+      .foreignKey({
+        columns: [table.templateId, table.organizationId],
+        foreignColumns: [templates.id, templates.organizationId],
+      })
+      .onDelete("cascade"),
+    ...templateChatThreadPolicies(),
+  ],
+);
+
 // -- MCP Connectors --
 
 export const MCP_CONNECTOR_AUTH_TYPES = ["none", "bearer", "oauth2"] as const;
@@ -4068,6 +4216,59 @@ export const usageAllocations = p.pgTable(
   ],
 );
 
+export const accountDeletionRequests = p.pgTable(
+  "account_deletion_requests",
+  {
+    id: pUuid<"accountDeletionRequest">().primaryKey(),
+    userId: p
+      .text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    organizationIds: safeOrganizationId("organization_ids")
+      .array()
+      .notNull()
+      .default([]),
+    workspaceIds: safeWorkspaceId("workspace_ids")
+      .array()
+      .notNull()
+      .default([]),
+    taskReassignmentCount: p
+      .integer("task_reassignment_count")
+      .notNull()
+      .default(0),
+    status: p
+      .varchar("status", { length: 16 })
+      .$type<AccountDeletionRequestStatus>()
+      .notNull()
+      .default("pending"),
+    storageCleanup: jsonb("storage_cleanup")
+      .$type<AccountDeletionStorageCleanup>()
+      .notNull(),
+    attemptCount: p.integer("attempt_count").notNull().default(0),
+    errorMessage: p.text("error_message"),
+    createdAt: p.timestamp("created_at").notNull().defaultNow(),
+    updatedAt: p
+      .timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+    completedAt: p.timestamp("completed_at"),
+  },
+  (table) => [
+    p.index("account_deletion_requests_user_created_idx").on(
+      table.userId,
+      table.createdAt,
+      table.id,
+    ),
+    p.index("account_deletion_requests_status_created_idx").on(
+      table.status,
+      table.createdAt,
+      table.id,
+    ),
+    ...userPolicies(),
+  ],
+);
+
 export const usageEvents = p.pgTable(
   "usage_events",
   {
@@ -4191,6 +4392,7 @@ export const relations = defineRelations(
     infoSoudTrackedCases,
     properties,
     propertyDependencies,
+    playbooks,
     entities,
     taskAssignees,
     entityLinks,
@@ -4222,6 +4424,7 @@ export const relations = defineRelations(
     clauseVersions,
     templateCategories,
     templateClauses,
+    templateRecipes,
     templateFills,
     searchDocuments,
     extractedContent,
@@ -4241,6 +4444,7 @@ export const relations = defineRelations(
     chatThreadCompactions,
     chatThreadSearchDocuments,
     fileChatThreads,
+    templateChatThreads,
     mcpConnectors,
     mcpOAuthClients,
     mcpUserConnections,
@@ -4988,6 +5192,16 @@ export const relations = defineRelations(
       field: r.one.fields({
         from: r.fileChatThreads.fieldId,
         to: r.fields.id,
+      }),
+    },
+    templateChatThreads: {
+      thread: r.one.chatThreads({
+        from: r.templateChatThreads.chatThreadId,
+        to: r.chatThreads.id,
+      }),
+      template: r.one.templates({
+        from: r.templateChatThreads.templateId,
+        to: r.templates.id,
       }),
     },
     mcpConnectors: {

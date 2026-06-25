@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { useShallow } from "zustand/react/shallow";
 
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import {
   mapEntityToSpanSlices,
   mergeAdjacentRects,
@@ -31,20 +32,22 @@ export const useOverlayRects = (
   // eslint-disable-next-line typescript-eslint/promise-function-async -- store selector returns promise as value, not as async result
   const renderPromise = usePDFStore((s) => s.renderPromises.get(pageId));
 
-  const [normalizedRects, setNormalizedRects] = useState<Map<
-    number,
-    OverlayRect[]
-  > | null>(null);
+  type NormalizedRectsCache = {
+    source: typeof overlays;
+    rects: Map<number, OverlayRect[]>;
+  };
+  const [normalizedRectsCache, setNormalizedRectsCache] =
+    useState<NormalizedRectsCache | null>(null);
+  const normalizedRects =
+    normalizedRectsCache !== null && normalizedRectsCache.source === overlays
+      ? normalizedRectsCache.rects
+      : null;
 
-  const prevOverlaysRef = useRef(overlays);
-  if (prevOverlaysRef.current !== overlays) {
-    prevOverlaysRef.current = overlays;
-    if (normalizedRects !== null) {
-      setNormalizedRects(null);
-    }
-  }
-
-  useEffect(() => {
+  // Measure pdf.js text-layer rects via the Range API into state.
+  // This reads the live pdf.js-rendered DOM (getClientRects), which
+  // can't run during render, so it's a genuine external (DOM)
+  // measurement sync rather than derived state.
+  useExternalSyncEffect(() => {
     if (normalizedRects) {
       return;
     }
@@ -116,7 +119,7 @@ export const useOverlayRects = (
       }
     }
 
-    setNormalizedRects(result);
+    setNormalizedRectsCache({ source: overlays, rects: result });
   }, [
     normalizedRects,
     overlays,

@@ -2,10 +2,12 @@ import { useState } from "react";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 import { Frame, FramePanel } from "@stll/ui/components/frame";
+import { Skeleton } from "@stll/ui/components/skeleton";
 import { stellaToast } from "@stll/ui/components/toast";
 
 import type { TranslationKey } from "@/i18n/types";
@@ -48,9 +50,8 @@ function UsageBody({
   data: UsageEntitlement | null;
   isLoading: boolean;
 }) {
-  const t = useTranslations();
   if (isLoading) {
-    return <FramePanel>{t("settings.organization.usageLoading")}</FramePanel>;
+    return <EntitlementCardSkeleton />;
   }
   if (data) {
     return <ActiveEntitlementCard data={data} />;
@@ -58,8 +59,36 @@ function UsageBody({
   return <EmptyStateCard />;
 }
 
+// Mirrors ActiveEntitlementCard: title + meta row with a trailing action,
+// then the usage label/value row above the meter, so the card does not
+// jump when the entitlement query resolves.
+function EntitlementCardSkeleton() {
+  return (
+    <Frame>
+      <FramePanel>
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <Skeleton className="h-6 w-40" />
+            <Skeleton className="h-4 w-72 max-w-full" />
+          </div>
+          <Skeleton className="h-8 w-20 rounded-md" />
+        </div>
+
+        <div className="mt-6 space-y-2">
+          <div className="flex justify-between gap-4">
+            <Skeleton className="h-4 w-36" />
+            <Skeleton className="h-4 w-24" />
+          </div>
+          <Skeleton className="h-2 w-full rounded-full" />
+        </div>
+      </FramePanel>
+    </Frame>
+  );
+}
+
 function ActiveEntitlementCard({ data }: { data: UsageEntitlement }) {
   const t = useTranslations();
+  const format = useFormatter();
   const monthlyAllowance =
     data.policy.monthlyUsageUnitsPerSeat * data.entitlement.seats;
   const usedPct =
@@ -82,11 +111,16 @@ function ActiveEntitlementCard({ data }: { data: UsageEntitlement }) {
       <FramePanel>
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1">
-            <h2 className="text-lg font-medium">{data.policy.displayName}</h2>
+            <h2 className="text-lg font-medium">
+              <BidiText>{data.policy.displayName}</BidiText>
+            </h2>
             <p className="text-muted-foreground text-sm">
               {data.entitlement.cancelAtPeriodEnd
                 ? t("settings.organization.usageEndsOnTemplate", {
-                    date: formatShortDate(data.entitlement.currentPeriodEnd),
+                    date: formatShortDate(
+                      data.entitlement.currentPeriodEnd,
+                      format,
+                    ),
                   })
                 : t(USAGE_STATUS_KEYS[data.entitlement.status])}{" "}
               ·{" "}
@@ -97,6 +131,7 @@ function ActiveEntitlementCard({ data }: { data: UsageEntitlement }) {
               {formatPeriod(
                 data.entitlement.currentPeriodStart,
                 data.entitlement.currentPeriodEnd,
+                format,
               )}
             </p>
           </div>
@@ -116,7 +151,7 @@ function ActiveEntitlementCard({ data }: { data: UsageEntitlement }) {
             </span>
             <span className="font-medium">
               {t("settings.organization.usageUnitsBalanceTemplate", {
-                remaining: data.remainingUsageUnits.toLocaleString(),
+                remaining: format.number(data.remainingUsageUnits),
               })}
             </span>
           </div>
@@ -129,7 +164,7 @@ function ActiveEntitlementCard({ data }: { data: UsageEntitlement }) {
             role="progressbar"
           >
             <div
-              className="bg-foreground h-full transition-all"
+              className="bg-foreground h-full transition-[width]"
               style={{ width: `${usedPct}%` }}
             />
           </div>
@@ -191,30 +226,33 @@ function EmptyStateCard() {
   );
 }
 
-const formatShortDate = (iso: string): string => {
+type IntlFormatter = ReturnType<typeof useFormatter>;
+
+const SHORT_DATE_OPTIONS = {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+} as const;
+
+const formatShortDate = (iso: string, format: IntlFormatter): string => {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) {
     return "";
   }
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(date);
+  return format.dateTime(date, SHORT_DATE_OPTIONS);
 };
 
-const formatPeriod = (start: string, end: string): string => {
+const formatPeriod = (
+  start: string,
+  end: string,
+  format: IntlFormatter,
+): string => {
   const s = new Date(start);
   const e = new Date(end);
   if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) {
     return "";
   }
-  const fmt = new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-  return `${fmt.format(s)} - ${fmt.format(e)}`;
+  return `${format.dateTime(s, SHORT_DATE_OPTIONS)} - ${format.dateTime(e, SHORT_DATE_OPTIONS)}`;
 };
 
 const USAGE_STATUS_KEYS = {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 
 import {
   BanknoteIcon,
@@ -19,6 +19,7 @@ import { useTranslations } from "use-intl";
 import { Button } from "@stll/ui/components/button";
 import { cn } from "@stll/ui/lib/utils";
 
+import { nativeToolLabelKey } from "@/components/catalogue/native-tool-label";
 import Tooltip from "@/components/tooltip";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
 import { sanitizeHref } from "@/lib/sanitize-href";
@@ -59,6 +60,7 @@ export const CatalogueDetailPanel = ({
       (entry.kind === "mcp" && entry.installedConnectorSlug !== null) ||
       (entry.kind === "skill" && entry.installedSkillId !== null));
   const homepageUrl = sanitizeHref(entry.homepage ?? entry.authorUrl);
+  const labelKey = nativeToolLabelKey({ slug: entry.slug, kind: entry.kind });
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col">
@@ -68,8 +70,11 @@ export const CatalogueDetailPanel = ({
           TOOLBAR_ROW_HEIGHT,
         )}
       >
-        <h2 className="text-foreground min-w-0 truncate text-sm font-semibold">
-          {entry.displayName}
+        <h2
+          className="text-foreground min-w-0 truncate text-sm font-semibold"
+          dir="auto"
+        >
+          {labelKey ? t(labelKey) : entry.displayName}
         </h2>
         {homepageUrl && (
           <a
@@ -98,7 +103,9 @@ export const CatalogueDetailPanel = ({
       <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-3 py-4">
         {entry.description && (
           <Section title={t("onboarding.catalogueDetailAbout")}>
-            <ExpandableText text={entry.description} />
+            {/* Remount per entry so expanded/overflow state starts fresh
+                (the panel itself is not remounted per selection). */}
+            <ExpandableText key={entry.description} text={entry.description} />
           </Section>
         )}
 
@@ -231,32 +238,29 @@ export const CatalogueDetailPanel = ({
  */
 const ExpandableText = ({ text }: { text: string }) => {
   const t = useTranslations();
-  const ref = useRef<HTMLParagraphElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
-
-  // Collapse when switching to a different entry (the panel is not
-  // remounted per selection, so expanded state would otherwise leak).
-  useEffect(() => {
-    setExpanded(false);
-  }, [text]);
 
   // Measure only while clamped, so overflow is detected against the
   // line-clamp height. A ResizeObserver keeps it correct across font
   // loads, panel animation, and width changes.
-  useEffect(() => {
-    const el = ref.current;
-    if (expanded || !el) {
-      return () => {
-        /* no-op cleanup */
+  const textRef = useCallback(
+    (el: HTMLParagraphElement | null) => {
+      if (expanded || !el) {
+        return undefined;
+      }
+
+      const measure = () => {
+        setOverflowing(el.scrollHeight > el.clientHeight + 1);
       };
-    }
-    const observer = new ResizeObserver(() => {
-      setOverflowing(el.scrollHeight > el.clientHeight + 1);
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [text, expanded]);
+
+      measure();
+      const observer = new ResizeObserver(measure);
+      observer.observe(el);
+      return () => observer.disconnect();
+    },
+    [expanded],
+  );
 
   return (
     <div className="flex flex-col items-start gap-1.5">
@@ -265,7 +269,7 @@ const ExpandableText = ({ text }: { text: string }) => {
           "text-foreground text-sm leading-relaxed text-pretty",
           !expanded && "line-clamp-5",
         )}
-        ref={ref}
+        ref={textRef}
       >
         {text}
       </p>

@@ -1,5 +1,6 @@
 import { toSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
+import { isUuid } from "@/api/lib/custom-schema";
 
 type ActorSessionIdentityInput = {
   organizationId: string;
@@ -26,15 +27,27 @@ export const brandPersistedWorkspaceId = (
   workspaceId: string,
 ): SafeId<"workspace"> => toSafeId<"workspace">(workspaceId);
 
+export const brandPersistedTemplateId = (
+  templateId: string,
+): SafeId<"template"> => toSafeId<"template">(templateId);
+
 export const brandPersistedEntityId = (entityId: string): SafeId<"entity"> =>
   toSafeId<"entity">(entityId);
 
 export const brandPersistedFieldId = (fieldId: string): SafeId<"field"> =>
   toSafeId<"field">(fieldId);
 
+export const brandPersistedEntityVersionId = (
+  entityVersionId: string,
+): SafeId<"entityVersion"> => toSafeId<"entityVersion">(entityVersionId);
+
 export const brandPersistedPropertyId = (
   propertyId: string,
 ): SafeId<"property"> => toSafeId<"property">(propertyId);
+
+export const brandPersistedPlaybookId = (
+  playbookId: string,
+): SafeId<"playbook"> => toSafeId<"playbook">(playbookId);
 
 export const brandPersistedUserFileId = (
   userFileId: string,
@@ -110,3 +123,33 @@ export const brandValidatedWorkflowActorKey = ({
   organizationId: toSafeId<"organization">(organizationId),
   workspaceId: toSafeId<"workspace">(workspaceId),
 });
+
+/**
+ * Parse a JSON-encoded list of client-picked entity ids (multipart bodies
+ * carry it as a string field) into branded ids. Returns null when the JSON
+ * is not an array of UUID strings or exceeds `maxItems`. Branding only
+ * asserts the format — every consumer must still scope its queries to the
+ * caller's organization and accessible workspaces.
+ */
+export const parsePickedEntityIdsJson = (
+  json: string,
+  maxItems: number,
+): SafeId<"entity">[] | null => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length > maxItems) {
+    return null;
+  }
+  const ids: SafeId<"entity">[] = [];
+  for (const id of parsed) {
+    if (typeof id !== "string" || !isUuid(id)) {
+      return null;
+    }
+    ids.push(toSafeId<"entity">(id));
+  }
+  return ids;
+};

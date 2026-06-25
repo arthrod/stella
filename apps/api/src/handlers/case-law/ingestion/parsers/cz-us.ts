@@ -44,7 +44,6 @@
  */
 
 import * as cheerio from "cheerio";
-import type { AnyNode } from "domhandler";
 
 import type {
   Block,
@@ -61,6 +60,7 @@ import {
   CZ_JUDGE_NAME_RE as JUDGE_NAME_RE,
   CZ_JUDGE_TITLE_RE as SIGNATURE_RE,
 } from "./cz-patterns";
+import { inlinesToPlainText, stripInlinePrefix } from "./shared-inlines";
 
 // ── Public API ─────────────────────────────────────────────
 
@@ -201,86 +201,6 @@ const extractCrossReferences = ($: cheerio.CheerioAPI): CrossReference[] => {
   return refs;
 };
 
-// ── Inline walking (HTML fallback) ────────────────────────
-
-const _walkInlines = (
-  $: cheerio.CheerioAPI,
-  el: cheerio.Cheerio<AnyNode>,
-): Inline[] => {
-  const inlines: Inline[] = [];
-
-  el.contents().each((_, node) => {
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type === "text") {
-      const text = $(node).text();
-      if (text) {
-        inlines.push({ type: "text", text });
-      }
-      return;
-    }
-
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type !== "tag") {
-      return;
-    }
-
-    const tag = node.tagName.toLowerCase();
-    const $node = $(node);
-
-    if (tag === "br") {
-      inlines.push({ type: "line-break" });
-      return;
-    }
-
-    if (tag === "b" || tag === "strong") {
-      const children = _walkInlines($, $node);
-      if (children.length > 0) {
-        inlines.push({ type: "bold", children });
-      }
-      return;
-    }
-
-    if (tag === "i" || tag === "em") {
-      const children = _walkInlines($, $node);
-      if (children.length > 0) {
-        inlines.push({ type: "italic", children });
-      }
-      return;
-    }
-
-    if (tag === "a") {
-      const href = $node.attr("href");
-      const children = _walkInlines($, $node);
-      if (href && children.length > 0) {
-        inlines.push({ type: "link", href, children });
-      } else if (children.length > 0) {
-        inlines.push(...children);
-      }
-      return;
-    }
-
-    // Unwrap presentational wrappers (span, font, etc.)
-    inlines.push(..._walkInlines($, $node));
-  });
-
-  return inlines;
-};
-
-const inlinesToPlainText = (inlines: readonly Inline[]): string => {
-  let text = "";
-  for (const node of inlines) {
-    if (node.type === "text") {
-      text += node.text;
-    } else if (node.type === "line-break") {
-      text += "\n";
-    } else {
-      // bold | italic | link — all carry children
-      text += inlinesToPlainText(node.children);
-    }
-  }
-  return text;
-};
-
 /** Create a simple text inline helper. */
 const textInline = (text: string): Inline[] => [{ type: "text", text }];
 
@@ -319,7 +239,7 @@ const RTF_NUMERIC_CONTROL_WORDS = new Set([
   "tx",
 ]);
 
-const RTF_CONTROL_WORD_RE = /\\([a-z]+)(-?\d*)\s?/giu;
+const RTF_CONTROL_WORD_RE = /\\(?<word>[a-z]+)(?<numericValue>-?\d*)\s?/giu;
 
 const stripIgnoredRtfControlWord = (
   match: string,
@@ -369,7 +289,7 @@ const parseRtfInlines = (rtf: string): Inline[] => {
   const inlines: Inline[] = [];
 
   // Split on \b and \b0 markers, keeping the delimiters
-  const parts = cleaned.split(/(\\b0?\s?)/u);
+  const parts = cleaned.split(/(?<marker>\\b0?\s?)/u);
   let bold = false;
 
   for (const part of parts) {
@@ -518,19 +438,17 @@ const SKIP_RE = /^\[OBRÁZEK\]|^Česká republika$|^ČESKÁ REPUBLIKA$/u;
 
 /** Decision title (level 1). */
 const TITLE_RE =
-  /^(N\s*[ÁA]\s*L\s*[ÉE]\s*Z|U\s*S\s*N\s*E\s*S\s*E\s*N\s*[ÍI]|Ústavního soudu|Jménem republiky)$/iu;
+  /^(?:N\s*[ÁA]\s*L\s*[ÉE]\s*Z|U\s*S\s*N\s*E\s*S\s*E\s*N\s*[ÍI]|Ústavního soudu|Jménem republiky)$/iu;
 
 /** Normalize spaced text like "t a k t o" -> "takto". */
 const collapseSpaces = (text: string): string =>
-  text.replace(/(\S)\s+(?=\S)/gu, "$1");
+  text.replace(/(?<keep>\S)\s+(?=\S)/gu, "$<keep>");
 
 /** "takto:" separator (with spaced variants). */
-// oxlint-disable-next-line sonarjs/slow-regex -- matched against individual normalized parser lines
 const TAKTO_RE = /^t\s*a\s*k\s*t\s*o\s*:?\s*$/iu;
 
 /** "Odůvodnění:" separator (with spaced variants). */
 const ODUVODNENI_RE =
-  // oxlint-disable-next-line sonarjs/slow-regex -- matched against individual normalized parser lines
   /^(?:O\s*d\s*[uů]\s*v\s*o\s*d\s*n\s*[eě]\s*n\s*[ií]|Odůvodnění)\s*:?\s*$/iu;
 
 /**
@@ -538,10 +456,10 @@ const ODUVODNENI_RE =
  * or Roman numeral followed by a short title on the same or
  * next line.
  */
-const SECTION_ROMAN_RE = /^((?:X{0,3}(?:IX|IV|V?I{0,3})))\.?\s*$/u;
+const SECTION_ROMAN_RE = /^(?=[IVX])(?<roman>X{0,3}(?:IX|IV|V?I{0,3}))\.?\s*$/u;
 
 /** Numbered paragraph: "1. ...", "2. ..." */
-const NUMBERED_PARA_RE = /^(\d+)\.\s+/u;
+const NUMBERED_PARA_RE = /^(?:\d+)\.\s+/u;
 
 // ── Block classification ───────────────────────────────────
 
@@ -551,68 +469,6 @@ const makeAnchorId = (prefix: string, index: number): string =>
 /**
  * Strip a character-counted prefix from inlines.
  */
-const stripInlinePrefix = (
-  inlines: readonly Inline[],
-  charCount: number,
-): Inline[] => {
-  if (charCount <= 0) {
-    return [...inlines];
-  }
-
-  const result: Inline[] = [];
-  let remaining = charCount;
-
-  for (const node of inlines) {
-    if (remaining <= 0) {
-      result.push(node);
-      continue;
-    }
-
-    if (node.type === "text") {
-      if (node.text.length <= remaining) {
-        remaining -= node.text.length;
-      } else {
-        const rest = node.text.slice(remaining);
-        remaining = 0;
-        if (rest) {
-          result.push({ type: "text", text: rest });
-        }
-      }
-      continue;
-    }
-
-    if (node.type === "line-break") {
-      remaining -= 1;
-      continue;
-    }
-
-    // Remaining variants (bold | italic | link) all carry children.
-    const nodeTextLen = inlinesToPlainText(node.children).length;
-    if (nodeTextLen <= remaining) {
-      remaining -= nodeTextLen;
-    } else {
-      const stripped = stripInlinePrefix(node.children, remaining);
-      remaining = 0;
-      if (stripped.length > 0) {
-        result.push({ ...node, children: stripped });
-      }
-    }
-  }
-
-  // Trim leading whitespace from the first text node
-  const first = result[0];
-  if (result.length > 0 && first?.type === "text") {
-    const trimmed = first.text.trimStart();
-    if (trimmed) {
-      result[0] = { type: "text", text: trimmed };
-    } else {
-      result.shift();
-    }
-  }
-
-  return result;
-};
-
 /**
  * Classify extracted lines into semantic blocks.
  *
@@ -787,7 +643,7 @@ const classifyLines = (lines: readonly ParsedLine[]): Block[] => {
           !CLOSING_RE.test(nextNonEmpty.plainText)
         ) {
           // Combine Roman numeral + title line
-          const combinedText = `${romanMatch[1] ?? ""}. ${nextNonEmpty.plainText}`;
+          const combinedText = `${romanMatch.groups?.["roman"] ?? ""}. ${nextNonEmpty.plainText}`;
           blockIndex += 1;
           blocks.push({
             id: makeBlockId(),

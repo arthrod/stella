@@ -1,5 +1,3 @@
-import { useCallback } from "react";
-
 import type { QueryClient } from "@tanstack/react-query";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { Result } from "better-result";
@@ -53,7 +51,7 @@ export const installPDFDocumentCleanup = (queryClient: QueryClient) => {
       return;
     }
     // SAFETY: only usePDFDocument registers this key
-    // eslint-disable-next-line typescript/no-unsafe-type-assertion
+    // eslint-disable-next-line typescript/no-unsafe-type-assertion -- key guard narrows to this hook's data; cache stores unknown
     const data = rawData as PDFDocumentQueryData;
     if (!Result.isOk(data)) {
       return;
@@ -89,12 +87,12 @@ export const usePDFDocument = ({ key, context }: PDFDocumentOptionsInput) => {
       }),
   });
 
-  const refetch = useCallback(() => {
+  const refetch = () => {
     queryClient.removeQueries({
       queryKey: pdfDocumentKeys.byFileId({ fileId: key.fileId }),
       exact: true,
     });
-  }, [queryClient, key.fileId]);
+  };
 
   return { data, refetch };
 };

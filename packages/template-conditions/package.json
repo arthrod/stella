@@ -15,10 +15,13 @@
     "lint:fix": "cd ../.. && bun --bun oxlint -c oxlint.config.ts --type-aware --fix packages/template-conditions",
     "format": "oxfmt ."
   },
+  "dependencies": {
+    "@stll/conditions": "workspace:*",
+    "better-result": "catalog:"
+  },
   "devDependencies": {
     "@stll/typescript-config": "workspace:*",
     "@types/bun": "catalog:",
-    "fast-check": "catalog:",
-    "typescript": "catalog:"
+    "fast-check": "catalog:"
   }
 }

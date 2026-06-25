@@ -16,6 +16,7 @@ import {
   DialogPopup,
   DialogTitle,
 } from "@stll/ui/components/dialog";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { Label } from "@stll/ui/components/label";
 import { ScrollArea } from "@stll/ui/components/scroll-area";
 import { stellaToast } from "@stll/ui/components/toast";
@@ -82,6 +83,7 @@ export const CopyToMatterDialog = ({
     let failedCount = 0;
     let firstErrorMessage: string | null = null;
     for (const { entityId } of transferEntities) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential copy/move mutations share query-key cache invalidation and move semantics (deleteSource); concurrent mutations would race and risk rate limits
       const result = await Result.tryPromise(
         async () =>
           await api
@@ -214,6 +216,7 @@ export const CopyToMatterDialog = ({
                         "hover:bg-accent w-full rounded px-2 py-1.5 text-start text-sm",
                         targetWorkspaceId === workspace.id && "bg-accent",
                       )}
+                      dir="auto"
                       key={workspace.id}
                       onClick={() => {
                         setTargetWorkspaceId(workspace.id);
@@ -337,17 +340,20 @@ const FolderPicker = ({
               className="hover:bg-muted rounded p-0.5"
               aria-expanded={isExpanded}
               aria-label={folder.name}
+              title={folder.name}
               onClick={(e) => {
                 e.stopPropagation();
                 toggleExpand(folder.entityId);
               }}
               type="button"
             >
-              <ChevronRightIcon
+              <DirectionalIcon
                 className={cn(
                   "size-3 transition-transform",
                   isExpanded && "rotate-90",
                 )}
+                flip={!isExpanded}
+                icon={ChevronRightIcon}
               />
             </button>
           ) : (
@@ -362,7 +368,9 @@ const FolderPicker = ({
             type="button"
           >
             <FolderIcon className="size-4 shrink-0" />
-            <span className="truncate">{folder.name}</span>
+            <span className="truncate" dir="auto">
+              {folder.name}
+            </span>
           </button>
         </div>
         {hasChildren && isExpanded && (

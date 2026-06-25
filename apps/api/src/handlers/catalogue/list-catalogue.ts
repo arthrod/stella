@@ -23,17 +23,14 @@ import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { SafeId } from "@/api/lib/branded-types";
 import { isBusinessRegistryNativeToolDeployAvailable } from "@/api/lib/business-registries/dispatch";
+import { LIMITS } from "@/api/lib/limits";
 import { isWebSearchDeployAvailable } from "@/api/lib/web-search/select-provider";
+
+import { resolveCatalogueSkillHandleMaps } from "./skill-handles";
 
 const config = {
   permissions: { workspace: ["read"] },
 } satisfies HandlerConfig;
-
-// Matches the cap on `GET /mcp/connectors`. The catalogue listing
-// surfaces every org-owned custom connector as a synthetic entry,
-// so the same bound applies — otherwise an org with thousands of
-// custom MCPs could turn `/catalogue` into an unbounded read.
-const ORG_CUSTOM_MCP_LIMIT = 100;
 
 /**
  * Distributes over the `LoadedCatalogueEntry` union so the per-member
@@ -70,6 +67,12 @@ type CatalogueEntryResponse = LoadedCatalogueEntry extends infer Entry
          * uninstall via `backendSlug` so they don't need a handle here.
          */
         installedSkillId: string | null;
+        /**
+         * Skill id that is safe to pass as active chat context. This is
+         * separate from `installedSkillId`, which is an edit/delete handle
+         * and is intentionally null for member-visible team skills.
+         */
+        chatSkillId: string | null;
         installedConnectorSlug: string | null;
         /**
          * Whether the installed entry is currently enabled (turned on for
@@ -119,6 +122,8 @@ const listCatalogue = createSafeRootHandler(
                   slug: agentSkills.slug,
                   scope: agentSkills.scope,
                   enabled: agentSkills.enabled,
+                  origin: agentSkills.origin,
+                  userId: agentSkills.userId,
                 })
                 .from(agentSkills)
                 .where(
@@ -238,7 +243,7 @@ const listCatalogue = createSafeRootHandler(
             ),
           )
           .orderBy(mcpConnectors.displayName, mcpConnectors.id)
-          .limit(ORG_CUSTOM_MCP_LIMIT),
+          .limit(LIMITS.mcpConnectorsPageSizeMax),
       ),
     );
     const curatedMcpUrlSet = new Set(mcpUrls);
@@ -269,18 +274,11 @@ const listCatalogue = createSafeRootHandler(
     //   = null) never produce a usable slug.
     const canDeleteTeamSkills =
       memberRole.role === "admin" || memberRole.role === "owner";
-    const skillIdBySlug = new Map<string, string>();
-    const skillEnabledBySlug = new Map<string, boolean>();
-    for (const row of visibleSkillRows) {
-      if (row.scope === "team" && !canDeleteTeamSkills) {
-        continue;
-      }
-      const existing = skillIdBySlug.get(row.slug);
-      if (!existing || row.scope === "team") {
-        skillIdBySlug.set(row.slug, row.id);
-        skillEnabledBySlug.set(row.slug, row.enabled);
-      }
-    }
+    const skillHandles = resolveCatalogueSkillHandleMaps({
+      canManageTeamSkills: canDeleteTeamSkills,
+      rows: visibleSkillRows,
+      userId: user.id,
+    });
     const connectorSlugByUrl = new Map<string, string>();
     for (const row of installedMcps) {
       if (row.organizationId !== session.activeOrganizationId) {
@@ -316,7 +314,11 @@ const listCatalogue = createSafeRootHandler(
           });
       const installedSkillId =
         entry.kind === "skill" && installState === "installed"
-          ? (skillIdBySlug.get(entry.slug) ?? null)
+          ? (skillHandles.installedSkillIdBySlug.get(entry.slug) ?? null)
+          : null;
+      const chatSkillId =
+        entry.kind === "skill" && installState === "installed"
+          ? (skillHandles.chatSkillIdBySlug.get(entry.slug) ?? null)
           : null;
       const installedConnectorSlug =
         entry.kind === "mcp" && installState === "installed"
@@ -325,7 +327,7 @@ const listCatalogue = createSafeRootHandler(
       let enabled: boolean | null = null;
       if (installState === "installed") {
         if (entry.kind === "skill") {
-          enabled = skillEnabledBySlug.get(entry.slug) ?? null;
+          enabled = skillHandles.enabledBySlug.get(entry.slug) ?? null;
         } else if (entry.kind === "native-tool") {
           // Native-tools encode the enabled decision into install-state
           // already (jurisdiction default + overrides). Installed ⇒ on.
@@ -339,6 +341,7 @@ const listCatalogue = createSafeRootHandler(
           installState !== "unavailable" && recommendedSlugs.has(entry.slug),
         installState,
         installedSkillId,
+        chatSkillId,
         installedConnectorSlug,
         enabled,
       });
@@ -465,6 +468,7 @@ const buildCustomMcpCatalogueEntry = (
     isRecommendedForOrg: false,
     installState: "installed",
     installedSkillId: null,
+    chatSkillId: null,
     installedConnectorSlug: connector.slug,
     enabled: null,
   };
@@ -537,6 +541,7 @@ const buildAuthoredSkillCatalogueEntry = (
   isRecommendedForOrg: false,
   installState: "installed",
   installedSkillId: skill.id,
+  chatSkillId: skill.id,
   installedConnectorSlug: null,
   enabled: skill.enabled,
 });

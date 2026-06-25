@@ -391,7 +391,8 @@ export function useAutoHistory<T>(
   // Automatically push when value changes
   useEffect(() => {
     history.push(value);
-  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- push only on value change; history.push identity changes after each push, so depending on it would loop
+  }, [value]);
 
   return history;
 }
@@ -450,10 +451,10 @@ export class HistoryManager<T> {
   private undoStack: HistoryEntry<T>[] = [];
   private redoStack: HistoryEntry<T>[] = [];
   private currentState: T;
-  private maxEntries: number;
-  private groupingInterval: number;
+  private readonly maxEntries: number;
+  private readonly groupingInterval: number;
   private lastPushTime: number = 0;
-  private isEqual: (a: T, b: T) => boolean;
+  private readonly isEqual: (a: T, b: T) => boolean;
 
   constructor(
     initialState: T,

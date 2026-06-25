@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { AnyPgTable } from "drizzle-orm/pg-core";
 
 import { member, organization, user } from "@/api/db/auth-schema";
@@ -32,6 +32,7 @@ import {
   rateEntries,
   rateTables,
   templateCategories,
+  templateChatThreads,
   templateClauses,
   templateFills,
   templates,
@@ -124,6 +125,7 @@ export const createTestIds = () => ({
   chatMessageWorkspaceA2: id<"chatMessage">(),
   chatMessageWorkspaceB1: id<"chatMessage">(),
   fileChatThreadA1: id<"fileChatThread">(),
+  templateChatThreadA1: id<"templateChatThread">(),
   // Additional properties for dependencies
   propertyA1dep: id<"property">(),
   propertyB1dep: id<"property">(),
@@ -401,6 +403,19 @@ export const setupRlsTestData = async (db: TestDatabase, ids: TestIds) => {
       entityId: ids.entityB1,
     },
   ]);
+
+  await db
+    .update(entities)
+    .set({ currentVersionId: ids.entityVersionA1 })
+    .where(eq(entities.id, ids.entityA1));
+  await db
+    .update(entities)
+    .set({ currentVersionId: ids.entityVersionA2 })
+    .where(eq(entities.id, ids.entityA2));
+  await db
+    .update(entities)
+    .set({ currentVersionId: ids.entityVersionB1 })
+    .where(eq(entities.id, ids.entityB1));
 
   const propContent = {
     version: 1 as const,
@@ -886,6 +901,14 @@ export const setupRlsTestData = async (db: TestDatabase, ids: TestIds) => {
     entityId: ids.entityA1,
     fieldId: ids.fieldA1,
     chatThreadId: ids.chatThreadWorkspaceA1,
+  });
+
+  await db.insert(templateChatThreads).values({
+    id: ids.templateChatThreadA1,
+    organizationId: ids.orgA,
+    userId: ids.userA1,
+    templateId: ids.templateA,
+    chatThreadId: ids.chatThreadGlobalA1,
   });
 
   const chatContent = (text: string) => ({

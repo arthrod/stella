@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
@@ -11,6 +11,7 @@ import type {
   ChatPart,
   ChatSourceDocument,
 } from "@stll/api/types";
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { cn } from "@stll/ui/lib/utils";
 
 import { openEntityInInspector } from "@/components/chat/entity-open";
@@ -24,6 +25,7 @@ import {
   collectExternalSources,
   collectSourceDocuments,
 } from "@/components/chat/source-chips.logic";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { sanitizeHref } from "@/lib/sanitize-href";
 import { mcpConnectorsOptions } from "@/routes/_protected.knowledge/-queries";
 import { DocumentIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/document-icon";
@@ -83,10 +85,8 @@ export const SourceChips = ({
   parts,
   workspaceId,
 }: SourceChipsProps) => {
-  const { uniqueExternalSources, uniqueSources } = useMemo(
-    () => collectSourceChipEntries(parts),
-    [parts],
-  );
+  const { uniqueExternalSources, uniqueSources } =
+    collectSourceChipEntries(parts);
   const hasMcpExternalSources = uniqueExternalSources.some(
     (source) => source.connectorSlug !== undefined,
   );
@@ -94,26 +94,24 @@ export const SourceChips = ({
     ...mcpConnectorsOptions(activeOrganizationId),
     enabled: hasMcpExternalSources,
   });
-  const uniqueExternalSourcesWithIcons = useMemo(
-    () =>
-      uniqueExternalSources.map((source) => {
-        if (source.connectorSlug === undefined) {
-          return source;
-        }
+  const uniqueExternalSourcesWithIcons = uniqueExternalSources.map((source) => {
+    if (source.connectorSlug === undefined) {
+      return source;
+    }
 
-        const iconHref = findMcpConnectorIconHref({
-          connectorSlug: source.connectorSlug,
-          connectors: mcpConnectorsData?.connectors ?? [],
-        });
-        return iconHref === undefined ? source : { ...source, iconHref };
-      }),
-    [mcpConnectorsData?.connectors, uniqueExternalSources],
-  );
+    const iconHref = findMcpConnectorIconHref({
+      connectorSlug: source.connectorSlug,
+      connectors: mcpConnectorsData?.connectors ?? [],
+    });
+    return iconHref === undefined ? source : { ...source, iconHref };
+  });
   const registerSources = useExternalSourceStore(
     (state) => state.registerSources,
   );
 
-  useEffect(() => {
+  // Push the derived source list into the external-source store
+  // whenever it changes so the inspector can resolve cited sources.
+  useExternalSyncEffect(() => {
     registerSources(uniqueExternalSourcesWithIcons);
   }, [registerSources, uniqueExternalSourcesWithIcons]);
 
@@ -269,7 +267,9 @@ const ExternalSourceChip = ({
         loaded={faviconRequested}
         url={source.url}
       />
-      <span className="max-w-[20ch] truncate">{source.title}</span>
+      <BidiText as="span" className="max-w-[20ch] truncate">
+        {source.title}
+      </BidiText>
     </button>
   );
 };
@@ -392,7 +392,9 @@ const SourceChip = ({
         kind={sourceDocument.kind}
         mimeType={sourceDocument.mimeType}
       />
-      <span className="max-w-[20ch] truncate">{sourceDocument.title}</span>
+      <BidiText as="span" className="max-w-[20ch] truncate">
+        {sourceDocument.title}
+      </BidiText>
     </button>
   );
 };

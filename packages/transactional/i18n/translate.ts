@@ -1,5 +1,8 @@
 import { createTranslator } from "use-intl/core";
 
+import type { UiLocale } from "@stll/locales";
+
+import ar from "./langs/ar.json";
 import cs from "./langs/cs.json";
 import de from "./langs/de.json";
 import en from "./langs/en.json";
@@ -15,6 +18,7 @@ import sk from "./langs/sk.json";
 
 const langMessages = {
   en,
+  ar,
   cs,
   de,
   es,
@@ -26,9 +30,15 @@ const langMessages = {
   pl,
   "pt-BR": ptBr,
   sk,
-} as const;
+} as const satisfies Record<UiLocale, unknown>;
 
-export type SupportedLang = keyof typeof langMessages;
+export type SupportedLang = UiLocale;
+
+const RTL_LANGS = new Set<SupportedLang>(["ar"]);
+
+/** Document direction for an email's `<Html>` so RTL locales lay out correctly. */
+export const getEmailDirection = (lang: SupportedLang): "rtl" | "ltr" =>
+  RTL_LANGS.has(lang) ? "rtl" : "ltr";
 
 export const getTranslator = (lang: SupportedLang) =>
   createTranslator({

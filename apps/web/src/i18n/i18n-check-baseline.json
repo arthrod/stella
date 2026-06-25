@@ -11,6 +11,7 @@
     "folio.findReplace.noResults",
     "folio.historyGroup",
     "folio.somethingWentWrong",
+    "folio.undo",
     "knowledge.agentSkills.formDescription",
     "knowledge.agentSkills.formName",
     "knowledge.agentSkills.renameFile",
@@ -21,17 +22,25 @@
     "search.kinds.matter",
     "search.updatedWithinOptions.day",
     "tasks.clearDate",
+    "tasks.priorityValues.none",
     "tasks.status",
     "tasks.statusValues.done",
     "tasks.statusValues.open",
+    "templates.conditionMatchAll",
     "templates.fieldOptions",
     "templates.inputTypes.date",
+    "templates.studio.filledByPerson",
     "translate.settings.remove",
     "translate.settings.save",
-    "workspaces.properties.optionsLabel"
+    "workspaces.playbooks.columnsLabel",
+    "workspaces.playbooks.contentType.date",
+    "workspaces.playbooks.nameLabel",
+    "workspaces.properties.optionsLabel",
+    "workspaces.views.filter"
   ],
   "identicalToSource": {
     "appearance.flexoki": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -48,6 +57,7 @@
       "de"
     ],
     "appearance.nord": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -80,9 +90,26 @@
       "pt-BR",
       "sk"
     ],
+    "auth.emailPlaceholder": [
+      "ar"
+    ],
     "billing.codes.codeLabel": [
       "de",
       "fr"
+    ],
+    "billing.codes.codePlaceholder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
     ],
     "billing.decimalHours": [
       "fr",
@@ -92,15 +119,6 @@
       "es",
       "fr",
       "pt-BR"
-    ],
-    "caseLaw.sectionTypes.argumentation": [
-      "fr"
-    ],
-    "caseLaw.sources.title": [
-      "fr"
-    ],
-    "caseLaw.viewer.sections": [
-      "fr"
     ],
     "caseLaw.viewer.source": [
       "fr"
@@ -130,12 +148,29 @@
     "chat.webSearch.sources": [
       "fr"
     ],
+    "clauses.variant": [
+      "et",
+      "sk"
+    ],
     "clauses.version": [
       "de",
       "fr"
     ],
     "common.actions": [
       "fr"
+    ],
+    "common.and": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
     ],
     "common.anonymizationLabels.date": [
       "fr"
@@ -170,11 +205,38 @@
     "common.name": [
       "de"
     ],
+    "common.none": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "common.notes": [
       "fr"
     ],
     "common.options": [
       "fr"
+    ],
+    "common.or": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
     ],
     "common.reference": [
       "cs"
@@ -193,6 +255,20 @@
     "common.type": [
       "fr"
     ],
+    "common.undo": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "common.urlIdentifier": [
       "cs",
       "es",
@@ -200,13 +276,18 @@
       "pt-BR",
       "sk"
     ],
+    "common.urlIdentifierPlaceholder": [
+      "ar"
+    ],
     "contacts.communication.emailPlaceholder": [
+      "ar",
       "de"
     ],
     "contacts.communication.title": [
       "fr"
     ],
     "contacts.create.icoPlaceholder": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -223,6 +304,7 @@
       "es"
     ],
     "contacts.fields.bankAccountBic": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -279,6 +361,188 @@
       "de",
       "fr"
     ],
+    "filters.contains_all": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.dateAfter": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.dateBefore": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.dateOnOrAfter": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.dateOnOrBefore": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.ends_with": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.gt": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.gte": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.in": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.is_not_empty": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.lt": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.lte": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.not_contains": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "filters.starts_with": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "folio.fontGroup": [
       "et"
     ],
@@ -287,9 +551,6 @@
       "es",
       "fr",
       "pt-BR"
-    ],
-    "inspector.matterPicker.directLabel": [
-      "fr"
     ],
     "inspector.metadata.version": [
       "de",
@@ -335,6 +596,7 @@
       "sk"
     ],
     "knowledge.agentSkills.newFileFilenamePlaceholder": [
+      "ar",
       "cs",
       "de",
       "et",
@@ -347,24 +609,12 @@
       "sk"
     ],
     "knowledge.agentSkills.newFilePathPlaceholder": [
+      "ar",
       "cs",
       "et",
       "hu",
       "lv",
       "pl",
-      "sk"
-    ],
-    "knowledge.agentSkills.newFolderFilenamePlaceholder": [
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
       "sk"
     ],
     "knowledge.agentSkills.selectFileHint": [
@@ -380,6 +630,9 @@
       "pt-BR",
       "sk"
     ],
+    "knowledge.agentSkills.urlPlaceholder": [
+      "ar"
+    ],
     "knowledge.agentSkills.version": [
       "de"
     ],
@@ -388,6 +641,7 @@
       "sk"
     ],
     "knowledge.mcp.auth.oauth2": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -405,6 +659,7 @@
       "sk"
     ],
     "knowledge.mcp.urlPlaceholder": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -661,13 +916,7 @@
       "fr",
       "sk"
     ],
-    "navigation.clients": [
-      "fr"
-    ],
     "navigation.contacts": [
-      "fr"
-    ],
-    "navigation.invitations": [
       "fr"
     ],
     "navigation.shortcutCategories.navigation": [
@@ -714,7 +963,11 @@
       "fr",
       "sk"
     ],
+    "organization.invitations.emailAddressPlaceholder": [
+      "ar"
+    ],
     "search.escKey": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -763,6 +1016,19 @@
       "pl",
       "pt-BR"
     ],
+    "templates.conditionCount": [
+      "fr"
+    ],
+    "templates.conditionOperator": [
+      "de",
+      "pl"
+    ],
+    "templates.conditionsTitle": [
+      "fr"
+    ],
+    "templates.fieldFormulaExpression": [
+      "fr"
+    ],
     "templates.fieldOptions": [
       "fr"
     ],
@@ -774,11 +1040,32 @@
       "de",
       "sk"
     ],
+    "templates.studio.draftedByAi": [
+      "cs",
+      "pl",
+      "sk"
+    ],
+    "templates.studio.expressionPlaceholder": [
+      "fr"
+    ],
+    "templates.studio.filledByPerson": [
+      "de"
+    ],
+    "templates.studio.formula": [
+      "lv"
+    ],
+    "templates.studio.questions": [
+      "fr"
+    ],
+    "templates.studio.scopeCondition": [
+      "fr"
+    ],
     "templates.versionLabel": [
       "de",
       "fr"
     ],
     "translate.settings.apiKeyPlaceholder": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -805,6 +1092,7 @@
       "sk"
     ],
     "translate.settings.tierPro": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -859,6 +1147,7 @@
       "sk"
     ],
     "workspaces.infosoud.title": [
+      "ar",
       "cs",
       "de",
       "es",
@@ -890,6 +1179,299 @@
     "workspaces.parties.personalLabel": [
       "es"
     ],
+    "workspaces.playbooks.action": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.addColumn": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.applied": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.apply": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.columnNamePlaceholder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.columnsLabel": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.contentType.date": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.contentType.int": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.contentType.text": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.create": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.description": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.duplicateColumn": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.empty": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.incomplete": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.nameLabel": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.namePlaceholder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.promptPlaceholder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.summary": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.title": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.playbooks.typeLabel": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.properties.addCondition": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "workspaces.properties.chipSingle": [
       "pl"
     ],
@@ -907,8 +1489,75 @@
     "workspaces.properties.documentsLabel": [
       "fr"
     ],
+    "workspaces.properties.editConditionsWhen": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.properties.markedAsReviewed": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.properties.markThisGroupAsReviewed": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.properties.noConditionFields": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "workspaces.properties.optionsLabel": [
       "fr"
+    ],
+    "workspaces.properties.selectField": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
     ],
     "workspaces.properties.text": [
       "cs",
@@ -927,13 +1576,157 @@
     "workspaces.team": [
       "de"
     ],
+    "workspaces.views.addAdvancedFilter": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.views.advancedFilter": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.views.advancedFilterCount": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "workspaces.views.calendar.addDates": [
       "fr"
     ],
     "workspaces.views.calendar.additionalDates": [
       "fr"
     ],
+    "workspaces.views.clearFilters": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.views.filter": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.views.filterByPlaceholder": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.views.filtersWithCount": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.views.groupItemCount": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "workspaces.views.layouts.kanban": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.views.noFilterResults": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.views.noFilterResultsHint": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.views.removeAdvancedFilter": [
       "cs",
       "de",
       "es",

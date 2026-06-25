@@ -23,14 +23,14 @@
   },
   "dependencies": {
     "@react-email/components": "^1.0.12",
+    "@stll/locales": "workspace:*",
     "react": "catalog:react19",
     "use-intl": "catalog:"
   },
   "devDependencies": {
-    "@react-email/ui": "6.5.0",
+    "@react-email/ui": "6.6.0",
     "@stll/typescript-config": "workspace:*",
     "@types/react": "catalog:react19",
-    "react-email": "^6.5.0",
-    "typescript": "catalog:"
+    "react-email": "^6.6.3"
   }
 }

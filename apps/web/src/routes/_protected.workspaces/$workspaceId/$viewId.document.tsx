@@ -2,6 +2,7 @@ import {
   lazy,
   Suspense,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -47,9 +48,10 @@ import {
   useDocxWheelZoom,
 } from "@/components/docx-preview-zoom";
 import { TranslateDocumentDialog } from "@/components/translate-document-dialog";
+import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
 import { api } from "@/lib/api";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
-import { ClientOperationError, toAPIError } from "@/lib/errors";
+import { APIError, ClientOperationError, toAPIError } from "@/lib/errors";
 import {
   PDFProvider,
   getPDFPageIdByNumber,
@@ -69,6 +71,7 @@ import { entityOptions } from "@/routes/_protected.workspaces/$workspaceId/-quer
 import {
   entityVersionsKeys,
   entityVersionsOptions,
+  fieldFileOptions,
 } from "@/routes/_protected.workspaces/$workspaceId/-queries/entity-versions";
 import { useWorkspaceStore } from "@/routes/_protected.workspaces/$workspaceId/-store";
 import { PdfViewerControls } from "@/routes/_protected.workspaces/-components/pdf-viewer-controls";
@@ -130,6 +133,7 @@ const AnonymizeScrollSync = () => {
     (s) => s.setPendingAnonymizeEntityId,
   );
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- pendingAnonymizeEntityId is set from page-anonymization.tsx (out of scope), and the scroll-to action depends on pageId resolving as PDF pages load asynchronously, so it cannot move into that setter's call-site
   useEffect(() => {
     if (pendingAnonymizeEntityId === null || pageId === undefined) {
       return;
@@ -177,7 +181,7 @@ const JustificationScrollSync = () => {
   );
   const setScrollTo = usePDFStore((s) => s.setScrollTo);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (!justificationId || pageId === undefined) {
       return;
     }
@@ -267,14 +271,12 @@ function RouteComponentInner({
     });
   }, [justificationId, justificationPage, setActiveJustification]);
 
-  useEffect(
-    () => () => {
-      setActiveJustification(null);
-      resetPdfViewerState();
-    },
-    [resetPdfViewerState, setActiveJustification],
-  );
+  useMountEffect(() => () => {
+    setActiveJustification(null);
+    resetPdfViewerState();
+  });
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- inspector-store cleanup keyed on fieldId; fieldId changes mid-mount (setActiveFieldId on version switch/save), so the cleanup must re-run on every fieldId change with the previous value, which useMountEffect cannot do
   useEffect(
     () => () => {
       const inspectorState = useInspectorStore.getState();
@@ -310,6 +312,7 @@ function RouteComponentInner({
   const [docxLatestVersionDialogOpen, setDocxLatestVersionDialogOpen] =
     useState(false);
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset setDocxUnlocked(false) when fieldId changes; setDocxUnlocked is also called from several editor handlers (onClose/onSaved/onUnlockedChange), and a key remount on fieldId would reset unrelated state, so it is neither pure derived state nor lift-to-key
   useEffect(() => {
     setDocxUnlocked(false);
   }, [fieldId]);
@@ -321,33 +324,68 @@ function RouteComponentInner({
     }
     return f.id === fieldId;
   });
+
+  // Track the field currently shown for each property so the
+  // version-switch effect below can tell whether the user is still on
+  // the previously-current field (auto-advance) or has navigated to an
+  // older version (leave alone). Ref-assign during render is the
+  // sanctioned latest-value pattern; the write is idempotent.
+  if (activeFileField !== undefined) {
+    currentFileFieldIdsByPropertyRef.current.set(
+      activeFileField.propertyId,
+      activeFileField.id,
+    );
+  }
   const activeVersionFile =
     versionData?.versions.find((version) => version.file?.fieldId === fieldId)
       ?.file ?? null;
+  // The active field can belong to an older version outside the newest
+  // version-history page (switch to an old version, then reload). When it is
+  // neither the current version nor in the loaded page, resolve its file
+  // metadata directly so the viewer renders it instead of showing "missing".
+  const needsFieldFileLookup =
+    activeFileField === undefined &&
+    activeVersionFile === null &&
+    versionDataQuery.isSuccess;
+  const fieldFileQuery = useQuery({
+    ...fieldFileOptions({ workspaceId, entityId, fieldId }),
+    enabled: needsFieldFileLookup,
+  });
+  const resolvedVersionFile =
+    activeVersionFile ?? fieldFileQuery.data?.file ?? null;
   const activeFileContent =
     activeFileField?.content.type === "file" ? activeFileField.content : null;
   const activeMimeType =
-    activeFileContent?.mimeType ?? activeVersionFile?.mimeType;
+    activeFileContent?.mimeType ?? resolvedVersionFile?.mimeType;
   const activePdfFileId = activeFileContent?.pdfFileId ?? null;
   const activeFileLabel =
-    activeFileContent?.fileName ?? activeVersionFile?.fileName ?? fieldId;
+    activeFileContent?.fileName ?? resolvedVersionFile?.fileName ?? fieldId;
   const isDocxFile = activeMimeType === DOCX_MIME;
   const usesNativeDocxDisplay = isDocxFile;
   const filePropertyId =
-    activeFileField?.propertyId ?? activeVersionFile?.propertyId;
+    activeFileField?.propertyId ?? resolvedVersionFile?.propertyId;
   const useDocxBrowserEditor = shouldUseDocxBrowserEditor({
     isDocxFile,
     hasFilePropertyId: filePropertyId !== undefined,
     isComparing,
   });
+  // A 404 from the field-file lookup means a stale/deleted/foreign field id;
+  // fall through to "missing" (recover by navigating back to the matter)
+  // rather than the error boundary. Only real failures (network/5xx) are fatal.
+  const fieldFileFatalError =
+    fieldFileQuery.isError &&
+    !(APIError.is(fieldFileQuery.error) && fieldFileQuery.error.status === 404);
   const filePreviewState = (() => {
     if (activeMimeType !== undefined) {
       return "ready";
     }
-    if (versionDataQuery.isError) {
+    if (versionDataQuery.isError || fieldFileFatalError) {
       return "error";
     }
-    if (versionDataQuery.isPending) {
+    if (
+      versionDataQuery.isPending ||
+      (needsFieldFileLookup && fieldFileQuery.isPending)
+    ) {
       return "loading";
     }
     return "missing";
@@ -367,17 +405,7 @@ function RouteComponentInner({
         )
       : undefined;
 
-  useEffect(() => {
-    if (activeFileField === undefined) {
-      return;
-    }
-
-    currentFileFieldIdsByPropertyRef.current.set(
-      activeFileField.propertyId,
-      activeFileField.id,
-    );
-  }, [activeFileField]);
-
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- auto-advances activeFieldId + navigate when a newer version appears via background query refetch; this reacts to async server-state changing (no user version-switch event to relay into) and runs setState/navigate post-commit
   useEffect(() => {
     if (
       latestFileFieldForProperty === undefined ||
@@ -412,6 +440,7 @@ function RouteComponentInner({
     });
   }, [fieldId, latestFileFieldForProperty, navigate]);
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- opens the file in the inspector store as derived file metadata (propertyId/mimeType/label) resolves from async entity+version queries; there is no single user open-event call-site to relay this into
   useEffect(() => {
     if (!filePropertyId || activeMimeType === undefined) {
       return;
@@ -691,6 +720,8 @@ const ReadOnlyDocxDocumentViewer = ({
     scaleOffset,
     maxAutoZoom: 0.85,
   });
+  // Stable ref callback so React doesn't detach/re-attach the fit-zoom
+  // ResizeObserver every render.
   const composedContainerRef = useMemo(
     () => composeRefs(containerRef, fitZoomRef),
     [fitZoomRef],
@@ -834,10 +865,9 @@ const VersionDropZone = ({
   const [isDropTarget, setIsDropTarget] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
 
-  const isUploadingRef = useRef(isUploading);
-  isUploadingRef.current = isUploading;
+  const canStartUpload = useEffectEvent(() => !isUploading);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = dropRef.current;
     if (!el || disabled) {
       return undefined;
@@ -849,7 +879,7 @@ const VersionDropZone = ({
       onDragLeave: () => setIsDropTarget(false),
       onDrop: ({ source }) => {
         setIsDropTarget(false);
-        if (isUploadingRef.current) {
+        if (!canStartUpload()) {
           return;
         }
         const files = getFiles({ source });

@@ -82,10 +82,14 @@ type CalendarQueryRangeInput =
       type: "month";
       year: number;
       month: number;
+      firstWeekday: number;
+      weekend: ReadonlySet<number>;
     }
   | {
       type: "week";
       viewDate: Date;
+      firstWeekday: number;
+      weekend: ReadonlySet<number>;
     }
   | {
       type: "year";
@@ -104,13 +108,18 @@ export const getCalendarQueryRange = (
     case "month": {
       const fallback = `${input.year}-${String(input.month + 1).padStart(2, "0")}-01`;
       return getBoundedCalendarRange(
-        getMonthDays(input.year, input.month),
+        getMonthDays(
+          input.year,
+          input.month,
+          input.firstWeekday,
+          input.weekend,
+        ),
         fallback,
       );
     }
     case "week":
       return getBoundedCalendarRange(
-        getWeekDays(input.viewDate),
+        getWeekDays(input.viewDate, input.firstWeekday, input.weekend),
         toUTCDateKey(input.viewDate),
       );
     default: {
@@ -156,7 +165,7 @@ export const groupCalendarTasksByDate = ({
           : null;
 
       if (endDate && endDate > startDate) {
-        const current = utcDateFromKey(startDate);
+        let current = utcDateFromKey(startDate);
         const end = utcDateFromKey(endDate);
         if (!current || !end) {
           continue;
@@ -167,7 +176,7 @@ export const groupCalendarTasksByDate = ({
             entity,
             propertyId: propId,
           });
-          current.setUTCDate(current.getUTCDate() + 1);
+          current = addUTCDays(current, 1);
         }
       } else {
         appendToMapArray(map, startDate, { entity, propertyId: propId });
@@ -186,4 +195,10 @@ const appendToMapArray = <K, V>(map: Map<K, V[]>, key: K, value: V): void => {
   }
 
   map.set(key, [value]);
+};
+
+const addUTCDays = (date: Date, days: number): Date => {
+  const next = new Date(date);
+  next.setUTCDate(next.getUTCDate() + days);
+  return next;
 };

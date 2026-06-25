@@ -4,26 +4,37 @@ Rules for maintaining consistent translations across all locales.
 
 ## Supported Languages
 
-| Code  | Language            | Plural forms                |
-| ----- | ------------------- | --------------------------- |
-| en    | English             | one, other                  |
-| cs    | Czech               | one, few (2–4), other       |
-| de    | German              | one, other                  |
-| es    | Spanish             | one, many, other            |
-| et    | Estonian            | one, other                  |
-| fr    | French              | one, many, other            |
-| hu    | Hungarian           | one, other                  |
-| lt    | Lithuanian          | one, few (2–9), many, other |
-| lv    | Latvian             | zero, one, other            |
-| pl    | Polish              | one, few (2–4), many, other |
-| pt-BR | Portuguese (Brazil) | one, many, other            |
-| sk    | Slovak              | one, few (2–4), other       |
+| Code  | Language            | Plural forms                     |
+| ----- | ------------------- | -------------------------------- |
+| en    | English             | one, other                       |
+| ar    | Arabic              | zero, one, two, few, many, other |
+| cs    | Czech               | one, few (2–4), other            |
+| de    | German              | one, other                       |
+| es    | Spanish             | one, many, other                 |
+| et    | Estonian            | one, other                       |
+| fr    | French              | one, many, other                 |
+| hu    | Hungarian           | one, other                       |
+| lt    | Lithuanian          | one, few (2–9), many, other      |
+| lv    | Latvian             | zero, one, other                 |
+| pl    | Polish              | one, few (2–4), many, other      |
+| pt-BR | Portuguese (Brazil) | one, many, other                 |
+| sk    | Slovak              | one, few (2–4), other            |
 
 > Czech and Slovak also have a CLDR `many` category, but it only
 > applies to fractional counts (e.g. 1.5); it is not needed for the
 > integer counts used in UI strings, so it is omitted above. Keep
 > `cs.json` and `sk.json` aligned on this — do not add unreachable
 > integer `many` branches to one but not the other.
+
+> Arabic (`ar`) uses all six CLDR plural categories: `zero`, `one`,
+> `two`, `few` (3–10), `many` (11–99), and `other`. Unlike `cs`/`sk`,
+> the `many` form is reachable for integer counts, so every pluralized
+> string must carry all six. `ar` was machine-translated and awaits a
+> native legal-Arabic review; a few proper nouns and format examples
+> that stay in Latin are grandfathered in `i18n-check-baseline.json`,
+> like other locales. Kuwait-specific formatting (Eastern Arabic
+> numerals, Hijri calendar, KWD) belongs to the locale formatting
+> layer, not to these strings.
 
 ## Writing for an International Audience
 
@@ -86,6 +97,8 @@ languages (es, fr) naturally collapse both to one verb — that is fine.
 
 Slavic, Baltic, Germanic, Finno-Ugric:
 
+<!-- glossary-gen:verbs-slavic-baltic start -->
+
 | Verb         | Czech        | Slovak       | Polish      | German        | Estonian   | Hungarian     | Lithuanian  | Latvian      |
 | ------------ | ------------ | ------------ | ----------- | ------------- | ---------- | ------------- | ----------- | ------------ |
 | **Save**     | Uložit       | Uložiť       | Zapisz      | Speichern     | Salvesta   | Mentés        | Išsaugoti   | Saglabāt     |
@@ -102,7 +115,11 @@ Slavic, Baltic, Germanic, Finno-Ugric:
 | **Sign in**  | Přihlásit se | Prihlásiť sa | Zaloguj się | Anmelden      | Logi sisse | Bejelentkezés | Prisijungti | Pieslēgties  |
 | **Sign out** | Odhlásit se  | Odhlásiť sa  | Wyloguj się | Abmelden      | Logi välja | Kijelentkezés | Atsijungti  | Atslēgties   |
 
+<!-- glossary-gen:verbs-slavic-baltic end -->
+
 Romance:
+
+<!-- glossary-gen:verbs-romance start -->
 
 | Verb         | Spanish        | French         | Brazilian Portuguese |
 | ------------ | -------------- | -------------- | -------------------- |
@@ -119,6 +136,30 @@ Romance:
 | **Export**   | Exportar       | Exporter       | Exportar             |
 | **Sign in**  | Iniciar sesión | Se connecter   | Faça login           |
 | **Sign out** | Cerrar sesión  | Se déconnecter | Sair                 |
+
+<!-- glossary-gen:verbs-romance end -->
+
+Arabic:
+
+<!-- glossary-gen:verbs-arabic start -->
+
+| Verb         | Arabic       |
+| ------------ | ------------ |
+| **Save**     | حفظ          |
+| **Cancel**   | إلغاء        |
+| **Confirm**  | تأكيد        |
+| **Delete**   | حذف          |
+| **Remove**   | إزالة        |
+| **Add**      | إضافة        |
+| **Edit**     | تحرير        |
+| **Close**    | إغلاق        |
+| **Send**     | إرسال        |
+| **Download** | تنزيل        |
+| **Export**   | تصدير        |
+| **Sign in**  | تسجيل الدخول |
+| **Sign out** | تسجيل الخروج |
+
+<!-- glossary-gen:verbs-arabic end -->
 
 Note: cs **Remove** is "Odebrat" (not "Odstranit", which collides with
 Delete); sk uses "Odstrániť" for Remove and "Vymazať" for Delete.
@@ -276,24 +317,32 @@ travail" / "tööruum".
 
 Slavic, Baltic, Germanic, Finno-Ugric:
 
-| Concept      | Czech      | Slovak     | Polish         | German         | Estonian      | Hungarian            | Lithuanian      | Latvian      |
-| ------------ | ---------- | ---------- | -------------- | -------------- | ------------- | -------------------- | --------------- | ------------ |
-| **Matter**   | Spis       | Spis       | Sprawa         | Akte           | Toimik        | Ügy                  | Byla            | Lieta        |
-| **Case law** | Judikatura | Judikatúra | Orzecznictwo   | Rechtsprechung | Kohtupraktika | Ítélkezési gyakorlat | Teismų praktika | Tiesu prakse |
-| **Court**    | Soud       | Súd        | Sąd            | Gericht        | Kohus         | Bíróság              | Teismas         | Tiesa        |
-| **Party**    | Strana     | Strana     | Strona         | Partei         | Osapool       | Fél                  | Šalis           | Puse         |
-| **Clause**   | Doložka    | Klauzula   | Klauzula       | Klausel        | Klausel       | Kikötés              | Sąlyga          | Klauzula     |
-| **Template** | Šablona    | Vzor       | Szablon        | Vorlage        | Mall          | Sablon               | Šablonas        | Veidne       |
-| **Folder**   | Složka     | Priečinok  | Folder         | Ordner         | Kaust         | Mappa                | Aplankas        | Mape         |
-| **Tag**      | Štítek     | Štítok     | Tag            | Schlagwort     | Silt          | Címke                | Žyma            | Birka        |
-| **Draft**    | Koncept    | Koncept    | Wersja robocza | Entwurf        | Mustand       | Piszkozat            | Juodraštis      | Melnraksts   |
-| **Contact**  | Kontakt    | Kontakt    | Kontakt        | Kontakt        | Kontakt       | Kapcsolat            | Kontaktas       | Kontakts     |
+<!-- glossary-gen:legal-slavic-baltic start -->
+
+| Concept      | Czech      | Slovak      | Polish         | German         | Estonian      | Hungarian            | Lithuanian      | Latvian      |
+| ------------ | ---------- | ----------- | -------------- | -------------- | ------------- | -------------------- | --------------- | ------------ |
+| **Matter**   | Spis       | Spis        | Sprawa         | Akte           | Toimik        | Ügy                  | Byla            | Lieta        |
+| **Team**     | Tým        | Tím         | Zespół         | Team           | Meeskond      | Csapat               | Komanda         | Komanda      |
+| **Case law** | Judikatura | Judikatúra  | Orzecznictwo   | Rechtsprechung | Kohtupraktika | Ítélkezési gyakorlat | Teismų praktika | Tiesu prakse |
+| **Court**    | Soud       | Súd         | Sąd            | Gericht        | Kohus         | Bíróság              | Teismas         | Tiesa        |
+| **Party**    | Strana     | Strana      | Strona         | Partei         | Osapool       | Fél                  | Šalis           | Puse         |
+| **Clause**   | Ustanovení | Ustanovenie | Klauzula       | Klausel        | Klausel       | Kikötés              | Sąlyga          | Klauzula     |
+| **Template** | Vzor       | Vzor        | Szablon        | Vorlage        | Mall          | Sablon               | Šablonas        | Veidne       |
+| **Folder**   | Složka     | Priečinok   | Folder         | Ordner         | Kaust         | Mappa                | Aplankas        | Mape         |
+| **Tag**      | Štítek     | Štítok      | Tag            | Schlagwort     | Silt          | Címke                | Žyma            | Birka        |
+| **Draft**    | Koncept    | Koncept     | Wersja robocza | Entwurf        | Mustand       | Piszkozat            | Juodraštis      | Melnraksts   |
+| **Contact**  | Kontakt    | Kontakt     | Kontakt        | Kontakt        | Kontakt       | Kapcsolat            | Kontaktas       | Kontakts     |
+
+<!-- glossary-gen:legal-slavic-baltic end -->
 
 Romance:
+
+<!-- glossary-gen:legal-romance start -->
 
 | Concept      | Spanish        | French        | Brazilian Portuguese |
 | ------------ | -------------- | ------------- | -------------------- |
 | **Matter**   | Asunto         | Dossier       | Caso                 |
+| **Team**     | Equipo         | Équipe        | Equipe               |
 | **Case law** | Jurisprudencia | Jurisprudence | Jurisprudência       |
 | **Court**    | Tribunal       | Juridiction   | Tribunal             |
 | **Party**    | Parte          | Partie        | Parte                |
@@ -304,6 +353,28 @@ Romance:
 | **Draft**    | Borrador       | Brouillon     | Rascunho             |
 | **Contact**  | Contacto       | Contact       | Contato              |
 
+<!-- glossary-gen:legal-romance end -->
+
+Arabic:
+
+<!-- glossary-gen:legal-arabic start -->
+
+| Concept      | Arabic           |
+| ------------ | ---------------- |
+| **Matter**   | ملف              |
+| **Team**     | فريق             |
+| **Case law** | الاجتهاد القضائي |
+| **Court**    | محكمة            |
+| **Party**    | طرف              |
+| **Clause**   | بند              |
+| **Template** | قالب             |
+| **Folder**   | مجلد             |
+| **Tag**      | وسم              |
+| **Draft**    | مسودة            |
+| **Contact**  | جهة اتصال        |
+
+<!-- glossary-gen:legal-arabic end -->
+
 Notes:
 
 - **de Tag** = "Schlagwort/Schlagwörter" (standard German DMS term, not
@@ -311,15 +382,34 @@ Notes:
   Judilibre open-data umbrella; "Tribunal" is too narrow).
 - **fr Dossier** serves both Matter and Folder; the collision is
   idiomatic and unavoidable, context disambiguates.
-- **sk Template** prefers "Vzor" (native legal-document register) over
-  "Šablóna". **cs Clause**: "Doložka" for a clause library; "Klauzule"
-  is acceptable.
+- **cs/sk Template** is always "Vzor" (native legal-document register);
+  "Šablona" / "Šablóna" and their inflected forms must not be used.
+  **cs/sk Clause** is always "Ustanovení" / "Ustanovenie"
+  (the clause library renders as "Vzorová ustanovení" / "Vzorové
+  ustanovenia"); "Klauzule" / "Klauzula" and their inflected forms must
+  not be used.
 - **lv Case law** = "Tiesu prakse" for a broad decisions database;
   reserve "Judikatūra" for binding Supreme-Court precedent only.
+- **Team** is the org/firm scope that content is shared with (members,
+  team skills, the anonymization deny list). The canonical label is
+  **Team**; the internal `organization` data-model alias and the
+  "firm" / "firm-wide" / "org-wide" renderings must not surface as
+  user-facing labels (cs "firemní", sk "firemný", pl "firmowy" /
+  "kancelaria", de "kanzleiweit" / "Kanzlei", fr "cabinet", and the
+  office-noun variants are all forbidden — see `glossary.json`). This
+  is distinct from the client **company** sense (cs "firma" in the
+  ARES company lookup, "Klient je firma"), which is a different concept
+  and stays.
+- **Visibility** pairs as **Personal** vs **Shared**: a matter is
+  either private to one person or shared with the team. Czech renders
+  this as "Osobní" / "Sdílené v rámci týmu". Do not introduce a third
+  visibility label.
 
 ### Brazilian Portuguese
 
 Use Brazilian legal and law-firm terminology, not generic Portuguese:
+
+<!-- glossary-gen:ptbr-special start -->
 
 | English          | pt-BR                       | Notes                                                                                  |
 | ---------------- | --------------------------- | -------------------------------------------------------------------------------------- |
@@ -333,3 +423,5 @@ Use Brazilian legal and law-firm terminology, not generic Portuguese:
 | Opposing counsel | Advogado da parte contrária | Clearer than literal `conselho oposto`.                                                |
 | Expert witness   | Perito                      | Brazilian procedural role; avoid literal `testemunha especialista`.                    |
 | Tracked changes  | Controle de alterações      | Microsoft Word UI term in Brazilian Portuguese.                                        |
+
+<!-- glossary-gen:ptbr-special end -->

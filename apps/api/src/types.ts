@@ -12,14 +12,14 @@ export type { Page } from "@/api/lib/pagination";
 export type PropertyTable = typeof properties.$inferSelect;
 export type PropertyContent = SchemaValidators.PropertyContent;
 export type PropertyContentType = SchemaValidators.PropertyContentType;
+export type PlaybookBundleColumn = SchemaValidators.PlaybookBundleColumn;
+export type PlaybookBundle = SchemaValidators.PlaybookBundle;
 
 export type FieldContent = SchemaValidators.FieldContent;
 
 export type OptionColor = SchemaValidators.OptionColor;
 
 export type BoundingBox = SchemaValidators.BoundingBoxes["boxes"][number];
-
-export type PropertyCondition = SchemaValidators.PropertyCondition;
 
 export type EntityKind = SchemaValidators.EntityKind;
 export type {
@@ -48,8 +48,9 @@ export type {
 } from "@/api/handlers/chat/types";
 export type ViewLayout = ViewSchemas.ViewLayout;
 export type ViewLayoutType = ViewSchemas.ViewLayoutType;
-export type ViewFilterCondition = ViewSchemas.ViewFilterCondition;
 export type ViewTemplateProperty = ViewSchemas.ViewTemplateProperty;
+export type { ConditionNode } from "@stll/conditions";
 export type { ChatMentionsData } from "@/api/handlers/chat/types";
+export type { TemplateRecipeDefinition } from "@/api/handlers/template-recipes/definition";
 export type { ChatSourceDocument } from "@/api/handlers/chat/tools/chat-source-document";
 export type { UserFileUrl } from "@/api/handlers/user-files/types";

@@ -3,7 +3,12 @@ import { eq, inArray } from "drizzle-orm";
 import { t } from "elysia";
 
 import type { SafeDb, Transaction } from "@/api/db";
-import { clauseCategories, clauses, clauseVersions } from "@/api/db/schema";
+import {
+  clauseCategories,
+  clauses,
+  clauseVariants,
+  clauseVersions,
+} from "@/api/db/schema";
 import { captureError } from "@/api/lib/analytics";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
@@ -89,6 +94,7 @@ const importHandler = async function* ({
       tx.query.clauseCategories.findMany({
         where: { organizationId: { eq: organizationId } },
         columns: { id: true, name: true, parentId: true },
+        limit: LIMITS.clauseCategoriesCount,
       }),
     ),
   );
@@ -150,6 +156,7 @@ const importHandler = async function* ({
     safeDb(async (tx) => {
       const insertedIds: SafeId<"clause">[] = [];
       const auditEvents: AuditEvent[] = [];
+      const errors: string[] = [];
 
       for (const item of toProcess) {
         const clauseId = createSafeId<"clause">();
@@ -157,9 +164,11 @@ const importHandler = async function* ({
 
         let categoryId: SafeId<"clauseCategory"> | null = null;
         if (item.categoryName) {
+          // oxlint-disable-next-line no-await-in-loop -- dedups via shared categoryByName map; must run sequentially to avoid duplicate category inserts
           categoryId = await findOrCreateCategory(tx, item.categoryName);
         }
 
+        // oxlint-disable-next-line no-await-in-loop -- sequential clause inserts in one transaction preserve insertion order
         await tx.insert(clauses).values({
           id: clauseId,
           organizationId,
@@ -174,6 +183,7 @@ const importHandler = async function* ({
           createdBy: userId,
         });
 
+        // oxlint-disable-next-line no-await-in-loop -- sequential version inserts in one transaction preserve insertion order
         await tx.insert(clauseVersions).values({
           id: versionId,
           organizationId,
@@ -181,6 +191,30 @@ const importHandler = async function* ({
           version: 1,
           body: item.body,
         });
+
+        // Bound per-clause variants to the same cap the normal create path
+        // enforces (createVariantHandler) and the read path returns; otherwise
+        // imported rows beyond the cap become hidden — never listed by normal
+        // clause reads. Truncate and surface a per-item notice instead of
+        // failing the whole import.
+        const allVariants = item.variants ?? [];
+        const variants = allVariants.slice(0, LIMITS.clauseVariantsPerClause);
+        if (allVariants.length > variants.length) {
+          errors.push(
+            `Clause "${item.title}": kept ${variants.length} of ${allVariants.length} variants (max ${LIMITS.clauseVariantsPerClause} per clause).`,
+          );
+        }
+        for (const [variantIndex, variant] of variants.entries()) {
+          // oxlint-disable-next-line no-await-in-loop -- sequential variant inserts in one transaction preserve sortOrder/insertion order
+          await tx.insert(clauseVariants).values({
+            id: createSafeId<"clauseVariant">(),
+            organizationId,
+            clauseId,
+            label: variant.label,
+            body: variant.body,
+            sortOrder: variantIndex,
+          });
+        }
 
         insertedIds.push(clauseId);
         auditEvents.push({
@@ -204,7 +238,7 @@ const importHandler = async function* ({
 
       await recordAuditEvent(tx, auditEvents);
 
-      return { count: insertedIds.length, insertedIds };
+      return { count: insertedIds.length, insertedIds, errors };
     }),
   );
 
@@ -238,7 +272,7 @@ const importHandler = async function* ({
     }
   }
 
-  return Result.ok({ created: result.count, skipped, errors: [] });
+  return Result.ok({ created: result.count, skipped, errors: result.errors });
 };
 
 const config = {

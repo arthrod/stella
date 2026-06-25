@@ -22,8 +22,11 @@ import openFolioCollabSession from "@/api/handlers/entities/open-folio-collab-se
 import organizeSuggestions from "@/api/handlers/entities/organize-suggestions";
 import readEntities from "@/api/handlers/entities/read";
 import readEntityById from "@/api/handlers/entities/read-by-id";
+import readFieldFile from "@/api/handlers/entities/read-field-file";
 import readFilesystemTree from "@/api/handlers/entities/read-filesystem-tree";
+import readGroupCounts from "@/api/handlers/entities/read-group-counts";
 import readKanbanGroup from "@/api/handlers/entities/read-kanban-group";
+import readPropertyFacets from "@/api/handlers/entities/read-property-facets";
 import readEntitySummaries from "@/api/handlers/entities/read-summaries";
 import readVersionById from "@/api/handlers/entities/read-version-by-id";
 import readVersions from "@/api/handlers/entities/read-versions";
@@ -41,6 +44,8 @@ import {
   isUploadRateLimitedPath,
 } from "@/api/handlers/entities/upload-rate-limit";
 import uploadVersion from "@/api/handlers/entities/upload-version";
+import versionDiff from "@/api/handlers/entities/version-diff";
+import versionSummarize from "@/api/handlers/entities/version-summarize";
 import { permissionMacro, workspaceAccessMacro } from "@/api/lib/auth";
 import { invalidateQuery } from "@/api/lib/invalidate-query-macro";
 import { API_RATE_LIMITS } from "@/api/lib/limits";
@@ -146,6 +151,14 @@ export const entitiesRoute = new Elysia({
     body: readKanbanGroup.config.body,
     permissions: readKanbanGroup.config.permissions,
   })
+  .post("/group-counts", readGroupCounts.handler, {
+    body: readGroupCounts.config.body,
+    permissions: readGroupCounts.config.permissions,
+  })
+  .post("/property-facets", readPropertyFacets.handler, {
+    body: readPropertyFacets.config.body,
+    permissions: readPropertyFacets.config.permissions,
+  })
   .post("/organize-suggestions", organizeSuggestions.handler, {
     body: organizeSuggestions.config.body,
     permissions: organizeSuggestions.config.permissions,
@@ -201,12 +214,29 @@ export const entitiesRoute = new Elysia({
   })
   .get("/entity/:entityId/versions", readVersions.handler, {
     params: readVersions.config.params,
+    query: readVersions.config.query,
     permissions: readVersions.config.permissions,
   })
   .get("/entity/:entityId/versions/:versionId", readVersionById.handler, {
     params: readVersionById.config.params,
     permissions: readVersionById.config.permissions,
   })
+  .get("/entity/:entityId/field/:fieldId/file", readFieldFile.handler, {
+    params: readFieldFile.config.params,
+    permissions: readFieldFile.config.permissions,
+  })
+  .get("/entity/:entityId/versions/:versionId/diff", versionDiff.handler, {
+    params: versionDiff.config.params,
+    permissions: versionDiff.config.permissions,
+  })
+  .post(
+    "/entity/:entityId/versions/:versionId/summarize",
+    versionSummarize.handler,
+    {
+      params: versionSummarize.config.params,
+      permissions: versionSummarize.config.permissions,
+    },
+  )
   .post("/entity/:entityId/compare", compareVersions.handler, {
     body: compareVersions.config.body,
     params: compareVersions.config.params,

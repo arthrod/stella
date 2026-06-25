@@ -1,5 +1,5 @@
 import "./chat-editor.css";
-import { useCallback, useEffect, useRef } from "react";
+import { useRef } from "react";
 
 import { ArrowUpIcon, PaperclipIcon, SquareIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
@@ -14,6 +14,7 @@ import type {
 } from "@/components/chat-editor-provider";
 import { ChatDraftAttachmentChips } from "@/components/chat/chat-draft-attachment-chips";
 import { PromptEditorContent } from "@/components/prompt-editor";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 
 type ChatInputSurfaceProps = {
   autoFocus?: boolean;
@@ -67,9 +68,11 @@ export const ChatInputSurface = ({
     handlePaste,
     isEmpty,
     openFilePicker,
+    placeholder,
     removeFile,
   } = controller;
   const inputDisabled = disabled;
+  const attachFileLabel = t("chat.attachFile");
   // Submitting stays enabled while the assistant streams: a send
   // during a turn is queued by `useChatSession` and dispatched once
   // the response finishes, so overlapping requests can't happen.
@@ -82,7 +85,7 @@ export const ChatInputSurface = ({
     submitDisabled,
   });
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (!autoFocus) {
       return;
     }
@@ -90,21 +93,18 @@ export const ChatInputSurface = ({
     focus();
   }, [autoFocus, focus]);
 
-  const handleFocus = useCallback(() => {
+  const handleFocus = () => {
     onFocusChange?.(true);
-  }, [onFocusChange]);
+  };
 
-  const handleBlur = useCallback(
-    (event: React.FocusEvent<HTMLDivElement>) => {
-      const nextTarget = event.relatedTarget;
-      if (nextTarget instanceof Node && rootRef.current?.contains(nextTarget)) {
-        return;
-      }
+  const handleBlur = (event: React.FocusEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && rootRef.current?.contains(nextTarget)) {
+      return;
+    }
 
-      onFocusChange?.(false);
-    },
-    [onFocusChange],
-  );
+    onFocusChange?.(false);
+  };
 
   return (
     <div
@@ -128,7 +128,7 @@ export const ChatInputSurface = ({
     >
       <ChatDraftAttachmentChips files={attachments} onRemove={removeFile} />
       <div
-        className="chat-editor relative px-3 pt-2 pb-1"
+        className="chat-editor relative min-w-0 overflow-hidden px-3 pt-2 pb-1"
         onKeyDown={(event) => event.stopPropagation()}
         role="presentation"
       >
@@ -139,14 +139,15 @@ export const ChatInputSurface = ({
         {isEmpty && attachments.length === 0 && (
           <span
             aria-hidden="true"
-            className="text-foreground-placeholder pointer-events-none absolute start-3 top-2 text-sm"
+            className="text-foreground-placeholder pointer-events-none absolute inset-x-3 top-2 truncate text-sm"
           >
-            {t("chat.placeholder")}
+            {placeholder}
           </span>
         )}
       </div>
       <div className="flex items-center gap-0.5 px-1.5 pb-1.5">
         <Button
+          aria-label={attachFileLabel}
           disabled={inputDisabled}
           onClick={openFilePicker}
           size="icon-sm"
@@ -164,34 +165,68 @@ export const ChatInputSurface = ({
           type="file"
         />
         <div className="ms-auto flex items-center gap-1">
-          {isGenerating && onStop && (
-            <Button
-              aria-label={t("chat.stopResponse")}
-              className="shrink-0"
-              onClick={onStop}
-              size="icon-sm"
-              variant="outline"
-            >
-              <SquareIcon className="size-3.5" />
-            </Button>
-          )}
-          <Button
-            aria-label={t("chat.sendPrompt")}
-            className={cn(
-              "bg-foreground text-background hover:bg-foreground/90 shrink-0",
-              (submitDisabled || !canSubmit) && "opacity-50",
-            )}
-            disabled={submitDisabled || !canSubmit}
-            onClick={() => {
+          <ChatSubmitButton
+            canSend={!submitDisabled && canSubmit}
+            isGenerating={isGenerating}
+            onSend={() => {
               void submitDraft();
             }}
-            size="icon-sm"
-            variant="default"
-          >
-            <ArrowUpIcon className="size-3.5" />
-          </Button>
+            onStop={onStop}
+          />
         </div>
       </div>
     </div>
+  );
+};
+
+type ChatSubmitButtonProps = {
+  canSend: boolean;
+  isGenerating: boolean;
+  onSend: () => void;
+  onStop?: (() => void) | undefined;
+};
+
+// The single primary affordance morphs in place: the same Button (and DOM node)
+// shows the send arrow to submit a draft and the stop square to cancel a running
+// turn, so focus state and the icon transition survive the state change.
+const ChatSubmitButton = ({
+  canSend,
+  isGenerating,
+  onSend,
+  onStop,
+}: ChatSubmitButtonProps) => {
+  const t = useTranslations();
+  const isStop = isGenerating && onStop !== undefined;
+
+  return (
+    <Button
+      aria-label={isStop ? t("chat.stopResponse") : t("chat.sendPrompt")}
+      className={cn(
+        "bg-foreground text-background hover:bg-foreground/90 shrink-0",
+        !isStop && !canSend && "opacity-50",
+      )}
+      disabled={!isStop && !canSend}
+      onClick={isStop ? onStop : onSend}
+      size="icon-sm"
+      variant="default"
+    >
+      <span
+        aria-hidden="true"
+        className="pointer-events-none relative size-3.5"
+      >
+        <SquareIcon
+          className={cn(
+            "absolute inset-0 size-full transition-[opacity,transform] duration-150 ease-out",
+            isStop ? "scale-100 opacity-100" : "scale-75 opacity-0",
+          )}
+        />
+        <ArrowUpIcon
+          className={cn(
+            "absolute inset-0 size-full transition-[opacity,transform] duration-150 ease-out",
+            isStop ? "scale-75 opacity-0" : "scale-100 opacity-100",
+          )}
+        />
+      </span>
+    </Button>
   );
 };

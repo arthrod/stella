@@ -40,13 +40,14 @@ import {
   parseRotationDegrees,
   rotatedBoundingBox,
 } from "../utils/rotationBoundingBox";
+import { hasCjk, segmentByScript } from "../utils/scriptSegments";
 import { getAutomaticTextColorForBackground } from "./documentColors";
 import {
   applyImageVisualAttrs,
   hasImageVisualAttrs,
   wrapImageWithCrop,
 } from "./renderImage";
-import { isFloatingImageRun } from "./renderUtils";
+import { isFloatingImageRun, resolveImageLineAlign } from "./renderUtils";
 import type { RenderContext } from "./renderUtils";
 import { applySdtDataAttrs } from "./sdtBoundary";
 
@@ -459,13 +460,22 @@ function applyRunStyles(element: HTMLElement, run: TextRun | TabRun): void {
     element.style.textDecorationLine = decorations.join(" ");
   }
 
-  // Superscript/subscript
+  // Superscript/subscript. Raise/lower the glyph with a paint-only
+  // `position: relative` offset rather than `vertical-align: super/sub`. CSS
+  // grows the line box to contain a vertical-align shift, so `super`/`sub`
+  // inflated the height of any line carrying a superscript (e.g. a footnote
+  // anchor) past the base-font height the measurer reserved. A relative offset
+  // moves only where the glyph paints, leaving the line box intact
+  // (eigenpal/docx-editor#846). The reduced `fontSize` from
+  // `getRaisedRunFontSize` already keeps the glyph shorter than the line.
   if (run.superscript) {
-    element.style.verticalAlign = "super";
+    element.style.position = "relative";
+    element.style.top = "-0.4em";
     element.style.fontSize = getRaisedRunFontSize(run);
   }
   if (run.subscript) {
-    element.style.verticalAlign = "sub";
+    element.style.position = "relative";
+    element.style.top = "0.2em";
     element.style.fontSize = getRaisedRunFontSize(run);
   }
 }
@@ -503,6 +513,16 @@ function applyPmPositions(
 function renderTextRun(run: TextRun, doc: Document): HTMLElement {
   const span = doc.createElement("span");
   span.className = `${PARAGRAPH_CLASS_NAMES.run} ${PARAGRAPH_CLASS_NAMES.text}`;
+
+  // Template fill preview substitution: the run's text is the typed value
+  // already laid out in place of its {{marker}}, so only a class is needed —
+  // `highlighted` paints the accent chip without altering the flowed width.
+  if (run.templatePreview) {
+    span.classList.add("folio-template-preview-run");
+    if (run.templatePreview === "highlighted") {
+      span.classList.add("folio-template-preview-run--highlighted");
+    }
+  }
 
   applyRunStyles(span, run);
   applyPmPositions(span, run.pmStart, run.pmEnd);
@@ -751,6 +771,20 @@ function renderInlineImageRun(run: ImageRun, doc: Document): HTMLElement {
   // Inline images should flow with text
   img.style.display = "inline";
   img.style.verticalAlign = "middle";
+
+  // Fit the image to its container's content width (the text column or table
+  // cell) while preserving the run's aspect ratio: cap the width at 100% of the
+  // container and let `aspect-ratio` drive the height. Without this a wide image
+  // in a narrow cell squashes (the explicit height stays while the width is
+  // clamped) or overflows the page. The run's own aspect ratio is used — not the
+  // image's natural one — so a deliberately stretched image keeps its shape.
+  // (eigenpal/docx-editor#760.) Only the plain inline path opts in: the rotated
+  // and cropped paths return earlier and need their explicit pixel geometry.
+  if (run.width > 0 && run.height > 0) {
+    img.style.height = "auto";
+    img.style.aspectRatio = `${run.width} / ${run.height}`;
+    img.style.maxWidth = "100%";
+  }
 
   // wp:inline distT/distB: the measurer folds these into maxImageHeightPx;
   // applying them as margins here keeps the margin-box footprint consistent
@@ -1006,6 +1040,50 @@ function renderFieldRun(
     text,
   };
 
+  // A CJK field result is generated text inside one atomic pm range, so the
+  // measurer's per-script EA segmentation is mirrored for the font: each script
+  // segment renders through renderTextRun (keeping the field's full styles, and
+  // its own anchor when the field is a hyperlink) with the CJK segments switched
+  // to the EA font. The pm range stays on the grouping wrapper; the segments
+  // carry no pm (the field is atomic). Letter-spaced fields stay one span,
+  // matching splitTextRunsByEastAsia and the measurer.
+  if (
+    resolvedRun.eastAsiaFontFamily !== undefined &&
+    !resolvedRun.letterSpacing &&
+    hasCjk(text)
+  ) {
+    const wrapper = doc.createElement("span");
+    applyPmPositions(wrapper, resolvedRun.pmStart, resolvedRun.pmEnd);
+    // horizontalScale lives on the wrapper (inline-block so the reserved width
+    // the render loop sets via reserveScaledAdvance applies, scaleX so the
+    // segments scale uniformly); the segments drop it to avoid double-scaling.
+    if (resolvedRun.horizontalScale && resolvedRun.horizontalScale !== 100) {
+      wrapper.style.display = "inline-block";
+      wrapper.style.transform = `scaleX(${resolvedRun.horizontalScale / 100})`;
+      wrapper.style.transformOrigin = "left center";
+    }
+    // The pm range lives on the wrapper; segments carry none (the field is one
+    // atomic unit), so drop pmStart/pmEnd (and the wrapper-applied scale) before
+    // spreading into each segment.
+    const {
+      pmStart: _pmStart,
+      pmEnd: _pmEnd,
+      horizontalScale: _horizontalScale,
+      ...segmentBase
+    } = resolvedRun;
+    for (const segment of segmentByScript(text)) {
+      const segmentRun: TextRun = {
+        ...segmentBase,
+        text: segment.text,
+        ...(segment.isCjk
+          ? { fontFamily: resolvedRun.eastAsiaFontFamily }
+          : {}),
+      };
+      wrapper.append(renderTextRun(segmentRun, doc));
+    }
+    return wrapper;
+  }
+
   return renderTextRun(resolvedRun, doc);
 }
 
@@ -1054,6 +1132,7 @@ function renderMathRun(run: MathRun, doc: Document): HTMLElement {
     '"Cambria Math", "Latin Modern Math", "STIX Two Math", serif';
 
   try {
+    // safe-html: mathml is built by ommlToMathml(), which escapes every text token via escapeXml() and emits only a fixed MathML tag vocabulary
     host.innerHTML = mathml;
   } catch {
     return renderMathFallback(run, doc, fallbackText, "1");
@@ -1155,11 +1234,21 @@ export function sliceRunsForLine(
       // Slice the text if needed
       if (startChar > 0 || endChar < run.text.length) {
         const slicedText = run.text.slice(startChar, endChar);
+        // Clamp to the run's own pmEnd: template-preview value runs keep the
+        // source marker's PM range while carrying longer text, so a naive
+        // char-offset projection would claim PM positions past the marker
+        // and overlap the following runs' data-pm spans. A no-op for normal
+        // runs, where pmStart + text.length === pmEnd.
+        const clampPm = (position: number): number =>
+          run.pmEnd === undefined ? position : Math.min(position, run.pmEnd);
         result.push({
           ...run,
           text: slicedText,
           ...(run.pmStart !== undefined
-            ? { pmStart: run.pmStart + startChar, pmEnd: run.pmStart + endChar }
+            ? {
+                pmStart: clampPm(run.pmStart + startChar),
+                pmEnd: clampPm(run.pmStart + endChar),
+              }
             : {}),
         });
       } else {
@@ -1168,6 +1257,52 @@ export function sliceRunsForLine(
     } else {
       // Non-text runs are included as-is
       result.push(run);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Split each text run carrying an East-Asian font into per-script sub-runs, so
+ * CJK code points render with `eastAsiaFontFamily` and the rest with
+ * `fontFamily`. Each sub-run gets a contiguous, exact `pmStart`/`pmEnd` (the
+ * same offset math as `sliceRunsForLine`), keeping PM position mapping,
+ * selection rects, and click-to-caret correct. The measurer segments the same
+ * way, so the per-run advances sum to the measured run width. Non-text runs and
+ * runs without CJK pass through unchanged (the common path).
+ */
+export function splitTextRunsByEastAsia(runs: Run[]): Run[] {
+  const result: Run[] = [];
+
+  for (const run of runs) {
+    if (
+      !isTextRun(run) ||
+      run.eastAsiaFontFamily === undefined ||
+      // A letter-spaced run stays one span: CSS letter-spacing would not bridge
+      // the gap between per-script sibling spans, so it keeps the base font for
+      // CJK too (the measurer skips the EA path identically, so widths agree).
+      run.letterSpacing ||
+      !hasCjk(run.text)
+    ) {
+      result.push(run);
+      continue;
+    }
+
+    let offset = 0;
+    for (const segment of segmentByScript(run.text)) {
+      result.push({
+        ...run,
+        text: segment.text,
+        ...(segment.isCjk ? { fontFamily: run.eastAsiaFontFamily } : {}),
+        ...(run.pmStart !== undefined
+          ? {
+              pmStart: run.pmStart + offset,
+              pmEnd: run.pmStart + offset + segment.text.length,
+            }
+          : {}),
+      });
+      offset += segment.text.length;
     }
   }
 
@@ -1226,6 +1361,9 @@ function runMeasureStyle(run: TextRun | FieldRun | MathRun): TextMeasureStyle {
       ? { letterSpacing: run.letterSpacing }
       : {}),
     ...(run.smallCaps !== undefined ? { smallCaps: run.smallCaps } : {}),
+    ...(run.eastAsiaFontFamily !== undefined
+      ? { eastAsiaFontFamily: run.eastAsiaFontFamily }
+      : {}),
   };
 }
 
@@ -1301,6 +1439,70 @@ function measureFollowingContentWidth(
 }
 
 /**
+ * Width of the decimal prefix (text before the first ".") that follows a tab,
+ * accumulated per run so a prefix spanning multiple fonts measures each part in
+ * its own font. After the EA split a prefix like `合計12` is a CJK sub-run (EA
+ * font) followed by a Latin sub-run, so measuring the whole prefix in the first
+ * sub-run's font would force the digits into the EA face and drift the decimal
+ * point from the measured tab stop.
+ */
+function measureDecimalPrefixWidth(
+  runs: Run[],
+  tabRunIndex: number,
+  decimalIndex: number,
+  measureText: (
+    text: string,
+    fontSize?: number,
+    fontFamily?: string,
+    style?: TextMeasureStyle,
+  ) => number,
+  context?: RenderContext,
+): number {
+  let width = 0;
+  let consumed = 0;
+  for (
+    let i = tabRunIndex + 1;
+    i < runs.length && consumed < decimalIndex;
+    i++
+  ) {
+    const run = runs[i]!; // SAFETY: i < runs.length
+    if (isTabRun(run) || isLineBreakRun(run)) {
+      break;
+    }
+    // Images contribute no characters to the following text (getTextAfterTab),
+    // so they never shift the decimal offset.
+    if (!isTextRun(run) && !isFieldRun(run) && !isMathRun(run)) {
+      continue;
+    }
+
+    let runText: string;
+    if (isFieldRun(run)) {
+      const resolved = resolveFieldText(run, context);
+      runText = run.allCaps ? resolved.toLocaleUpperCase() : resolved;
+    } else if (isMathRun(run)) {
+      runText = run.plainText;
+    } else {
+      runText = run.allCaps ? run.text.toLocaleUpperCase() : run.text;
+    }
+
+    const take = Math.min(runText.length, decimalIndex - consumed);
+    if (take > 0) {
+      const scale = run.horizontalScale ?? 100;
+      width +=
+        measureText(
+          runText.slice(0, take),
+          run.fontSize ?? 11,
+          run.fontFamily ?? "Calibri",
+          runMeasureStyle(run),
+        ) *
+        (scale / 100);
+    }
+    consumed += runText.length;
+  }
+  return width;
+}
+
+/**
  * Build a stable key for an inline image run.
  * PM positions are preferred because they uniquely identify the source node.
  */
@@ -1364,6 +1566,9 @@ type TextMeasureStyle = {
   italic?: boolean;
   letterSpacing?: number;
   smallCaps?: boolean;
+  /** EA font for CJK code points; segments the measured text by script when set
+   * (and the run has no letter spacing), mirroring measureContainer. */
+  eastAsiaFontFamily?: string;
 };
 
 function applyLetterSpacingToMeasuredWidth(
@@ -1407,18 +1612,35 @@ function createTextMeasurer(
     const cssFallback = resolveFontFamily(fontFamily).cssFallback;
     // Convert pt to px for canvas (1pt = 96/72 px)
     const fontSizePx = (fontSize * 96) / 72;
-    const fontParts: string[] = [];
+    const fontPrefixParts: string[] = [];
     if (style.italic) {
-      fontParts.push("italic");
+      fontPrefixParts.push("italic");
     }
     if (style.smallCaps) {
-      fontParts.push("small-caps");
+      fontPrefixParts.push("small-caps");
     }
     if (style.bold) {
-      fontParts.push(DOCX_BOLD_FONT_WEIGHT);
+      fontPrefixParts.push(DOCX_BOLD_FONT_WEIGHT);
     }
-    fontParts.push(`${fontSizePx}px`, cssFallback);
-    ctx.font = fontParts.join(" ");
+    fontPrefixParts.push(`${fontSizePx}px`);
+    const fontPrefix = fontPrefixParts.join(" ");
+
+    // CJK code points measure with the EA font (matching the per-script sub-spans
+    // the painter emits and measureContainer's segmentation). Gated off for
+    // letter-spaced runs, which keep a single base-font span.
+    if (style.eastAsiaFontFamily && !style.letterSpacing && hasCjk(text)) {
+      const eaFallback = resolveFontFamily(
+        style.eastAsiaFontFamily,
+      ).cssFallback;
+      let segmentedWidth = 0;
+      for (const segment of segmentByScript(text)) {
+        ctx.font = `${fontPrefix} ${segment.isCjk ? eaFallback : cssFallback}`;
+        segmentedWidth += ctx.measureText(segment.text).width;
+      }
+      return segmentedWidth;
+    }
+
+    ctx.font = `${fontPrefix} ${cssFallback}`;
     return applyLetterSpacingToMeasuredWidth(
       ctx.measureText(text).width,
       text,
@@ -1453,7 +1675,7 @@ export function renderLine(
   lineEl.style.lineHeight = `${line.lineHeight}px`;
 
   // Get runs for this line
-  const runsForLine = sliceRunsForLine(block, line);
+  const runsForLine = splitTextRunsByEastAsia(sliceRunsForLine(block, line));
   // OOXML `<m:oMathPara>` (display math) defaults to `jc="centerGroup"` —
   // Word renders display math centred on its own paragraph. When the line
   // holds a single block math run, centre it horizontally so the equation
@@ -1475,12 +1697,15 @@ export function renderLine(
     lineEl.style.alignItems = "center";
     // Flex defaults to flex-start regardless of the parent's text-align, so
     // an image-only line in a centred / right-aligned paragraph would
-    // left-align after the flex switch. Mirror the paragraph alignment onto
-    // justify-content so logo-only header lines stay centred / right-aligned
-    // like Word.
-    if (alignment === "center") {
+    // left-align after the flex switch. An ANCHORED image is positioned by its
+    // own `wp:positionH` (defaulting to left like Word); an inline image
+    // follows the paragraph alignment. Mirror the resolved alignment onto
+    // justify-content so logo-only header lines stay placed like Word
+    // (eigenpal/docx-editor#787).
+    const imageAlign = resolveImageLineAlign(runsForLine[0]!, alignment);
+    if (imageAlign === "center") {
       lineEl.style.justifyContent = "center";
-    } else if (alignment === "right") {
+    } else if (imageAlign === "right") {
       lineEl.style.justifyContent = "flex-end";
     }
   } else if (runsForLine.some((r) => isImageRun(r) && !isFloatingImageRun(r))) {
@@ -1517,9 +1742,33 @@ export function renderLine(
   if (runsForLine.length === 0) {
     const emptySpan = doc.createElement("span");
     emptySpan.className = `${PARAGRAPH_CLASS_NAMES.run} layout-empty-run`;
+    // A paragraph that ends with a hard break has a trailing blank row whose
+    // sliced runs are empty (measurement starts it past the last run), so it
+    // lands here rather than in the line-break marker path below. Resolve it to
+    // the position *after* that break (the break's `pmEnd`, since a break spans
+    // `[pmStart, pmEnd)`), not the paragraph start, so a click or caret on the
+    // blank line lands after the break rather than back on the previous line.
+    // (eigenpal/docx-editor#752.)
+    const trailingRun = block.runs.at(-1);
+    const trailingBreakEnd =
+      line.fromRun > block.runs.length - 1 &&
+      trailingRun !== undefined &&
+      isLineBreakRun(trailingRun)
+        ? trailingRun.pmEnd
+        : undefined;
     const contentStart =
-      block.pmStart === undefined ? undefined : block.pmStart + 1;
-    applyPmPositions(emptySpan, contentStart, block.pmEnd ?? contentStart);
+      trailingBreakEnd ??
+      (block.pmStart === undefined ? undefined : block.pmStart + 1);
+    // For a trailing break, collapse the span to the after-break position. Its
+    // `&nbsp;` is matched by the generic `span[data-pm-start][data-pm-end]`
+    // resolver (which runs before the empty-run fallback), so a wide range would
+    // let a right-half click resolve to the paragraph end instead of after the
+    // break — disagreeing with vertical navigation. (eigenpal/docx-editor#752.)
+    const contentEnd =
+      trailingBreakEnd !== undefined
+        ? contentStart
+        : (block.pmEnd ?? contentStart);
+    applyPmPositions(emptySpan, contentStart, contentEnd);
     emptySpan.innerHTML = "&nbsp;";
     lineEl.append(emptySpan);
     return lineEl;
@@ -1615,34 +1864,19 @@ export function renderLine(
       );
       const followingText = getTextAfterTab(runsForLine, i, options?.context);
       const decimalIndex = followingText.indexOf(".");
-      // Resolve the first text/field run after the tab and measure the
-      // decimal prefix in *its* font/style. Defaulting to 11px Calibri
-      // (the `measureText` fallback) drifts on sized/bold/italic runs and
-      // breaks decimal alignment — eigenpal #576 gemini review on PR #512.
-      const firstFollowingRun = (() => {
-        for (let j = i + 1; j < runsForLine.length; j++) {
-          const next = runsForLine[j];
-          if (!next || isTabRun(next) || isLineBreakRun(next)) {
-            return undefined;
-          }
-          if (isTextRun(next) || isFieldRun(next)) {
-            return next;
-          }
-          if (isMathRun(next)) {
-            return next;
-          }
-        }
-        return undefined;
-      })();
+      // Measure the decimal prefix run-by-run so each part uses its own
+      // font/size/style. A single-font pass over the joined prefix drifts on
+      // sized/bold/italic runs (eigenpal #576) and, after the EA split, on
+      // mixed CJK+Latin prefixes (eigenpal/docx-editor follow-up).
       const decimalPrefixWidth =
         decimalIndex !== -1
-          ? measureText(
-              followingText.slice(0, decimalIndex),
-              firstFollowingRun?.fontSize,
-              firstFollowingRun?.fontFamily,
-              firstFollowingRun ? runMeasureStyle(firstFollowingRun) : {},
-            ) *
-            ((firstFollowingRun?.horizontalScale ?? 100) / 100)
+          ? measureDecimalPrefixWidth(
+              runsForLine,
+              i,
+              decimalIndex,
+              measureText,
+              options?.context,
+            )
           : 0;
 
       const tabResult = calculateTabWidth(currentX, tabContext, {
@@ -1840,14 +2074,7 @@ export function renderLine(
         run.allCaps ? fieldText.toLocaleUpperCase() : fieldText,
         fontSize,
         fontFamily,
-        {
-          ...(run.bold !== undefined ? { bold: run.bold } : {}),
-          ...(run.italic !== undefined ? { italic: run.italic } : {}),
-          ...(run.letterSpacing !== undefined
-            ? { letterSpacing: run.letterSpacing }
-            : {}),
-          ...(run.smallCaps !== undefined ? { smallCaps: run.smallCaps } : {}),
-        },
+        runMeasureStyle(run),
       );
       reserveScaledAdvance(runEl, measuredWidth, run.horizontalScale);
       currentX += measuredWidth * ((run.horizontalScale ?? 100) / 100);
@@ -1867,6 +2094,37 @@ export function renderLine(
       const runEl = renderRun(run, doc, options?.context);
       lineEl.append(runEl);
     }
+  }
+
+  // A line whose in-flow runs are all line breaks (a blank row from consecutive
+  // `<w:br/>`) renders as just a `<br>`, whose PM position the click/caret/
+  // visual-line resolvers don't read — they query `span[data-pm-start]`. With no
+  // positioned span on the row those resolvers fall back to the paragraph start,
+  // collapsing clicks, the caret, and arrow navigation onto the first line. Emit
+  // a zero-width positioned marker carrying the break's position so the existing
+  // resolvers can locate the row. (eigenpal/docx-editor#752; derived from the
+  // runs instead of a `querySelector` so the painter stays testable with a
+  // minimal fake Document.) Prepended ahead of the `<br>`: the break pushes any
+  // following node onto the next visual line, so a marker after it would carry
+  // the wrong Y and the caret would land a row too low.
+  //
+  // Floating image runs stay in the line's run range but the painter renders
+  // them in a separate layer (it `continue`s past them), so a break row that
+  // also carries a floating image still paints as only a `<br>`. Exclude them
+  // when deciding whether the row is blank, else the marker is suppressed.
+  const inFlowRuns = runsForLine.filter(
+    (run) => !(isImageRun(run) && isFloatingImageRun(run)),
+  );
+  const blankBreakRun =
+    inFlowRuns.length > 0 && inFlowRuns.every(isLineBreakRun)
+      ? inFlowRuns.find(isLineBreakRun)
+      : undefined;
+  if (blankBreakRun?.pmStart !== undefined) {
+    const marker = doc.createElement("span");
+    marker.className = PARAGRAPH_CLASS_NAMES.run;
+    applyPmPositions(marker, blankBreakRun.pmStart, blankBreakRun.pmStart);
+    marker.textContent = "\u200B";
+    lineEl.prepend(marker);
   }
 
   return lineEl;
@@ -1944,17 +2202,19 @@ function paragraphBaseIsRtl(block: ParagraphBlock): boolean {
   // letter (`\p{L}`). Digits, combining marks, punctuation and spaces are
   // weak/neutral and skipped. The first letter's script decides; nothing
   // strong => honor w:rtl.
-  const match = /(\u200F|\u061C)|(\u200E)|(\p{L})/u.exec(text);
+  const match =
+    /(?<rtlMark>\u200F|\u061C)|(?<lrmMark>\u200E)|(?<letter>\p{L})/u.exec(text);
   if (!match) {
     return true;
   }
-  if (match[1] !== undefined) {
+  const { rtlMark, lrmMark, letter } = match.groups ?? {};
+  if (rtlMark !== undefined) {
     return true; // RLM or ALM
   }
-  if (match[2] !== undefined) {
+  if (lrmMark !== undefined) {
     return false; // LRM
   }
-  return match[3] !== undefined && RTL_STRONG_LETTER.test(match[3]);
+  return letter !== undefined && RTL_STRONG_LETTER.test(letter);
 }
 
 /**
@@ -2239,19 +2499,16 @@ export function renderParagraphFragment(
     const lineLeftOffset = line.leftOffset ?? 0;
     const lineRightOffset = line.rightOffset ?? 0;
 
-    // For first line, adjust available width for hanging/firstLine indent
-    // Measurement uses: baseFirstLineWidth = bodyContentWidth - (firstLine - hanging)
-    // So hanging gives MORE width, firstLine gives LESS width
-    let lineAvailableWidth = availableWidth;
-    if (isFirstLine) {
-      const hasHangingIndent = indent?.hanging && indent.hanging > 0;
-      const hasFirstLineIndent = indent?.firstLine && indent.firstLine > 0;
-      if (hasHangingIndent && indent.hanging) {
-        lineAvailableWidth = availableWidth + indent.hanging;
-      } else if (hasFirstLineIndent && indent.firstLine) {
-        lineAvailableWidth = availableWidth - indent.firstLine;
-      }
-    }
+    // The justify box width (and the floating-image width constraint below) is
+    // the full content width on every line, including the first. The first
+    // line's hanging/firstLine shift is realized purely by `text-indent` /
+    // padding further down: the shift moves where the line STARTS, but justify
+    // still stretches to the content box's right edge. Narrowing the box by
+    // `firstLine` (or widening it by `hanging`) here as well double-counted the
+    // indent, so the first line's right edge fell short of (or past) the margin
+    // while body lines reached it. Measurement separately accounts for the
+    // indent when deciding how much text fits the first line (eigenpal/docx-editor#868).
+    const lineAvailableWidth = availableWidth;
 
     const lineEl = renderLine(block, line, effectiveAlignment, doc, {
       availableWidth: lineAvailableWidth - lineLeftOffset - lineRightOffset,

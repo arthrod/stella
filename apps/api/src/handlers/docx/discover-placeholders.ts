@@ -10,10 +10,14 @@
 import JSZip from "jszip";
 import * as slimdom from "slimdom";
 
+import { placeholderPattern } from "@stll/template-conditions";
+
 import { HEADER_FOOTER_RE, paragraphText, W_NS } from "./ooxml";
 import type { DiscoveredPlaceholder } from "./types";
 
-export const PLACEHOLDER_RE = /\{\{([\p{L}\p{N}_.@:-]+)\}\}/gu;
+// Canonical pattern from @stll/template-conditions (markers.ts) — the single
+// source of truth shared with rich-patch, folio, and the web preview.
+export const PLACEHOLDER_RE = placeholderPattern();
 
 /**
  * Scan all `w:p` paragraphs in a parsed XML document and
@@ -28,7 +32,7 @@ const scanParagraphs = (
   for (const p of paragraphs) {
     const text = paragraphText(p);
     for (const match of text.matchAll(PLACEHOLDER_RE)) {
-      const name = match[1];
+      const name = match.groups?.["name"];
       if (!name) {
         continue;
       }
@@ -73,6 +77,7 @@ export const discoverPlaceholders = async (
       continue;
     }
 
+    // oxlint-disable-next-line no-await-in-loop -- bounded memory while streaming docx parts; accumulates into shared counts map
     const xml = await entry.async("string");
     scanParagraphs(slimdom.parseXmlDocument(xml), counts);
   }

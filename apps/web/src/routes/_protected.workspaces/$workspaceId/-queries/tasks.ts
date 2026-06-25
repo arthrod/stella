@@ -22,6 +22,7 @@ type TaskDetailAssignee = {
     id: string;
     name: string | null;
     image: string | null;
+    deletedAt: Date | null;
   };
 };
 
@@ -117,7 +118,7 @@ export const taskDetailOptions = (workspaceId: string, taskId: string) =>
       if (response.error) {
         throw toAPIError(response.error);
       }
-      // eslint-disable-next-line typescript/no-unsafe-type-assertion
+      // eslint-disable-next-line typescript/no-unsafe-type-assertion -- narrows Eden's nested relational-query shape to the curated TaskDetail consumed by the panel
       return response.data as TaskDetail;
     },
     enabled: !!taskId,

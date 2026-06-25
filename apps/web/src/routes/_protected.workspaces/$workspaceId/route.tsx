@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 
 import { useHotkey } from "@tanstack/react-hotkeys";
 import type { QueryClient } from "@tanstack/react-query";
@@ -18,10 +18,7 @@ import { api } from "@/lib/api";
 import { APIError, toAPIError } from "@/lib/errors";
 import { HOTKEYS } from "@/lib/hotkeys";
 import { pageTitle, pageTitleLiteral } from "@/lib/page-title";
-import {
-  ensureCriticalQueryData,
-  prefetchNonCriticalQuery,
-} from "@/lib/react-query";
+import { ensureRouteQueryData, prefetchRouteQuery } from "@/lib/react-query";
 import { useWorkspaceSSE } from "@/lib/sse";
 import { useWorkspaceChatMentionRegistration } from "@/routes/_protected.chat/-hooks/use-workspace-chat-mention-registration";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
@@ -76,7 +73,7 @@ export const Route = createFileRoute("/_protected/workspaces/$workspaceId")({
     // Handles unmatched child routes (e.g. doubled
     // /workspaces/$id/workspaces/$id from stale router state).
     if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
+      // eslint-disable-next-line no-console -- dev-only stack trace to debug stale doubled URLs
       console.trace(
         "[stella] notFoundComponent triggered — redirecting to /workspaces. Current URL:",
         globalThis.location.href,
@@ -109,14 +106,14 @@ export const Route = createFileRoute("/_protected/workspaces/$workspaceId")({
         .catch(onPrefetchError);
     }
 
-    void prefetchNonCriticalQuery(
+    void prefetchRouteQuery(
       qc,
       workflowOptions({ key: { workspaceId: wsId } }),
       onPrefetchError,
     );
-    void prefetchNonCriticalQuery(qc, viewsOptions(wsId), onPrefetchError);
-    void prefetchNonCriticalQuery(qc, overviewOptions(wsId), onPrefetchError);
-    void prefetchNonCriticalQuery(qc, propertiesOptions(wsId), onPrefetchError);
+    void prefetchRouteQuery(qc, viewsOptions(wsId), onPrefetchError);
+    void prefetchRouteQuery(qc, overviewOptions(wsId), onPrefetchError);
+    void prefetchRouteQuery(qc, propertiesOptions(wsId), onPrefetchError);
 
     return workspace;
   },
@@ -136,7 +133,7 @@ const loadWorkspaceOrRedirect = async (
   workspaceId: string,
 ) => {
   try {
-    return await ensureCriticalQueryData(
+    return await ensureRouteQueryData(
       queryClient,
       workspaceOptions(workspaceId),
     );
@@ -162,51 +159,54 @@ function RouteComponent() {
     new Map<string, ReturnType<typeof setTimeout>>(),
   );
 
-  const handleWorkspaceSSEEvent = useCallback(
-    ({ type, data }: { type: string; data: unknown }) => {
-      const workspaceStore = useWorkspaceStore.getState();
-      if (
-        type !== EXTRACTION_PREVIEW_EVENT_TYPE ||
-        !isExtractionPreviewEventData(data)
-      ) {
-        return;
-      }
+  const handleWorkspaceSSEEvent = ({
+    type,
+    data,
+  }: {
+    type: string;
+    data: unknown;
+  }) => {
+    const workspaceStore = useWorkspaceStore.getState();
+    if (
+      type !== EXTRACTION_PREVIEW_EVENT_TYPE ||
+      !isExtractionPreviewEventData(data)
+    ) {
+      return;
+    }
 
-      // Backend sends "clear" right after the entity-invalidation
-      // broadcast, but the invalidation's refetch needs a network
-      // round-trip — clearing the preview synchronously here makes
-      // the cell flip preview → pending skeleton → final value, with
-      // the skeleton visible for the duration of the refetch. Hold
-      // the preview instead: CellResult only reads it while the
-      // field is still pending, so once the refetch lands and the
-      // field finalises, the preview becomes invisible automatically.
-      // The TTL below still cleans up if the stream is abandoned.
-      if (data.status === "clear" || data.answer === null) {
-        return;
-      }
+    // Backend sends "clear" right after the entity-invalidation
+    // broadcast, but the invalidation's refetch needs a network
+    // round-trip — clearing the preview synchronously here makes
+    // the cell flip preview → pending skeleton → final value, with
+    // the skeleton visible for the duration of the refetch. Hold
+    // the preview instead: CellResult only reads it while the
+    // field is still pending, so once the refetch lands and the
+    // field finalises, the preview becomes invisible automatically.
+    // The TTL below still cleans up if the stream is abandoned.
+    if (data.status === "clear" || data.answer === null) {
+      return;
+    }
 
-      const key = extractionPreviewKey(data.entityId, data.propertyId);
-      const previousTimer = previewClearTimersRef.current.get(key);
-      if (previousTimer !== undefined) {
-        clearTimeout(previousTimer);
-      }
+    const key = extractionPreviewKey(data.entityId, data.propertyId);
+    const previousTimer = previewClearTimersRef.current.get(key);
+    if (previousTimer !== undefined) {
+      clearTimeout(previousTimer);
+    }
 
-      workspaceStore.setExtractionPreview({
-        entityId: data.entityId,
-        propertyId: data.propertyId,
-        answer: data.answer,
-      });
+    workspaceStore.setExtractionPreview({
+      entityId: data.entityId,
+      propertyId: data.propertyId,
+      answer: data.answer,
+    });
 
-      const nextTimer = setTimeout(() => {
-        useWorkspaceStore
-          .getState()
-          .clearExtractionPreview(data.entityId, data.propertyId);
-        previewClearTimersRef.current.delete(key);
-      }, EXTRACTION_PREVIEW_CLIENT_TTL_MS);
-      previewClearTimersRef.current.set(key, nextTimer);
-    },
-    [],
-  );
+    const nextTimer = setTimeout(() => {
+      useWorkspaceStore
+        .getState()
+        .clearExtractionPreview(data.entityId, data.propertyId);
+      previewClearTimersRef.current.delete(key);
+    }, EXTRACTION_PREVIEW_CLIENT_TTL_MS);
+    previewClearTimersRef.current.set(key, nextTimer);
+  };
 
   // Subscribe to workspace SSE events for real-time query
   // invalidation (replaces the Rivet sync actor for this workspace).
@@ -226,6 +226,7 @@ function RouteComponent() {
   // they left them. PDF tabs from another matter will refetch
   // with their own workspaceId; chat tabs are workspace-tagged
   // so they only render under the matter they belong to.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id: clears timers + workspace store on matter switch (cleanup re-runs per workspaceId, not just unmount). This is a route component, so it can't take a key from a parent, and useMountEffect would only clean up on unmount.
   useEffect(
     () => () => {
       for (const timer of previewClearTimersRef.current.values()) {
@@ -262,9 +263,9 @@ function RouteComponent() {
   // can start a new conversation without first dismissing whatever
   // is currently open.
   const openChat = useInspectorStore((s) => s.openChat);
-  const handleOpenChat = useCallback(() => {
+  const handleOpenChat = () => {
     openChat({ workspaceId, contextMatterIds: [workspaceId] });
-  }, [openChat, workspaceId]);
+  };
   useHotkey(HOTKEYS.NEW_CHAT, handleOpenChat);
 
   // The right-side inspector pane (file viewers + chat tabs) is

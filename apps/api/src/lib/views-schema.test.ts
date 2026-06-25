@@ -3,12 +3,14 @@ import { describe, expect, test } from "bun:test";
 import fc from "fast-check";
 import * as v from "valibot";
 
+import { conditionNodeSchema } from "@stll/conditions";
+
+import { tConditionNode } from "@/api/lib/conditions/contract";
 import {
   parseViewLayout,
-  tViewFilterConditionSchema,
+  parseViewLayoutSafe,
   tViewLayoutSchema,
   tViewTemplatePropertySchema,
-  viewFilterConditionSchema,
   viewLayoutSchema,
 } from "@/api/lib/views-schema";
 import type { ViewLayout } from "@/api/lib/views-schema";
@@ -42,6 +44,72 @@ describe("parseViewLayout", () => {
   });
 });
 
+describe("parseViewLayoutSafe", () => {
+  test("returns a well-formed layout unchanged", () => {
+    const layout = {
+      version: 1,
+      type: "table",
+      filters: [],
+      sorts: [],
+      hiddenProperties: [],
+      columnOrder: ["name"],
+      columnPinning: [],
+    } satisfies ViewLayout;
+
+    expect(parseViewLayoutSafe(layout)).toEqual(layout);
+  });
+
+  test("recovers a layout whose filters use a retired grammar by dropping them", () => {
+    // Legacy ViewFilterCondition grammar (field/op/value) that the current AST
+    // schema no longer accepts.
+    const legacy = {
+      version: 1,
+      type: "table",
+      filters: [{ id: "f1", field: "kind", op: "in", value: ["document"] }],
+      sorts: [],
+      hiddenProperties: [],
+      columnOrder: ["name"],
+      columnPinning: ["name"],
+    };
+
+    // The strict parser now drops the unparseable legacy filters itself rather
+    // than throwing, keeping the table view with an empty filter set...
+    expect(parseViewLayout(legacy)).toEqual({
+      version: 1,
+      type: "table",
+      filters: [],
+      sorts: [],
+      hiddenProperties: [],
+      columnOrder: ["name"],
+      columnPinning: ["name"],
+    });
+
+    // ...and the safe parser returns the same recovered layout, so one legacy
+    // view can't fail the list.
+    expect(parseViewLayoutSafe(legacy)).toEqual({
+      version: 1,
+      type: "table",
+      filters: [],
+      sorts: [],
+      hiddenProperties: [],
+      columnOrder: ["name"],
+      columnPinning: ["name"],
+    });
+  });
+
+  test("falls back to a minimal layout for an unrecoverable value and never throws", () => {
+    expect(parseViewLayoutSafe({ type: "garbage" })).toEqual({
+      type: "filesystem",
+      version: 1,
+      filters: [],
+      sorts: [],
+      hiddenProperties: [],
+    });
+    expect(() => parseViewLayoutSafe(null)).not.toThrow();
+    expect(() => parseViewLayoutSafe("not a layout")).not.toThrow();
+  });
+});
+
 describe("view template property validation", () => {
   test("accepts saved AI properties with empty prompts", () => {
     expect(
@@ -62,53 +130,60 @@ describe("view template property validation", () => {
 // every layout and filter shape. Drift between them lets payloads slip past the
 // route validator and fail at parseViewLayout, or vice versa.
 
-const arbId = fc.string({ minLength: 1, maxLength: 16 });
 const arbPropertyId = fc.string({ minLength: 1, maxLength: 16 });
 const arbHiddenProperties = fc.array(fc.string({ maxLength: 16 }), {
   maxLength: 5,
 });
 
-const arbEntityKind = fc.constantFrom(
-  "document",
-  "folder",
-  "task",
-  "message",
-  "link",
-);
 const arbBuiltinField = fc.constantFrom("status", "priority");
-const arbStringOrArray = fc.oneof(
+const arbLiteralValue = fc.oneof(
   fc.string({ maxLength: 16 }),
+  fc.integer(),
+  fc.boolean(),
   fc.array(fc.string({ maxLength: 16 }), { maxLength: 4 }),
 );
 
-const arbFilter = fc.oneof(
+const arbRefOperand = fc.oneof(
   fc.record({
-    id: arbId,
-    field: fc.constant("kind" as const),
-    op: fc.constant("in" as const),
-    value: fc.array(arbEntityKind, { maxLength: 5 }),
+    type: fc.constant("property" as const),
+    propertyId: arbPropertyId,
   }),
-  fc.record(
-    {
-      id: arbId,
-      field: fc.constant("property" as const),
-      propertyId: arbPropertyId,
-      op: fc.constantFrom("eq", "neq", "contains", "is_empty"),
-      value: arbStringOrArray,
-    },
-    { requiredKeys: ["id", "field", "propertyId", "op"] },
-  ),
-  fc.record(
-    {
-      id: arbId,
-      field: fc.constant("builtin" as const),
-      builtinField: arbBuiltinField,
-      op: fc.constantFrom("eq", "neq", "in", "is_empty"),
-      value: arbStringOrArray,
-    },
-    { requiredKeys: ["id", "field", "builtinField", "op"] },
-  ),
+  fc.record({ type: fc.constant("builtin" as const), field: arbBuiltinField }),
+  fc.record({ type: fc.constant("kind" as const) }),
 );
+
+const arbLiteralOperand = fc.record({
+  type: fc.constant("literal" as const),
+  value: arbLiteralValue,
+});
+
+const arbCompareNode = fc.record({
+  type: fc.constant("compare" as const),
+  left: arbRefOperand,
+  op: fc.constantFrom("eq", "neq", "gt", "lt", "gte", "lte"),
+  right: arbLiteralOperand,
+});
+
+const arbPredicateNode = fc.record(
+  {
+    type: fc.constant("predicate" as const),
+    operand: arbRefOperand,
+    op: fc.constantFrom(
+      "is_empty",
+      "is_truthy",
+      "contains",
+      "contains_all",
+      "in",
+    ),
+    value: fc.oneof(
+      fc.string({ maxLength: 16 }),
+      fc.array(fc.string({ maxLength: 16 }), { maxLength: 4 }),
+    ),
+  },
+  { requiredKeys: ["type", "operand", "op"] },
+);
+
+const arbFilter = fc.oneof(arbCompareNode, arbPredicateNode);
 
 const arbSort = fc.record({
   propertyId: arbPropertyId,
@@ -218,12 +293,12 @@ const objectPrototypeKeys = new Set(
   Object.getOwnPropertyNames(Object.prototype),
 );
 
-describe("viewFilterConditionSchema — properties", () => {
-  test("Valibot and TypeBox agree on every well-formed filter", () => {
+describe("conditionNodeSchema — properties", () => {
+  test("Valibot and TypeBox agree on every well-formed condition node", () => {
     fc.assert(
       fc.property(arbFilter, (filter) => {
-        expect(v.is(viewFilterConditionSchema, filter)).toBe(true);
-        expect(Value.Check(tViewFilterConditionSchema, filter)).toBe(true);
+        expect(v.is(conditionNodeSchema, filter)).toBe(true);
+        expect(Value.Check(tConditionNode, filter)).toBe(true);
       }),
     );
   });

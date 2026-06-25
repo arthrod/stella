@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type React from "react";
 
 import { draggable } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
@@ -10,12 +10,15 @@ import {
   row_getIsSomeSelected,
 } from "@tanstack/react-table/static-functions";
 import { ChevronRightIcon, FolderIcon, FolderOpenIcon } from "lucide-react";
+import { useTranslations } from "use-intl";
 
 import { Checkbox } from "@stll/ui/components/checkbox";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 import { cn } from "@stll/ui/lib/utils";
 
 import { renderDragPreview } from "@/components/drag-preview";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
 import { ENTITY_DRAG_TYPE } from "@/routes/_protected.workspaces/$workspaceId/-components/drag-constants";
 import { InlineEdit } from "@/routes/_protected.workspaces/$workspaceId/-components/inline-edit";
@@ -97,7 +100,7 @@ const useActiveCellFlash = ({
 }: ActiveCellFlashInput) => {
   const previousCellActivationSeq = useRef(activationSeq);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const rowElement = rowRef.current;
     if (
       !rowElement ||
@@ -201,6 +204,8 @@ export const DraggableRow = ({
   onToggleExpandedCell,
 }: DraggableRowProps) => {
   const rowRef = useRef<HTMLDivElement>(null);
+  // Stable ref callback so React doesn't re-run TanStack Virtual's
+  // measureElement on every render.
   const setRowRef = useCallback(
     (element: HTMLDivElement | null) => {
       rowRef.current = element;
@@ -364,13 +369,13 @@ export const DraggableRow = ({
     </>
   );
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (rowRef.current) {
       measureElement(rowRef.current);
     }
   }, [contentMode, expandedCellId, measureElement]);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = rowRef.current;
     if (!el) {
       return undefined;
@@ -761,9 +766,11 @@ const FolderCell = ({
   onStopEditing,
   onRename,
 }: FolderCellProps) => {
+  const t = useTranslations("workspaces.table");
   const name = getEntityName(entity);
   const isEditing = editingEntityId === entity.entityId;
   const [editValue, setEditValue] = useState(name);
+  const rowToggleLabel = isExpanded ? t("collapseRow") : t("expandRow");
 
   const commitRename = () => {
     onStopEditing();
@@ -780,12 +787,19 @@ const FolderCell = ({
         paddingLeft: depth > 0 ? `${depth * 20}px` : undefined,
       }}
     >
-      <button className="flex shrink-0 items-center" type="button">
-        <ChevronRightIcon
+      <button
+        aria-label={rowToggleLabel}
+        className="flex shrink-0 items-center"
+        title={rowToggleLabel}
+        type="button"
+      >
+        <DirectionalIcon
           className={cn(
             "size-3.5 transition-transform",
             isExpanded && "rotate-90",
           )}
+          flip={!isExpanded}
+          icon={ChevronRightIcon}
         />
       </button>
       {isExpanded ? (
@@ -807,6 +821,7 @@ const FolderCell = ({
       ) : (
         <button
           className="truncate text-start text-sm"
+          dir="auto"
           onDoubleClick={(e) => {
             e.stopPropagation();
             setEditValue(name);

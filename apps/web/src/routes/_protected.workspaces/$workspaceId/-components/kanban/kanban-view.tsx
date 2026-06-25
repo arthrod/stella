@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 
 import { autoScrollForElements } from "@atlaskit/pragmatic-drag-and-drop-auto-scroll/element";
@@ -19,20 +19,24 @@ import { useTranslations } from "use-intl";
 import type { OptionColor } from "@stll/api/types";
 import { stellaToast } from "@stll/ui/components/toast";
 
+import { useMountEffect } from "@/hooks/use-effect";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { toSafeId } from "@/lib/safe-id";
-import type { EntityKind, WorkspaceProperty, WorkspaceView } from "@/lib/types";
+import type { EntityKind, WorkspaceView } from "@/lib/types";
 // -- Auto-scrolling board container with forgiving column drop --
 import { COLUMN_DRAG_TYPE } from "@/routes/_protected.workspaces/$workspaceId/-components/drag-constants";
 import { EmptyState } from "@/routes/_protected.workspaces/$workspaceId/-components/empty-state";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
 import { KanbanColumn } from "@/routes/_protected.workspaces/$workspaceId/-components/kanban/kanban-column";
 import {
+  getEntityGroups,
   getKanbanGroupingPropertyId,
+  resolveGroupOptions,
   resolveKanbanGrouping,
+  TASK_STATUS_ORDER,
 } from "@/routes/_protected.workspaces/$workspaceId/-components/kanban/kanban-view.logic";
-import { resolveOptionColor } from "@/routes/_protected.workspaces/$workspaceId/-components/utils";
+import type { EntityGroup } from "@/routes/_protected.workspaces/$workspaceId/-components/kanban/kanban-view.logic";
 import {
   uploadFileEntitiesBatched,
   useBatchUploadLabels,
@@ -144,6 +148,10 @@ export const KanbanView = ({ view, workspaceId }: KanbanViewProps) => {
 
   // Reset local column order when the groupBy property changes so stale
   // column positions from the previous grouping don't leak through.
+  // A `key` on the parent would remount the whole view and also wipe
+  // `hiddenGroups` (which must survive a groupBy change), so this stays a
+  // scoped reset instead of a lift-to-key.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id resetting only localColumnOrder; lift-to-key would over-reset (also clears hiddenGroups) and the parent render site is out of scope
   useEffect(() => {
     setLocalColumnOrder([]);
   }, [configuredGroupBy]);
@@ -248,6 +256,24 @@ export const KanbanView = ({ view, workspaceId }: KanbanViewProps) => {
     );
   }
 
+  // A Kanban card belongs to one column, and drop/upload write a single-select
+  // value to the grouping property, so the property must be single-select. A
+  // persisted multi-select grouping (from before the picker was mode-specific,
+  // or after a property type change) would render columns no card can move into,
+  // so fall back to the property prompt.
+  if (
+    grouping.type === "property" &&
+    grouping.property.content.type !== "single-select"
+  ) {
+    return (
+      <EmptyState
+        hint={t("workspaces.kanban.usePropertyHint")}
+        icon={KanbanIcon}
+        message={t("workspaces.kanban.selectPropertyHint")}
+      />
+    );
+  }
+
   // -- Unified grouping: resolve options, then render one board --
 
   const statusLabels: Record<string, string> = isStatusGrouping
@@ -263,21 +289,12 @@ export const KanbanView = ({ view, workspaceId }: KanbanViewProps) => {
     link: t("search.kinds.link"),
   };
 
-  const options: GroupOption[] = (() => {
-    if (isStatusGrouping) {
-      return getStatusGroupOptions(statusLabels);
-    }
-    if (isBuiltInGrouping) {
-      return getBuiltInGroupOptions({
-        labels: entityKindLabels,
-        mode: groupByPropertyId,
-      });
-    }
-    if (groupByProperty && isGroupableProperty(groupByProperty)) {
-      return getGroupOptions(groupByProperty);
-    }
-    return [];
-  })();
+  const options = resolveGroupOptions({
+    grouping,
+    groupByPropertyId,
+    statusLabels,
+    entityKindLabels,
+  });
 
   const groups = getEntityGroups(options, t("common.uncategorized"));
 
@@ -641,10 +658,13 @@ const KanbanBoard = ({ children, onReorderColumn }: KanbanBoardProps) => {
   // Track the last valid drop position so drops in the
   // gap between columns still work (monitors always fire).
   const lastPosition = useRef<ColumnDragPosition | null>(null);
-  const onReorderRef = useRef(onReorderColumn);
-  onReorderRef.current = onReorderColumn;
+  const handleColumnReorder = useEffectEvent(
+    (sourceValue: string, targetValue: string, edge: Edge | null) => {
+      onReorderColumn?.(sourceValue, targetValue, edge);
+    },
+  );
 
-  useEffect(() => {
+  useMountEffect(() => {
     const el = scrollRef.current;
     if (!el) {
       return undefined;
@@ -688,12 +708,12 @@ const KanbanBoard = ({ children, onReorderColumn }: KanbanBoardProps) => {
           const pos = lastPosition.current;
           lastPosition.current = null;
           if (pos) {
-            onReorderRef.current?.(pos.sourceValue, pos.targetValue, pos.edge);
+            handleColumnReorder(pos.sourceValue, pos.targetValue, pos.edge);
           }
         },
       }),
     );
-  }, []);
+  });
 
   return (
     <div className="flex h-full gap-4 overflow-x-auto p-4" ref={scrollRef}>
@@ -701,119 +721,3 @@ const KanbanBoard = ({ children, onReorderColumn }: KanbanBoardProps) => {
     </div>
   );
 };
-
-// -- Helpers --
-
-const isGroupableProperty = (property: WorkspaceProperty) =>
-  property.content.type === "single-select" ||
-  property.content.type === "multi-select";
-
-type GroupOption = {
-  value: string;
-  label: string;
-  color?: string;
-  colorBg?: string;
-  optionColor?: OptionColor;
-};
-
-const getGroupOptions = (property: WorkspaceProperty): GroupOption[] => {
-  if (
-    property.content.type === "single-select" ||
-    property.content.type === "multi-select"
-  ) {
-    return property.content.options.map((opt) => ({
-      value: opt.value,
-      label: opt.value,
-      color: resolveOptionColor(opt.color).color,
-      colorBg: resolveOptionColor(opt.color).background,
-      optionColor: opt.color,
-    }));
-  }
-
-  return [];
-};
-
-type EntityGroup = {
-  value: string | null;
-  label: string;
-  color?: string | undefined;
-  colorBg?: string | undefined;
-  optionColor?: OptionColor | undefined;
-};
-
-const getEntityGroups = (
-  options: GroupOption[],
-  uncategorizedLabel: string,
-): EntityGroup[] => {
-  const result: EntityGroup[] = options.map((opt) => ({
-    value: opt.value,
-    label: opt.label,
-    color: opt.color,
-    colorBg: opt.colorBg,
-    optionColor: opt.optionColor,
-  }));
-  result.push({ value: null, label: uncategorizedLabel });
-  return result;
-};
-
-/** All task statuses in the order they should appear as kanban columns. */
-const TASK_STATUS_ORDER = [
-  "open",
-  "in_progress",
-  "in_review",
-  "done",
-  "cancelled",
-] as const;
-
-/** Map task status to kanban option colors. */
-const STATUS_OPTION_COLORS: Record<string, OptionColor> = {
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- OptionColor domain constant, not a CSS color value
-  open: "gray",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- OptionColor domain constant, not a CSS color value
-  in_progress: "blue",
-  in_review: "amber",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- OptionColor domain constant, not a CSS color value
-  done: "green",
-  // eslint-disable-next-line no-inline-style-colors/no-inline-style-colors -- OptionColor domain constant, not a CSS color value
-  cancelled: "red",
-};
-
-/** Build GroupOption[] for task status kanban. */
-const getStatusGroupOptions = (labels: Record<string, string>): GroupOption[] =>
-  TASK_STATUS_ORDER.map((status) => {
-    const optColor = STATUS_OPTION_COLORS[status] ?? "gray";
-    return {
-      value: status,
-      label: labels[status] ?? status,
-      color: resolveOptionColor(optColor).color,
-      colorBg: resolveOptionColor(optColor).background,
-      optionColor: optColor,
-    };
-  });
-
-type EntityKindLabels = Record<
-  "document" | "folder" | "task" | "message" | "link",
-  string
->;
-
-const getEntityKindGroupOptions = (labels: EntityKindLabels): GroupOption[] => [
-  { value: "document", label: labels.document },
-  { value: "folder", label: labels.folder },
-  { value: "task", label: labels.task },
-  { value: "message", label: labels.message },
-  { value: "link", label: labels.link },
-];
-
-type BuiltInGroupOptionsParams = {
-  labels: EntityKindLabels;
-  mode: string;
-};
-
-/** Build GroupOption[] for read-only built-in groupings. */
-const getBuiltInGroupOptions = ({
-  labels,
-  mode,
-}: BuiltInGroupOptionsParams): GroupOption[] =>
-  mode === getInternalPropertyId("kind")
-    ? getEntityKindGroupOptions(labels)
-    : [];

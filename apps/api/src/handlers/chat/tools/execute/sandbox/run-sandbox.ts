@@ -279,10 +279,11 @@ const flushSandboxAdmissionQueue = (): void => {
   }
 
   let queueIndex = 0;
-  while (
-    queueIndex < sandboxAdmissionQueue.length &&
-    activeSandboxCount < MAX_CONCURRENT_SANDBOXES
-  ) {
+  while (queueIndex < sandboxAdmissionQueue.length) {
+    if (activeSandboxCount >= MAX_CONCURRENT_SANDBOXES) {
+      return;
+    }
+
     const waiter = sandboxAdmissionQueue[queueIndex];
     if (!waiter || !canAdmitSandbox(waiter.concurrencyKey)) {
       queueIndex += 1;
@@ -642,7 +643,7 @@ type RunHostCallProps = {
   parsedArgs: unknown;
 };
 
-// oxlint-disable-next-line typescript/promise-function-async
+// oxlint-disable-next-line typescript/promise-function-async -- must synchronously build and return the workPromise reference registered in pendingHostWork
 const runHostCall = ({
   ctx,
   deferred,
@@ -843,6 +844,7 @@ const driveVmUntilSettled = async ({
     }
 
     if (state.pendingHostWork.size > 0) {
+      // oxlint-disable-next-line no-await-in-loop -- VM event loop: must wait for host progress before pumping the next VM step
       const waitResult = await waitForHostProgress({
         pendingHostWork: state.pendingHostWork,
         deadline,
@@ -860,6 +862,7 @@ const driveVmUntilSettled = async ({
       continue;
     }
 
+    // oxlint-disable-next-line no-await-in-loop -- VM event loop: yields the microtask queue before pumping the next VM step
     await Promise.resolve();
   }
 };

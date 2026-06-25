@@ -1,8 +1,12 @@
+import type { ReactNode } from "react";
+
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ChevronRightIcon } from "lucide-react";
-import { useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 import { useShallow } from "zustand/shallow";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { Frame } from "@stll/ui/components/frame";
 import {
   SortableHead,
@@ -15,7 +19,7 @@ import {
 } from "@stll/ui/components/table";
 import { cn } from "@stll/ui/lib/utils";
 
-import { useI18nStore } from "@/i18n/i18n-store";
+import { getFormattingLocale } from "@/i18n/i18n-store";
 import { getMatterColor } from "@/lib/matter-colors";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { InlineEdit } from "@/routes/_protected.workspaces/$workspaceId/-components/inline-edit";
@@ -41,6 +45,7 @@ import { useConfigStore } from "@/stores/config-store";
 
 const MAX_VISIBLE_AVATARS = 3;
 const MATTER_INLINE_EDIT_SELECTOR = "[data-matter-inline-edit]";
+const MATTERS_TABLE_NAME_COLUMN_WIDTH_PX = 260;
 
 type MattersTableProps = {
   workspaces: Workspace[];
@@ -80,8 +85,12 @@ export const MattersTable = ({
   const columns = COLUMNS.filter((col) =>
     col.id === "name" ? true : visibleColumnSet.has(col.id),
   );
+  const minTableWidth = columns.reduce(
+    (sum, column) => sum + column.widthPx,
+    0,
+  );
 
-  const filterTrigger = (id: string) => {
+  const filterTrigger = (id: ColumnDef["id"]) => {
     if (!isFilterableColumnId(id)) {
       return null;
     }
@@ -89,81 +98,83 @@ export const MattersTable = ({
   };
 
   return (
-    <Frame>
-      <Table className="table-fixed">
-        <colgroup>
-          {columns.map((col) => (
-            <col
-              key={col.id}
-              style={col.width ? { width: col.width } : undefined}
-            />
-          ))}
-        </colgroup>
-        <TableHeader>
-          <TableRow>
-            {columns.map((col) => {
-              const trailing = filterTrigger(col.id);
-              if (!col.sortKey) {
-                return (
-                  <TableHead className="group/header" key={col.id}>
-                    <span className="inline-flex items-center gap-1">
-                      <span className="truncate">{columnLabels[col.id]}</span>
-                      {trailing}
-                    </span>
-                  </TableHead>
-                );
-              }
-              const key = col.sortKey;
-              const direction: "asc" | "desc" | null = (() => {
-                if (sortKey !== key) {
-                  return null;
+    <Frame className="overflow-hidden rounded-lg sm:rounded-2xl">
+      <div className="overflow-x-auto">
+        <Table
+          className="table-fixed"
+          style={{ minWidth: `${minTableWidth}px` }}
+        >
+          <colgroup>
+            {columns.map((col) => (
+              <col key={col.id} style={{ width: `${col.widthPx}px` }} />
+            ))}
+          </colgroup>
+          <TableHeader>
+            <TableRow>
+              {columns.map((col) => {
+                const trailing = filterTrigger(col.id);
+                if (col.type === "static") {
+                  return (
+                    <TableHead className="group/header" key={col.id}>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="truncate">{columnLabels[col.id]}</span>
+                        {trailing}
+                      </span>
+                    </TableHead>
+                  );
                 }
-                return sortDesc ? "desc" : "asc";
-              })();
-              return (
-                <SortableHead
-                  className="group/header"
-                  key={col.id}
-                  onSort={() => {
-                    if (sortKey === key) {
-                      update({ sortDesc: !sortDesc });
-                    } else {
-                      update({ sortKey: key, sortDesc: true });
-                    }
-                  }}
-                  sortDirection={direction}
-                  trailing={trailing}
-                >
-                  {sortLabels[key]}
-                </SortableHead>
-              );
-            })}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {groups && groups.length > 0
-            ? groups.map((group) => (
-                <MattersTableGroup
-                  collapsed={collapsedGroups.includes(group.groupId)}
-                  columns={columns}
-                  focusIndex={focusIndex}
-                  group={group}
-                  key={group.groupId}
-                  onToggle={() => onToggleGroup(group.groupId)}
-                  workspaces={workspaces}
-                />
-              ))
-            : workspaces.map((ws, i) => (
-                <MattersTableRow
-                  columns={columns}
-                  focusIndex={focusIndex}
-                  globalIndex={i}
-                  key={ws.id}
-                  workspace={ws}
-                />
-              ))}
-        </TableBody>
-      </Table>
+                const key = col.sortKey;
+                const direction: "asc" | "desc" | null = (() => {
+                  if (sortKey !== key) {
+                    return null;
+                  }
+                  return sortDesc ? "desc" : "asc";
+                })();
+                return (
+                  <SortableHead
+                    className="group/header"
+                    key={col.id}
+                    onSort={() => {
+                      if (sortKey === key) {
+                        update({ sortDesc: !sortDesc });
+                      } else {
+                        update({ sortKey: key, sortDesc: true });
+                      }
+                    }}
+                    sortDirection={direction}
+                    trailing={trailing}
+                  >
+                    {sortLabels[key]}
+                  </SortableHead>
+                );
+              })}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {groups && groups.length > 0
+              ? groups.map((group) => (
+                  <MattersTableGroup
+                    collapsed={collapsedGroups.includes(group.groupId)}
+                    columns={columns}
+                    focusIndex={focusIndex}
+                    group={group}
+                    key={group.groupId}
+                    onToggle={() => onToggleGroup(group.groupId)}
+                    workspaces={workspaces}
+                  />
+                ))
+              : workspaces.map((ws, i) => (
+                  <MattersTableRow
+                    columns={columns}
+                    focusIndex={focusIndex}
+                    globalIndex={i}
+                    key={ws.id}
+                    workspace={ws}
+                  />
+                ))}
+          </TableBody>
+        </Table>
+      </div>
     </Frame>
   );
 };
@@ -178,7 +189,9 @@ const NameCell = ({ workspace }: CellProps) => (
         backgroundColor: getMatterColor(workspace.id),
       }}
     />
-    <span className="truncate font-medium">{workspace.name}</span>
+    <BidiText as="span" className="truncate font-medium">
+      {workspace.name}
+    </BidiText>
   </div>
 );
 
@@ -192,9 +205,9 @@ const ClientCell = ({ workspace }: CellProps) => {
     );
   }
   return (
-    <span className="text-muted-foreground block truncate">
+    <BidiText as="span" className="text-muted-foreground block truncate">
       {workspace.client.displayName}
-    </span>
+    </BidiText>
   );
 };
 
@@ -204,26 +217,29 @@ const ReferenceCell = ({ workspace }: CellProps) => (
   </span>
 );
 
-const EntityCountCell = ({ workspace }: CellProps) => (
-  <span className="text-muted-foreground tabular-nums">
-    {workspace.entityCount}
-  </span>
-);
-
-const LastActivityCell = ({ workspace }: CellProps) => {
-  const lang = useI18nStore((s) => s.lang);
+const EntityCountCell = ({ workspace }: CellProps) => {
+  const format = useFormatter();
   return (
-    <span
-      className="text-muted-foreground"
-      title={new Date(workspace.lastActivityAt).toLocaleString(lang, {
-        dateStyle: "full",
-        timeStyle: "medium",
-      })}
-    >
-      {formatRelativeTime(workspace.lastActivityAt, lang)}
+    <span className="text-muted-foreground tabular-nums">
+      {format.number(workspace.entityCount)}
     </span>
   );
 };
+
+const LastActivityCell = ({ workspace }: CellProps) => (
+  <span
+    className="text-muted-foreground"
+    title={new Date(workspace.lastActivityAt).toLocaleString(
+      getFormattingLocale(),
+      {
+        dateStyle: "full",
+        timeStyle: "medium",
+      },
+    )}
+  >
+    {formatRelativeTime(workspace.lastActivityAt)}
+  </span>
+);
 
 /** Format a Date as `YYYY-MM-DD` in local time (locale-neutral, ISO-style). */
 const toLocalISODate = (date: Date): string => {
@@ -234,20 +250,23 @@ const toLocalISODate = (date: Date): string => {
 };
 
 const TeamCell = ({ workspace }: CellProps) => (
-  <TeamAvatars
-    leadUserId={workspace.leadUserId}
-    maxVisible={MAX_VISIBLE_AVATARS}
-    members={workspace.members}
-  />
+  <div className="flex min-w-0 justify-end sm:justify-start">
+    <TeamAvatars
+      leadUserId={workspace.leadUserId}
+      maxVisible={MAX_VISIBLE_AVATARS}
+      members={workspace.members}
+      size="size-5 sm:size-6"
+      textSize="text-[0.55rem] sm:text-[0.625rem]"
+    />
+  </div>
 );
 
 const CreatedAtCell = ({ workspace }: CellProps) => {
-  const lang = useI18nStore((s) => s.lang);
   const date = new Date(workspace.createdAt);
   return (
     <span
       className="text-muted-foreground tabular-nums"
-      title={date.toLocaleString(lang, {
+      title={date.toLocaleString(getFormattingLocale(), {
         dateStyle: "full",
         timeStyle: "medium",
       })}
@@ -259,22 +278,23 @@ const CreatedAtCell = ({ workspace }: CellProps) => {
 
 type ColumnDef =
   | {
+      type: "sortable";
       id: MattersColumnId | "name";
       sortKey: MattersSortKey;
-      width?: string;
-      Cell: (props: CellProps) => React.ReactNode;
+      widthPx: number;
+      Cell: (props: CellProps) => ReactNode;
     }
   | {
+      type: "static";
       id: MattersColumnId;
-      sortKey?: undefined;
-      width?: string;
-      Cell: (props: CellProps) => React.ReactNode;
+      widthPx: number;
+      Cell: (props: CellProps) => ReactNode;
     };
 
 type MattersTableRowProps = {
   workspace: Workspace;
   globalIndex: number;
-  columns: ColumnDef[];
+  columns: readonly ColumnDef[];
   focusIndex: number;
 };
 
@@ -366,40 +386,56 @@ const MattersTableRow = ({
   );
 };
 
-const COLUMNS: ColumnDef[] = [
-  { id: "name", sortKey: "name", Cell: NameCell },
-  { id: "client", sortKey: "clientName", width: "240px", Cell: ClientCell },
-  { id: "team", width: "160px", Cell: TeamCell },
+const COLUMNS = [
   {
+    type: "sortable",
+    id: "name",
+    sortKey: "name",
+    widthPx: MATTERS_TABLE_NAME_COLUMN_WIDTH_PX,
+    Cell: NameCell,
+  },
+  {
+    type: "sortable",
+    id: "client",
+    sortKey: "clientName",
+    widthPx: 240,
+    Cell: ClientCell,
+  },
+  { type: "static", id: "team", widthPx: 160, Cell: TeamCell },
+  {
+    type: "sortable",
     id: "reference",
     sortKey: "reference",
-    width: "120px",
+    widthPx: 120,
     Cell: ReferenceCell,
   },
   {
+    type: "sortable",
     id: "entityCount",
     sortKey: "entityCount",
-    width: "96px",
+    widthPx: 96,
     Cell: EntityCountCell,
   },
   {
+    type: "sortable",
     id: "lastActivityAt",
     sortKey: "lastActivityAt",
-    width: "140px",
+    widthPx: 140,
     Cell: LastActivityCell,
   },
   {
+    type: "sortable",
     id: "createdAt",
     sortKey: "createdAt",
-    width: "120px",
+    widthPx: 120,
     Cell: CreatedAtCell,
   },
-];
+] as const satisfies readonly ColumnDef[];
 
 type MattersTableGroupProps = {
   group: WorkspaceGroup;
   workspaces: Workspace[];
-  columns: ColumnDef[];
+  columns: readonly ColumnDef[];
   focusIndex: number;
   collapsed: boolean;
   onToggle: () => void;
@@ -414,6 +450,7 @@ const MattersTableGroup = ({
   onToggle,
 }: MattersTableGroupProps) => {
   const t = useTranslations();
+  const format = useFormatter();
   const firstWs = group.workspaces.at(0);
 
   if (!firstWs) {
@@ -433,11 +470,13 @@ const MattersTableGroup = ({
           colSpan={columns.length}
         >
           <div className="flex items-center gap-2">
-            <ChevronRightIcon
+            <DirectionalIcon
               className={cn(
                 "text-muted-foreground size-3.5 shrink-0 transition-transform",
                 !collapsed && "rotate-90",
               )}
+              flip={collapsed}
+              icon={ChevronRightIcon}
             />
             {group.type === "client" && (
               <span
@@ -460,7 +499,7 @@ const MattersTableGroup = ({
                 params={{ contactId: group.clientId }}
                 to="/contacts/$contactId"
               >
-                {group.clientName}
+                <BidiText>{group.clientName}</BidiText>
               </Link>
             )}
             <span
@@ -469,7 +508,7 @@ const MattersTableGroup = ({
                 "text-muted-foreground text-[0.625rem] tabular-nums",
               )}
             >
-              {group.workspaces.length}
+              {format.number(group.workspaces.length)}
             </span>
             {group.type === "client" && group.responsibleAttorneyName && (
               <span className="text-muted-foreground ms-auto truncate text-xs font-normal">

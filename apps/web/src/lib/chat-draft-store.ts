@@ -90,6 +90,33 @@ export const createChatDraftState = (
   updatedAt: overrides?.updatedAt ?? Date.now(),
 });
 
+export const areDraftDocsEqual = (
+  left: JSONContent,
+  right: JSONContent,
+): boolean => JSON.stringify(left) === JSON.stringify(right);
+
+type NextDraftForEditorUpdateOptions = {
+  attachments: ChatDraftAttachment[];
+  nextDoc: JSONContent;
+  storedDoc: JSONContent;
+};
+
+// Decides whether a tiptap `update` event should be persisted to the draft
+// store. Returns `null` for no-op updates whose document matches what is
+// already stored: tiptap emits `update` even for transactions that leave the
+// document unchanged (e.g. editor props re-applied while the page re-renders
+// during response streaming). Persisting an identical draft would churn the
+// store entry's reference, retrigger the editor's onUpdate, and loop until
+// React's max-update-depth guard throws. Only genuine edits yield a new state.
+export const nextDraftForEditorUpdate = ({
+  attachments,
+  nextDoc,
+  storedDoc,
+}: NextDraftForEditorUpdateOptions): ChatDraftState | null =>
+  areDraftDocsEqual(nextDoc, storedDoc)
+    ? null
+    : createChatDraftState({ attachments, doc: nextDoc });
+
 export const useChatDraftStore = create<ChatDraftStore>((set, get) => ({
   clearDraft: (threadKey) =>
     set((state) => {
@@ -127,3 +154,33 @@ export const useChatDraftStore = create<ChatDraftStore>((set, get) => ({
 
 export const getChatDraft = (threadRef: ChatThreadRef): ChatDraftState | null =>
   useChatDraftStore.getState().getDraft(getChatThreadKey(threadRef));
+
+const isEmptyDoc = (draft: ChatDraftState): boolean => {
+  if (draft.doc.type !== "doc") {
+    return false;
+  }
+  const nodes = draft.doc.content;
+  if (!nodes || nodes.length !== 1) {
+    return false;
+  }
+  const [only] = nodes;
+  // A paragraph with children (text, mentions, pasted-text chips) is not empty.
+  return only?.type === "paragraph" && (only.content?.length ?? 0) === 0;
+};
+
+const isDraftEmpty = (draft: ChatDraftState | null): boolean => {
+  if (!draft) {
+    return true;
+  }
+  return draft.attachments.length === 0 && isEmptyDoc(draft);
+};
+
+export const isChatDraftEmpty = (threadRef: ChatThreadRef): boolean =>
+  isDraftEmpty(getChatDraft(threadRef));
+
+export const useIsChatDraftEmpty = (threadRef: ChatThreadRef): boolean => {
+  const threadKey = getChatThreadKey(threadRef);
+  return useChatDraftStore((state) =>
+    isDraftEmpty(state.draftsByThreadKey[threadKey] ?? null),
+  );
+};

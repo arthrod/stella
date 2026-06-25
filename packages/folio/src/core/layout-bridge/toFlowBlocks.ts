@@ -8,6 +8,7 @@
 import type { Node as PMNode, Mark } from "prosemirror-model";
 
 import { convertBulletToUnicode } from "../docx/bulletMarkers";
+import { padDecimal } from "../docx/numberingParser";
 import type {
   FlowBlock,
   ParagraphBlock,
@@ -61,6 +62,7 @@ import {
   expectTrackedChangeMarkAttrs,
   expectUnderlineMarkAttrs,
 } from "../prosemirror/attrs";
+import { autospacingMatchesBase } from "../prosemirror/autospacingBase";
 import { runShadingAttrsToShading } from "../prosemirror/conversion/runShadingMark";
 import type { RunFormattingOverrideAttrs } from "../prosemirror/schema/marks";
 import type {
@@ -79,6 +81,7 @@ import { NUMBER_FORMAT_VALUES } from "../types/documentEnumValues";
 import { resolveColor, resolveHighlightToCss } from "../utils/colorResolver";
 import { resolveShadingFill } from "../utils/formatToStyle";
 import {
+  AUTO_PARAGRAPH_SPACING_PX,
   pointsToPixels,
   halfPointsToPixels,
   halfPointsToPoints,
@@ -257,7 +260,13 @@ export function formatCounter(
     case "lowerLetter":
       return toLetter(value, false);
     case "decimalZero":
-      return value < 10 ? `0${value}` : String(value);
+      return padDecimal(value, 2);
+    case "decimalZero3":
+      return padDecimal(value, 3);
+    case "decimalZero4":
+      return padDecimal(value, 4);
+    case "decimalZero5":
+      return padDecimal(value, 5);
     case "none":
       return "";
     default:
@@ -271,8 +280,12 @@ export function resolveListTemplate(
   levelFormats: NumberFormat[] | undefined,
   forceDecimal = false,
 ): string {
-  return template.replace(/%(\d)([.):\]])?/gu, (_match, digit, punct = "") => {
-    const index = Number.parseInt(String(digit), 10) - 1;
+  return template.replace(/%(?<digit>\d)(?<punct>[.):\]])?/gu, (...args) => {
+    const { digit, punct = "" } = args.at(-1) as {
+      digit: string;
+      punct?: string;
+    };
+    const index = Number.parseInt(digit, 10) - 1;
     if (index < 0) {
       return "";
     }
@@ -280,7 +293,7 @@ export function resolveListTemplate(
       counters[index] ?? 0,
       forceDecimal ? "decimal" : levelFormats?.[index],
     );
-    return formatted ? `${formatted}${String(punct)}` : "";
+    return formatted ? `${formatted}${punct}` : "";
   });
 }
 
@@ -412,6 +425,7 @@ function extractRunFormatting(
   theme?: Theme | null,
 ): RunFormatting {
   const formatting: RunFormatting = {};
+  let hasNoteRef = false;
 
   for (const mark of marks) {
     switch (mark.type.name) {
@@ -497,6 +511,9 @@ function extractRunFormatting(
         const font = attrs.ascii || attrs.hAnsi;
         if (font) {
           formatting.fontFamily = font;
+        }
+        if (attrs.eastAsia) {
+          formatting.eastAsiaFontFamily = attrs.eastAsia;
         }
         break;
       }
@@ -591,7 +608,11 @@ function extractRunFormatting(
       }
 
       case "footnoteRef": {
+        hasNoteRef = true;
         const attrs = expectFootnoteRefMarkAttrs(mark);
+        if (attrs.vertAlign === "superscript") {
+          formatting.superscript = true;
+        }
         const id =
           typeof attrs.id === "string"
             ? Number.parseInt(attrs.id, 10)
@@ -639,6 +660,10 @@ function extractRunFormatting(
       default:
         break;
     }
+  }
+
+  if (hasNoteRef && formatting.subscript) {
+    delete formatting.superscript;
   }
 
   return formatting;
@@ -735,6 +760,12 @@ function paragraphRunDefaults(
     defaultTextFormatting.fontFamily?.hAnsi;
   if (fontFamily) {
     result.fontFamily = fontFamily;
+  }
+  // East-Asian font inherited from the paragraph style / docDefaults, so CJK
+  // runs without a direct `w:eastAsia` still get per-character EA selection. A
+  // run's own fontFamily mark overrides this via mergeRunFormatting.
+  if (defaultTextFormatting.fontFamily?.eastAsia) {
+    result.eastAsiaFontFamily = defaultTextFormatting.fontFamily.eastAsia;
   }
   if (defaultTextFormatting.fontSize !== undefined) {
     result.fontSize = defaultTextFormatting.fontSize / 2;
@@ -1399,40 +1430,62 @@ function convertParagraphAttrs(
     // default to no alignment set (inherits from style or defaults to left)
   }
 
-  // Spacing
+  // Spacing. HTML-origin auto spacing (w:beforeAutospacing/afterAutospacing)
+  // renders Word's ~14px auto gap, overriding the imported before/after (which
+  // Word writes as `0`) — surface it here so pagination matches the rendered
+  // margins (eigenpal/docx-editor#823). But only while the effective spacing
+  // still matches the import baseline; any later command or style change that
+  // writes a different spacing value must win over the stale auto-spacing flag.
   const spaceBefore = pmAttrs.spaceBefore;
   const spaceAfter = pmAttrs.spaceAfter;
   const lineSpacing = pmAttrs.lineSpacing;
+  const autoBefore = autospacingMatchesBase(
+    pmAttrs._autospacingBase,
+    "before",
+    spaceBefore,
+  );
+  const autoAfter = autospacingMatchesBase(
+    pmAttrs._autospacingBase,
+    "after",
+    spaceAfter,
+  );
   if (
+    autoBefore ||
+    autoAfter ||
     typeof spaceBefore === "number" ||
     typeof spaceAfter === "number" ||
     typeof lineSpacing === "number"
   ) {
     attrs.spacing = {};
-    if (typeof spaceBefore === "number") {
+    if (autoBefore) {
+      attrs.spacing.before = AUTO_PARAGRAPH_SPACING_PX;
+    } else if (typeof spaceBefore === "number") {
       attrs.spacing.before = twipsToPixels(spaceBefore);
     }
-    if (typeof spaceAfter === "number") {
+    if (autoAfter) {
+      attrs.spacing.after = AUTO_PARAGRAPH_SPACING_PX;
+    } else if (typeof spaceAfter === "number") {
       attrs.spacing.after = twipsToPixels(spaceAfter);
     }
     // Propagate the `spacingExplicit` flag the PM schema carries — empty
     // paragraphs inherit zero spacing unless the side was set inline (Word
-    // fidelity, eigenpal #402).
+    // fidelity, eigenpal #402). Auto spacing counts as explicit: an imported
+    // empty paragraph whose only spacing is `w:beforeAutospacing`/
+    // `afterAutospacing` must keep the ~14px gap rather than collapse to zero
+    // (eigenpal/docx-editor#823).
     const pmSpacingExplicit = pmAttrs.spacingExplicit as
       | { before?: boolean; after?: boolean }
       | null
       | undefined;
-    if (pmSpacingExplicit) {
-      const explicit: { before?: boolean; after?: boolean } = {};
-      if (pmSpacingExplicit.before) {
-        explicit.before = true;
-      }
-      if (pmSpacingExplicit.after) {
-        explicit.after = true;
-      }
-      if (explicit.before !== undefined || explicit.after !== undefined) {
-        attrs.spacingExplicit = explicit;
-      }
+    const explicit: { before?: boolean; after?: boolean } = {};
+    if (autoBefore || pmSpacingExplicit?.before) {
+      explicit.before = true;
+    }
+    if (autoAfter || pmSpacingExplicit?.after) {
+      explicit.after = true;
+    }
+    if (explicit.before !== undefined || explicit.after !== undefined) {
+      attrs.spacingExplicit = explicit;
     }
     if (typeof lineSpacing === "number") {
       // Line spacing in twips - convert to multiplier or exact
@@ -2115,9 +2168,12 @@ function convertTable(
   // Extract justification
   const justification = attrs.justification;
 
-  // Extract table indent from _originalFormatting (w:tblInd)
+  // Extract table indent + RTL column order from _originalFormatting
+  // (w:tblInd, w:bidiVisual). bidiVisual is import-only — folio has no UI to
+  // toggle it — so reading the preserved formatting is sufficient
+  // (eigenpal/docx-editor#940).
   const originalFormatting = attrs._originalFormatting as
-    | { indent?: { value: number; type: string } }
+    | { indent?: { value: number; type: string }; bidi?: boolean }
     | undefined;
   const indentPx =
     originalFormatting?.indent?.value &&
@@ -2206,6 +2262,9 @@ function convertTable(
   }
   if (floatingPx) {
     tableBlock.floating = floatingPx;
+  }
+  if (originalFormatting?.bidi) {
+    tableBlock.bidi = true;
   }
   return tableBlock;
 }

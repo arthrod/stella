@@ -1,5 +1,3 @@
-import { useCallback } from "react";
-
 import {
   useMutation,
   useQueryClient,
@@ -103,6 +101,7 @@ const prepareFolderTreeUpload = async ({
       name: placement.file.name,
       mimeType: placement.file.type || "application/octet-stream",
       size: placement.file.size,
+      // oxlint-disable-next-line no-await-in-loop -- hashing files one at a time bounds peak memory; reading every dropped file into memory concurrently could exhaust it for large folder trees
       sha256Hex: await hashFileSha256Hex(placement.file),
     });
   }
@@ -200,6 +199,7 @@ const abortPreparedUploadsForFiles = async ({
   for (const file of files) {
     const preparedUpload = preparedUploadForFile(file);
     if (preparedUpload) {
+      // oxlint-disable-next-line no-await-in-loop -- best-effort sequential cleanup of presigned uploads; keeps abort load bounded and avoids a concurrent burst against the API during failure handling
       await abortUpload(workspaceId, preparedUpload.uploadId);
     }
   }
@@ -733,15 +733,12 @@ export const useCreateFileEntities = (workspaceId: string) => {
     },
   });
 
-  const handleCreateFileEntities = useCallback(
-    (input: CreateFileEntitiesInput) => {
-      if (isPending || !hasUploadInputItems(input)) {
-        return;
-      }
-      mutate(input);
-    },
-    [isPending, mutate],
-  );
+  const handleCreateFileEntities = (input: CreateFileEntitiesInput) => {
+    if (isPending || !hasUploadInputItems(input)) {
+      return;
+    }
+    mutate(input);
+  };
 
   return [isPending, handleCreateFileEntities] as const;
 };

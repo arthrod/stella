@@ -3,6 +3,8 @@ import type { ReactNode } from "react";
 import { ArrowLeftIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
+
 import { OnboardingProgress } from "@/routes/onboarding/-components/onboarding-progress";
 
 type OnboardingLayoutProps = {
@@ -43,12 +45,13 @@ export const OnboardingLayout = ({
           {onBack && (
             <button
               aria-label={t("common.goBack")}
+              title={t("common.goBack")}
               className="text-muted-foreground hover:text-foreground absolute -top-12 flex size-8 items-center justify-center rounded-md transition-colors"
               onClick={onBack}
               style={{ insetInlineStart: "-12px" }}
               type="button"
             >
-              <ArrowLeftIcon className="size-4" />
+              <DirectionalIcon className="size-4" icon={ArrowLeftIcon} />
             </button>
           )}
           <OnboardingProgress

@@ -69,15 +69,15 @@ const normalizeCitation = (
   }
 
   // Czech: "sp. zn. 33 Cdo 2178/2018" → "33 Cdo 2178/2018"
-  const spZn = /^sp\.\s*zn\.\s*(.+)/iu.exec(trimmed);
-  if (spZn?.[1]) {
-    return { caseNumber: spZn[1].trim() };
+  const spZn = /^sp\.\s*zn\.\s*(?<caseNumber>.+)/iu.exec(trimmed);
+  if (spZn?.groups?.["caseNumber"]) {
+    return { caseNumber: spZn.groups["caseNumber"].trim() };
   }
 
   // Czech file number: "č. j. 5 As 123/2020" → "5 As 123/2020"
-  const cj = /^[čc]\.\s*j\.\s*(.+)/iu.exec(trimmed);
-  if (cj?.[1]) {
-    return { caseNumber: cj[1].trim() };
+  const cj = /^[čc]\.\s*j\.\s*(?<caseNumber>.+)/iu.exec(trimmed);
+  if (cj?.groups?.["caseNumber"]) {
+    return { caseNumber: cj.groups["caseNumber"].trim() };
   }
 
   // Czech collection: "č. 123/2020 Sb. rozh. tr." — no case number
@@ -86,9 +86,9 @@ const normalizeCitation = (
   }
 
   // Polish: "sygn. akt II CSK 123/20" → "II CSK 123/20"
-  const sygn = /^sygn\.\s*(?:akt\s+)?(.+)/iu.exec(trimmed);
-  if (sygn?.[1]) {
-    return { caseNumber: sygn[1].trim() };
+  const sygn = /^sygn\.\s*(?:akt\s+)?(?<caseNumber>.+)/iu.exec(trimmed);
+  if (sygn?.groups?.["caseNumber"]) {
+    return { caseNumber: sygn.groups["caseNumber"].trim() };
   }
 
   // Polish bare: "II CSK 123/20" — already a case number
@@ -111,6 +111,7 @@ const seedRules = async () => {
 
   let upserted = 0;
   for (const rule of SEED_RULES) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential seeding preserves upsert order across rules
     await rootDb
       .insert(caseLawPolarityRules)
       .values({
@@ -150,13 +151,13 @@ const validateTemporalOrder = (
   // If either date is unknown, allow the match (can't validate)
   if (!citingDate || !citedDate) {
     // SAFETY: branded-type constructor — date is missing so we can't disprove temporal order
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- branded-type construction at the validated temporal boundary
     return matchedId as ValidCitedDecisionId;
   }
   // ISO dates sort lexicographically; citing must be on or after cited
   if (citingDate >= citedDate) {
     // SAFETY: branded-type constructor — temporal order verified above
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- branded-type construction at the validated temporal boundary
     return matchedId as ValidCitedDecisionId;
   }
   return null;
@@ -238,6 +239,7 @@ const resolveCitations = async (): Promise<ResolveStats> => {
   let offset = 0;
 
   while (true) {
+    // oxlint-disable-next-line no-await-in-loop -- bounded memory: process one batch at a time
     const batch = await rootDb
       .select({
         id: caseLawCitations.id,
@@ -309,6 +311,7 @@ const resolveCitations = async (): Promise<ResolveStats> => {
       }
 
       if (validId && !DRY_RUN) {
+        // oxlint-disable-next-line no-await-in-loop -- bounded memory: resolve one batch row at a time
         await rootDb
           .update(caseLawCitations)
           .set({ citedDecisionId: validId })
@@ -386,6 +389,7 @@ const classifyWithRules = async () => {
   let noMatch = 0;
 
   while (true) {
+    // oxlint-disable-next-line no-await-in-loop -- bounded memory: process one batch at a time
     const batch = await rootDb
       .select({
         id: caseLawCitations.id,
@@ -406,6 +410,7 @@ const classifyWithRules = async () => {
 
     for (const row of batch) {
       // Get the citing decision's sections for context
+      // oxlint-disable-next-line no-await-in-loop -- bounded memory: load decision context for one batch row at a time
       const [decision] = await rootDb
         .select({ sections: caseLawDecisions.sections })
         .from(caseLawDecisions)
@@ -427,6 +432,7 @@ const classifyWithRules = async () => {
       for (const rule of compiled) {
         if (context && rule.pattern.test(context)) {
           if (!DRY_RUN && !REPORT_ONLY) {
+            // oxlint-disable-next-line no-await-in-loop -- bounded memory: classify one batch row at a time
             await rootDb
               .update(caseLawCitations)
               .set({
@@ -444,6 +450,7 @@ const classifyWithRules = async () => {
       if (!matched) {
         // Set as "unknown" so we don't re-process
         if (!DRY_RUN && !REPORT_ONLY) {
+          // oxlint-disable-next-line no-await-in-loop -- bounded memory: classify one batch row at a time
           await rootDb
             .update(caseLawCitations)
             .set({ polarity: "unknown" })
@@ -571,6 +578,7 @@ const printReport = async () => {
     "negative",
     "neutral",
   ] as const) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential status check; sample output is printed in order per polarity
     const examples = await rootDb.execute(sql`
       SELECT
         c.citation_text,

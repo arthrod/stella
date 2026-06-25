@@ -98,6 +98,7 @@ export type TextEffectAttrs = {
 export type FootnoteRefAttrs = {
   id: string | number;
   noteType?: "footnote" | "endnote";
+  vertAlign?: "baseline" | "superscript";
 };
 
 export type CommentAttrs = {
@@ -129,6 +130,23 @@ export type RunFormattingOverrideAttrs = {
   >]?: false;
 } & {
   underline?: "none";
+};
+
+/**
+ * Character style mark attributes (w:rStyle).
+ *
+ * `styleId` is the OOXML character style reference, carried so a styled run
+ * re-serializes as a style reference instead of losing the semantic link.
+ * `_styleRPr` is the style's own run properties snapshotted at load in mark
+ * normal form (the shape `marksToTextFormatting` produces); `fromProseDoc`
+ * subtracts values equal to this snapshot so style-provided formatting is not
+ * baked into the run as direct formatting on save. It is absent when the
+ * style was unknown at load — nothing was resolved, so nothing is subtracted
+ * and the reference round-trips verbatim.
+ */
+export type CharacterStyleAttrs = {
+  styleId: string;
+  _styleRPr?: TextFormatting;
 };
 
 /**

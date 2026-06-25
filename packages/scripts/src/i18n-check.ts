@@ -12,7 +12,7 @@
  *                    the current untranslated/duplicate debt so the gate
  *                    stays green while catching new regressions.
  */
-import { resolve } from "node:path";
+import path from "node:path";
 
 export type NestedMessages = {
   [key: string]: string | NestedMessages;
@@ -238,7 +238,6 @@ const isTriviallyIdentical = (value: string): boolean => {
   const trimmed = value.trim();
   // Ignore ICU placeholders so "{n}" / "{value}%" count as letter-free.
   // Pattern is linear: [^}] cannot match the closing }, so no backtracking.
-  // oxlint-disable-next-line sonarjs/slow-regex
   const literal = trimmed.replace(/\{[^}]*\}/gu, "");
   // Exempt only language-neutral content: no letters (numbers, punctuation,
   // placeholder-only) or an explicit allowed token. Do NOT blanket-exempt by
@@ -338,7 +337,7 @@ if (import.meta.main) {
   }
 
   const readLang = async (filename: string): Promise<NestedMessages> => {
-    const content = await Bun.file(resolve(langsDir, filename)).text();
+    const content = await Bun.file(path.resolve(langsDir, filename)).text();
     // SAFETY: i18n JSON files conform to NestedMessages; script validates
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion
     return JSON.parse(content) as NestedMessages;
@@ -350,7 +349,7 @@ if (import.meta.main) {
 
   // Baseline grandfathers existing untranslated/duplicate debt (kept beside
   // the langs dir so the *.json glob does not treat it as a locale).
-  const baselinePath = resolve(langsDir, "..", "i18n-check-baseline.json");
+  const baselinePath = path.resolve(langsDir, "..", "i18n-check-baseline.json");
   const readBaseline = async (): Promise<CheckBaseline> => {
     const file = Bun.file(baselinePath);
     if (!(await file.exists())) {
@@ -372,6 +371,7 @@ if (import.meta.main) {
     const identicalToSource: Record<string, string[]> = {};
     for (const file of localeFiles) {
       const locale = file.replace(/\.json$/u, "");
+      // oxlint-disable-next-line no-await-in-loop -- locales must be processed in sorted order so identicalToSource accumulates deterministically
       const messages = await readLang(file);
       for (const key of findUntranslated(
         enMessages,
@@ -409,7 +409,7 @@ if (import.meta.main) {
 
   // Check and sort en.json
   if (!isSorted(enRaw)) {
-    const enPath = resolve(langsDir, "en.json");
+    const enPath = path.resolve(langsDir, "en.json");
     console.log(`\n${enPath}:`);
     console.log("  ~ unsorted keys");
     hasIssues = true;
@@ -427,7 +427,7 @@ if (import.meta.main) {
     const duplicates = findCommonDuplicates(enMessages, baseline);
     if (duplicates.length > 0) {
       hasIssues = true;
-      console.log(`\n${resolve(langsDir, "en.json")}:`);
+      console.log(`\n${path.resolve(langsDir, "en.json")}:`);
       for (const { key, reuse } of duplicates) {
         console.log(
           `  = duplicate of ${reuse}: ${key} (reuse it, or baseline it)`,
@@ -438,6 +438,7 @@ if (import.meta.main) {
 
   for (const file of localeFiles) {
     const locale = file.replace(/\.json$/u, "");
+    // oxlint-disable-next-line no-await-in-loop -- locales reported in sorted order; console output and sync writes must stay deterministic per file
     const messages = await readLang(file);
     const langKeys = new Set(flattenKeys(messages));
 
@@ -458,7 +459,7 @@ if (import.meta.main) {
     }
 
     hasIssues = true;
-    const filePath = resolve(langsDir, file);
+    const filePath = path.resolve(langsDir, file);
     console.log(`\n${filePath}:`);
 
     for (const key of missing) {
@@ -479,6 +480,7 @@ if (import.meta.main) {
 
     if (shouldSync) {
       const synced = syncMessages(enMessages, messages);
+      // oxlint-disable-next-line no-await-in-loop -- sequential per-locale file write paired with ordered console output
       await Bun.write(filePath, `${JSON.stringify(synced, null, 2)}\n`);
       console.log("  ✓ synced");
     }

@@ -71,10 +71,13 @@ export const AIConfigCard = () => {
   const [roleModels, setRoleModels] =
     useState<RoleModelSelections>(initialRoleModels);
 
-  // Sync form state when the config query resolves after
-  // initial render (useState initializers only run once).
-  // Intentionally depends only on `configured` to avoid
-  // overwriting user edits on query refetch.
+  // Seed editable form state once the config query resolves
+  // (useState initializers only run once). Intentionally depends
+  // only on `configured`, not full `config`, so a refetch does not
+  // overwrite in-flight user edits. Not pure derived state:
+  // setProviders/setRoleModels are also driven by the editor and the
+  // save/delete mutations, so it cannot be computed in render. Keep.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- seed-form-from-async-config that must not clobber user edits; setters used elsewhere. Keep.
   useEffect(() => {
     if (!config?.configured) {
       return;
@@ -216,6 +219,7 @@ export const AIConfigCard = () => {
   });
 
   const providerValues = getProviderValues(providers);
+  const removeLabel = tCommon("remove");
   const canSave =
     hasUsableProviderDrafts(providers) &&
     serializeOverrideModels({ providers: providerValues, roleModels }) !== null;
@@ -245,6 +249,7 @@ export const AIConfigCard = () => {
             ))}
           </div>
           <Button
+            aria-label={removeLabel}
             loading={deleteMutation.isPending}
             onClick={() => deleteMutation.mutate()}
             size="sm"

@@ -8,6 +8,7 @@ import { useTranslations } from "use-intl";
 import { Button } from "@stll/ui/components/button";
 import { Checkbox } from "@stll/ui/components/checkbox";
 import { Dialog, DialogPopup } from "@stll/ui/components/dialog";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { Input } from "@stll/ui/components/input";
 import { Label } from "@stll/ui/components/label";
 import {
@@ -23,9 +24,11 @@ import { DatePickerPopover } from "@/components/date-picker-popover";
 import { UserIdentity } from "@/components/user-avatar";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
+import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { toAPIError } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
 import { organizationOptions } from "@/routes/_protected.organization/-queries";
+import { formatCurrencyAmount } from "@/routes/_protected.workspaces/$workspaceId/-components/billing/format-currency";
 import {
   rateEntriesOptions,
   ratesKeys,
@@ -277,6 +280,7 @@ const RateTablesView = ({
                   </Button>
                 )}
                 <Button
+                  aria-label={t("common.delete")}
                   className="text-destructive size-7"
                   onClick={() => handleDelete(table.id)}
                   size="icon"
@@ -356,6 +360,7 @@ const CreateRateTableForm = ({
           <form.Field name="currency">
             {(field) => (
               <Input
+                dir="ltr"
                 maxLength={3}
                 onChange={(e) =>
                   field.handleChange(e.currentTarget.value.toUpperCase())
@@ -404,12 +409,15 @@ const RateEntriesView = ({
 }) => {
   const t = useTranslations();
   const [showForm, setShowForm] = useState(false);
+  const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
 
   const { data: tables } = useSuspenseQuery(rateTablesOptions(workspaceId));
   const { data: entries } = useQuery(
     rateEntriesOptions(workspaceId, rateTableId),
   );
-  const { data: org } = useSuspenseQuery(organizationOptions);
+  const { data: org } = useSuspenseQuery(
+    organizationOptions(activeOrganizationId),
+  );
 
   const table = tables.find((tbl) => tbl.id === rateTableId);
   const analytics = useAnalytics();
@@ -507,8 +515,14 @@ const RateEntriesView = ({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center gap-2">
-        <Button className="size-7" onClick={onBack} size="icon" variant="ghost">
-          <ArrowLeftIcon className="size-4" />
+        <Button
+          aria-label={t("common.back")}
+          className="size-7"
+          onClick={onBack}
+          size="icon"
+          variant="ghost"
+        >
+          <DirectionalIcon className="size-4" icon={ArrowLeftIcon} />
         </Button>
         <h3 className="text-sm font-medium">
           {table?.name ?? t("billing.rates.rateEntries")}
@@ -569,7 +583,7 @@ const RateEntriesView = ({
                       name={entry.userName}
                     />
                     <span className="text-sm tabular-nums">
-                      {formatCurrency(
+                      {formatCurrencyAmount(
                         entry.hourlyRate,
                         table?.currency ?? "USD",
                       )}
@@ -582,7 +596,7 @@ const RateEntriesView = ({
                       {t("billing.rates.defaultRate")}
                     </span>
                     <span className="text-sm tabular-nums">
-                      {formatCurrency(
+                      {formatCurrencyAmount(
                         entry.hourlyRate,
                         table?.currency ?? "USD",
                       )}
@@ -599,6 +613,7 @@ const RateEntriesView = ({
               </div>
 
               <Button
+                aria-label={t("common.delete")}
                 className="text-destructive size-7 opacity-0 transition-opacity group-hover:opacity-100"
                 onClick={() => handleDelete(entry.id)}
                 size="icon"
@@ -742,6 +757,7 @@ const CreateRateEntryForm = ({
           <form.Field name="hourlyRate">
             {(field) => (
               <Input
+                dir="ltr"
                 inputMode="decimal"
                 onChange={(e) => field.handleChange(e.currentTarget.value)}
                 placeholder="350.00"
@@ -787,19 +803,4 @@ const CreateRateEntryForm = ({
       </div>
     </form>
   );
-};
-
-// --- Helpers ---
-
-const formatCurrency = (cents: number, currency: string): string => {
-  const amount = cents / 100;
-  try {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency,
-      minimumFractionDigits: 2,
-    }).format(amount);
-  } catch {
-    return `${amount.toFixed(2)} ${currency}`;
-  }
 };

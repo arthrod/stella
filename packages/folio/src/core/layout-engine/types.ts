@@ -35,7 +35,7 @@ export type RunFormatting = {
   strike?: boolean;
   color?: string;
   textColorSource?: "direct" | "paragraphDefault";
-  // TODO: cannot tighten to NonNullable<TextFormatting["highlight"]> (the OOXML
+  // Cannot tighten to NonNullable<TextFormatting["highlight"]> (the OOXML
   // named-color union). The bridge stores a *resolved CSS* color here via
   // `resolveHighlightToCss` (named color → hex, or raw `#hex`), so values like
   // `#FFFF00` are not union members. Either keep a separate CSS field or move
@@ -48,6 +48,14 @@ export type RunFormatting = {
    */
   shading?: string;
   fontFamily?: string;
+  /**
+   * Resolved East-Asian font (`w:eastAsia` / `eastAsiaTheme`). CJK code points
+   * in this run measure and paint with this font; non-CJK keeps `fontFamily`
+   * (ascii/hAnsi). Both the measurer and the painter segment identically (see
+   * `segmentByScript`) so wrapping stays correct. Absent means CJK falls back
+   * to `fontFamily`.
+   */
+  eastAsiaFontFamily?: string;
   fontSize?: number;
   letterSpacing?: number;
   superscript?: boolean;
@@ -141,6 +149,15 @@ export type TextRun = RunFormatting & {
   pmStart?: number;
   /** Absolute ProseMirror position (exclusive) after last character. */
   pmEnd?: number;
+  /**
+   * Set when this run is a template fill-preview substitution: the text is
+   * the typed value while [pmStart, pmEnd) still addresses the source
+   * `{{marker}}` range, so `text.length` may differ from the PM span. The
+   * painter adds the preview classes from this (`highlighted` paints the
+   * accent chip); pm↔char mappers must use the run's own pm bounds instead
+   * of assuming one PM position per character.
+   */
+  templatePreview?: "highlighted" | "plain";
 };
 
 /**
@@ -333,7 +350,7 @@ export type TabStop = {
  * Border specification for paragraphs.
  */
 export type BorderStyle = {
-  // TODO: this holds a *CSS* border-style (solid, double, ridge, groove, …),
+  // This holds a *CSS* border-style (solid, double, ridge, groove, …),
   // mapped from OOXML by `OOXML_TO_CSS_BORDER` in the bridge. It is NOT the
   // OOXML `KnownBorderStyle` union (single/thinThickSmallGap/…), and includes
   // CSS-only values (ridge/groove) that have no union member. Move the OOXML→CSS
@@ -473,7 +490,7 @@ export type ParagraphBlock = {
 export type CellBorderSpec = {
   width?: number; // pixels
   color?: string; // CSS color
-  // TODO: CSS border-style mapped from OOXML by the bridge, not the OOXML
+  // CSS border-style mapped from OOXML by the bridge, not the OOXML
   // `KnownBorderStyle` union (see BorderStyle.style). Includes CSS-only values
   // (ridge/groove) with no union member.
   style?: string; // CSS border-style (solid, dashed, dotted, double)
@@ -554,6 +571,8 @@ export type TableBlock = {
   justification?: "left" | "center" | "right";
   /** Table indent from left margin (in pixels, from w:tblInd) */
   indent?: number;
+  /** Right-to-left column order (w:bidiVisual): logical column 0 paints on the right. */
+  bidi?: boolean;
   /** Floating table properties (pixel values). */
   floating?: FloatingTablePosition;
   pmStart?: number;

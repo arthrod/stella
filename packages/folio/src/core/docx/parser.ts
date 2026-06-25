@@ -64,7 +64,7 @@ import {
 import { parseSettings } from "./settingsParser";
 import { parseStylesPackage } from "./styleParser";
 import type { StyleMap } from "./styleParser";
-import { parseTheme } from "./themeParser";
+import { applyThemeFontLang, parseTheme } from "./themeParser";
 import { normalizeTrackedMoveRanges } from "./trackedMoveRangeNormalization";
 import { unzipDocx, getMediaMimeType, mediaToDataUrl } from "./unzip";
 import type { DocxUnzipLimits, RawDocxContent } from "./unzip";
@@ -130,18 +130,12 @@ export async function parseDocx(
   const warnings: string[] = [];
 
   try {
-    // oxlint-disable-next-line no-inner-declarations -- scoped to try block intentionally
-    function timeStage<T>(_name: string, fn: () => T): T {
-      return fn();
-    }
+    const timeStage = <T>(_name: string, fn: () => T): T => fn();
 
-    // oxlint-disable-next-line no-inner-declarations -- scoped to try block intentionally
-    async function timeStageAsync<T>(
+    const timeStageAsync = async <T>(
       _name: string,
       fn: () => Promise<T>,
-    ): Promise<T> {
-      return await fn();
-    }
+    ): Promise<T> => await fn();
 
     // ========================================================================
     // STAGE 1: Unzip DOCX package (0-10%)
@@ -167,6 +161,14 @@ export async function parseDocx(
     // ========================================================================
     onProgress("Parsing theme...", 15);
     const theme = timeStage("theme", () => parseTheme(raw.themeXml));
+    // Settings must be read before styles so `w:themeFontLang` can fill the
+    // theme's empty EastAsian/complex-script slots (eigenpal/docx-editor#949);
+    // styles, body, and header/footer parsing all resolve theme fonts off this
+    // mutated theme object.
+    const settings = timeStage("settings", () =>
+      parseSettings(raw.settingsXml),
+    );
+    applyThemeFontLang(theme, settings.themeFontLang);
     onProgress("Parsed theme", 20);
 
     // ========================================================================
@@ -193,13 +195,6 @@ export async function parseDocx(
       parseNumbering(raw.numberingXml),
     );
     onProgress("Parsed numbering", 35);
-
-    // Settings (`word/settings.xml`) — currently only used for
-    // `w:defaultTabStop`, but staged here so future settings flow through
-    // the same point. Cheap; no separate progress band.
-    const settings = timeStage("settings", () =>
-      parseSettings(raw.settingsXml),
-    );
 
     // ========================================================================
     // STAGE 6: Build media file map (35-40%)
@@ -462,6 +457,7 @@ async function buildMediaMap(
     // with the original TIFF data — the round-trip survives even if the
     // in-browser preview is broken.
     if (isTiffMimeType(mimeType)) {
+      // oxlint-disable-next-line no-await-in-loop -- TIFF decode uses a shared Canvas; conversions must stay serialized to avoid contention
       const converted = await convertTiffToPngDataUrl(data);
       if (converted) {
         const mediaFile: MediaFile = {

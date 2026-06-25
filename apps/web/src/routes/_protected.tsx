@@ -1,15 +1,7 @@
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
-import type { MouseEvent } from "react";
+import { lazy, Suspense, useCallback, useRef, useState } from "react";
+import type { MouseEvent, PointerEvent } from "react";
 
 import { useHotkey } from "@tanstack/react-hotkeys";
-import { useQuery } from "@tanstack/react-query";
 import {
   createFileRoute,
   Outlet,
@@ -33,6 +25,13 @@ import {
   MenuTrigger,
 } from "@stll/ui/components/menu";
 import { Separator } from "@stll/ui/components/separator";
+import {
+  Sheet,
+  SheetHeader,
+  SheetPopup,
+  SheetTitle,
+} from "@stll/ui/components/sheet";
+import { Skeleton } from "@stll/ui/components/skeleton";
 import { TOAST_RIGHT_OFFSET_VAR } from "@stll/ui/components/toast";
 import { cn } from "@stll/ui/lib/utils";
 
@@ -41,6 +40,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { AppBreadcrumbs } from "@/components/breadcrumbs/app-breadcrumbs";
 import { ChatEditorProvider } from "@/components/chat-editor-provider";
 import { ChatMentionProviders } from "@/components/chat-mention-providers";
+import { ModelSelectorDialog } from "@/components/chat/model-selector-dialog";
 import {
   initializeInspectorTabBroadcast,
   useInspectorStore,
@@ -55,6 +55,9 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/sidebar";
+import { useChromeQuery } from "@/hooks/use-chrome-query";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { useI18nStore } from "@/i18n/i18n-store";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { AuthenticatedUserProvider } from "@/lib/authenticated-user-context";
 import {
@@ -65,10 +68,11 @@ import {
 import { HOTKEYS } from "@/lib/hotkeys";
 import { resolveMatterColor } from "@/lib/matter-colors";
 import { usePinnedStore } from "@/lib/pinned-store";
-import { prefetchNonCriticalQuery } from "@/lib/react-query";
+import { prefetchRouteQuery } from "@/lib/react-query";
 import { loadAuthContext } from "@/routes/-auth-context";
 import { roleOptions } from "@/routes/-queries";
 import { useGlobalChatMentionRegistration } from "@/routes/_protected.chat/-hooks/use-global-chat-mention-registration";
+import { aiAvailabilityOptions } from "@/routes/_protected.organization/-ai-config-queries";
 import { CreateMatterDialog } from "@/routes/_protected.workspaces/-components/create-matter-dialog";
 import { workspaceOptions } from "@/routes/_protected.workspaces/-queries";
 
@@ -114,6 +118,26 @@ const InspectorRailFallback = () => (
   </div>
 );
 
+const MobileInspectorFallback = () => (
+  <div className="bg-background flex h-full min-w-0 flex-col">
+    <div
+      className={cn(
+        "flex shrink-0 items-center gap-2 border-b px-3",
+        TOOLBAR_ROW_HEIGHT,
+      )}
+    >
+      <Skeleton className="h-4 w-16" />
+      <Skeleton className="h-4 flex-1" />
+      <Skeleton className="size-7 rounded-md" />
+    </div>
+    <div className="space-y-3 px-4 py-4">
+      <Skeleton className="h-7 w-2/3" />
+      <Skeleton className="h-8 w-full" />
+      <Skeleton className="h-8 w-full" />
+    </div>
+  </div>
+);
+
 export const Route = createFileRoute("/_protected")({
   ssr: false,
   beforeLoad: async ({ context, location }) => {
@@ -130,17 +154,26 @@ export const Route = createFileRoute("/_protected")({
       throw redirect({ to: "/auth/organization", replace: true });
     }
 
-    // Prefetch role so useSuspenseQuery in the component is a
-    // cache hit instead of a serial round-trip after child loaders.
-    // staleTime: Infinity → only fetch on cold cache, not every
-    // navigation. Errors surface to the user via useSuspenseQuery.
-    void prefetchNonCriticalQuery(
+    const activeOrganizationId = authContext.session.activeOrganizationId;
+
+    // These shell queries only gate optional affordances. AI config stays
+    // non-blocking. The role cache MUST be settled before chrome that reads it
+    // via a non-suspense useQuery mounts (app-sidebar, inspector): a cold-cache
+    // role fetch resolving mid-mount triggers React's "state update on a
+    // not-yet-mounted component" warning, which the route-smoke e2e treats as a
+    // failure. So we AWAIT the role prefetch fully — no time-boxed race that
+    // could let chrome render while the fetch is still in flight. The prefetch is
+    // non-throwing, so a role-fetch failure resolves it rather than stalling or
+    // taking down the shell.
+    const onPrefetchError = (error: unknown) => {
+      getAnalytics().captureError(error);
+    };
+    void prefetchRouteQuery(
       context.queryClient,
-      { ...roleOptions, staleTime: Infinity },
-      (error: unknown) => {
-        getAnalytics().captureError(error);
-      },
+      aiAvailabilityOptions({ organizationId: activeOrganizationId }),
+      onPrefetchError,
     );
+    await prefetchRouteQuery(context.queryClient, roleOptions, onPrefetchError);
 
     // Seed the pinned-matters store from localStorage before the
     // sidebar renders. The store's `init` is idempotent (skips when
@@ -151,7 +184,7 @@ export const Route = createFileRoute("/_protected")({
     return {
       user: {
         id: authContext.session.userId,
-        activeOrganizationId: authContext.session.activeOrganizationId,
+        activeOrganizationId,
         name: authContext.user.name || undefined,
         email: authContext.user.email,
         image: authContext.user.image,
@@ -163,10 +196,82 @@ export const Route = createFileRoute("/_protected")({
   },
   component: ProtectedComponent,
   // This subtree is private and client-only. Rendering a loading
-  // shell in SSR gives no SEO value and currently trips React's
-  // streamed Suspense boundary path under Bun in CI.
-  pendingComponent: () => null,
+  // shell in SSR gives no SEO value and previously tripped React's
+  // streamed Suspense boundary path under Bun in CI, so the fallback
+  // must stay PURE STATIC: plain layout divs + Skeleton blocks, no
+  // hooks, context, data, lazy(), or Suspense. It renders identically
+  // on server and client to shape the shell during hydration instead
+  // of flashing a blank white screen.
+  pendingComponent: ProtectedPendingSkeleton,
 });
+
+// Static, SSR-safe placeholder for the client-only `_protected`
+// subtree. Mirrors the real shell's shape (left side-rail → sidebar
+// column → main content with a header bar) using the same layout
+// constants so the skeleton lines up with the chrome that replaces
+// it. Intentionally free of hooks, context, data, and Suspense.
+function ProtectedPendingSkeleton() {
+  return (
+    <div aria-hidden="true" className="bg-background flex h-full min-h-dvh">
+      {/* Sidebar column — matches AppSidebar's 16rem width with a
+          header row, a few stacked nav rows, and a footer row. */}
+      <div className="bg-sidebar hidden w-64 shrink-0 flex-col gap-2 border-e p-2 md:flex">
+        <div
+          className={`flex shrink-0 items-center gap-2 ${TOOLBAR_ROW_HEIGHT}`}
+        >
+          <Skeleton className="size-6 rounded-md" />
+          <Skeleton className="h-4 w-28" />
+        </div>
+        <div className="mt-2 flex flex-col gap-2">
+          {Array.from({ length: 6 }, (_, index) => (
+            <Skeleton className="h-8 w-full rounded-md" key={index} />
+          ))}
+        </div>
+        <div className="flex-1" />
+        <Skeleton className="h-8 w-full shrink-0 rounded-md" />
+      </div>
+
+      {/* Main content column — header-height bar + a handful of
+          content blocks. */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div
+          className={`flex shrink-0 items-center gap-3 border-b px-4 ${TOOLBAR_ROW_HEIGHT}`}
+        >
+          <Skeleton className="h-4 w-40" />
+          <div className="ms-auto flex items-center gap-2">
+            <Skeleton className={SIDE_RAIL_ICON_BUTTON_SIZE} />
+            <Skeleton className={SIDE_RAIL_ICON_BUTTON_SIZE} />
+          </div>
+        </div>
+        <div className="flex flex-1 flex-col gap-4 p-6">
+          <Skeleton className="h-8 w-1/3" />
+          <Skeleton className="h-4 w-2/3" />
+          <Skeleton className="h-40 w-full rounded-md" />
+          <Skeleton className="h-4 w-1/2" />
+          <Skeleton className="h-24 w-full rounded-md" />
+        </div>
+      </div>
+
+      {/* Right side-rail — same width as the real rail with muted
+          icon-sized blocks top and bottom. */}
+      <div
+        className={`bg-muted/50 hidden shrink-0 flex-col border-s md:flex ${SIDE_RAIL_WIDTH}`}
+      >
+        <div
+          className={`flex w-full shrink-0 items-center justify-center border-b ${TOOLBAR_ROW_HEIGHT}`}
+        >
+          <Skeleton className={SIDE_RAIL_ICON_BUTTON_SIZE} />
+        </div>
+        <div className="flex-1" />
+        <div
+          className={`flex w-full shrink-0 items-center justify-center border-t ${TOOLBAR_ROW_HEIGHT}`}
+        >
+          <Skeleton className={SIDE_RAIL_ICON_BUTTON_SIZE} />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ProtectedComponent() {
   const analyticsUser = Route.useRouteContext({ select: (ctx) => ctx.user });
@@ -182,7 +287,7 @@ function ProtectedComponent() {
   });
   const activeWorkspaceId = workspaceMatch?.params.workspaceId;
 
-  useEffect(
+  useExternalSyncEffect(
     () =>
       initializeInspectorTabBroadcast({
         organizationId: inspectorBroadcastOrganizationId,
@@ -224,6 +329,7 @@ function ProtectedComponent() {
               <ProtectedContent />
               <WorkspaceInspectorSidePanel />
               <ShortcutHintsOverlay />
+              <ModelSelectorDialog />
             </ChatEditorProvider>
           </AIAvailabilityProvider>
         </ChatMentionProviders>
@@ -275,11 +381,11 @@ function ProtectedContent() {
     }
     toggleInspector();
   };
-  // Show the chrome inspector button only before the rail exists.
-  // Once tabs exist, the rail remains visible even when the pane
-  // content is minimized, and its top button is the restore/hide
-  // affordance.
-  const canShowInspectorButton = inspectorTabsCount === 0;
+  // Desktop keeps the rail mounted once tabs exist, so the rail is
+  // the restore affordance. Mobile has no rail; after Back minimizes
+  // the sheet, the chrome button must reappear so the user can return.
+  const canShowInspectorButton =
+    inspectorTabsCount === 0 || (isMobile && inspectorMinimized);
   const inspectorButtonTitle = (() => {
     if (inspectorTabsCount === 0) {
       return t("inspector.openChat");
@@ -315,7 +421,7 @@ function ProtectedContent() {
     setChatMenuOpen(false);
   };
 
-  const { data: workspace } = useQuery({
+  const { data: workspace } = useChromeQuery({
     ...workspaceOptions(workspaceId ?? ""),
     enabled: !!workspaceId,
   });
@@ -437,6 +543,63 @@ const INSPECTOR_PANE_MAX_WIDTH = 800;
 // toast / find-replace right-offset CSS vars under the visible rail.
 const INSPECTOR_RAIL_WIDTH = 48;
 
+type InspectorWorkspaceResolutionInput = {
+  activeId: string | null;
+  routeWorkspaceId: string | undefined;
+  tabs: readonly InspectorTab[];
+};
+
+const resolveInspectorWorkspaceId = ({
+  activeId,
+  routeWorkspaceId,
+  tabs,
+}: InspectorWorkspaceResolutionInput): string | undefined => {
+  const activeTab =
+    activeId === null ? undefined : tabs.find((tab) => tab.id === activeId);
+  const activeWorkspaceId = getInspectorTabWorkspaceId(activeTab);
+  if (activeWorkspaceId !== undefined) {
+    return activeWorkspaceId;
+  }
+
+  if (routeWorkspaceId !== undefined) {
+    return routeWorkspaceId;
+  }
+
+  for (const tab of tabs) {
+    const tabWorkspaceId = getInspectorTabWorkspaceId(tab);
+    if (tabWorkspaceId !== undefined) {
+      return tabWorkspaceId;
+    }
+  }
+
+  return undefined;
+};
+
+const getInspectorTabWorkspaceId = (
+  tab: InspectorTab | undefined,
+): string | undefined => {
+  if (tab === undefined) {
+    return undefined;
+  }
+
+  switch (tab.type) {
+    case "pdf":
+    case "matter":
+    case "task":
+      return tab.workspaceId;
+    case "chat":
+      return tab.workspaceId ?? tab.contextMatterIds.at(0);
+    case "external":
+      return tab.workspaceId ?? undefined;
+    case "skill-resource":
+    case "view":
+      return undefined;
+  }
+
+  const exhaustive: never = tab;
+  return exhaustive;
+};
+
 /**
  * Workspace inspector pane — file viewers + chat tabs. Mounted at
  * the protected layout level (next to `TemplateAssistantSidePanel`)
@@ -448,6 +611,8 @@ const INSPECTOR_RAIL_WIDTH = 48;
  * inspector chrome.
  */
 function WorkspaceInspectorSidePanel() {
+  const t = useTranslations();
+  const { isMobile } = useSidebar();
   const projectMatch = useMatch({
     from: "/_protected/workspaces/$workspaceId",
     shouldThrow: false,
@@ -456,76 +621,40 @@ function WorkspaceInspectorSidePanel() {
   const tabs = useInspectorStore((s) => s.tabs);
   const activeId = useInspectorStore((s) => s.activeId);
   const minimized = useInspectorStore((s) => s.minimized);
-  // The inspector rail is always mounted — even with zero tabs it
-  // shows the toggle + new-chat affordances so the user has a
-  // consistent right-side anchor point. The pane *content* area is
-  // hidden when there are no tabs or when the user has minimized.
+  const setMinimized = useInspectorStore((s) => s.setMinimized);
+  // Desktop keeps a rail-mounted inspector shell; mobile uses a
+  // sheet and relies on the topbar restore button after Back.
+  // Pane content is shown only when a tab exists and the inspector
+  // is not minimized.
   const showPaneContent = tabs.length > 0 && !minimized;
-
-  // Pin the inspector's "current matter" to the ACTIVE TAB's
-  // origin so documents and started chats keep showing the
-  // matter they came from, even after the user navigates away
-  // to another matter (or to a non-workspace route like the
-  // knowledge / case-law viewer). Resolution order:
-  //   1. Active tab's origin (PDF.workspaceId, Matter.workspaceId,
-  //      or started-chat contextMatterIds[0])
-  //   2. The current route's matter (for blank chats or task
-  //      tabs while inside a workspace)
-  //   3. Any other tab's stored workspaceId — keeps the pane
-  //      mounted when the user navigates away from a workspace
-  //      with only blank chats active but PDFs from earlier
-  //      matters still open in the rail.
-  const activeTab = tabs.find((tab) => tab.id === activeId);
-  const tabOriginWorkspaceId = (() => {
-    if (activeTab?.type === "pdf") {
-      return activeTab.workspaceId;
-    }
-    if (activeTab?.type === "matter") {
-      return activeTab.workspaceId;
-    }
-    if (activeTab?.type === "chat") {
-      return activeTab.contextMatterIds.at(0) ?? null;
-    }
-    return null;
-  })();
-  // Last-resort: pick *any* tab's stored workspace so the inspector
-  // mounts even when the active tab can't dictate one (a task tab,
-  // or a chat that hasn't been pinned to a matter yet) and the
-  // route is also non-workspace. PDF tabs carry workspaceId
-  // directly; matter tabs carry workspaceId directly; chat tabs
-  // surface theirs via contextMatterIds[0].
-  const fallbackPdfTab = tabs.find(
-    (tab): tab is Extract<InspectorTab, { type: "pdf" }> => tab.type === "pdf",
-  );
-  const fallbackMatterTab = tabs.find(
-    (tab): tab is Extract<InspectorTab, { type: "matter" }> =>
-      tab.type === "matter",
-  );
-  const fallbackChatTab = tabs.find(
-    (tab): tab is Extract<InspectorTab, { type: "chat" }> =>
-      tab.type === "chat" && tab.contextMatterIds.length > 0,
-  );
-  const fallbackTabWorkspaceId =
-    fallbackPdfTab?.workspaceId ??
-    fallbackMatterTab?.workspaceId ??
-    fallbackChatTab?.contextMatterIds.at(0) ??
-    null;
-  const activeWorkspaceId =
-    tabOriginWorkspaceId ?? routeWorkspaceId ?? fallbackTabWorkspaceId;
+  const activeWorkspaceId = resolveInspectorWorkspaceId({
+    activeId,
+    routeWorkspaceId,
+    tabs,
+  });
   const [width, setWidth] = useState(INSPECTOR_PANE_DEFAULT_WIDTH);
   const isDragging = useRef(false);
+  // Re-run the offset effect once the new bundle applies: `loadedLang` (not
+  // `lang`) is what flips document.documentElement.dir, so depending on it
+  // reads the correct direction.
+  const loadedLang = useI18nStore((s) => s.loadedLang);
 
-  const handlePointerDown = (e: React.PointerEvent) => {
+  const handlePointerDown = (e: PointerEvent<HTMLElement>) => {
     e.preventDefault();
     isDragging.current = true;
     e.currentTarget.setPointerCapture(e.pointerId);
   };
 
-  const handlePointerMove = (e: React.PointerEvent) => {
+  const handlePointerMove = (e: PointerEvent<HTMLElement>) => {
     if (!isDragging.current) {
       return;
     }
-    const newWidth = window.innerWidth - e.clientX;
+    // The pane docks to the inline-end edge: that's the right in LTR
+    // (width = distance from the right) and the left in RTL (width =
+    // distance from the left). Without the RTL branch the delta is
+    // inverted and the drag oscillates.
+    const isRtl = document.documentElement.dir === "rtl";
+    const newWidth = isRtl ? e.clientX : window.innerWidth - e.clientX;
     setWidth(
       Math.min(
         INSPECTOR_PANE_MAX_WIDTH,
@@ -541,24 +670,73 @@ function WorkspaceInspectorSidePanel() {
   // Rail is always shown; only when there are real tabs and the
   // user hasn't minimized do we widen to the full pane width.
   const widthPx = `${showPaneContent ? width : INSPECTOR_RAIL_WIDTH}px`;
+  const reservedInlineEndWidthPx = isMobile ? "0px" : widthPx;
 
-  useEffect(() => {
-    document.documentElement.style.setProperty(TOAST_RIGHT_OFFSET_VAR, widthPx);
-    // Keep Folio's find/replace dialog out from under the right inspector
-    // pane. Folio reads --folio-find-replace-right on the overlay so the
-    // dialog lands over the document, not behind the sidebar.
+  useExternalSyncEffect(() => {
+    // The toast offset is consumed via a logical `end-` utility, so the same
+    // value reserves the correct edge in both directions.
+    document.documentElement.style.setProperty(
+      TOAST_RIGHT_OFFSET_VAR,
+      reservedInlineEndWidthPx,
+    );
+    // Folio's find/replace overlay is `justify-end`, so it packs against the
+    // inline-end edge: the right in LTR, the LEFT under RTL. The inspector
+    // docks to that same edge, so reserve the offset on whichever physical
+    // side both occupy and clear the other. In LTR reserve the right (left
+    // keeps its default); in RTL the pane docks left (end-0), so reserve the
+    // left and clear the right. The overlay reads --folio-find-replace-left in
+    // its width calc too, so setting it also keeps the dialog from overflowing
+    // the inspector.
+    const isRtl = document.documentElement.dir === "rtl";
     document.documentElement.style.setProperty(
       "--folio-find-replace-right",
-      widthPx,
+      isRtl ? "0px" : reservedInlineEndWidthPx,
     );
+    if (isRtl) {
+      document.documentElement.style.setProperty(
+        "--folio-find-replace-left",
+        reservedInlineEndWidthPx,
+      );
+    } else {
+      document.documentElement.style.removeProperty(
+        "--folio-find-replace-left",
+      );
+    }
 
     return () => {
       document.documentElement.style.removeProperty(TOAST_RIGHT_OFFSET_VAR);
       document.documentElement.style.removeProperty(
         "--folio-find-replace-right",
       );
+      document.documentElement.style.removeProperty(
+        "--folio-find-replace-left",
+      );
     };
-  }, [widthPx]);
+  }, [reservedInlineEndWidthPx, loadedLang]);
+
+  if (isMobile) {
+    return (
+      <Sheet
+        onOpenChange={(open) => {
+          setMinimized(!open);
+        }}
+        open={showPaneContent}
+      >
+        <SheetPopup
+          className="h-dvh w-full max-w-none border-0 p-0 md:hidden"
+          showCloseButton={false}
+          side="inline-end"
+        >
+          <SheetHeader className="sr-only">
+            <SheetTitle>{t("inspector.title")}</SheetTitle>
+          </SheetHeader>
+          <Suspense fallback={<MobileInspectorFallback />}>
+            <LazyInspectorPanel workspaceId={activeWorkspaceId} />
+          </Suspense>
+        </SheetPopup>
+      </Sheet>
+    );
+  }
 
   return (
     <div
@@ -568,12 +746,12 @@ function WorkspaceInspectorSidePanel() {
     >
       <div className="bg-sidebar relative" style={{ width: widthPx }} />
       <div
-        className="fixed inset-y-0 right-0 z-10 hidden h-svh md:flex"
+        className="fixed inset-y-0 end-0 z-10 hidden h-svh md:flex"
         style={{ width: widthPx }}
       >
         {showPaneContent && (
           <div
-            className="hover:bg-border active:bg-border absolute inset-y-0 -left-px z-20 flex w-1 cursor-col-resize items-center justify-center border-l"
+            className="hover:bg-border active:bg-border absolute inset-y-0 -start-px z-20 flex w-1 cursor-col-resize items-center justify-center border-s"
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
@@ -581,7 +759,7 @@ function WorkspaceInspectorSidePanel() {
         )}
         <div className="bg-sidebar flex h-full w-full flex-col">
           <Suspense fallback={<InspectorRailFallback />}>
-            <LazyInspectorPanel workspaceId={activeWorkspaceId ?? undefined} />
+            <LazyInspectorPanel workspaceId={activeWorkspaceId} />
           </Suspense>
         </div>
       </div>

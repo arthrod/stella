@@ -3,16 +3,18 @@ import { and, eq, inArray } from "drizzle-orm";
 import { t } from "elysia";
 
 import type { SafeDb } from "@/api/db";
-import { clauses } from "@/api/db/schema";
+import { clauses, clauseVariants } from "@/api/db/schema";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import type { SafeId } from "@/api/lib/branded-types";
 import { LIMITS } from "@/api/lib/limits";
 import { brandPersistedClauseId } from "@/api/lib/safe-id-boundaries";
 
+import { buildClauseCategoryPath } from "./category-path";
 import type {
   ClauseExportItem,
   ClauseExportPayload,
+  ClauseExportVariant,
 } from "./import-export-schema";
 import { normalizeClauseMetadata } from "./metadata";
 
@@ -69,35 +71,45 @@ const exportHandler = async function* ({
       tx.query.clauseCategories.findMany({
         where: { organizationId: { eq: organizationId } },
         columns: { id: true, name: true, parentId: true },
+        limit: LIMITS.clauseCategoriesCount,
       }),
     ),
   );
 
-  const categoryMap = new Map(allCategories.map((c) => [c.id, c]));
+  // Author-curated variant bodies, grouped per clause in display order.
+  const clauseIds = rows.map((row) => row.id);
+  const variantRows =
+    clauseIds.length > 0
+      ? yield* Result.await(
+          safeDb((tx) =>
+            tx
+              .select({
+                clauseId: clauseVariants.clauseId,
+                label: clauseVariants.label,
+                body: clauseVariants.body,
+                sortOrder: clauseVariants.sortOrder,
+              })
+              .from(clauseVariants)
+              .where(
+                and(
+                  eq(clauseVariants.organizationId, organizationId),
+                  inArray(clauseVariants.clauseId, clauseIds),
+                ),
+              ),
+          ),
+        )
+      : [];
 
-  const buildPath = (
-    catId: SafeId<"clauseCategory"> | null,
-  ): string[] | null => {
-    if (!catId) {
-      return null;
-    }
-    const path: string[] = [];
-    let current: SafeId<"clauseCategory"> | null = catId;
-    const visited = new Set<SafeId<"clauseCategory">>();
-    while (current) {
-      if (visited.has(current)) {
-        break;
-      }
-      visited.add(current);
-      const cat = categoryMap.get(current);
-      if (!cat) {
-        break;
-      }
-      path.unshift(cat.name);
-      current = cat.parentId;
-    }
-    return path.length > 0 ? path : null;
-  };
+  const variantsByClause = new Map<SafeId<"clause">, ClauseExportVariant[]>();
+  for (const variant of [...variantRows].sort(
+    (a, b) => a.sortOrder - b.sortOrder,
+  )) {
+    const list = variantsByClause.get(variant.clauseId) ?? [];
+    list.push({ label: variant.label, body: variant.body });
+    variantsByClause.set(variant.clauseId, list);
+  }
+
+  const categoryMap = new Map(allCategories.map((c) => [c.id, c]));
 
   const items: ClauseExportItem[] = rows.map((row) => ({
     title: row.title,
@@ -105,11 +117,12 @@ const exportHandler = async function* ({
     usageNotes: row.usageNotes,
     language: row.language,
     body: row.body,
+    variants: variantsByClause.get(row.id) ?? [],
     metadata: normalizeClauseMetadata(row.metadata) ?? null,
     categoryName: row.categoryId
       ? (categoryMap.get(row.categoryId)?.name ?? null)
       : null,
-    categoryPath: buildPath(row.categoryId),
+    categoryPath: buildClauseCategoryPath(categoryMap, row.categoryId),
   }));
 
   const payload: ClauseExportPayload = {

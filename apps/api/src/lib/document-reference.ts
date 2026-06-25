@@ -9,14 +9,14 @@ const VCODE_LENGTH = 10;
 
 /** Rejection-sampling to avoid modulo bias (256 % 31 = 8). */
 const generateCode = (): string => {
-  // eslint-disable-next-line no-bitwise
+  // eslint-disable-next-line no-bitwise -- bit-shift builds the rejection-sampling mask
   const mask = (1 << Math.ceil(Math.log2(VCODE_ALPHABET.length))) - 1;
   const result: string[] = [];
   while (result.length < VCODE_LENGTH) {
     const bytes = new Uint8Array(VCODE_LENGTH * 2);
     crypto.getRandomValues(bytes);
     for (const b of bytes) {
-      // eslint-disable-next-line no-bitwise
+      // eslint-disable-next-line no-bitwise -- mask random byte to the alphabet bit-width
       const idx = b & mask;
       if (idx < VCODE_ALPHABET.length) {
         result.push(VCODE_ALPHABET.at(idx) ?? "");
@@ -41,16 +41,21 @@ export const generateVerificationCode = (): string => generateCode();
  *
  * Format: `{matterRef}/{docSeq}.v{version}`
  *
- * Examples:
- * - `toDocumentReference("2026/001", 15, 3)` → `"2026/001/015.v3"`
- * - `toDocumentReference("CORP-001", 3, 1)` → `"CORP-001/003.v1"`
- * - `toDocumentReference("001", 42, 2)` → `"001/042.v2"`
+ * Format: `{matterRef}/{docSeq}.v{version}` →
+ * `{ matterReference: "2026/001", docSequence: 15, versionNumber: 3 }`
+ * produces `"2026/001/015.v3"`.
  */
-export const toDocumentReference = (
-  matterReference: string,
-  docSequence: number,
-  versionNumber: number,
-): string => {
+type DocumentReferenceParams = {
+  matterReference: string;
+  docSequence: number;
+  versionNumber: number;
+};
+
+export const toDocumentReference = ({
+  matterReference,
+  docSequence,
+  versionNumber,
+}: DocumentReferenceParams): string => {
   const paddedSeq = String(docSequence).padStart(3, "0");
   return `${matterReference}/${paddedSeq}.v${versionNumber}`;
 };

@@ -19,6 +19,7 @@ import { stellaToast } from "@stll/ui/components/toast";
 
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
+import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { toAPIError } from "@/lib/errors";
 import {
   organizationSettingsKeys,
@@ -37,7 +38,10 @@ const PATTERN_PRESETS = [
 const PADDING_OPTIONS = [2, 3, 4, 5, 6] as const;
 
 export const MatterNumberingCard = () => {
-  const { data: settings } = useQuery(organizationSettingsOptions);
+  const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
+  const { data: settings } = useQuery(
+    organizationSettingsOptions(activeOrganizationId),
+  );
 
   if (!settings) {
     return null;
@@ -85,6 +89,7 @@ const MatterNumberingCardBody = ({
     }
   }, 300);
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- debounced preview POST that must also fire once on mount; a useQuery migration would change debounce/mount-fire/abort semantics, and moving into the change handlers would drop the initial preview, so kept as an explicit external fetch
   useEffect(() => {
     void fetchPreview(pattern, padding);
   }, [pattern, padding, fetchPreview]);

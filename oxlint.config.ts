@@ -1,4 +1,6 @@
 import { defineConfig } from "oxlint";
+import core from "ultracite/oxlint/core";
+import react from "ultracite/oxlint/react";
 
 import {
   libraryIgnorePatterns,
@@ -6,9 +8,6 @@ import {
   libraryRules,
   stellaLowercasePluginSpecifier,
 } from "@stll/oxlint-config";
-
-import core from "./node_modules/ultracite/config/oxlint/core/index.mjs";
-import react from "./node_modules/ultracite/config/oxlint/react/index.mjs";
 
 // All workspaces run oxlint from the repo root via:
 //   cd ../.. && oxlint -c oxlint.config.ts --type-aware <workspace-dir>
@@ -36,6 +35,7 @@ export default defineConfig({
     "unicorn/no-useless-undefined": "off",
     "unicorn/prefer-array-find": "error",
     "unicorn/prefer-at": "error",
+    "unicorn/prefer-node-protocol": "error",
     // Stylistic only; the negated form (`a !== b ? x : y`) is often
     // clearer than the swapped equivalent. No bug-catching value.
     "unicorn/no-negated-condition": "off",
@@ -57,8 +57,11 @@ export default defineConfig({
     "react/style-prop-object": "error",
     "react/jsx-no-comment-textnodes": "error",
     "react/iframe-missing-sandbox": "error",
+    "react/jsx-no-target-blank": "error",
     "react/jsx-no-script-url": "error",
     "react/button-has-type": "error",
+    "react/checked-requires-onchange-or-readonly": "error",
+    "react/no-unknown-property": "error",
     "react/no-object-type-as-default-prop": "error",
     // Allow component creation in prop position: i18n rich-text render
     // callbacks (`t.rich({ link: (chunks) => <a/> })`) and IIFE-as-prop
@@ -104,6 +107,30 @@ export default defineConfig({
     ],
     "no-bare-error/no-bare-error": "error",
     "ai-output-strict-schema/ai-output-strict-schema": "error",
+    "no-coerced-optional-union-enum/no-coerced-optional-union-enum": "error",
+    "tagged-error-requires-message/tagged-error-requires-message": "error",
+    "require-custom-jsonb-column/require-custom-jsonb-column": "error",
+    "no-spread-input-in-query-key/no-spread-input-in-query-key": "error",
+    "no-unsafe-inner-html/no-unsafe-inner-html": "error",
+    "no-static-devtools-import/no-static-devtools-import": "error",
+    "no-static-catalogue-route-import/no-static-catalogue-route-import": [
+      "error",
+      {
+        routeFiles: ["apps/web/src/routes/_protected.knowledge/tools.tsx"],
+      },
+    ],
+    "suppression-hygiene/require-description": "error",
+    "suppression-hygiene/no-foreign-directive": "error",
+    "typescript/ban-ts-comment": [
+      "error",
+      {
+        "ts-expect-error": "allow-with-description",
+        "ts-ignore": true,
+        "ts-nocheck": false,
+        "ts-check": false,
+        minimumDescriptionLength: 3,
+      },
+    ],
     "no-nanoid/no-nanoid": "error",
     "no-raw-date-input/no-raw-date-input": "error",
     "stella-lowercase/stella-lowercase": "error",
@@ -155,7 +182,7 @@ export default defineConfig({
     "no-unexpected-multiline": "off",
     "max-classes-per-file": "off",
     "class-methods-use-this": "off",
-    "no-unmodified-loop-condition": "off",
+    "no-unmodified-loop-condition": "error",
     "no-loop-func": "error",
     complexity: "off",
     "func-style": "off",
@@ -164,7 +191,7 @@ export default defineConfig({
     "typescript/no-inferrable-types": "off",
     "typescript/consistent-return": "error",
     "typescript/dot-notation": "error",
-    "typescript/prefer-readonly": "off",
+    "typescript/prefer-readonly": "error",
     "typescript/no-unnecessary-type-conversion": "error",
     "typescript/no-unnecessary-condition": [
       "error",
@@ -277,6 +304,10 @@ export default defineConfig({
     "eslint-plugin-sonarjs",
     "@stll/oxlint-config/no-raw-colors",
     "./.oxlint-plugins/no-raw-date-input.ts",
+    "./.oxlint-plugins/no-raw-locale-format.ts",
+    "./.oxlint-plugins/no-input-dir-auto.ts",
+    "./.oxlint-plugins/require-dir-on-rendered-name.ts",
+    "./.oxlint-plugins/no-unformatted-number.ts",
     "./.oxlint-plugins/no-raw-foreground-opacity.ts",
     "./.oxlint-plugins/no-inline-style-colors.ts",
     "./.oxlint-plugins/no-physical-properties.ts",
@@ -285,14 +316,20 @@ export default defineConfig({
     "./.oxlint-plugins/no-untyped-updates.ts",
     "./.oxlint-plugins/no-nanoid.ts",
     "./.oxlint-plugins/no-crypto-random-uuid.ts",
+    "./.oxlint-plugins/no-raw-use-effect.ts",
+    "./.oxlint-plugins/no-ref-mirror.ts",
+    "./.oxlint-plugins/no-shared-suspense-query.ts",
+    "./.oxlint-plugins/no-bare-chrome-query.ts",
     "./.oxlint-plugins/require-router-select.ts",
     "./.oxlint-plugins/require-matter-affordance.ts",
     "./.oxlint-plugins/no-raw-route-query-client.ts",
+    "./.oxlint-plugins/no-component-on-redirect-route.ts",
     "./.oxlint-plugins/require-safe-route-handlers.ts",
     "./.oxlint-plugins/security-guards.ts",
     "./.oxlint-plugins/no-unbranded-ownership-id-param.ts",
     "./.oxlint-plugins/no-raw-user-id-schema.ts",
     "./.oxlint-plugins/no-offset-pagination.ts",
+    "./.oxlint-plugins/require-query-limit.ts",
     "./.oxlint-plugins/mcp-security.ts",
     "./.oxlint-plugins/auth-lifecycle.ts",
     "./.oxlint-plugins/stella-toast.ts",
@@ -301,6 +338,7 @@ export default defineConfig({
     "./.oxlint-plugins/no-secret-in-log-sink.ts",
     "./.oxlint-plugins/no-raw-api-url.ts",
     "./.oxlint-plugins/require-fetch-timeout.ts",
+    "./.oxlint-plugins/require-escape-like.ts",
     "./.oxlint-plugins/no-bare-error.ts",
     "./.oxlint-plugins/ai-output-strict-schema.ts",
     "./.oxlint-plugins/require-audit-on-mutation.ts",
@@ -313,6 +351,17 @@ export default defineConfig({
     "./.oxlint-plugins/public-case-law-db-boundary.ts",
     "./.oxlint-plugins/folio-layer-boundaries.ts",
     "./.oxlint-plugins/require-contained-handler.ts",
+    "./.oxlint-plugins/suppression-hygiene.ts",
+    "./.oxlint-plugins/no-coerced-optional-union-enum.ts",
+    "./.oxlint-plugins/tagged-error-requires-message.ts",
+    "./.oxlint-plugins/require-custom-jsonb-column.ts",
+    "./.oxlint-plugins/no-spread-input-in-query-key.ts",
+    "./.oxlint-plugins/no-unsafe-inner-html.ts",
+    "./.oxlint-plugins/no-centered-scroll-column.ts",
+    "./.oxlint-plugins/no-static-devtools-import.ts",
+    "./.oxlint-plugins/no-static-catalogue-route-import.ts",
+    "./.oxlint-plugins/no-workspace-field-value-drift.ts",
+    "./.oxlint-plugins/icon-button-requires-tooltip.ts",
   ],
 
   overrides: [
@@ -322,7 +371,7 @@ export default defineConfig({
       // Custom oxlint plugin rules traverse AST nodes that the runtime
       // delivers as untyped (effectively `any`). Strict any-flow rules
       // produce noise without real safety here.
-      files: [".oxlint-plugins/**/*.ts"],
+      files: [".oxlint-plugins/**/*.{ts,tsx}"],
       rules: {
         "typescript/no-unsafe-assignment": "off",
         "typescript/no-unsafe-member-access": "off",
@@ -332,6 +381,79 @@ export default defineConfig({
         "typescript/strict-boolean-expressions": "off",
         "require-unicode-regexp": "off",
         "no-nested-ternary": "off",
+        // Plugin sources and fixtures embed directive strings as
+        // documentation/regression examples; do not lint them as real
+        // directives.
+        "suppression-hygiene/require-description": "off",
+        "suppression-hygiene/no-foreign-directive": "off",
+      },
+    },
+    {
+      // Exercise no-raw-use-effect against its regression fixture; the rule is
+      // otherwise scoped to apps/web/src, which the fixtures dir is not.
+      files: [".oxlint-plugins/__fixtures__/no-raw-use-effect.fixture.tsx"],
+      rules: { "no-raw-use-effect/no-raw-use-effect": "error" },
+    },
+    {
+      files: [
+        ".oxlint-plugins/__fixtures__/no-raw-route-query-client.fixture.tsx",
+      ],
+      rules: {
+        "no-raw-route-query-client/no-raw-route-query-client": "error",
+      },
+    },
+    {
+      files: [
+        ".oxlint-plugins/__fixtures__/no-component-on-redirect-route.fixture.tsx",
+      ],
+      rules: {
+        "no-component-on-redirect-route/no-component-on-redirect-route":
+          "error",
+      },
+    },
+    {
+      files: [".oxlint-plugins/__fixtures__/no-ref-mirror.fixture.tsx"],
+      rules: { "no-ref-mirror/no-ref-mirror": "error" },
+    },
+    {
+      files: [".oxlint-plugins/__fixtures__/require-escape-like.fixture.ts"],
+      rules: { "require-escape-like/require-escape-like": "error" },
+    },
+    {
+      files: [
+        ".oxlint-plugins/__fixtures__/no-static-catalogue-route-import.fixture.tsx",
+      ],
+      rules: {
+        "no-static-catalogue-route-import/no-static-catalogue-route-import": [
+          "error",
+          {
+            routeFiles: [
+              ".oxlint-plugins/__fixtures__/no-static-catalogue-route-import.fixture.tsx",
+            ],
+          },
+        ],
+      },
+    },
+    {
+      files: [
+        ".oxlint-plugins/__fixtures__/no-static-devtools-import.fixture.tsx",
+      ],
+      rules: {
+        "no-static-devtools-import/no-static-devtools-import": "error",
+      },
+    },
+    {
+      files: [
+        ".oxlint-plugins/__fixtures__/no-shared-suspense-query.fixture.tsx",
+      ],
+      rules: {
+        "no-shared-suspense-query/no-shared-suspense-query": "error",
+      },
+    },
+    {
+      files: [".oxlint-plugins/__fixtures__/no-bare-chrome-query.fixture.tsx"],
+      rules: {
+        "no-bare-chrome-query/no-bare-chrome-query": "error",
       },
     },
     {
@@ -360,6 +482,22 @@ export default defineConfig({
       rules: {
         "typescript/no-unsafe-assignment": "off",
         "typescript/no-unsafe-call": "off",
+      },
+    },
+    {
+      // TipTap v3 builds `Editor.chain()` (ChainedCommands) and `isActive`
+      // from a large intersection of module-augmented command interfaces.
+      // oxlint's type-aware pass resolves the editor to `error`-typed here
+      // (the only web consumer of toggleBold/toggleHeading/isActive), while
+      // tsc and tsgo --noEmit both type-check the file clean.
+      files: [
+        "apps/web/src/routes/_protected.knowledge/-components/clause-editor.tsx",
+      ],
+      rules: {
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-call": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/strict-boolean-expressions": "off",
       },
     },
     {
@@ -446,6 +584,16 @@ export default defineConfig({
       rules: { "require-unicode-regexp": "off" },
     },
     {
+      // The tokenizer regex here is a standard quoted-string-with-escapes
+      // matcher (linear in practice). Naming its capture group to satisfy
+      // prefer-named-capture-group puts the line into the PR diff, which
+      // re-surfaces a CodeQL "polynomial regular expression" false positive
+      // on a pattern that already exists on main. Keep the regex byte-
+      // identical to main and disable the rule for this single-regex file.
+      files: ["packages/template-conditions/src/index.ts"],
+      rules: { "prefer-named-capture-group": "off" },
+    },
+    {
       // Case-law ingestion parsers/adapters intentionally encode many source
       // quirks. Tighten this after parser-specific refactors.
       files: ["apps/api/src/handlers/case-law/ingestion/**/*.ts"],
@@ -481,6 +629,79 @@ export default defineConfig({
       },
     },
     {
+      // A centered, width-capped content column must not own the vertical
+      // scroll, or the scrollbar floats at the column edge instead of the pane
+      // edge next to the inspector rail. Scoped to apps/web (the app shell with
+      // the inspector rail); folio has its own document scroll model.
+      files: [
+        "apps/web/src/**/*.tsx",
+        ".oxlint-plugins/__fixtures__/no-centered-scroll-column.fixture.tsx",
+      ],
+      rules: {
+        "no-centered-scroll-column/no-centered-scroll-column": "error",
+      },
+    },
+    {
+      // Icon-only actions need visible hover/focus affordance for sighted users;
+      // aria-label alone is not discoverable. Decorative icons are ignored.
+      files: [
+        "apps/web/src/**/*.tsx",
+        ".oxlint-plugins/__fixtures__/icon-button-requires-tooltip.fixture.tsx",
+      ],
+      rules: {
+        "icon-button-requires-tooltip/icon-button-requires-tooltip": "error",
+      },
+    },
+    {
+      // Locale-aware number/date formatting. Folio is excluded: its
+      // document surface stays LTR-based and formats with its own
+      // resolved locales rather than the UI numbering preference.
+      files: [
+        "apps/web/src/**/*.{ts,tsx}",
+        "packages/ui/src/**/*.{ts,tsx}",
+        ".oxlint-plugins/__fixtures__/no-raw-locale-format.fixture.ts",
+      ],
+      rules: {
+        "no-raw-locale-format/no-raw-locale-format": "error",
+      },
+    },
+    {
+      // Bidirectional: the shared <Input>/<Textarea> own field direction, so a
+      // literal dir="auto" is forbidden (it strands the caret left when empty);
+      // numeric inputs must be explicitly dir="ltr".
+      files: [
+        "apps/web/src/**/*.tsx",
+        "packages/ui/src/**/*.tsx",
+        ".oxlint-plugins/__fixtures__/no-input-dir-auto.fixture.tsx",
+      ],
+      rules: {
+        "no-input-dir-auto/no-input-dir-auto": "error",
+      },
+    },
+    {
+      // Bidirectional: rendering a user-provided name needs `dir` so it
+      // isn't reordered under RTL.
+      files: [
+        "apps/web/src/**/*.tsx",
+        "packages/ui/src/**/*.tsx",
+        ".oxlint-plugins/__fixtures__/require-dir-on-rendered-name.fixture.tsx",
+      ],
+      rules: {
+        "require-dir-on-rendered-name/require-dir-on-rendered-name": "error",
+      },
+    },
+    {
+      // Numbers must go through the locale formatter so digits localize.
+      files: [
+        "apps/web/src/**/*.tsx",
+        "packages/ui/src/**/*.tsx",
+        ".oxlint-plugins/__fixtures__/no-unformatted-number.fixture.tsx",
+      ],
+      rules: {
+        "no-unformatted-number/no-unformatted-number": "error",
+      },
+    },
+    {
       files: ["packages/ui/src/**/*.{ts,tsx}"],
       rules: {
         "no-restricted-imports": [
@@ -506,12 +727,71 @@ export default defineConfig({
     {
       files: ["apps/web/src/**/*.{ts,tsx}"],
       rules: {
+        // Direct useEffect is banned; route external-system sync through
+        // useMountEffect / useExternalSyncEffect. See /conventions-use-effect.
+        // Upstream-synced packages/folio is intentionally exempt.
+        "no-raw-use-effect/no-raw-use-effect": [
+          "error",
+          { allowedFiles: ["apps/web/src/hooks/use-effect.ts"] },
+        ],
+        // useExternalSyncEffect takes a dependency array, so exhaustive-deps
+        // must inspect it like useEffect. useMountEffect is deliberately
+        // dependency-less (mount-only) and is left unregistered.
+        "react-hooks/exhaustive-deps": [
+          "error",
+          { additionalHooks: "(useExternalSyncEffect)" },
+        ],
         "@tanstack/query/exhaustive-deps": "error",
         "@tanstack/query/infinite-query-property-order": "error",
         "@tanstack/query/mutation-property-order": "error",
         "@tanstack/query/no-rest-destructuring": "error",
         "@tanstack/query/no-unstable-deps": "error",
         "@tanstack/query/stable-query-client": "error",
+        "no-ref-mirror/no-ref-mirror": [
+          "error",
+          {
+            // Existing render-body ref mirrors. Keep the rule as a ratchet:
+            // new files cannot add this pattern, while these legacy files are
+            // kept only when the mutable ref is not an effect-callback shim.
+            allowedFiles: [
+              {
+                path: "apps/web/src/components/chat-editor-provider.tsx",
+                reason:
+                  "Tiptap extension callbacks and ordinary editor event handlers read latest placeholder, attachments, and slash items; useEffectEvent is not for third-party plugin/event callbacks.",
+              },
+              {
+                path: "apps/web/src/components/inspector/versions-facet.tsx",
+                reason:
+                  "Older-version paging updates the seeded query identity during render so in-flight page responses can be discarded before the passive-effect window; useEffectEvent would not protect this async race.",
+              },
+              {
+                path: "apps/web/src/routes/_protected.chat/-hooks/use-chat-session.ts",
+                reason:
+                  "Older-message paging updates the seeded Chat identity during render so stale in-flight page responses are discarded across thread switches and same-thread refetches.",
+              },
+              {
+                path: "apps/web/src/routes/_protected.knowledge/-components/template-form.tsx",
+                reason:
+                  "Form refs bridge synchronous onChange/onBlur ordering before React commits, so validation reads the latest field values and touched state inside ordinary event handlers.",
+              },
+              {
+                path: "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/cell-metadata-flags.tsx",
+                reason:
+                  "Debounced metadata flush needs the latest server base and in-flight mutation base; the callback is scheduled from user input, not installed by an effect.",
+              },
+              {
+                path: "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/property-popover.tsx",
+                reason:
+                  "Rapid dependency edits compose against latest optimistic state during event handlers and transitions; this is mutable optimistic state, not stale effect callback plumbing.",
+              },
+              {
+                path: "apps/web/src/routes/_protected.workspaces/$workspaceId/-hooks/use-create-b-boxes.ts",
+                reason:
+                  "Returned callback identity must stay stable for downstream effect deps while reading latest pending mutation count; callers invoke it directly, not from an effect-installed callback.",
+              },
+            ],
+          },
+        ],
         "no-restricted-imports": [
           "error",
           {
@@ -571,6 +851,21 @@ export default defineConfig({
       ],
       rules: {
         "require-matter-affordance/require-matter-affordance": "error",
+      },
+    },
+    {
+      files: [
+        ".oxlint-plugins/__fixtures__/no-workspace-field-value-drift.fixture.tsx",
+      ],
+      rules: {
+        "no-workspace-field-value-drift/no-workspace-field-value-drift":
+          "error",
+      },
+    },
+    {
+      files: [".oxlint-plugins/__fixtures__/require-query-limit.fixture.ts"],
+      rules: {
+        "require-query-limit/require-query-limit": "error",
       },
     },
     {
@@ -775,13 +1070,15 @@ export default defineConfig({
         "apps/web/src/**/conversation.tsx",
         "packages/ui/src/**/toast.tsx",
         "packages/ui/src/**/tabs.tsx",
-        "apps/web/src/**/_protected.tsx",
         "apps/web/src/**/kanban-column.tsx",
         "apps/web/src/**/workspace-table.tsx",
         "apps/web/src/**/workspace-table/**/*.tsx",
         "apps/web/src/**/sidebar.tsx",
         "apps/web/src/**/template-preview.tsx",
         "apps/web/src/**/page-citation.tsx",
+        // Generated message types: UI copy may legitimately contain words
+        // like "right-click"; these strings are never class names.
+        "apps/web/src/i18n/langs/messages.gen.ts",
       ],
       rules: { "no-physical-properties/no-physical-properties": "off" },
     },
@@ -796,9 +1093,64 @@ export default defineConfig({
       },
     },
     {
+      files: [
+        "apps/web/src/routes/_protected.settings/route.tsx",
+        "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/view/view-switcher.tsx",
+        "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/view/view-toolbar.tsx",
+      ],
+      rules: {
+        "no-shared-suspense-query/no-shared-suspense-query": "error",
+      },
+    },
+    {
+      // Persistent chrome that mounts on every route: defer cold-cache fetches
+      // past mount via useChromeQuery so they cannot warn on a not-yet-mounted
+      // fiber. See apps/web/src/hooks/use-chrome-query.ts.
+      files: [
+        "apps/web/src/routes/_protected.tsx",
+        "apps/web/src/components/app-sidebar.tsx",
+        "apps/web/src/components/sidebar-user-menu.tsx",
+        "apps/web/src/components/require-ai-key.tsx",
+        "apps/web/src/components/chat-mention-providers.tsx",
+        "apps/web/src/components/chat-editor-provider.tsx",
+        "apps/web/src/components/api-version-mismatch-banner.tsx",
+        "apps/web/src/components/selfhost-update-banner.tsx",
+        "apps/web/src/routes/_protected.workspaces/-components/create-matter-dialog.tsx",
+      ],
+      rules: {
+        "no-bare-chrome-query/no-bare-chrome-query": "error",
+      },
+    },
+    {
+      // Field value display must stay centralized in FieldValue /
+      // EditableField. These surfaces own table/kanban/inspector shell
+      // behavior, but must not reimplement per-field display branches.
+      files: [
+        "apps/web/src/components/inspector/entity-metadata-panel.tsx",
+        "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/cell-result.tsx",
+        "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/table-column.tsx",
+        "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/kanban/kanban-card.tsx",
+      ],
+      rules: {
+        "no-workspace-field-value-drift/no-workspace-field-value-drift":
+          "error",
+      },
+    },
+    {
+      files: [
+        "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/field-value.tsx",
+        ".oxlint-plugins/__fixtures__/no-workspace-field-value-drift.fixture.tsx",
+      ],
+      rules: {
+        "no-workspace-field-value-drift/no-raw-field-value-bidi-text": "error",
+      },
+    },
+    {
       files: ["apps/web/src/routes/**/*.{ts,tsx}"],
       rules: {
         "@tanstack/router/create-route-property-order": "error",
+        "no-component-on-redirect-route/no-component-on-redirect-route":
+          "error",
         "no-raw-route-query-client/no-raw-route-query-client": "error",
       },
     },
@@ -812,6 +1164,7 @@ export default defineConfig({
         "sonarjs/no-ignored-return": "error",
         "sonarjs/no-use-of-empty-return-value": "error",
         "require-fetch-timeout/require-fetch-timeout": "error",
+        "require-escape-like/require-escape-like": "error",
       },
     },
     {
@@ -872,6 +1225,20 @@ export default defineConfig({
       excludeFiles: ["apps/api/src/handlers/**/*.test.ts"],
       rules: {
         "require-audit-on-mutation/require-audit-on-mutation": "error",
+      },
+    },
+    {
+      // require-query-limit flags unbounded Drizzle reads (a `findMany`
+      // with no `limit`, or an ordered `select` chain with no `.limit()`)
+      // per conventions-db / conventions-scale. Genuine list reads carry a
+      // `.limit(LIMITS.*)`; reads that are bounded by a single-parent FK
+      // filter (a fixed-cardinality relation) carry an inline disable with a
+      // `// SAFETY:` note explaining the bound. Test files run unbounded
+      // fixtures intentionally and are excluded.
+      files: ["apps/api/src/**/*.ts"],
+      excludeFiles: ["apps/api/src/**/*.test.ts", "apps/api/src/tests/**/*.ts"],
+      rules: {
+        "require-query-limit/require-query-limit": "error",
       },
     },
     {
@@ -1355,6 +1722,7 @@ export default defineConfig({
         "no-dangerous-type-assertions/no-dangerous-type-assertions": "off",
         "security-guards/no-unsanitized-href": "off",
         "security-guards/no-unscoped-user-query": "off",
+        "vitest/no-focused-tests": "error",
         "vitest/prefer-importing-vitest-globals": "off",
         // bun:test globals (describe/test/expect/it/…) resolve as `error` type
         // when test files are excluded from the main tsconfig (packages/folio).

@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 import {
   Dialog,
@@ -178,7 +179,7 @@ export const PartiesSection = ({ workspaceId }: PartiesSectionProps) => {
             params={{ contactId: client.id }}
             to="/contacts/$contactId"
           >
-            {client.displayName}
+            <BidiText>{client.displayName}</BidiText>
           </Link>
         </div>
       </section>
@@ -377,8 +378,9 @@ const PromoteDialog = ({ workspaceId }: PromoteDialogProps) => {
             </span>
             {selectedContact ? (
               <div className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
-                <span>{selectedContact.displayName}</span>
+                <BidiText>{selectedContact.displayName}</BidiText>
                 <Button
+                  aria-label={t("common.remove")}
                   className="ms-auto"
                   onClick={() => setSelectedContact(null)}
                   size="icon-xs"
@@ -513,7 +515,7 @@ const PartyRow = ({ party, workspaceId }: PartyRowProps) => {
         params={{ contactId: contact.id }}
         to="/contacts/$contactId"
       >
-        {contact.displayName}
+        <BidiText>{contact.displayName}</BidiText>
       </Link>
       <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs">
         {t(roleKey)}
@@ -659,8 +661,9 @@ const AddPartyDialog = ({
             </span>
             {selectedContact ? (
               <div className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
-                <span>{selectedContact.displayName}</span>
+                <BidiText>{selectedContact.displayName}</BidiText>
                 <Button
+                  aria-label={t("common.remove")}
                   className="ms-auto"
                   onClick={() => setSelectedContact(null)}
                   size="icon-xs"
@@ -692,9 +695,8 @@ const AddPartyDialog = ({
             >
               <SelectTrigger>
                 <SelectValue>
-                  {(current) =>
-                    // oxlint-disable-next-line typescript/strict-boolean-expressions -- tsgo issue
-                    current
+                  {(current: PartyRole | null) =>
+                    current !== null
                       ? roleItems.find((r) => r.value === current)?.label
                       : t("common.selectARole")
                   }

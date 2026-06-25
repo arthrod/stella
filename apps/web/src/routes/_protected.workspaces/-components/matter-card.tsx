@@ -5,6 +5,7 @@ import { Link } from "@tanstack/react-router";
 import { FileIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import {
   PreviewCard,
   PreviewCardPopup,
@@ -12,7 +13,7 @@ import {
 } from "@stll/ui/components/preview-card";
 import { cn } from "@stll/ui/lib/utils";
 
-import { useI18nStore } from "@/i18n/i18n-store";
+import { getFormattingLocale } from "@/i18n/i18n-store";
 import { getMatterColor } from "@/lib/matter-colors";
 import { formatFullTimestamp, formatRelativeTime } from "@/lib/relative-time";
 import { DocumentIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/document-icon";
@@ -44,9 +45,8 @@ export const MatterCard = ({
   hideClientName,
 }: MatterCardProps) => {
   const t = useTranslations();
-  const lang = useI18nStore((s) => s.lang);
 
-  const lastActivityAt = formatRelativeTime(workspace.lastActivityAt, lang);
+  const lastActivityAt = formatRelativeTime(workspace.lastActivityAt);
   const [previewEnabled, setPreviewEnabled] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
 
@@ -62,7 +62,7 @@ export const MatterCard = ({
       preview.recentEntities.length > 0);
 
   const recencyClass = getRecencyClass(workspace.lastActivityAt);
-  const deadline = getDeadlineInfo(workspace.nextDeadline, lang);
+  const deadline = getDeadlineInfo(workspace.nextDeadline);
   const isOverdue = deadline?.urgency === "overdue";
   const matterTintStyle: React.CSSProperties & { "--matter-tint": string } = {
     "--matter-tint": `color-mix(in srgb, ${getMatterColor(workspace.id)} 8%, transparent)`,
@@ -108,7 +108,10 @@ export const MatterCard = ({
           >
             {/* Line 1: name + reference */}
             <div className="flex items-center gap-2">
-              <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">
+              <h2
+                className="min-w-0 flex-1 truncate text-sm font-semibold"
+                dir="auto"
+              >
                 {rename.status === "editing" ? (
                   <InlineEdit
                     onChange={rename.setDraft}
@@ -148,7 +151,7 @@ export const MatterCard = ({
                   params={{ contactId: workspace.client.id }}
                   to="/contacts/$contactId"
                 >
-                  {workspace.client.displayName}
+                  <BidiText>{workspace.client.displayName}</BidiText>
                 </Link>
               ) : (
                 <span className="text-muted-foreground -mt-1 truncate text-xs italic">
@@ -197,7 +200,7 @@ export const MatterCard = ({
                 <span
                   className={cn("shrink-0", recencyClass)}
                   title={new Date(workspace.lastActivityAt).toLocaleString(
-                    lang,
+                    getFormattingLocale(),
                     {
                       dateStyle: "full",
                       timeStyle: "medium",
@@ -210,9 +213,7 @@ export const MatterCard = ({
             </div>
           </PreviewCardTrigger>
 
-          {hasPreviewContent && (
-            <PreviewPopupContent lang={lang} preview={preview} />
-          )}
+          {hasPreviewContent && <PreviewPopupContent preview={preview} />}
         </PreviewCard>
       )}
     </MatterContextMenu>
@@ -239,10 +240,7 @@ type DeadlineInfo = {
 };
 
 /** Format deadline with urgency color. Returns null if no deadline. */
-const getDeadlineInfo = (
-  deadline: string | null,
-  lang: string,
-): DeadlineInfo | null => {
+const getDeadlineInfo = (deadline: string | null): DeadlineInfo | null => {
   if (!deadline) {
     return null;
   }
@@ -253,7 +251,7 @@ const getDeadlineInfo = (
   }
   const now = Date.now();
   const diff = dueDate.getTime() - now;
-  const label = formatRelativeTime(new Date(`${deadline}T00:00:00`), lang);
+  const label = formatRelativeTime(new Date(`${deadline}T00:00:00`));
 
   if (diff < 0) {
     return {
@@ -273,10 +271,9 @@ const getDeadlineInfo = (
 
 type PreviewPopupContentProps = {
   preview: OverviewData;
-  lang: string;
 };
 
-const PreviewPopupContent = ({ preview, lang }: PreviewPopupContentProps) => {
+const PreviewPopupContent = ({ preview }: PreviewPopupContentProps) => {
   const t = useTranslations();
 
   return (
@@ -311,9 +308,9 @@ const PreviewPopupContent = ({ preview, lang }: PreviewPopupContentProps) => {
             {entity.updatedAt && (
               <span
                 className="text-muted-foreground shrink-0"
-                title={formatFullTimestamp(entity.updatedAt, lang)}
+                title={formatFullTimestamp(entity.updatedAt)}
               >
-                {formatRelativeTime(entity.updatedAt, lang)}
+                {formatRelativeTime(entity.updatedAt)}
               </span>
             )}
           </div>

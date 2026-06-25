@@ -1,5 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import path from "node:path";
 
 import { STAGING_STORAGE_STATE } from "../playwright.staging.config";
 
@@ -87,6 +87,7 @@ const waitForDeployedRevision = async (): Promise<void> => {
   let consecutive = 0;
 
   while (Date.now() < deadline) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential readiness sampling: each sample must follow the prior interval to build a streak
     const readiness = await Promise.all(
       ORIGINS.map(async (origin) => await origin.isReady(expectedCommit)),
     );
@@ -94,6 +95,7 @@ const waitForDeployedRevision = async (): Promise<void> => {
     if (consecutive >= READINESS_STABLE_SAMPLES) {
       return;
     }
+    // oxlint-disable-next-line no-await-in-loop -- sequential poll backoff: wait between readiness samples
     await sleep(READINESS_INTERVAL_MS);
   }
 
@@ -141,7 +143,7 @@ const globalSetup = async (): Promise<void> => {
     origins: [],
   };
 
-  mkdirSync(dirname(STAGING_STORAGE_STATE), { recursive: true });
+  mkdirSync(path.dirname(STAGING_STORAGE_STATE), { recursive: true });
   writeFileSync(STAGING_STORAGE_STATE, JSON.stringify(storageState, null, 2));
 };
 

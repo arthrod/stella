@@ -1,8 +1,8 @@
 /**
  * Custom XML Manifest for DOCX templates.
  *
- * Stores field metadata (labels, input types, validation) and
- * named conditions inside the DOCX as a Custom XML Part
+ * Stores field metadata (labels, input types, validation)
+ * inside the DOCX as a Custom XML Part
  * (`customXml/item1.xml`) — standard OOXML mechanism, ignored
  * by Word, self-contained in one file.
  *
@@ -13,34 +13,65 @@
 import JSZip from "jszip";
 import * as slimdom from "slimdom";
 
-import { WorkflowValidationError } from "@/api/lib/errors/tagged-errors";
+import { isFieldPath } from "@stll/template-conditions";
 
 import { isElement } from "./ooxml";
 import type {
   DiscoveredField,
   DiscoveredTemplate,
+  FieldDateFormat,
+  FieldLookup,
+  FieldLookupFormat,
   FieldMeta,
+  FieldPart,
   FieldValidation,
   InputType,
-  NamedCondition,
+  LookupRegistry,
+  PartInputType,
   ResolvedField,
   TemplateManifest,
+} from "./types";
+import {
+  isFieldDateFormat,
+  isLookupFormatKey,
+  LOOKUP_FORMAT_TEMPLATE_MAX_LENGTH,
+  LOOKUP_FORMATS_MAX,
+  LOOKUP_REGISTRIES,
 } from "./types";
 
 // ── Constants ────────────────────────────────────────────
 
 export const MANIFEST_NS = "urn:stella:template:v1";
 
-const CUSTOM_XML_ITEM_PATH = "customXml/item1.xml";
-const CUSTOM_XML_PROPS_PATH = "customXml/itemProps1.xml";
-const CUSTOM_XML_RELS_PATH = "customXml/_rels/item1.xml.rels";
+// Custom XML parts live in numbered slots (`customXml/item{N}.xml`). The slot
+// is NOT fixed at 1: real Word documents commonly ship their own custom XML at
+// item1 (bibliography sources, custom doc properties, content-control bindings,
+// SharePoint metadata). The manifest is located by namespace and written to a
+// free slot, never assuming item1 is ours.
+const customXmlItemPath = (slot: number): string =>
+  `customXml/item${String(slot)}.xml`;
+const customXmlPropsPath = (slot: number): string =>
+  `customXml/itemProps${String(slot)}.xml`;
+const customXmlRelsPath = (slot: number): string =>
+  `customXml/_rels/item${String(slot)}.xml.rels`;
+
+/** Matches any custom XML data or props part to read its slot index
+ *  (used to find the next free slot). */
+const CUSTOM_XML_INDEX_RE =
+  /^customXml\/(?:item|itemProps)(?<index>\d+)\.xml$/u;
+
+/** Matches only data parts (`item{N}.xml`), where a manifest can live. */
+const CUSTOM_XML_DATA_RE = /^customXml\/item(?<index>\d+)\.xml$/u;
+
+/** Escape every regex meta-character (including `\`) for literal matching. */
+const escapeRegExp = (value: string): string =>
+  value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
 const CONTENT_TYPES_PATH = "[Content_Types].xml";
 
-// prettier-ignore
 const CUSTOM_XML_CONTENT_TYPE =
   "application/vnd.openxmlformats-officedocument.customXmlProperties+xml";
 
-// prettier-ignore
 const CUSTOM_XML_PROPS_REL_TYPE =
   "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps";
 
@@ -52,7 +83,6 @@ const CURRENT_VERSION = 1;
 
 const INPUT_TYPES: ReadonlySet<string> = new Set([
   "text",
-  "textarea",
   "number",
   "boolean",
   "date",
@@ -61,6 +91,12 @@ const INPUT_TYPES: ReadonlySet<string> = new Set([
 
 const isInputType = (value: string): value is InputType =>
   INPUT_TYPES.has(value);
+
+const isPartInputType = (value: string): value is PartInputType =>
+  value === "text" || value === "select";
+
+const isLookupRegistry = (value: string): value is LookupRegistry =>
+  LOOKUP_REGISTRIES.some((registry) => registry === value);
 
 // ── XML builders ─────────────────────────────────────────
 
@@ -71,10 +107,59 @@ const escapeXml = (s: string): string =>
     .replace(/>/gu, "&gt;")
     .replace(/"/gu, "&quot;");
 
+const buildOptionsXml = (options: readonly string[]): string => {
+  const optionElements = options
+    .map((o) => `<st:option value="${escapeXml(o)}"/>`)
+    .join("");
+  return `<st:options>${optionElements}</st:options>`;
+};
+
+const buildPartXml = (part: FieldPart): string => {
+  const attrs: string[] = [
+    `key="${escapeXml(part.key)}"`,
+    `inputType="${escapeXml(part.inputType)}"`,
+  ];
+  if (part.label !== undefined) {
+    attrs.push(`label="${escapeXml(part.label)}"`);
+  }
+  if (part.pattern !== undefined) {
+    attrs.push(`pattern="${escapeXml(part.pattern)}"`);
+  }
+  if (part.options && part.options.length > 0) {
+    return `<st:part ${attrs.join(" ")}>${buildOptionsXml(part.options)}</st:part>`;
+  }
+  return `<st:part ${attrs.join(" ")}/>`;
+};
+
+const buildLookupXml = (lookup: FieldLookup): string => {
+  const registryAttr = `registry="${escapeXml(lookup.registry)}"`;
+  // The formats list is the sole carrier of renderings; the first child is the
+  // default for the bare marker, the rest are keyed `{{path.key}}` renderings.
+  const formatEls = lookup.formats
+    .map(
+      (f) =>
+        `<st:lookupFormat key="${escapeXml(f.key)}"` +
+        ` template="${escapeXml(f.template)}"/>`,
+    )
+    .join("");
+  return (
+    `<st:lookup ${registryAttr}>` +
+    `<st:lookupFormats>${formatEls}</st:lookupFormats>` +
+    "</st:lookup>"
+  );
+};
+
+const buildDateFormatXml = (dateFormat: FieldDateFormat): string =>
+  `<st:dateFormat locale="${escapeXml(dateFormat.locale)}"` +
+  ` style="${escapeXml(dateFormat.style)}"/>`;
+
 const buildFieldXml = (field: FieldMeta): string => {
   const attrs: string[] = [`path="${escapeXml(field.path)}"`];
   if (field.label !== undefined) {
     attrs.push(`label="${escapeXml(field.label)}"`);
+  }
+  if (field.hint !== undefined) {
+    attrs.push(`hint="${escapeXml(field.hint)}"`);
   }
   if (field.inputType) {
     attrs.push(`inputType="${escapeXml(field.inputType)}"`);
@@ -82,14 +167,46 @@ const buildFieldXml = (field: FieldMeta): string => {
   if (field.required !== undefined) {
     attrs.push(`required="${field.required}"`);
   }
+  if (field.aiPrompt !== undefined) {
+    attrs.push(`aiPrompt="${escapeXml(field.aiPrompt)}"`);
+  }
+  if (field.aiAdapt !== undefined) {
+    attrs.push(`aiAdapt="${field.aiAdapt}"`);
+  }
+  if (field.aiSeesDocument !== undefined) {
+    attrs.push(`aiSeesDocument="${field.aiSeesDocument}"`);
+  }
+  if (field.format !== undefined) {
+    attrs.push(`format="${escapeXml(field.format)}"`);
+  }
+  if (field.optionsFrom !== undefined) {
+    attrs.push(`optionsFrom="${escapeXml(field.optionsFrom)}"`);
+  }
+  if (field.formula !== undefined) {
+    attrs.push(`formula="${escapeXml(field.formula)}"`);
+  }
+  if (field.condition !== undefined) {
+    attrs.push(`condition="${escapeXml(field.condition)}"`);
+  }
 
   const children: string[] = [];
 
   if (field.options && field.options.length > 0) {
-    const optionElements = field.options
-      .map((o) => `<st:option value="${escapeXml(o)}"/>`)
-      .join("");
-    children.push(`<st:options>${optionElements}</st:options>`);
+    children.push(buildOptionsXml(field.options));
+  }
+
+  if (field.parts && field.parts.length > 0) {
+    children.push(
+      `<st:parts>${field.parts.map(buildPartXml).join("")}</st:parts>`,
+    );
+  }
+
+  if (field.lookup) {
+    children.push(buildLookupXml(field.lookup));
+  }
+
+  if (field.dateFormat) {
+    children.push(buildDateFormatXml(field.dateFormat));
   }
 
   if (field.validation) {
@@ -107,6 +224,12 @@ const buildFieldXml = (field: FieldMeta): string => {
     if (v.pattern !== undefined) {
       vAttrs.push(`pattern="${escapeXml(v.pattern)}"`);
     }
+    if (v.minItems !== undefined) {
+      vAttrs.push(`minItems="${v.minItems}"`);
+    }
+    if (v.maxItems !== undefined) {
+      vAttrs.push(`maxItems="${v.maxItems}"`);
+    }
     if (vAttrs.length > 0) {
       children.push(`<st:validation ${vAttrs.join(" ")}/>`);
     }
@@ -118,27 +241,14 @@ const buildFieldXml = (field: FieldMeta): string => {
   return `<st:field ${attrs.join(" ")}>${children.join("")}</st:field>`;
 };
 
-const buildConditionXml = (condition: NamedCondition): string => {
-  const attrs: string[] = [
-    `name="${escapeXml(condition.name)}"`,
-    `expression="${escapeXml(condition.expression)}"`,
-  ];
-  if (condition.label !== undefined) {
-    attrs.push(`label="${escapeXml(condition.label)}"`);
-  }
-  return `<st:condition ${attrs.join(" ")}/>`;
-};
-
 const buildManifestXml = (manifest: TemplateManifest): string => {
   const fields = manifest.fields.map(buildFieldXml).join("");
-  const conditions = manifest.conditions.map(buildConditionXml).join("");
 
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     `<st:template xmlns:st="${MANIFEST_NS}"`,
     ` version="${manifest.version}">`,
     fields ? `<st:fields>${fields}</st:fields>` : "",
-    conditions ? `<st:conditions>${conditions}</st:conditions>` : "",
     "</st:template>",
   ].join("");
 };
@@ -156,14 +266,14 @@ const buildItemPropsXml = (): string =>
     "</ds:datastoreItem>",
   ].join("");
 
-const buildItemRelsXml = (): string =>
+const buildItemRelsXml = (slot: number): string =>
   [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<Relationships xmlns="http://schemas.openxmlformats.org',
     '/package/2006/relationships">',
     `<Relationship Id="rId1"`,
     ` Type="${CUSTOM_XML_PROPS_REL_TYPE}"`,
-    ` Target="itemProps1.xml"/>`,
+    ` Target="itemProps${String(slot)}.xml"/>`,
     "</Relationships>",
   ].join("");
 
@@ -194,6 +304,40 @@ const getFirstElementChild = (
   return null;
 };
 
+const parseFieldPart = (el: slimdom.Element): FieldPart | null => {
+  const key = el.getAttribute("key");
+  if (key === null || !isFieldPath(key)) {
+    return null;
+  }
+
+  const rawType = el.getAttribute("inputType");
+  const part: FieldPart = {
+    key,
+    inputType: rawType !== null && isPartInputType(rawType) ? rawType : "text",
+  };
+
+  const label = el.getAttribute("label");
+  if (label !== null) {
+    part.label = label;
+  }
+  const pattern = el.getAttribute("pattern");
+  if (pattern !== null) {
+    part.pattern = pattern;
+  }
+
+  const optionsEl = getFirstElementChild(el, "options");
+  if (optionsEl) {
+    const options = getElementChildren(optionsEl, "option")
+      .map((o) => o.getAttribute("value"))
+      .filter((v): v is string => v !== null);
+    if (options.length > 0) {
+      part.options = options;
+    }
+  }
+
+  return part;
+};
+
 const parseFieldMeta = (el: slimdom.Element): FieldMeta => {
   const path = el.getAttribute("path") ?? "";
   const label = el.getAttribute("label") ?? undefined;
@@ -207,11 +351,33 @@ const parseFieldMeta = (el: slimdom.Element): FieldMeta => {
   if (label !== undefined) {
     field.label = label;
   }
+  const hint = el.getAttribute("hint");
+  if (hint !== null) {
+    field.hint = hint;
+  }
   if (inputType) {
     field.inputType = inputType;
   }
   if (required !== undefined) {
     field.required = required;
+  }
+  const aiPrompt = el.getAttribute("aiPrompt");
+  if (aiPrompt !== null) {
+    field.aiPrompt = aiPrompt;
+  }
+  const aiAdapt = el.getAttribute("aiAdapt");
+  if (aiAdapt !== null) {
+    field.aiAdapt = aiAdapt === "true";
+  }
+  const aiSeesDocument = el.getAttribute("aiSeesDocument");
+  if (aiSeesDocument !== null) {
+    field.aiSeesDocument = aiSeesDocument === "true";
+  }
+  // A hand-edited value outside the field-path grammar is dropped so the
+  // isFieldMeta invariant holds downstream.
+  const optionsFrom = el.getAttribute("optionsFrom");
+  if (optionsFrom !== null && isFieldPath(optionsFrom)) {
+    field.optionsFrom = optionsFrom;
   }
 
   // Parse options
@@ -252,24 +418,119 @@ const parseFieldMeta = (el: slimdom.Element): FieldMeta => {
     if (pattern !== null) {
       validation.pattern = pattern;
     }
+    const minItems = validationEl.getAttribute("minItems");
+    if (minItems !== null) {
+      const parsed = Number.parseInt(minItems, 10);
+      if (Number.isFinite(parsed)) {
+        validation.minItems = parsed;
+      }
+    }
+    const maxItems = validationEl.getAttribute("maxItems");
+    if (maxItems !== null) {
+      const parsed = Number.parseInt(maxItems, 10);
+      if (Number.isFinite(parsed)) {
+        validation.maxItems = parsed;
+      }
+    }
     if (Object.keys(validation).length > 0) {
       field.validation = validation;
     }
   }
 
-  return field;
-};
-
-const parseCondition = (el: slimdom.Element): NamedCondition => {
-  const name = el.getAttribute("name") ?? "";
-  const expression = el.getAttribute("expression") ?? "";
-  const label = el.getAttribute("label") ?? undefined;
-
-  const condition: NamedCondition = { name, expression };
-  if (label !== undefined) {
-    condition.label = label;
+  // A hand-edited registry outside the supported set is dropped so the
+  // isFieldMeta invariant holds downstream.
+  const lookupEl = getFirstElementChild(el, "lookup");
+  if (lookupEl) {
+    const registry = lookupEl.getAttribute("registry");
+    if (registry !== null && isLookupRegistry(registry)) {
+      // Output formats round-trip nested under the lookup element; the first
+      // child is the default for the bare marker. A hand-edited key outside the
+      // segment grammar or an over-long template is dropped, and a lookup with
+      // no valid format is itself dropped so the isFieldLookup invariant holds.
+      const formats: FieldLookupFormat[] = [];
+      const formatsEl = getFirstElementChild(lookupEl, "lookupFormats");
+      if (formatsEl) {
+        for (const formatEl of getElementChildren(formatsEl, "lookupFormat")) {
+          const key = formatEl.getAttribute("key");
+          const template = formatEl.getAttribute("template");
+          if (
+            key !== null &&
+            isLookupFormatKey(key) &&
+            template !== null &&
+            template.length <= LOOKUP_FORMAT_TEMPLATE_MAX_LENGTH
+          ) {
+            formats.push({ key, template });
+          }
+        }
+      }
+      if (formats.length > 0) {
+        field.lookup = {
+          registry,
+          formats: formats.slice(0, LOOKUP_FORMATS_MAX),
+        };
+      }
+    }
   }
-  return condition;
+
+  // A hand-edited locale that is not a plausible BCP-47 tag (or an unknown
+  // style) is dropped so the isFieldMeta invariant holds downstream.
+  const dateFormatEl = getFirstElementChild(el, "dateFormat");
+  if (dateFormatEl) {
+    const candidate = {
+      locale: dateFormatEl.getAttribute("locale"),
+      style: dateFormatEl.getAttribute("style"),
+    };
+    if (isFieldDateFormat(candidate)) {
+      field.dateFormat = candidate;
+    }
+  }
+
+  // parts + format round-trip together; a half-shape (hand-edited XML) is
+  // dropped so the "both present or both absent" invariant holds downstream.
+  const format = el.getAttribute("format");
+  const partsEl = getFirstElementChild(el, "parts");
+  const parts =
+    partsEl === null
+      ? []
+      : getElementChildren(partsEl, "part")
+          .map(parseFieldPart)
+          .filter((part): part is FieldPart => part !== null);
+  if (format !== null && parts.length > 0) {
+    field.parts = parts;
+    field.format = format;
+  }
+
+  // A formula field's value is derived, never user-entered; a hand-edited
+  // formula on a field that already has another value source (AI prompt or
+  // adapt, lookup, composite parts) is dropped so the isFieldMeta invariant
+  // holds downstream.
+  const formula = el.getAttribute("formula");
+  if (
+    formula !== null &&
+    field.aiPrompt === undefined &&
+    field.aiAdapt === undefined &&
+    field.lookup === undefined &&
+    field.parts === undefined
+  ) {
+    field.formula = formula;
+  }
+
+  // A condition field is a boolean derived by rule; like a formula it cannot
+  // coexist with another value source. A hand-edited condition on a field that
+  // already has one is dropped so the isFieldMeta invariant holds downstream.
+  const condition = el.getAttribute("condition");
+  if (
+    condition !== null &&
+    field.formula === undefined &&
+    field.aiPrompt === undefined &&
+    field.aiAdapt === undefined &&
+    field.lookup === undefined &&
+    field.parts === undefined
+  ) {
+    field.condition = condition;
+  }
+
+  return field;
 };
 
 const parseManifestXml = (xml: string): TemplateManifest | null => {
@@ -281,13 +542,15 @@ const parseManifestXml = (xml: string): TemplateManifest | null => {
   }
 
   const root = doc.documentElement;
-  if (!root || root.localName !== "template") {
-    return null;
-  }
-
-  // Check namespace (attribute or default)
-  const ns = root.namespaceURI ?? root.getAttribute("xmlns:st");
-  if (ns !== MANIFEST_NS) {
+  // Require the root element to actually be `template` *in* our namespace.
+  // Checking namespaceURI (not a declared-but-unused `xmlns:st` attribute)
+  // ensures a foreign `<template xmlns:st="...">` whose element is not in the
+  // namespace is never mistaken for a manifest.
+  if (
+    !root ||
+    root.localName !== "template" ||
+    root.namespaceURI !== MANIFEST_NS
+  ) {
     return null;
   }
 
@@ -298,7 +561,6 @@ const parseManifestXml = (xml: string): TemplateManifest | null => {
   const version = Number.isFinite(parsed) ? parsed : CURRENT_VERSION;
 
   const fields: FieldMeta[] = [];
-  const conditions: NamedCondition[] = [];
 
   const fieldsEl = getFirstElementChild(root, "fields");
   if (fieldsEl) {
@@ -308,18 +570,87 @@ const parseManifestXml = (xml: string): TemplateManifest | null => {
     }
   }
 
+  // Migrate a pre-field-model `<st:conditions>` section (named conditions were
+  // standalone before they became boolean condition-fields). Each legacy entry
+  // becomes a synthetic boolean field { path: name, condition: expression },
+  // skipped when a real field already owns that path, so the new field-based
+  // model round-trips old manifests: manifestNamedConditions resurfaces them
+  // and buildFieldXml re-persists them on the next save.
   const conditionsEl = getFirstElementChild(root, "conditions");
   if (conditionsEl) {
-    const condEls = getElementChildren(conditionsEl, "condition");
-    for (const c of condEls) {
-      conditions.push(parseCondition(c));
+    const existingPaths = new Set(fields.map((f) => f.path));
+    for (const c of getElementChildren(conditionsEl, "condition")) {
+      const name = c.getAttribute("name");
+      if (name === null || existingPaths.has(name)) {
+        continue;
+      }
+      const field: FieldMeta = {
+        path: name,
+        inputType: "boolean",
+        condition: c.getAttribute("expression") ?? "",
+      };
+      const label = c.getAttribute("label");
+      if (label !== null) {
+        field.label = label;
+      }
+      fields.push(field);
+      existingPaths.add(name);
     }
   }
 
-  return { version, fields, conditions };
+  return { version, fields };
 };
 
 // ── Public API ───────────────────────────────────────────
+
+/** The Stella manifest part: its slot index plus the parsed manifest. */
+type ManifestSlot = { index: number; manifest: TemplateManifest };
+
+/**
+ * Locate the Stella manifest among the DOCX's custom XML parts.
+ *
+ * A part is "ours" only when it parses to a valid manifest whose root is
+ * `<template>` in `MANIFEST_NS` (a URN we own) — not a loose substring match,
+ * so a foreign part that merely mentions the URI is never selected. When more
+ * than one qualifies (should not happen for documents we write), the lowest
+ * slot index wins, so the choice is deterministic regardless of zip order.
+ */
+const findManifestSlot = async (zip: JSZip): Promise<ManifestSlot | null> => {
+  const candidates = Object.entries(zip.files).flatMap(([path, entry]) => {
+    const index = CUSTOM_XML_DATA_RE.exec(path)?.groups?.["index"];
+    return index === undefined ? [] : [{ index: Number(index), entry }];
+  });
+
+  const slots = await Promise.all(
+    candidates.map(async (c) => ({
+      index: c.index,
+      manifest: parseManifestXml(await c.entry.async("string")),
+    })),
+  );
+
+  return (
+    slots
+      .filter((slot): slot is ManifestSlot => slot.manifest !== null)
+      .toSorted((a, b) => a.index - b.index)
+      .at(0) ?? null
+  );
+};
+
+/**
+ * Pick the next free custom XML slot: one past the highest existing
+ * `item{N}` / `itemProps{N}` index. Using max+1 (not first-gap) keeps the
+ * data and props parts paired and never reuses a foreign slot.
+ */
+const nextFreeSlot = (zip: JSZip): number => {
+  let max = 0;
+  for (const path of Object.keys(zip.files)) {
+    const index = CUSTOM_XML_INDEX_RE.exec(path)?.groups?.["index"];
+    if (index !== undefined) {
+      max = Math.max(max, Number(index));
+    }
+  }
+  return max + 1;
+};
 
 /**
  * Read the Stella template manifest from an already-opened
@@ -329,13 +660,8 @@ const parseManifestXml = (xml: string): TemplateManifest | null => {
 export const readManifestFromZip = async (
   zip: JSZip,
 ): Promise<TemplateManifest | null> => {
-  const entry = zip.file(CUSTOM_XML_ITEM_PATH);
-  if (!entry) {
-    return null;
-  }
-
-  const xml = await entry.async("string");
-  return parseManifestXml(xml);
+  const found = await findManifestSlot(zip);
+  return found?.manifest ?? null;
 };
 
 /**
@@ -359,41 +685,42 @@ export const writeManifest = async (
 ): Promise<Buffer> => {
   const zip = await JSZip.loadAsync(docxBuffer);
 
-  // Guard: refuse to overwrite non-Stella custom XML
-  const existing = zip.file(CUSTOM_XML_ITEM_PATH);
-  if (existing) {
-    const xml = await existing.async("string");
-    if (!xml.includes(MANIFEST_NS)) {
-      throw new WorkflowValidationError({
-        message:
-          "Cannot write manifest: " +
-          `${CUSTOM_XML_ITEM_PATH} contains ` +
-          "non-stella custom XML",
-      });
-    }
-  }
+  // Reuse our own slot when re-saving a template that already carries a
+  // manifest; otherwise claim a fresh slot so a foreign custom XML part
+  // (Word bibliography, content-control bindings, SharePoint metadata) is
+  // never overwritten.
+  const existing = await findManifestSlot(zip);
+  const slot = existing?.index ?? nextFreeSlot(zip);
 
-  // Write the manifest XML
-  zip.file(CUSTOM_XML_ITEM_PATH, buildManifestXml(manifest));
+  const propsPath = customXmlPropsPath(slot);
 
-  // Write item properties
-  zip.file(CUSTOM_XML_PROPS_PATH, buildItemPropsXml());
+  zip.file(customXmlItemPath(slot), buildManifestXml(manifest));
+  zip.file(propsPath, buildItemPropsXml());
+  zip.file(customXmlRelsPath(slot), buildItemRelsXml(slot));
 
-  // Write relationships for the custom XML part
-  zip.file(CUSTOM_XML_RELS_PATH, buildItemRelsXml());
-
-  // Ensure [Content_Types].xml includes the custom XML part
+  // Add the per-part Override for our props part. Checking the specific
+  // PartName (not a generic "customXmlProperties" substring) is required:
+  // a foreign custom XML part already contributes its own props override.
   const ctEntry = zip.file(CONTENT_TYPES_PATH);
   if (ctEntry) {
-    let ctXml = await ctEntry.async("string");
-    if (!ctXml.includes("customXmlProperties")) {
-      ctXml = ctXml.replace(
-        "</Types>",
-        `<Override PartName="/${CUSTOM_XML_PROPS_PATH}"` +
-          ` ContentType="${CUSTOM_XML_CONTENT_TYPE}"/>` +
+    const ctXml = await ctEntry.async("string");
+    // Tolerate quote style and attribute spacing/ordering so we never append a
+    // duplicate Override (which would violate the OPC spec and corrupt the
+    // package).
+    const hasOverride = new RegExp(
+      `<Override[^>]*PartName=["']/${escapeRegExp(propsPath)}["']`,
+      "u",
+    ).test(ctXml);
+    if (!hasOverride) {
+      zip.file(
+        CONTENT_TYPES_PATH,
+        ctXml.replace(
           "</Types>",
+          `<Override PartName="/${propsPath}"` +
+            ` ContentType="${CUSTOM_XML_CONTENT_TYPE}"/>` +
+            "</Types>",
+        ),
       );
-      zip.file(CONTENT_TYPES_PATH, ctXml);
     }
   }
 
@@ -410,21 +737,17 @@ export const writeManifest = async (
 export const stripManifest = async (docxBuffer: Buffer): Promise<Buffer> => {
   const zip = await JSZip.loadAsync(docxBuffer);
 
-  const hasManifest = zip.file(CUSTOM_XML_ITEM_PATH);
-  if (!hasManifest) {
+  const found = await findManifestSlot(zip);
+  if (!found) {
     return docxBuffer;
   }
 
-  // Check that this is actually a Stella manifest
-  const xml = await hasManifest.async("string");
-  if (!xml.includes(MANIFEST_NS)) {
-    return docxBuffer;
-  }
+  const propsPath = customXmlPropsPath(found.index);
 
-  // Remove the custom XML part files
-  zip.remove(CUSTOM_XML_ITEM_PATH);
-  zip.remove(CUSTOM_XML_PROPS_PATH);
-  zip.remove(CUSTOM_XML_RELS_PATH);
+  // Remove only our slot's part files; foreign custom XML parts stay intact.
+  zip.remove(customXmlItemPath(found.index));
+  zip.remove(propsPath);
+  zip.remove(customXmlRelsPath(found.index));
 
   // Clean up empty customXml directory entries
   const customXmlDir = "customXml/";
@@ -438,10 +761,14 @@ export const stripManifest = async (docxBuffer: Buffer): Promise<Buffer> => {
   const ctEntry = zip.file(CONTENT_TYPES_PATH);
   if (ctEntry) {
     let ctXml = await ctEntry.async("string");
-    // Remove the Override for itemProps1.xml
+    // Remove the Override for our props part. Fully escape the path so every
+    // regex meta-character (including `\`) is matched literally, and tolerate
+    // either quote style to mirror the quote-tolerant check on the write side
+    // (otherwise a single-quoted override would be skipped on write yet left
+    // dangling here, pointing at a part we just deleted).
     ctXml = ctXml.replace(
       new RegExp(
-        `<Override[^>]*PartName="/${CUSTOM_XML_PROPS_PATH}"[^>]*/>`,
+        `<Override[^>]*PartName=["']/${escapeRegExp(propsPath)}["'][^>]*/>`,
         "u",
       ),
       "",
@@ -467,20 +794,31 @@ export const mergeManifestWithDiscovery = (
 ): ResolvedField[] => {
   // Index manifest fields by path
   const metaByPath = new Map<string, FieldMeta>();
+  // Markers a lookup field's named formats own (`company.full`, …). These are
+  // rendered outputs of the one resolved hit, not separate fillable inputs, so
+  // discovery may surface them as dotted fields; the final filter drops them.
+  const lookupFormatMarkers = new Set<string>();
   if (manifest) {
     for (const f of manifest.fields) {
       metaByPath.set(f.path, f);
+      for (const format of f.lookup?.formats ?? []) {
+        lookupFormatMarkers.add(`${f.path}.${format.key}`);
+      }
     }
   }
 
   // Start with discovered fields, enriching with manifest
   const resolved: ResolvedField[] = [];
   const seen = new Set<string>();
+  const arrayRoots = new Set<string>();
 
   for (const df of discovered.fields) {
     seen.add(df.path);
+    if (df.kind === "array") {
+      arrayRoots.add(df.path);
+    }
     const meta = metaByPath.get(df.path);
-    resolved.push(mergeField(df, meta));
+    resolved.push(mergeField(df, meta, metaByPath));
   }
 
   // Add manifest-only fields (not discovered)
@@ -489,20 +827,56 @@ export const mergeManifestWithDiscovery = (
       if (seen.has(f.path)) {
         continue;
       }
+      // Loop-item metadata (e.g. "lawyers.name" under a discovered
+      // {{#each lawyers}}) merges into the array's itemFields above; adding
+      // it as a flat field would shadow the array root in the prefix filter
+      // below and break the array rendering.
+      const root = f.path.split(".").at(0);
+      if (root !== undefined && root !== f.path && arrayRoots.has(root)) {
+        continue;
+      }
       resolved.push({
         path: f.path,
         kind: inputTypeToFieldKind(f.inputType),
         count: 0,
         label: f.label,
+        hint: f.hint,
         inputType: f.inputType,
         options: f.options,
         validation: f.validation,
         required: f.required,
+        aiAdapt: f.aiAdapt,
+        aiPrompt: f.aiPrompt,
+        aiSeesDocument: f.aiSeesDocument,
+        parts: f.parts,
+        format: f.format,
+        optionsFrom: f.optionsFrom,
+        lookup: f.lookup,
+        formula: f.formula,
+        condition: f.condition,
+        dateFormat: f.dateFormat,
       });
     }
   }
 
-  return resolved;
+  // Drop namespace parents: a path that is only a dotted prefix of others
+  // (e.g. "tenant" when "tenant.name"/"tenant.krs" exist) is structural, not a
+  // fillable field. Discovery registers such roots to infer object/array kinds.
+  //
+  // A lookup field is exempt: it is a real leaf input even when dotted format
+  // markers ({{company.full}}) sit "under" it. Those markers are named
+  // renderings of the one resolved hit, not separate fields, so the lookup
+  // root must survive the prefix filter.
+  const paths = resolved.map((f) => f.path);
+  return resolved.filter((f) => {
+    if (lookupFormatMarkers.has(f.path)) {
+      return false;
+    }
+    if (f.lookup !== undefined) {
+      return true;
+    }
+    return !paths.some((p) => p !== f.path && p.startsWith(`${f.path}.`));
+  });
 };
 
 // ── Helpers ──────────────────────────────────────────────
@@ -510,6 +884,7 @@ export const mergeManifestWithDiscovery = (
 const mergeField = (
   discovered: DiscoveredField,
   meta?: FieldMeta,
+  metaByPath?: ReadonlyMap<string, FieldMeta>,
 ): ResolvedField => {
   const resolved: ResolvedField = {
     path: discovered.path,
@@ -520,6 +895,9 @@ const mergeField = (
   if (meta) {
     if (meta.label !== undefined) {
       resolved.label = meta.label;
+    }
+    if (meta.hint !== undefined) {
+      resolved.hint = meta.hint;
     }
     if (meta.inputType) {
       resolved.inputType = meta.inputType;
@@ -533,6 +911,34 @@ const mergeField = (
     if (meta.required !== undefined) {
       resolved.required = meta.required;
     }
+    if (meta.aiAdapt !== undefined) {
+      resolved.aiAdapt = meta.aiAdapt;
+    }
+    if (meta.aiPrompt !== undefined) {
+      resolved.aiPrompt = meta.aiPrompt;
+    }
+    if (meta.aiSeesDocument !== undefined) {
+      resolved.aiSeesDocument = meta.aiSeesDocument;
+    }
+    if (meta.parts !== undefined && meta.format !== undefined) {
+      resolved.parts = meta.parts;
+      resolved.format = meta.format;
+    }
+    if (meta.optionsFrom !== undefined) {
+      resolved.optionsFrom = meta.optionsFrom;
+    }
+    if (meta.lookup !== undefined) {
+      resolved.lookup = meta.lookup;
+    }
+    if (meta.formula !== undefined) {
+      resolved.formula = meta.formula;
+    }
+    if (meta.condition !== undefined) {
+      resolved.condition = meta.condition;
+    }
+    if (meta.dateFormat !== undefined) {
+      resolved.dateFormat = meta.dateFormat;
+    }
   }
 
   // Preserve visibleWhen from discovery
@@ -541,8 +947,12 @@ const mergeField = (
   }
 
   if (discovered.itemFields) {
-    // Item-level metadata not yet supported
-    resolved.itemFields = discovered.itemFields.map((item) => mergeField(item));
+    // Item paths are relative to the array root; their manifest entries are
+    // stored dotted ("lawyers.name"), so resolve item metadata through the
+    // full path.
+    resolved.itemFields = discovered.itemFields.map((item) =>
+      mergeField(item, metaByPath?.get(`${discovered.path}.${item.path}`)),
+    );
   }
 
   return resolved;
@@ -562,7 +972,6 @@ const inputTypeToFieldKind = (
     case "date":
     case "select":
     case "text":
-    case "textarea":
       return "string";
     default:
       return "string";

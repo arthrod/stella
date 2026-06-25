@@ -15,6 +15,9 @@ import {
   mergeCells as pmMergeCells,
   splitCell as pmSplitCell,
   CellSelection,
+  selectedRect,
+  removeRow,
+  TableMap,
 } from "prosemirror-tables";
 import { Decoration, DecorationSet } from "prosemirror-view";
 
@@ -23,6 +26,7 @@ import {
   TABLE_CELL_TEXT_DIRECTION_VALUES,
   TABLE_WIDTH_TYPE_VALUES,
 } from "../../../types/documentEnumValues";
+import type { TableBorders } from "../../../types/formatting";
 import { resolveColor } from "../../../utils/colorResolver";
 import {
   expectTableAttrs,
@@ -112,25 +116,30 @@ function parseCssColorToColorValue(cssColor: string): ColorValue | null {
   if (!cssColor || cssColor === "transparent" || cssColor === "inherit") {
     return null;
   }
-  const hexMatch = /#([0-9a-fA-F]{6})/u.exec(cssColor);
+  const hexMatch = /#(?<hex>[0-9a-fA-F]{6})/u.exec(cssColor);
   if (hexMatch) {
-    // SAFETY: capture group 1 exists when match succeeds
-    return { rgb: (hexMatch[1] ?? "").toUpperCase() };
+    // SAFETY: capture group exists when match succeeds
+    return { rgb: (hexMatch.groups?.["hex"] ?? "").toUpperCase() };
   }
-  const shortHex = /#([0-9a-fA-F]{3})$/u.exec(cssColor);
+  const shortHex = /#(?<hex>[0-9a-fA-F]{3})$/u.exec(cssColor);
   if (shortHex) {
-    // SAFETY: capture group 1 exists when match succeeds
-    const hex3 = shortHex[1] ?? "";
+    // SAFETY: capture group exists when match succeeds
+    const hex3 = shortHex.groups?.["hex"] ?? "";
     // SAFETY: regex guarantees exactly 3 hex chars
     const r = hex3[0] ?? "";
     const g = hex3[1] ?? "";
     const b = hex3[2] ?? "";
     return { rgb: (r + r + g + g + b + b).toUpperCase() };
   }
-  const rgbMatch = /rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)/u.exec(cssColor);
+  const rgbMatch =
+    /rgb\(\s*(?<r>\d+)\s*,\s*(?<g>\d+)\s*,\s*(?<b>\d+)\s*\)/u.exec(cssColor);
   if (rgbMatch) {
-    // SAFETY: capture groups 1-3 exist when the rgb() regex matches
-    const hex = [rgbMatch[1] ?? "0", rgbMatch[2] ?? "0", rgbMatch[3] ?? "0"]
+    // SAFETY: capture groups exist when the rgb() regex matches
+    const hex = [
+      rgbMatch.groups?.["r"] ?? "0",
+      rgbMatch.groups?.["g"] ?? "0",
+      rgbMatch.groups?.["b"] ?? "0",
+    ]
       .map((v) => Number.parseInt(v, 10).toString(16).padStart(2, "0"))
       .join("")
       .toUpperCase();
@@ -297,6 +306,7 @@ const tableSpec: NodeSpec = {
     floating: { default: null },
     cellMargins: { default: null },
     look: { default: null },
+    borders: { default: null },
     _originalFormatting: { default: null },
   },
   parseDOM: [
@@ -967,6 +977,9 @@ export const TableHeaderExtension = createNodeExtension({
 
 export type BorderPreset = "all" | "outside" | "inside" | "none";
 
+/** Whole-table border presets (Word's "All Borders" / "No Border"). */
+export type TableBorderPreset = "all" | "none";
+
 export const TablePluginExtension = createExtension({
   name: "tablePlugin",
   onSchemaReady(ctx: ExtensionContext): ExtensionRuntime {
@@ -1252,21 +1265,70 @@ export const TablePluginExtension = createExtension({
         !context.isInTable ||
         context.rowIndex === undefined ||
         !context.table ||
-        context.tablePos === undefined ||
-        (context.rowCount ?? 0) <= 1
+        context.tablePos === undefined
       ) {
         return false;
       }
+      const tablePos = context.tablePos;
+      const table = context.table;
+      const rowCount = context.rowCount ?? 0;
+      if (rowCount <= 0) {
+        return false;
+      }
+
+      // A CellSelection deletes every row it covers; a plain caret deletes only
+      // its own row — even inside a vertically merged cell, whose rowspan would
+      // otherwise make `selectedRect` cover the whole merged span
+      // (eigenpal/docx-editor#783).
+      let firstRow: number;
+      let lastRow: number;
+      if (state.selection instanceof CellSelection) {
+        const rect = selectedRect(state);
+        firstRow = Math.max(0, Math.min(rect.top, rowCount - 1));
+        lastRow = Math.min(Math.max(rect.bottom - 1, firstRow), rowCount - 1);
+      } else {
+        firstRow = context.rowIndex;
+        lastRow = context.rowIndex;
+      }
+      const coversAllRows = firstRow === 0 && lastRow >= rowCount - 1;
 
       if (dispatch) {
         const tr = state.tr;
-        let rowStart = context.tablePos + 1;
-        for (let i = 0; i < context.rowIndex; i++) {
-          rowStart += context.table.child(i).nodeSize;
+        if (coversAllRows) {
+          // Deleting every row deletes the table (Word drops an emptied table).
+          // If the table is its parent's only child, a bare delete would leave
+          // an empty doc/cell, which the schema forbids — replace it with an
+          // empty paragraph in that case so the parent keeps a valid block.
+          const tableEnd = tablePos + table.nodeSize;
+          const parent = state.doc.resolve(tablePos).parent;
+          const emptyParagraph =
+            parent.childCount === 1
+              ? state.schema.nodes["paragraph"]?.createAndFill()
+              : null;
+          if (emptyParagraph) {
+            tr.replaceWith(tablePos, tableEnd, emptyParagraph);
+            tr.setSelection(TextSelection.near(tr.doc.resolve(tablePos + 1)));
+          } else {
+            tr.delete(tablePos, tableEnd);
+          }
+          dispatch(tr.scrollIntoView());
+          return true;
         }
-        const rowEnd =
-          rowStart + context.table.child(context.rowIndex).nodeSize;
-        tr.delete(rowStart, rowEnd);
+        // Remove rows bottom-up through prosemirror-tables so cells that span
+        // into a deleted row have their rowspan adjusted (and their content
+        // preserved) instead of being orphaned. `removeRow` mutates the table,
+        // so the map is re-read after each removal.
+        const rect = selectedRect(state);
+        for (let row = lastRow; row >= firstRow; row--) {
+          removeRow(tr, rect, row);
+          if (row > firstRow) {
+            const updated = tr.doc.nodeAt(rect.tableStart - 1);
+            if (updated) {
+              rect.table = updated;
+              rect.map = TableMap.get(updated);
+            }
+          }
+        }
         dispatch(tr.scrollIntoView());
       }
       return true;
@@ -1988,6 +2050,72 @@ export const TablePluginExtension = createExtension({
           for (const [pos, attrs] of modified) {
             tr.setNodeMarkup(tr.mapping.map(pos), undefined, attrs);
           }
+          dispatch(tr.scrollIntoView());
+        }
+
+        return true;
+      };
+    }
+
+    /**
+     * Apply a whole-table border preset (Word's "All Borders" / "No Border")
+     * to the table containing the caret. Updates the table node's `borders`
+     * attr (serialized as w:tblBorders) and bakes the same spec into every
+     * cell's `borders` attr so the paged painter reflects the change live.
+     */
+    function setTableBorderPreset(preset: TableBorderPreset): Command {
+      return (state, dispatch) => {
+        const context = getTableContext(state);
+        if (
+          !context.isInTable ||
+          context.tablePos === undefined ||
+          !context.table
+        ) {
+          return false;
+        }
+
+        if (dispatch) {
+          const tr = state.tr;
+          const table = context.table;
+          const tableStart = context.tablePos;
+
+          // Word's default table border: single, sz 4 (0.5pt), auto color.
+          const spec: BorderSpec =
+            preset === "all"
+              ? { style: "single", size: 4, space: 0, color: { auto: true } }
+              : { style: "none" };
+          const tableBorders: TableBorders = {
+            top: spec,
+            bottom: spec,
+            left: spec,
+            right: spec,
+            insideH: spec,
+            insideV: spec,
+          };
+
+          tr.setNodeMarkup(tableStart, undefined, {
+            ...expectTableAttrs(table),
+            borders: tableBorders,
+          });
+
+          // Both presets use one uniform spec for every edge, so each cell
+          // gets the same four sides; positions are stable because the
+          // transaction only changes attrs.
+          // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
+          table.forEach((row, rowOffset) => {
+            if (row.type.name !== "tableRow") {
+              return;
+            }
+            // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
+            row.forEach((cell, cellOffset) => {
+              const pos = tableStart + rowOffset + cellOffset + 2;
+              tr.setNodeMarkup(pos, undefined, {
+                ...expectTableCellAttrs(cell),
+                borders: { top: spec, bottom: spec, left: spec, right: spec },
+              });
+            });
+          });
+
           dispatch(tr.scrollIntoView());
         }
 
@@ -3049,6 +3177,8 @@ export const TablePluginExtension = createExtension({
           preset: BorderPreset,
           borderSpec?: { style: string; size: number; color: { rgb: string } },
         ) => setTableBorders(preset, borderSpec),
+        setTableBorderPreset: (preset: TableBorderPreset) =>
+          setTableBorderPreset(preset),
         setCellVerticalAlign: (align: "top" | "center" | "bottom") =>
           setCellVerticalAlign(align),
         setCellMargins: (margins: {

@@ -11,7 +11,10 @@
 import { getHeaderRowsHeight } from "../layout-engine/index";
 import { measuredLineContentOffset } from "../layout-engine/lineFlow";
 import { measureParagraph } from "../layout-engine/measure";
-import { measureRun } from "../layout-engine/measure/measureContainer";
+import {
+  buildRunFontStyle,
+  measureRun,
+} from "../layout-engine/measure/measureContainer";
 import type { FontStyle } from "../layout-engine/measure/measureContainer";
 import {
   buildTableCellFloatingZones,
@@ -38,6 +41,14 @@ import type {
 } from "../layout-engine/types";
 import { inlineImageBoundingBox } from "../utils/rotationBoundingBox";
 import { getPageTop } from "./hitTest";
+
+/**
+ * Width (px) of the highlight sliver painted for an empty paragraph the
+ * selection spans. A genuinely empty paragraph has a zero-length line, so the
+ * normal run-span overlap produces no rect; a fixed sliver keeps drag-selection
+ * across blank lines visible (eigenpal/docx-editor#836).
+ */
+const EMPTY_PARAGRAPH_SLIVER_WIDTH = 4;
 
 // =============================================================================
 // TYPES
@@ -84,20 +95,7 @@ const DEFAULT_TABLE_CELL_PADDING_TOP = 1;
  * Extract FontStyle from a run for measurement.
  */
 function runToFontStyle(run: TextRun | TabRun): FontStyle {
-  return {
-    fontFamily: run.fontFamily ?? "Arial",
-    fontSize: run.fontSize ?? 12,
-    ...(run.bold !== undefined ? { bold: run.bold } : {}),
-    ...(run.italic !== undefined ? { italic: run.italic } : {}),
-    ...(run.letterSpacing !== undefined
-      ? { letterSpacing: run.letterSpacing }
-      : {}),
-    ...(run.allCaps ? { textTransform: "uppercase" as const } : {}),
-    ...(run.smallCaps ? { fontVariant: "small-caps" as const } : {}),
-    ...(run.horizontalScale !== undefined
-      ? { horizontalScale: run.horizontalScale }
-      : {}),
-  };
+  return buildRunFontStyle(run, "Arial", 12);
 }
 
 function mathRunToFontStyle(run: MathRun): FontStyle {
@@ -155,16 +153,40 @@ function getMeasuredBlockHeight(measure: Measure | undefined): number {
   return 0;
 }
 
+/** Clamp a projected PM position to the run's own end position. */
+function clampToRunPmEnd(run: { pmEnd?: number }, position: number): number {
+  return run.pmEnd === undefined ? position : Math.min(position, run.pmEnd);
+}
+
 /**
  * Calculate the PM range for a line.
  * Note: ProseMirror positions include node boundaries:
  * - blockPmStart is the position of the paragraph node itself
  * - The actual text content starts at blockPmStart + 1 (after the opening tag)
+ *
+ * Prefers the runs' own PM metadata over cumulative character counting:
+ * template-preview value runs carry the source marker's PM range with a
+ * different text length, so the one-PM-position-per-character assumption
+ * the char-counting fallback makes does not hold for them.
  */
 function computeLinePmRange(
   block: ParagraphBlock,
   line: MeasuredLine,
 ): { pmStart: number | undefined; pmEnd: number | undefined } {
+  const fromRun = block.runs[line.fromRun];
+  const toRun = block.runs[line.toRun];
+  if (fromRun?.pmStart !== undefined && toRun?.pmStart !== undefined) {
+    const pmStart =
+      fromRun.kind === "text"
+        ? clampToRunPmEnd(fromRun, fromRun.pmStart + line.fromChar)
+        : fromRun.pmStart;
+    const pmEnd =
+      toRun.kind === "text"
+        ? clampToRunPmEnd(toRun, toRun.pmStart + line.toChar)
+        : (toRun.pmEnd ?? toRun.pmStart + 1);
+    return { pmStart, pmEnd };
+  }
+
   const blockPmStart = block.pmStart ?? 0;
   // Text content starts after the paragraph's opening tag
   const contentStart = blockPmStart + 1;
@@ -246,8 +268,15 @@ function findLinesInRange(
       continue;
     }
 
-    // Check if line overlaps with selection
-    if (range.pmEnd > from && range.pmStart < to) {
+    // A zero-length line (an empty paragraph) overlaps the selection when its
+    // caret position is anywhere within it, INCLUSIVE of the endpoints, so a
+    // drag that starts or ends exactly there still selects it. A non-empty line
+    // uses the strict overlap test (eigenpal/docx-editor#836).
+    const overlaps =
+      range.pmStart === range.pmEnd
+        ? from < to && range.pmStart >= from && range.pmStart <= to
+        : range.pmEnd > from && range.pmStart < to;
+    if (overlaps) {
       result.push({ line, index: i });
     }
   }
@@ -257,18 +286,61 @@ function findLinesInRange(
 
 /**
  * Convert a PM position to a character offset within a line.
+ *
+ * Walks the line's runs and maps through each run's own PM range, so runs
+ * whose text length differs from their PM span (template-preview value
+ * runs) keep the rest of the line aligned: positions inside the marker
+ * clamp to the value text, positions after it land after the value. Falls
+ * back to the legacy whole-line subtraction when a run lacks PM metadata.
  */
 function pmPosToCharOffset(
   block: ParagraphBlock,
   line: MeasuredLine,
   pmPos: number,
 ): number {
-  const range = computeLinePmRange(block, line);
-  if (range.pmStart === undefined) {
-    return 0;
+  let charOffset = 0;
+
+  for (
+    let runIndex = line.fromRun;
+    runIndex <= line.toRun && runIndex < block.runs.length;
+    runIndex++
+  ) {
+    const run = block.runs[runIndex];
+    if (!run) {
+      continue;
+    }
+    if (run.pmStart === undefined) {
+      const range = computeLinePmRange(block, line);
+      if (range.pmStart === undefined) {
+        return 0;
+      }
+      return Math.max(0, pmPos - range.pmStart);
+    }
+
+    if (run.kind === "text") {
+      const startChar = runIndex === line.fromRun ? line.fromChar : 0;
+      const endChar = runIndex === line.toRun ? line.toChar : run.text.length;
+      const sliceLength = Math.max(0, endChar - startChar);
+      const slicePmStart = clampToRunPmEnd(run, run.pmStart + startChar);
+      const slicePmEnd = clampToRunPmEnd(run, run.pmStart + endChar);
+      if (pmPos <= slicePmStart) {
+        return charOffset;
+      }
+      if (pmPos < slicePmEnd) {
+        return charOffset + Math.min(pmPos - slicePmStart, sliceLength);
+      }
+      charOffset += sliceLength;
+      continue;
+    }
+
+    // Non-text runs occupy one PM position and one character slot.
+    if (pmPos <= run.pmStart) {
+      return charOffset;
+    }
+    charOffset += 1;
   }
 
-  return Math.max(0, pmPos - range.pmStart);
+  return charOffset;
 }
 
 /**
@@ -456,10 +528,21 @@ export function selectionToRects(
             continue;
           }
 
-          // Calculate overlap with selection
+          // Calculate overlap with selection. A zero-length line is either a
+          // genuinely empty paragraph (a caret-only line) or the blank row a
+          // trailing hard break leaves behind. The latter starts past the last
+          // run and `computeLinePmRange` resolves it to the paragraph START, so
+          // only a true empty paragraph draws a sliver — never the trailing
+          // break row, which would otherwise highlight whenever the selection
+          // merely crosses the paragraph start (eigenpal/docx-editor#836).
+          const isTrailingBreakRow =
+            paragraphBlock.runs.length > 0 &&
+            line.fromRun >= paragraphBlock.runs.length;
+          const isEmptyLine =
+            range.pmStart === range.pmEnd && !isTrailingBreakRow;
           const sliceFrom = Math.max(range.pmStart, selFrom);
           const sliceTo = Math.min(range.pmEnd, selTo);
-          if (sliceFrom >= sliceTo) {
+          if (!isEmptyLine && sliceFrom >= sliceTo) {
             continue;
           }
 
@@ -513,7 +596,9 @@ export function selectionToRects(
           // Create selection rectangle
           const rectX =
             fragment.x + indentLeft + alignmentOffset + Math.min(startX, endX);
-          const rectWidth = Math.max(1, Math.abs(endX - startX));
+          const rectWidth = isEmptyLine
+            ? EMPTY_PARAGRAPH_SLIVER_WIDTH
+            : Math.max(1, Math.abs(endX - startX));
           const rectY = fragment.y + lineOffset;
 
           rects.push({
@@ -635,9 +720,16 @@ export function selectionToRects(
                   continue;
                 }
 
+                // Only a true empty paragraph draws a sliver — not the blank row
+                // a trailing hard break leaves behind (eigenpal/docx-editor#836).
+                const isTrailingBreakRow =
+                  paragraphBlock.runs.length > 0 &&
+                  line.fromRun >= paragraphBlock.runs.length;
+                const isEmptyLine =
+                  range.pmStart === range.pmEnd && !isTrailingBreakRow;
                 const sliceFrom = Math.max(range.pmStart, selFrom);
                 const sliceTo = Math.min(range.pmEnd, selTo);
-                if (sliceFrom >= sliceTo) {
+                if (!isEmptyLine && sliceFrom >= sliceTo) {
                   continue;
                 }
 
@@ -685,7 +777,9 @@ export function selectionToRects(
                     contentOffsetX +
                     Math.min(startX, endX),
                   y: tableFragment.y + rowY + clippedLineY - clipTop + pageTopY,
-                  width: Math.max(1, Math.abs(endX - startX)),
+                  width: isEmptyLine
+                    ? EMPTY_PARAGRAPH_SLIVER_WIDTH
+                    : Math.max(1, Math.abs(endX - startX)),
                   height: line.lineHeight,
                   pageIndex,
                 });

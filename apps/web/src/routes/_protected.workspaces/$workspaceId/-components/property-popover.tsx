@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useOptimistic,
-  useRef,
-  useState,
-  useTransition,
-} from "react";
+import { useOptimistic, useRef, useState, useTransition } from "react";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -22,10 +16,10 @@ import { stellaToast } from "@stll/ui/components/toast";
 
 import { api } from "@/lib/api";
 import { toAPIError } from "@/lib/errors";
-import { toSafeId } from "@/lib/safe-id";
+import { type SafeId, toSafeId } from "@/lib/safe-id";
 import type {
+  ConditionNode,
   PropertyDependency,
-  ViewFilterCondition,
   WorkspaceProperty,
 } from "@/lib/types";
 import { CreateProperty } from "@/routes/_protected.workspaces/$workspaceId/-components/create-property";
@@ -37,6 +31,7 @@ import {
   SortProperty,
   toSortHint,
 } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/sort-property";
+import { useGroupScope } from "@/routes/_protected.workspaces/$workspaceId/-components/table/group-scope";
 import type { TableHeader } from "@/routes/_protected.workspaces/$workspaceId/-components/table/types";
 import { useStartWorkflow } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-start-workflow";
 import { useUpdateProperty } from "@/routes/_protected.workspaces/$workspaceId/-mutations/properties";
@@ -45,7 +40,7 @@ import { entitiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queri
 type PropertyPopoverProps = {
   property: WorkspaceProperty;
   header: TableHeader;
-  filters: ViewFilterCondition[];
+  filters: ConditionNode[];
 };
 
 type ReplaceAction = {
@@ -62,14 +57,50 @@ export const PropertyPopover = ({
 }: PropertyPopoverProps) => {
   const t = useTranslations();
   const { workspaceId, id, name } = property;
+  const groupScope = useGroupScope();
   const [isOpen, setIsOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const updateProperty = useUpdateProperty();
   const startWorkflow = useStartWorkflow(workspaceId);
   const queryClient = useQueryClient();
 
-  const markAllReviewed = useMutation({
-    mutationFn: async () => {
+  // `scoped` narrows the batch to the current grouped-view subtable (only
+  // meaningful when a group scope is present); `set: false` removes the flag,
+  // which powers the toast's Undo. `onlyAddedAt` (set on undo) reverts just the
+  // cells this mark added, never flags a human verified earlier.
+  const markReviewed = useMutation({
+    mutationFn: async ({
+      scoped,
+      set,
+      onlyAddedAt,
+    }: {
+      scoped: boolean;
+      set: boolean;
+      onlyAddedAt?: string;
+    }) => {
+      // The annotation keeps the narrowed grouping id from widening back to
+      // `string` (an un-annotated object literal would); mirrors the
+      // kanban-group / group-counts query builders.
+      const groupParams:
+        | {
+            groupByPropertyId: "_status" | "_kind" | SafeId<"property">;
+            groupValue: string | null;
+            optionValues?: string[];
+          }
+        | Record<never, never> =
+        scoped && groupScope
+          ? {
+              groupByPropertyId:
+                groupScope.groupByPropertyId === "_status" ||
+                groupScope.groupByPropertyId === "_kind"
+                  ? groupScope.groupByPropertyId
+                  : toSafeId<"property">(groupScope.groupByPropertyId),
+              groupValue: groupScope.groupValue,
+              ...(groupScope.optionValues !== undefined && {
+                optionValues: groupScope.optionValues,
+              }),
+            }
+          : {};
       const response = await api
         .fields({ workspaceId: toSafeId<"workspace">(workspaceId) })
         ["metadata-batch"].patch({
@@ -77,6 +108,9 @@ export const PropertyPopover = ({
           propertyId: toSafeId<"property">(id),
           flag: VERIFIED_FLAG,
           filters,
+          set,
+          ...(onlyAddedAt !== undefined && { onlyAddedAt }),
+          ...groupParams,
         });
 
       if (response.error) {
@@ -84,11 +118,29 @@ export const PropertyPopover = ({
       }
       return response.data;
     },
-    onSuccess: () => {
+    onSuccess: (data, { scoped, set }) => {
       void queryClient.invalidateQueries({
         queryKey: entitiesKeys.all(workspaceId),
       });
       setIsOpen(false);
+      if (set && data.updatedCount > 0) {
+        stellaToast.add({
+          title: t("workspaces.properties.markedAsReviewed", {
+            count: data.updatedCount,
+          }),
+          type: "success",
+          action: {
+            label: t("common.undo"),
+            onClick: () => {
+              markReviewed.mutate({
+                scoped,
+                set: false,
+                onlyAddedAt: data.addedAt,
+              });
+            },
+          },
+        });
+      }
     },
     onError: (error) => {
       stellaToast.add({
@@ -124,12 +176,12 @@ export const PropertyPopover = ({
   >(null);
   const displayedDependencies = immediateDeps ?? optimisticDeps;
   const latestDependenciesRef = useRef(displayedDependencies);
+  // Mirror the latest render value into the ref during render. Read
+  // only from event handlers (replaceDependency), so this is the
+  // sanctioned latest-value pattern.
+  latestDependenciesRef.current = displayedDependencies;
   const dependencyGenerationRef = useRef(0);
   const [, startDepsTransition] = useTransition();
-
-  useEffect(() => {
-    latestDependenciesRef.current = displayedDependencies;
-  }, [displayedDependencies]);
 
   // Conditions are editable from the popover without opening the full
   // composer: replaceValue swaps a dependency in place and we save by
@@ -246,11 +298,25 @@ export const PropertyPopover = ({
                   {t("workspaces.properties.rerunColumn")}
                 </Button>
               )}
+              {groupScope && (
+                <Button
+                  className="justify-start gap-1.5 font-normal"
+                  disabled={markReviewed.isPending}
+                  onClick={() => {
+                    markReviewed.mutate({ scoped: true, set: true });
+                  }}
+                  size="sm"
+                  variant="ghost"
+                >
+                  <CheckCircle2Icon />
+                  {t("workspaces.properties.markThisGroupAsReviewed")}
+                </Button>
+              )}
               <Button
                 className="justify-start gap-1.5 font-normal"
-                disabled={markAllReviewed.isPending}
+                disabled={markReviewed.isPending}
                 onClick={() => {
-                  markAllReviewed.mutate();
+                  markReviewed.mutate({ scoped: false, set: true });
                 }}
                 size="sm"
                 variant="ghost"

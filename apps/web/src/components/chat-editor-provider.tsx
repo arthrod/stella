@@ -10,11 +10,7 @@ import {
 } from "react";
 import type React from "react";
 
-import {
-  useInfiniteQuery,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import type { QueryKey } from "@tanstack/react-query";
 import HardBreak from "@tiptap/extension-hard-break";
 import History from "@tiptap/extension-history";
@@ -22,7 +18,7 @@ import Paragraph from "@tiptap/extension-paragraph";
 import Placeholder from "@tiptap/extension-placeholder";
 import Text from "@tiptap/extension-text";
 import type { EditorState, Plugin, PluginKey } from "@tiptap/pm/state";
-import type { Editor, JSONContent } from "@tiptap/react";
+import type { Editor } from "@tiptap/react";
 import { useEditor } from "@tiptap/react";
 import { panic, Result } from "better-result";
 import { useDebouncedCallback } from "use-debounce";
@@ -51,11 +47,15 @@ import {
   type SlashItem,
 } from "@/components/chat/prompt-slash-extension";
 import { createPromptEditorDocument } from "@/components/prompt-editor";
+import { useChromeQuery, useHasMounted } from "@/hooks/use-chrome-query";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import {
+  areDraftDocsEqual,
   createChatDraftState,
   createEmptyChatDraftDoc,
+  nextDraftForEditorUpdate,
   useChatDraftStore,
 } from "@/lib/chat-draft-store";
 import type { ChatThreadRef } from "@/lib/chat-thread-ref";
@@ -93,6 +93,17 @@ export const CHAT_FILE_INPUT_ACCEPT =
   ".png,.jpg,.jpeg,.webp,.gif,.pdf,.docx,.txt,.csv,.md";
 const EMPTY_ATTACHMENTS: ChatDraftAttachment[] = [];
 const EMPTY_CHAT_DRAFT_DOC = createEmptyChatDraftDoc();
+
+// Wrap an interpolated value in Unicode directional isolates (FSI…PDI) so an
+// embedded run keeps its own direction inside a translated string of the
+// opposite direction — e.g. a Latin suggestion inside the Arabic "tab to ask"
+// placeholder, whose trailing "?" would otherwise reorder to the wrong side.
+// The plain-string equivalent of wrapping in <bdi>.
+// U+2068 FIRST STRONG ISOLATE, U+2069 POP DIRECTIONAL ISOLATE.
+const FIRST_STRONG_ISOLATE = String.fromCodePoint(8296);
+const POP_DIRECTIONAL_ISOLATE = String.fromCodePoint(8297);
+const isolateBidi = (value: string): string =>
+  `${FIRST_STRONG_ISOLATE}${value}${POP_DIRECTIONAL_ISOLATE}`;
 
 type EntityMentionPage = {
   entities: WorkspaceEntity[];
@@ -160,6 +171,14 @@ export type ChatEditorController = {
   handlePaste: (event: React.ClipboardEvent) => void;
   isEmpty: boolean;
   openFilePicker: () => void;
+  /**
+   * The placeholder string the surface should render. Resolves the
+   * suggested-followup "tab to ask" hint, an explicit override, and the
+   * default in that order. Surfaces render this themselves (see
+   * `ChatInputSurface`); TipTap's own placeholder is suppressed for the
+   * chat editor to avoid a double-rendered overlay.
+   */
+  placeholder: string;
   removeFile: (id: string) => void;
   setContent: (
     content: Parameters<Editor["commands"]["setContent"]>[0],
@@ -205,9 +224,6 @@ const isSuggestionPluginActive = (state: EditorState): boolean =>
     const pluginState: unknown = plugin.getState(state);
     return isSuggestionPluginState(pluginState) && pluginState.active;
   });
-
-const areDocsEqual = (left: JSONContent, right: JSONContent) =>
-  JSON.stringify(left) === JSON.stringify(right);
 
 const getEditorHtml = (editor: Editor) =>
   editor.isEmpty ? "" : editor.getHTML().trim();
@@ -260,24 +276,27 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
   const searchMentionItems = useCallback(async (query: string) => {
     const items: ChatMentionOption[] = [];
 
-    for (const { registration } of registrationsRef.current.values()) {
-      if (!registration.mentionSources) {
+    // Mention sources are independent; query them in parallel and append
+    // results in registration/source order (preserved by Promise.all).
+    const sources = Array.from(registrationsRef.current.values()).flatMap(
+      ({ registration }) => registration.mentionSources ?? [],
+    );
+    const results = await Promise.all(
+      sources.map(
+        async (source) =>
+          await Result.tryPromise(
+            async () => await source.searchItems?.(query),
+          ),
+      ),
+    );
+
+    for (const result of results) {
+      if (Result.isError(result)) {
+        getAnalytics().captureError(result.error);
         continue;
       }
-
-      for (const source of registration.mentionSources) {
-        const nextItemsResult = await Result.tryPromise(
-          async () => await source.searchItems?.(query),
-        );
-        if (Result.isError(nextItemsResult)) {
-          getAnalytics().captureError(nextItemsResult.error);
-          continue;
-        }
-
-        const nextItems = nextItemsResult.value;
-        if (nextItems !== undefined) {
-          items.push(...nextItems);
-        }
+      if (result.value !== undefined) {
+        items.push(...result.value);
       }
     }
 
@@ -446,14 +465,14 @@ export const useChatComposerWiring = ({
     });
   }, [onSubmit, onSubmitGuard, submit, submitDisabled]);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     setSubmitHandler(submitDraft);
     return () => {
       setSubmitHandler(null);
     };
   }, [setSubmitHandler, submitDraft]);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     setEditable(!inputDisabled);
     if (inputDisabled) {
       blur();
@@ -466,19 +485,34 @@ export const useChatComposerWiring = ({
 export const useChatEditor = ({
   onDraftStart,
   placeholder,
+  reservedCommands = false,
   sentMessageHistoryHtml,
   threadRef,
+  suggestedFollowupPrompt,
 }: {
   onDraftStart?: (() => void) | undefined;
   placeholder?: string | undefined;
+  /**
+   * Surface the reserved `/new` and `/model` commands in the slash menu. Only
+   * the chat surfaces that intercept them on submit may opt in; other consumers
+   * of this hook (e.g. Template Studio) must leave it off or the commands would
+   * be sent to the model as literal text.
+   */
+  reservedCommands?: boolean | undefined;
   sentMessageHistoryHtml?: readonly string[] | undefined;
   threadRef: ChatThreadRef;
+  suggestedFollowupPrompt?: string | undefined;
 }): ChatEditorController => {
   const t = useTranslations();
   const defaultPlaceholder = t("chat.placeholder");
-  const resolvedPlaceholder = placeholder ?? defaultPlaceholder;
+  const tabToAskText = suggestedFollowupPrompt
+    ? t("chat.tabToAsk", { prompt: isolateBidi(suggestedFollowupPrompt) })
+    : undefined;
+  const resolvedPlaceholder = tabToAskText ?? placeholder ?? defaultPlaceholder;
   const placeholderRef = useRef(resolvedPlaceholder);
   placeholderRef.current = resolvedPlaceholder;
+  const suggestedFollowupPromptRef = useRef(suggestedFollowupPrompt);
+  suggestedFollowupPromptRef.current = suggestedFollowupPrompt;
   const queryClient = useQueryClient();
   const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -509,7 +543,7 @@ export const useChatEditor = ({
   const draftDoc = draft?.doc ?? EMPTY_CHAT_DRAFT_DOC;
   const attachments = draft?.attachments ?? EMPTY_ATTACHMENTS;
   const [isEmpty, setIsEmpty] = useState(() =>
-    areDocsEqual(draftDoc, EMPTY_CHAT_DRAFT_DOC),
+    areDraftDocsEqual(draftDoc, EMPTY_CHAT_DRAFT_DOC),
   );
   const attachmentsRef = useRef(attachments);
   attachmentsRef.current = attachments;
@@ -528,6 +562,7 @@ export const useChatEditor = ({
   }, [onDraftStart, threadKey]);
   markDraftStartedRef.current = markDraftStarted;
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- ref reset on id change, not external-system sync
   useEffect(() => {
     messageHistoryIndexRef.current = null;
   }, [sentMessageHistoryHtml, threadKey]);
@@ -664,7 +699,7 @@ export const useChatEditor = ({
     [debouncedFetchWorkspaceEntities, queryClient, threadRef],
   );
 
-  useEffect(
+  useExternalSyncEffect(
     () => () => {
       debouncedFetchWorkspaceEntities.cancel();
       pendingWorkspaceEntitySearchRef.current?.resolve([]);
@@ -680,17 +715,26 @@ export const useChatEditor = ({
       return;
     }
 
+    // `nextDraftForEditorUpdate` returns null for no-op updates whose document
+    // already matches the stored draft. tiptap emits `update` even when a
+    // transaction leaves the document unchanged (e.g. editor props re-applied
+    // while the page re-renders during response streaming); persisting an
+    // identical draft would churn the store reference, retrigger this handler,
+    // and loop until React's max-update-depth guard throws.
+    const nextDraft = nextDraftForEditorUpdate({
+      attachments: attachmentsRef.current,
+      nextDoc: nextEditor.getJSON(),
+      storedDoc: draftDoc,
+    });
+    if (!nextDraft) {
+      return;
+    }
+
     if (!isNavigatingHistoryRef.current) {
       messageHistoryIndexRef.current = null;
     }
 
-    setDraft(
-      threadKey,
-      createChatDraftState({
-        attachments: attachmentsRef.current,
-        doc: nextEditor.getJSON(),
-      }),
-    );
+    setDraft(threadKey, nextDraft);
 
     if (!nextEditor.isEmpty) {
       markDraftStarted();
@@ -702,17 +746,28 @@ export const useChatEditor = ({
   // they live in `agent_skills` and the dedicated commands endpoint
   // returns only the command-bearing subset, so the slash menu
   // doesn't pay for resource-heavy fields it doesn't render.
-  const { data: commandSkills = [] } = useQuery(
+  const { data: commandSkills = [] } = useChromeQuery(
     skillCommandsOptions(activeOrganizationId),
   );
+  // useInfiniteQuery has no chrome wrapper; gate its cold-cache fetch on mount
+  // by hand so it can't resolve on a not-yet-mounted fiber (same rationale as
+  // useChromeQuery).
+  const hasMounted = useHasMounted();
   const {
     data: skillPages,
     fetchNextPage: fetchNextSkillPage,
     hasNextPage: hasNextSkillPage,
     isFetchingNextPage: isFetchingNextSkillPage,
-  } = useInfiniteQuery(skillsOptions(activeOrganizationId));
+  } = useInfiniteQuery({
+    ...skillsOptions(activeOrganizationId),
+    enabled: hasMounted,
+  });
 
-  useEffect(() => {
+  // Drain every skill page into the slash menu: drive the infinite query
+  // forward whenever another page becomes available and we're not already
+  // fetching. This is imperative synchronization with TanStack's query
+  // state, not derived state or a one-shot fetch.
+  useExternalSyncEffect(() => {
     if (!hasNextSkillPage || isFetchingNextSkillPage) {
       return;
     }
@@ -746,8 +801,9 @@ export const useChatEditor = ({
       buildChatSlashItems({
         shortcuts: slashShortcutRows,
         skillPages: skillPageRows,
+        includeReservedCommands: reservedCommands,
       }),
-    [slashShortcutRows, skillPageRows],
+    [slashShortcutRows, skillPageRows, reservedCommands],
   );
   const slashItemsRef = useRef(slashItems);
   slashItemsRef.current = slashItems;
@@ -872,7 +928,7 @@ export const useChatEditor = ({
       handleEditorUpdate(nextEditor);
     },
     editorProps: {
-      attributes: {
+      attributes: (state) => ({
         // A contenteditable div has no implicit ARIA role, so without
         // these the composer is invisible to assistive tech (and to
         // role-based queries); the visible placeholder span is
@@ -880,9 +936,14 @@ export const useChatEditor = ({
         role: "textbox",
         "aria-multiline": "true",
         "aria-label": resolvedPlaceholder,
+        // While empty, inherit the ambient UI direction so the caret sits on
+        // the RTL side; once there is content, switch to first-strong-character
+        // detection to align mixed Arabic + Latin input. A static `dir="auto"`
+        // would fall back to LTR on the empty doc and strand the caret left.
+        ...(state.doc.textContent.length > 0 ? { dir: "auto" } : {}),
         class:
           "field-sizing-content max-h-48 min-h-10 overflow-y-auto text-sm focus-visible:outline-none",
-      },
+      }),
       handlePaste: (_view, event) => {
         // ProseMirror processes paste before any React `onPaste`
         // handler, so the chip-on-large-paste logic has to live
@@ -921,6 +982,29 @@ export const useChatEditor = ({
       handleKeyDown: (view, event) => {
         if (handleMessageHistoryKeyDown(view.state, event)) {
           return true;
+        }
+
+        // ArrowRight or Tab + empty editor + suggested followup: accept the
+        // suggestion without auto-submitting (so the user can review and press
+        // Enter). Tab is intercepted only in this narrow state — a suggestion
+        // on offer and the input empty — so it still moves focus normally (for
+        // keyboard and screen-reader users) everywhere else, including the
+        // moment the suggestion is gone.
+        if (
+          (event.key === "ArrowRight" || event.key === "Tab") &&
+          !event.shiftKey &&
+          !event.altKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.isComposing
+        ) {
+          const suggestion = suggestedFollowupPromptRef.current;
+          const targetEditor = editorRef.current;
+          if (suggestion && targetEditor && targetEditor.isEmpty) {
+            event.preventDefault();
+            targetEditor.commands.setContent(suggestion);
+            return true;
+          }
         }
 
         // Submit on Enter or Cmd/Ctrl+Enter. Shift+Enter falls
@@ -964,7 +1048,7 @@ export const useChatEditor = ({
     [getPluginRegistrations],
   );
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (!isUsableEditor(editor)) {
       return undefined;
     }
@@ -981,11 +1065,11 @@ export const useChatEditor = ({
     };
   }, [editor, extensionVersion, syncEditorPlugins]);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (!isUsableEditor(editor)) {
       return undefined;
     }
-    if (areDocsEqual(editor.getJSON(), draftDoc)) {
+    if (areDraftDocsEqual(editor.getJSON(), draftDoc)) {
       setIsEmpty(editor.isEmpty);
       return undefined;
     }
@@ -1058,7 +1142,7 @@ export const useChatEditor = ({
     [editor, markDraftStarted],
   );
 
-  useEffect(
+  useExternalSyncEffect(
     () =>
       registerActiveEditor({
         focus,
@@ -1257,6 +1341,7 @@ export const useChatEditor = ({
     handlePaste,
     isEmpty,
     openFilePicker,
+    placeholder: resolvedPlaceholder,
     removeFile,
     setContent,
     setEditable,

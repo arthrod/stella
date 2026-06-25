@@ -12,9 +12,12 @@ import { useChat } from "@ai-sdk/react";
 import type { Chat } from "@ai-sdk/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { isToolUIPart } from "ai";
+import { Result } from "better-result";
+import { useTranslations } from "use-intl";
 import { v7 as uuidv7 } from "uuid";
 
 import type { ChatSendMode } from "@stll/anonymize-chat";
+import { stellaToast } from "@stll/ui/components/toast";
 
 import { AnonymizedSpan } from "@/components/chat/anonymized-span";
 import type {
@@ -28,18 +31,22 @@ import {
   getExternalMcpConnectorApprovalGrant,
   getExternalMcpConnectorSlugFromToolName,
   getToolApprovalGrant,
-  hasRunningToolCallInLatestAssistantMessage,
   isApprovalToolName,
+  isChatTurnInFlight,
   isExternalMcpToolName,
   isToolApprovalGrant,
 } from "@/components/chat/chat-ui-tools";
 import { openEntityInInspector } from "@/components/chat/entity-open";
 import type { NeedsMatterMatter } from "@/components/chat/needs-matter-card";
 import { StreamdownMentionLink } from "@/components/chat/streamdown-mention-link";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { getAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
+import type { ChatThreadRef } from "@/lib/chat-thread-ref";
 import { toAPIError } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
+import { fetchOlderMessages } from "@/routes/_protected.chat/-queries";
 import { mcpConnectorsOptions } from "@/routes/_protected.knowledge/-queries";
 import { fileOptions } from "@/routes/_protected.workspaces/$workspaceId/-components/files/queries";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
@@ -54,6 +61,9 @@ type UseChatSessionOptions = {
   chat: Chat<PersistedChatMessage>;
   conversationId: string;
   getSendMode?: (() => ChatSendMode) | undefined;
+  /** Cursor for the first older page, seeded from the thread fetch. */
+  initialOlderCursor: string | null;
+  threadRef: ChatThreadRef;
   workspaceId?: string | undefined;
 };
 
@@ -119,9 +129,12 @@ export const useChatSession = ({
   chat,
   conversationId,
   getSendMode,
+  initialOlderCursor,
+  threadRef,
   workspaceId,
 }: UseChatSessionOptions) => {
   const organizationId = useAuthenticatedUser().activeOrganizationId;
+  const t = useTranslations();
   const { data: mcpCatalog } = useQuery(mcpConnectorsOptions(organizationId));
   const mcpConnectorIdentities =
     mcpCatalog?.connectors ?? EMPTY_MCP_CONNECTOR_IDENTITIES;
@@ -144,6 +157,94 @@ export const useChatSession = ({
     addToolOutput,
   } = useChat({ chat });
 
+  // Load-older paging. `olderCursor` seeds from the thread fetch and advances
+  // with each older page. Re-seed whenever a fresh `Chat` is hydrated — both
+  // on thread switch and on a same-thread refetch (sending a message
+  // invalidates the thread query, which rebuilds the Chat from the newest
+  // page plus a new initial cursor). Keying on conversationId alone would
+  // leave the cursor stale after such a refetch, hiding "load earlier" or
+  // paging from a stale boundary. `isLoadingOlder` gates the
+  // IntersectionObserver trigger and shows the top spinner.
+  const [olderCursor, setOlderCursor] = useState(initialOlderCursor);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  // Set after a failed older-page fetch: the cursor is kept for retry, but the
+  // auto-trigger is suppressed (see ChatThreadMessages) so a still-visible
+  // sentinel cannot loop the request. Cleared on a manual retry or a re-seed.
+  const [loadOlderError, setLoadOlderError] = useState(false);
+  const [seededChat, setSeededChat] = useState(chat);
+  const isLoadingOlderRef = useRef(false);
+  const olderCursorRef = useRef(olderCursor);
+  // Render-current Chat identity for the stale-response guard below. A fresh
+  // Chat means the thread was rehydrated — a thread switch OR a same-thread
+  // refetch (sending a message rebuilds the Chat from a newer first page) — so
+  // an in-flight older request must be discarded. A thread-id guard would miss
+  // the same-thread case. Written during render (not a passive effect) so a
+  // response resolving in the commit→effect window is still caught.
+  const seededChatRef = useRef(chat);
+  if (seededChat !== chat) {
+    setSeededChat(chat);
+    setOlderCursor(initialOlderCursor);
+    setIsLoadingOlder(false);
+    setLoadOlderError(false);
+    olderCursorRef.current = initialOlderCursor;
+    isLoadingOlderRef.current = false;
+    seededChatRef.current = chat;
+  }
+
+  const loadOlder = useCallback(async () => {
+    const before = olderCursorRef.current;
+    if (before === null || isLoadingOlderRef.current) {
+      return;
+    }
+    const requestedChat = seededChatRef.current;
+    isLoadingOlderRef.current = true;
+    setIsLoadingOlder(true);
+    setLoadOlderError(false);
+
+    const result = await Result.tryPromise(
+      async () => await fetchOlderMessages({ key: threadRef, before }),
+    );
+
+    // Discard a response that resolved after the Chat was rehydrated (thread
+    // switch OR same-thread refetch): the re-seed already reset paging for the
+    // new page, so applying this would corrupt its cursor and prepend a stale
+    // page (skipping the boundary message).
+    if (seededChatRef.current !== requestedChat) {
+      return;
+    }
+
+    isLoadingOlderRef.current = false;
+    setIsLoadingOlder(false);
+
+    if (Result.isError(result)) {
+      // `fetchOlderMessages` already throws a converted APIError; capture it
+      // for telemetry and surface a toast so the user knows the older history
+      // failed to load. Keep the cursor but flag the error so auto-loading
+      // pauses (the manual button retries) instead of looping the request.
+      getAnalytics().captureError(result.error);
+      setLoadOlderError(true);
+      stellaToast.add({
+        title: t("chat.loadEarlierMessagesError"),
+        type: "error",
+      });
+      return;
+    }
+
+    const older = result.value;
+    setMessages((current) => {
+      const existingIds = new Set(current.map((message) => message.id));
+      const prepend = older.messages.filter(
+        (message) => !existingIds.has(message.id),
+      );
+      if (prepend.length === 0) {
+        return current;
+      }
+      return [...prepend, ...current];
+    });
+    olderCursorRef.current = older.olderCursor;
+    setOlderCursor(older.olderCursor);
+  }, [setMessages, t, threadRef]);
+
   // Mirror `isGenerating` (computed below) and the live queue into
   // refs so the stable `sendMessage` callback can branch on the
   // latest committed values. The refs are updated in effects or
@@ -154,6 +255,13 @@ export const useChatSession = ({
   const wasGeneratingRef = useRef(false);
   const conversationIdRef = useRef(conversationId);
   const [queuedMessages, setQueuedMessages] = useState<QueuedChatEntry[]>([]);
+  /**
+   * Set when the user stops a turn whose request the SDK can no
+   * longer abort (the stream already died, leaving a tool part stuck
+   * in a running state). Suppresses the running-tool-call signal in
+   * `isGenerating`; lifted as soon as a new request starts.
+   */
+  const [turnAbandoned, setTurnAbandoned] = useState(false);
 
   const replaceQueuedMessages = useCallback((next: QueuedChatEntry[]) => {
     queueRef.current = next;
@@ -254,6 +362,19 @@ export const useChatSession = ({
     },
     [regenerate],
   );
+
+  /**
+   * Stop the current turn. The SDK's `stop()` only aborts a live
+   * request (`submitted`/`streaming`); for a turn whose stream is
+   * already dead it resolves without changing anything, so the
+   * abandoned mark is what guarantees the session returns to idle.
+   * Marked before awaiting so the UI resets even if the abort
+   * settles late.
+   */
+  const stopGenerating = useCallback(async () => {
+    setTurnAbandoned(true);
+    await stop();
+  }, [stop]);
 
   const handleApprove = useCallback(
     (id: string, _toolName?: ApprovalToolName) => {
@@ -376,7 +497,7 @@ export const useChatSession = ({
       // owns the rewritten parts array.
       const truncated = messages
         .slice(0, targetIndex + 1)
-        // eslint-disable-next-line oxc/no-map-spread
+        // eslint-disable-next-line oxc/no-map-spread -- intentionally builds a new message object to avoid mutating SDK history
         .map((message) => {
           if (message.role !== "assistant") {
             return message;
@@ -546,24 +667,40 @@ export const useChatSession = ({
     [messages],
   );
 
-  const hasRunningToolCall = useMemo(
-    () => hasRunningToolCallInLatestAssistantMessage({ messages }),
-    [messages],
-  );
-  const isGenerating =
-    status === "submitted" || status === "streaming" || hasRunningToolCall;
+  const isGenerating = isChatTurnInFlight({ status, messages, turnAbandoned });
+  // These refs are also written optimistically in `sendMessage`/the drain
+  // effect; mirroring the committed value must run post-commit (see the refs'
+  // doc comment above) so a bailed-out render can't strand the ref ahead of
+  // committed state. A render-time assignment would defeat that guarantee.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reconcile mutable ref to committed isGenerating post-commit; render-time assign could strand it ahead of a bailed render
   useEffect(() => {
     isGeneratingRef.current = isGenerating;
   }, [isGenerating]);
+  // A fresh request (manual send, regenerate, or the SDK's automatic
+  // continuation) starts a new turn; lift the abandoned mark so its
+  // tool calls count as in-flight again.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reconcile derived turnAbandoned flag to committed status post-commit; render-time assign could strand it ahead of a bailed render
+  useEffect(() => {
+    if (status === "submitted" || status === "streaming") {
+      setTurnAbandoned(false);
+    }
+  }, [status]);
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reconcile mutable ref to committed queue post-commit; render-time assign could strand it ahead of a bailed render
   useEffect(() => {
     queueRef.current = queuedMessages;
   }, [queuedMessages]);
 
+  // This is a hook, so there is no element to attach a `key` to: the reset of
+  // these refs + the queue (which fires setState via replaceQueuedMessages) must
+  // happen here. Lifting to a key would require every consumer to remount, which
+  // is out of scope and unverifiable from here.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id inside a hook (no element to key); resets several committed-state refs and the queue
   useEffect(() => {
     conversationIdRef.current = conversationId;
     isGeneratingRef.current = false;
     replaceQueuedMessages([]);
     wasGeneratingRef.current = false;
+    setTurnAbandoned(false);
   }, [conversationId, replaceQueuedMessages]);
 
   // Drain the queue one message per turn. When the response
@@ -575,6 +712,11 @@ export const useChatSession = ({
   // into a failing provider just burns quota and spams the user
   // with repeats of the same error. The next manual send (or a
   // successful `regenerate`) lifts the gate.
+  // The "turn finished" trigger is `isGenerating` falling to false, observed
+  // post-commit — the turn ends inside the AI SDK's status machine, not in any
+  // handler we own, so there is no event site to relay this into. It must read
+  // the committed status/queue after the stream settles.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- drains the queue on the post-commit isGenerating-falls-to-false transition; no owned event/handler to relocate into
   useEffect(() => {
     const finishedTurn = wasGeneratingRef.current && !isGenerating;
     wasGeneratingRef.current = isGenerating;
@@ -602,13 +744,18 @@ export const useChatSession = ({
     status,
   ]);
 
+  // Re-reads the approved-tool sets from storage when the conversation/org/
+  // connectors change. Both setters are also driven by user approvals and the
+  // cross-tab storage listener below, so the value is genuine local state, not
+  // pure derived state: a render-time compute would discard those mutations.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- re-sync storage-backed approved-tool state on id/org/connector change; setters shared with handlers + storage listener, so not derivable in render
   useEffect(() => {
     setConversationApprovedTools(readConversationApprovedTools(conversationId));
     setAlwaysApprovedTools(
       readAlwaysApprovedTools({ organizationId, mcpConnectorIdentities }),
     );
   }, [conversationId, mcpConnectorIdentities, organizationId]);
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const handleApprovedToolsChanged = (event: Event) => {
       const detail = getApprovedToolsChangedDetail(event);
       if (!detail) {
@@ -658,11 +805,15 @@ export const useChatSession = ({
   return {
     error,
     messages,
+    loadOlder,
+    olderCursor,
+    isLoadingOlder,
+    loadOlderError,
     resendLatestMessage,
     sendMessage,
     queuedMessages,
     removeQueuedMessage,
-    stop,
+    stop: stopGenerating,
     isGenerating,
     alwaysApprovedTools,
     conversationApprovedTools,

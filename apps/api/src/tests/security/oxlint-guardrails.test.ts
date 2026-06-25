@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import path from "node:path";
 
 const readRootFixture = (relativePath: string) =>
-  readFileSync(join(import.meta.dir, "../../../../..", relativePath), "utf-8");
+  readFileSync(
+    path.join(import.meta.dir, "../../../../..", relativePath),
+    "utf-8",
+  );
 
 describe("custom oxlint guardrails", () => {
   test("process.env rule treats only static computed keys as known names", () => {
@@ -234,6 +237,41 @@ describe("custom oxlint guardrails", () => {
     expect(pluginSource).toContain("Navigate");
   });
 
+  test("workspace field value surfaces must use the shared renderer", () => {
+    const configSource = readRootFixture("oxlint.config.ts");
+    const pluginSource = readRootFixture(
+      ".oxlint-plugins/no-workspace-field-value-drift.ts",
+    );
+
+    expect(configSource).toContain(
+      "./.oxlint-plugins/no-workspace-field-value-drift.ts",
+    );
+    expect(configSource).toContain(
+      "no-workspace-field-value-drift/no-workspace-field-value-drift",
+    );
+    expect(configSource).toContain(
+      "no-workspace-field-value-drift/no-raw-field-value-bidi-text",
+    );
+    expect(configSource).toContain(
+      "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/cell-result.tsx",
+    );
+    expect(configSource).toContain(
+      "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/table-column.tsx",
+    );
+    expect(configSource).toContain(
+      "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/kanban/kanban-card.tsx",
+    );
+    expect(configSource).toContain(
+      "apps/web/src/components/inspector/entity-metadata-panel.tsx",
+    );
+    expect(pluginSource).toContain("DISPLAY_FIELD_TYPES");
+    expect(pluginSource).toContain('"single-select"');
+    expect(pluginSource).toContain("isFieldContentTypeAccess");
+    expect(pluginSource).toContain("<FieldValue /> or <EditableField />");
+    expect(pluginSource).toContain("BIDI_TEXT_COMPONENTS");
+    expect(pluginSource).toContain("noRawFieldValueBidiText");
+  });
+
   test("public SEO endpoints cannot import auth or protected code", () => {
     const configSource = readRootFixture("oxlint.config.ts");
 
@@ -250,6 +288,288 @@ describe("custom oxlint guardrails", () => {
     );
     expect(configSource).toContain(
       "Public SEO endpoints must use the public case-law API response",
+    );
+  });
+
+  test("no-raw-use-effect tracks the react import and points at the convention", () => {
+    const pluginSource = readRootFixture(
+      ".oxlint-plugins/no-raw-use-effect.ts",
+    );
+
+    // Must resolve `useEffect` through the react import (named, aliased,
+    // default, and namespace) rather than matching the bare identifier —
+    // otherwise an unrelated local `useEffect` would false-positive.
+    expect(pluginSource).toContain('const REACT_MODULE = "react"');
+    expect(pluginSource).toContain(
+      'getImportedName(specifier) === "useEffect"',
+    );
+    expect(pluginSource).toContain(
+      'specifier.type === "ImportDefaultSpecifier"',
+    );
+    expect(pluginSource).toContain(
+      'specifier.type === "ImportNamespaceSpecifier"',
+    );
+
+    // allowedFiles lets the sanctioned wrapper module call useEffect directly.
+    expect(pluginSource).toContain("allowedFiles");
+
+    // A failing call must point the reader/agent at the source of truth.
+    expect(pluginSource).toContain("/conventions-use-effect");
+  });
+
+  test("no-raw-use-effect is enabled for apps/web with the wrapper allowlisted", () => {
+    const configSource = readRootFixture("oxlint.config.ts");
+
+    expect(configSource).toContain("./.oxlint-plugins/no-raw-use-effect.ts");
+    expect(configSource).toContain("no-raw-use-effect/no-raw-use-effect");
+    expect(configSource).toContain(
+      'allowedFiles: ["apps/web/src/hooks/use-effect.ts"]',
+    );
+    // The regression fixture is enabled explicitly because the rule is scoped
+    // to apps/web/src, which the fixtures dir is not.
+    expect(configSource).toContain(
+      ".oxlint-plugins/__fixtures__/no-raw-use-effect.fixture.tsx",
+    );
+  });
+
+  test("route loader query lint points at route-fresh helpers", () => {
+    const pluginSource = readRootFixture(
+      ".oxlint-plugins/no-raw-route-query-client.ts",
+    );
+    const configSource = readRootFixture("oxlint.config.ts");
+    const reactQuerySource = readRootFixture("apps/web/src/lib/react-query.ts");
+
+    expect(pluginSource).toContain("ensureRouteQueryData");
+    expect(pluginSource).toContain("ensureRouteInfiniteQueryData");
+    expect(pluginSource).toContain("fetchRouteQuery");
+    expect(pluginSource).toContain("prefetchRouteQuery");
+    expect(pluginSource).toContain("ensureCriticalQueryData");
+    expect(pluginSource).toContain("prefetchNonCriticalQuery");
+    expect(pluginSource).toContain("route-seeded queries carry");
+    expect(pluginSource).toContain("pendingComponent");
+    expect(pluginSource).toContain("useQueryClient().getQueryData");
+    expect(pluginSource).toContain("abandoned pending renders");
+    expect(reactQuerySource).toContain("ensureRouteInfiniteQueryData");
+    expect(reactQuerySource).toContain("fetchInfiniteQuery");
+
+    expect(configSource).toContain(
+      "./.oxlint-plugins/no-raw-route-query-client.ts",
+    );
+    expect(configSource).toContain(
+      "no-raw-route-query-client/no-raw-route-query-client",
+    );
+    expect(configSource).toContain(
+      ".oxlint-plugins/__fixtures__/no-raw-route-query-client.fixture.tsx",
+    );
+  });
+
+  test("protected shell chrome queries stay non-critical and route-fresh", () => {
+    const protectedRouteSource = readRootFixture(
+      "apps/web/src/routes/_protected.tsx",
+    );
+    const aiConfigQuerySource = readRootFixture(
+      "apps/web/src/routes/_protected.organization/-ai-config-queries.ts",
+    );
+    const organizationQuerySource = readRootFixture(
+      "apps/web/src/routes/_protected.organization/-queries.ts",
+    );
+    const workspacesQuerySource = readRootFixture(
+      "apps/web/src/routes/_protected.workspaces/-queries.ts",
+    );
+
+    expect(protectedRouteSource).not.toContain("ensureRouteQueryData");
+    expect(protectedRouteSource).toContain("prefetchRouteQuery");
+    expect(protectedRouteSource).toContain("aiAvailabilityOptions");
+    expect(protectedRouteSource).toContain("roleOptions");
+    expect(protectedRouteSource).not.toContain("organizationOptions");
+    expect(protectedRouteSource).not.toContain("workspacesNavigationOptions");
+    expect(protectedRouteSource).toContain("AIAvailabilityProvider");
+    expect(protectedRouteSource).toContain("AppSidebar");
+    expect(protectedRouteSource).toContain("ChatMentionProviders");
+    expect(aiConfigQuerySource).toContain("ROUTE_QUERY_STALE_TIME_MS");
+    expect(aiConfigQuerySource).toContain(
+      "staleTime: ROUTE_QUERY_STALE_TIME_MS",
+    );
+    expect(organizationQuerySource).toContain(
+      "staleTime: ROUTE_QUERY_STALE_TIME_MS",
+    );
+    expect(workspacesQuerySource).toContain("workspacesNavigationOptions");
+    expect(workspacesQuerySource).toContain(
+      "staleTime: ROUTE_QUERY_STALE_TIME_MS",
+    );
+  });
+
+  test("route-seeded entity queries keep observer freshness", () => {
+    const routeSource = readRootFixture(
+      "apps/web/src/routes/_protected.workspaces/$workspaceId/$viewId.route.tsx",
+    );
+    const entityQuerySource = readRootFixture(
+      "apps/web/src/routes/_protected.workspaces/$workspaceId/-queries/entities.ts",
+    );
+    const entitiesWindowOptionsSource = entityQuerySource.slice(
+      entityQuerySource.indexOf("export const entitiesWindowOptions"),
+      entityQuerySource.indexOf("export const filesystemEntitiesOptions"),
+    );
+    const filesystemEntitiesOptionsSource = entityQuerySource.slice(
+      entityQuerySource.indexOf("export const filesystemEntitiesOptions"),
+      entityQuerySource.indexOf("export const kanbanGroupOptions"),
+    );
+
+    expect(routeSource).toContain("ensureRouteInfiniteQueryData");
+    expect(routeSource).toContain("entitiesWindowOptions");
+    expect(routeSource).toContain("ensureRouteQueryData");
+    expect(routeSource).toContain("filesystemEntitiesOptions");
+    expect(entityQuerySource).toContain("ROUTE_QUERY_STALE_TIME_MS");
+    expect(entitiesWindowOptionsSource).toContain(
+      "staleTime: ROUTE_QUERY_STALE_TIME_MS",
+    );
+    expect(filesystemEntitiesOptionsSource).toContain(
+      "staleTime: ROUTE_QUERY_STALE_TIME_MS",
+    );
+  });
+
+  test("legacy entity redirects do not block protected shell commit", () => {
+    const entityRouteSource = readRootFixture(
+      "apps/web/src/routes/_protected.workspaces/$workspaceId/entities/$entityId.tsx",
+    );
+
+    expect(entityRouteSource).toContain("component: LegacyEntityRedirect");
+    expect(entityRouteSource).toContain("useQuery");
+    expect(entityRouteSource).toContain("DocxLoadingShell");
+    expect(entityRouteSource).toContain("Navigate");
+    expect(entityRouteSource).not.toContain("beforeLoad");
+    expect(entityRouteSource).not.toContain("ensureRouteQueryData");
+  });
+
+  test("tools route keeps heavy catalogue UI behind Suspense", () => {
+    const toolsRouteSource = readRootFixture(
+      "apps/web/src/routes/_protected.knowledge/tools.tsx",
+    );
+    const pluginSource = readRootFixture(
+      ".oxlint-plugins/no-static-catalogue-route-import.ts",
+    );
+    const configSource = readRootFixture("oxlint.config.ts");
+
+    expect(toolsRouteSource).toContain("const LazyCatalogueBrowser = lazy");
+    expect(toolsRouteSource).toContain("catalogue/catalogue-browser");
+    expect(toolsRouteSource).toContain(
+      "return { default: module.CatalogueBrowserWithRouteData };",
+    );
+    expect(toolsRouteSource).toContain("Route.useLoaderData");
+    expect(toolsRouteSource).toContain("canManageCustomTools");
+    expect(toolsRouteSource).toContain("practiceJurisdictions");
+    expect(toolsRouteSource).toContain("const LazyToolDetailView = lazy");
+    expect(toolsRouteSource).toContain("const LazyToolDetailRailIcon = lazy");
+    expect(toolsRouteSource).not.toContain("import { CatalogueBrowser");
+    expect(toolsRouteSource).not.toContain("ToolDetailView,");
+    expect(toolsRouteSource).not.toContain("ToolDetailRailIcon,");
+
+    expect(pluginSource).toContain("CATALOGUE_BROWSER_MODULE");
+    expect(pluginSource).toContain('node.importKind === "type"');
+    expect(pluginSource).toContain("staticCatalogueImport");
+    expect(configSource).toContain(
+      "./.oxlint-plugins/no-static-catalogue-route-import.ts",
+    );
+    expect(configSource).toContain(
+      "no-static-catalogue-route-import/no-static-catalogue-route-import",
+    );
+    expect(configSource).toContain(
+      "apps/web/src/routes/_protected.knowledge/tools.tsx",
+    );
+  });
+
+  test("presigned upload integration test does not mock presign helpers", () => {
+    const uploadIntegrationSource = readRootFixture(
+      "apps/api/src/handlers/uploads/presigned-upload.integration.test.ts",
+    );
+
+    expect(uploadIntegrationSource).toContain('mock.module("@/api/lib/s3"');
+    expect(uploadIntegrationSource).not.toContain(
+      'mock.module("@/api/lib/s3-presign"',
+    );
+  });
+
+  test("devtools shell lazy-loads TanStack panels", () => {
+    const pluginSource = readRootFixture(
+      ".oxlint-plugins/no-static-devtools-import.ts",
+    );
+    const configSource = readRootFixture("oxlint.config.ts");
+    const devRootSource = readRootFixture(
+      "apps/web/src/components/dev-root.tsx",
+    );
+    const tanstackDevtoolsRootSource = readRootFixture(
+      "apps/web/src/components/tanstack-devtools-root.tsx",
+    );
+    const tableLayoutSource = readRootFixture(
+      "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/table/table-layout.tsx",
+    );
+    const tableDevtoolsGateSource = readRootFixture(
+      "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/table/table-devtools-gate.tsx",
+    );
+
+    expect(devRootSource).toContain(
+      'import("@/components/tanstack-devtools-root")',
+    );
+    expect(devRootSource).not.toContain("@tanstack/react-table-devtools");
+    expect(devRootSource).not.toContain("@tanstack/react-devtools");
+    expect(tanstackDevtoolsRootSource).toContain(
+      "@tanstack/react-table-devtools",
+    );
+    expect(tanstackDevtoolsRootSource).toContain("tableDevtoolsPlugin()");
+    expect(tableLayoutSource).toContain("TableDevtoolsGate");
+    expect(tableLayoutSource).toContain("table-devtools-gate");
+    expect(tableLayoutSource).not.toContain('table-devtools"');
+    expect(tableDevtoolsGateSource).toContain("state.tanstackDevtools");
+    expect(tableDevtoolsGateSource).toContain("table-devtools");
+
+    expect(pluginSource).toContain("DEVTOOLS_PACKAGES");
+    expect(pluginSource).toContain("@tanstack/react-table-devtools");
+    expect(pluginSource).toContain("DYNAMIC_ONLY_MODULES");
+    expect(pluginSource).toContain("staticDevtoolsPackage");
+    expect(pluginSource).toContain("staticDevtoolsModule");
+    expect(configSource).toContain(
+      "./.oxlint-plugins/no-static-devtools-import.ts",
+    );
+    expect(configSource).toContain(
+      "no-static-devtools-import/no-static-devtools-import",
+    );
+    expect(configSource).toContain(
+      ".oxlint-plugins/__fixtures__/no-static-devtools-import.fixture.tsx",
+    );
+  });
+
+  test("workspace table measures scroll metrics after mount", () => {
+    const tableSource = readRootFixture(
+      "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/table/workspace-table/index.tsx",
+    );
+
+    expect(tableSource).toContain("useExternalSyncEffect(() => {");
+    expect(tableSource).toContain("const element = tableWrapperRef.current");
+    expect(tableSource).toContain("new ResizeObserver(updateMetrics)");
+    expect(tableSource).toContain("ref={tableWrapperRef}");
+    expect(tableSource).not.toContain("tableWrapperObserverRef");
+    expect(tableSource).not.toContain("composeRefs(tableWrapperRef");
+  });
+
+  test("redirect-only route lint forbids render components", () => {
+    const pluginSource = readRootFixture(
+      ".oxlint-plugins/no-component-on-redirect-route.ts",
+    );
+    const configSource = readRootFixture("oxlint.config.ts");
+
+    expect(pluginSource).toContain("throw redirect");
+    expect(pluginSource).toContain("component");
+    expect(pluginSource).toContain("pendingComponent");
+    expect(pluginSource).toContain("abandoned before mount");
+
+    expect(configSource).toContain(
+      "./.oxlint-plugins/no-component-on-redirect-route.ts",
+    );
+    expect(configSource).toContain(
+      "no-component-on-redirect-route/no-component-on-redirect-route",
+    );
+    expect(configSource).toContain(
+      ".oxlint-plugins/__fixtures__/no-component-on-redirect-route.fixture.tsx",
     );
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -19,16 +19,21 @@ import {
   ExternalSourceLogo,
   findMcpConnectorIconHref,
 } from "@/components/inspector/external-reference-panel";
+import { getActiveSkillChatContext } from "@/components/inspector/inspector-active-skill";
 import {
   isGenericInspectorTab,
   useInspectorStore,
 } from "@/components/inspector/inspector-store";
-import type { InspectorTab } from "@/components/inspector/inspector-store";
+import type {
+  ChatTab,
+  InspectorTab,
+} from "@/components/inspector/inspector-store";
 import { buildMaximizeTabAction } from "@/components/inspector/maximize-tab";
 import { useRailContextMenu } from "@/components/inspector/use-rail-context-menu";
 import { useTabContextMenu } from "@/components/inspector/use-tab-context-menu";
 import { getInspectorView } from "@/components/inspector/view-registry";
 import Tooltip from "@/components/tooltip";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import {
   SIDE_RAIL_CONTAINER_CLASS,
@@ -37,6 +42,7 @@ import {
 } from "@/lib/consts";
 import { resolveMatterColor } from "@/lib/matter-colors";
 import { mcpConnectorsOptions } from "@/routes/_protected.knowledge/-queries";
+import { catalogueOptions } from "@/routes/_protected.knowledge/-queries/catalogue";
 import { DocumentIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/document-icon";
 import { EntityKindIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/entity-kind-icon";
 
@@ -48,8 +54,10 @@ type InspectorRailProps = {
   onOpenChat: (
     args?: Parameters<
       (args?: {
+        label?: string;
         workspaceId?: string | undefined;
         contextMatterIds?: string[];
+        activeSkill?: ChatTab["activeSkill"];
       }) => void
     >[0],
   ) => void;
@@ -69,14 +77,34 @@ export const InspectorRail = ({
   workspaceId,
 }: InspectorRailProps) => {
   const t = useTranslations();
-  const railContextMenu = useRailContextMenu({ workspaceId });
+  const activeTab = tabs.find((tab) => tab.id === activeId);
+  const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
+  const { data: activeSkillCatalogueData } = useQuery({
+    ...catalogueOptions(activeOrganizationId),
+    enabled: activeTab?.type === "view" && activeTab.viewType === "tool-detail",
+  });
+  const activeSkill = getActiveSkillChatContext(
+    activeTab,
+    activeSkillCatalogueData?.entries,
+  );
+  const railContextMenu = useRailContextMenu({ activeSkill, workspaceId });
 
   const openContextChat = () => {
-    onOpenChat(
-      workspaceId === undefined
+    const skillContext =
+      activeSkill === undefined
         ? {}
-        : { workspaceId, contextMatterIds: [workspaceId] },
-    );
+        : { activeSkill, label: activeSkill.skillName };
+
+    if (workspaceId === undefined) {
+      onOpenChat(skillContext);
+      return;
+    }
+
+    onOpenChat({
+      ...skillContext,
+      workspaceId,
+      contextMatterIds: [workspaceId],
+    });
   };
 
   return (
@@ -148,6 +176,7 @@ export const InspectorRail = ({
               tab={tab}
             />
           ))}
+          <SuggestedReviveTab />
         </div>
       </ScrollArea>
       {railContextMenu.element}
@@ -303,11 +332,100 @@ const VerticalTabIcon = ({
   );
 };
 
+/**
+ * Muted ghost chip for the main-view-bound tab the user closed
+ * while its document/template is still open in the main view.
+ * Clicking it revives the exact tab (same id + payload) so per-tab
+ * state reconnects. Renders after the regular tabs; disappears as
+ * soon as the bound main view goes away or the tab reopens.
+ */
+const SuggestedReviveTab = () => {
+  const t = useTranslations();
+  const suggestion = useInspectorStore((s) => s.reviveSuggestion);
+  const reviveSuggestedTab = useInspectorStore((s) => s.reviveSuggestedTab);
+  if (suggestion === null) {
+    return null;
+  }
+  const label = t("inspector.reopenTab", { name: suggestion.label });
+  return (
+    <Tooltip
+      content={label}
+      render={
+        <button
+          aria-label={label}
+          className={cn(
+            "text-foreground-muted hover:bg-accent hover:text-foreground flex min-h-8 w-full items-center justify-center transition-colors",
+            TOOLBAR_ROW_HEIGHT,
+          )}
+          onClick={reviveSuggestedTab}
+          type="button"
+        />
+      }
+      side="left"
+    >
+      <span className="flex size-6 items-center justify-center rounded-md border border-dashed">
+        <SuggestedReviveTabIcon tab={suggestion} />
+      </span>
+    </Tooltip>
+  );
+};
+
+const SuggestedReviveTabIcon = ({ tab }: { tab: InspectorTab }) => {
+  if (isGenericInspectorTab(tab)) {
+    const registration = getInspectorView(tab.viewType);
+    if (registration !== undefined) {
+      const RailIcon = registration.railIcon;
+      return (
+        <RailIcon
+          active={false}
+          tab={{
+            id: tab.id,
+            label: tab.label,
+            payload: tab.payload,
+            ownerRouteId: tab.ownerRouteId,
+          }}
+        />
+      );
+    }
+  }
+  // Unlike the inactive regular tabs (abbreviation text), the ghost
+  // always shows the file-type icon: the chip stands in for the
+  // document that is centered in the main view, so the icon is the
+  // recognisable anchor.
+  if (tab.type === "pdf" && tab.mimeType !== undefined) {
+    return (
+      <DocumentIcon
+        className="size-3.5"
+        fileName={tab.fileName}
+        mimeType={tab.mimeType}
+      />
+    );
+  }
+  if (tab.type === "pdf") {
+    return <FileTextIcon className="size-3.5" />;
+  }
+  return (
+    <span className="text-[9px] leading-none font-semibold tracking-tight uppercase">
+      {getTabAbbrev(tab.label)}
+    </span>
+  );
+};
+
 type VerticalTabProps = {
   tab: InspectorTab;
   active: boolean;
   onActivate: () => void;
   onClose: () => void;
+};
+
+const flashTabElement = (el: HTMLElement) => {
+  el.animate(
+    [
+      { backgroundColor: "var(--color-primary)", opacity: 0.7 },
+      { backgroundColor: "transparent", opacity: 1 },
+    ],
+    { duration: 400, easing: "ease-out" },
+  );
 };
 
 const VerticalTab = ({
@@ -354,25 +472,26 @@ const VerticalTab = ({
   // Flash the tab on (re-)activation.
   const activationSeq = useInspectorStore((s) => s.activationSeq);
   const prevSeq = useRef(activationSeq);
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = tabRef.current;
     if (el && active && activationSeq !== prevSeq.current) {
-      el.animate(
-        [
-          {
-            backgroundColor: "var(--color-primary)",
-            opacity: 0.7,
-          },
-          {
-            backgroundColor: "transparent",
-            opacity: 1,
-          },
-        ],
-        { duration: 400, easing: "ease-out" },
-      );
+      flashTabElement(el);
     }
     prevSeq.current = activationSeq;
   }, [active, activationSeq]);
+
+  // Targeted flash: flash this tab when something asks for it by id
+  // (e.g. clicking a field in the document), regardless of active state.
+  const flashSeq = useInspectorStore((s) => s.flashSeq);
+  const flashTabId = useInspectorStore((s) => s.flashTabId);
+  const prevFlashSeq = useRef(flashSeq);
+  useExternalSyncEffect(() => {
+    const el = tabRef.current;
+    if (el && flashSeq !== prevFlashSeq.current && flashTabId === tab.id) {
+      flashTabElement(el);
+    }
+    prevFlashSeq.current = flashSeq;
+  }, [flashSeq, flashTabId, tab.id]);
 
   return (
     <>

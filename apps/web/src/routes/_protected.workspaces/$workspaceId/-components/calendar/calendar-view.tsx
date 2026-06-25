@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 import type { UIEvent } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -7,6 +7,7 @@ import { useLocale, useTranslations } from "use-intl";
 
 import { stellaToast } from "@stll/ui/components/toast";
 
+import { getFirstWeekday, getWeekendDays } from "@/i18n/week";
 import { api } from "@/lib/api";
 import { toSafeId } from "@/lib/safe-id";
 import type { EntityKind, WorkspaceView } from "@/lib/types";
@@ -54,12 +55,20 @@ type CalendarViewProps = {
   workspaceId: string;
 };
 
+type HandleDropParams = {
+  date: string;
+  entityId: string;
+  kind: string;
+};
+
 const toAllDayAgendaDateTime = (date: string): string =>
   new Date(`${date}T00:00:00.000Z`).toISOString();
 
 export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
   const t = useTranslations();
   const locale = useLocale();
+  const firstWeekday = getFirstWeekday(locale);
+  const weekend = getWeekendDays(locale);
   const queryClient = useQueryClient();
   const weekdayLabels = getWeekdayLabels(locale);
   const { filters, sorts } = view.layout;
@@ -139,7 +148,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
   );
   const monthScrollRef = useRef<HTMLDivElement>(null);
   const monthAnchorRefs = useRef(new Map<string, HTMLElement>());
-  const latestViewDate = useRef(viewDate);
+  const getCurrentViewDate = useEffectEvent(() => viewDate);
   const pendingScrollMonthKey = useRef<string | null>(null);
   const pendingScrollAdjustment = useRef<{
     key: string;
@@ -149,7 +158,6 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
 
   const year = viewDate.getUTCFullYear();
   const month = viewDate.getUTCMonth();
-  latestViewDate.current = viewDate;
   const monthWeeks = getMonthWeekRows(locale, monthWindowStart);
   const monthAnchors = getMonthAnchors(locale, monthWindowStart);
 
@@ -158,7 +166,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
       return monthWeeks.flatMap((week) => week.days);
     }
     if (mode === "week") {
-      return getWeekDays(viewDate);
+      return getWeekDays(viewDate, firstWeekday, weekend);
     }
     return [];
   })();
@@ -184,11 +192,15 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
         type: "month",
         year,
         month,
+        firstWeekday,
+        weekend,
       });
     }
     return getCalendarQueryRange({
       type: "week",
       viewDate,
+      firstWeekday,
+      weekend,
     });
   })();
 
@@ -350,7 +362,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
       return;
     }
 
-    const target = startOfUTCMonth(latestViewDate.current);
+    const target = startOfUTCMonth(getCurrentViewDate());
     const key = getUTCMonthKey(target);
     pendingScrollMonthKey.current = key;
     setMonthWindowStart((start) =>
@@ -389,7 +401,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
     pendingScrollMonthKey.current = null;
   }, [mode, monthWindowStart, viewDate]);
 
-  const handleDrop = (date: string, entityId: string, kind: string) => {
+  const handleDrop = ({ date, entityId, kind }: HandleDropParams) => {
     if (!isEditable) {
       return;
     }
@@ -532,7 +544,11 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
         if (mode === "month") {
           return (
             <>
-              <CalendarWeekHeader weekdayLabels={weekdayLabels} />
+              <CalendarWeekHeader
+                firstWeekday={firstWeekday}
+                weekdayLabels={weekdayLabels}
+                weekend={weekend}
+              />
 
               <div
                 className="relative flex-1 overflow-y-auto overscroll-contain"
@@ -587,7 +603,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
                             });
                           }}
                           onDrop={(entityId, kind) =>
-                            handleDrop(day.date, entityId, kind)
+                            handleDrop({ date: day.date, entityId, kind })
                           }
                           workspaceId={workspaceId}
                         />
@@ -601,7 +617,11 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
         }
         return (
           <>
-            <CalendarWeekHeader weekdayLabels={weekdayLabels} />
+            <CalendarWeekHeader
+              firstWeekday={firstWeekday}
+              weekdayLabels={weekdayLabels}
+              weekend={weekend}
+            />
 
             <div className="grid flex-1 grid-cols-7 grid-rows-1">
               {days.map((day) => (
@@ -617,7 +637,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
                     });
                   }}
                   onDrop={(entityId, kind) =>
-                    handleDrop(day.date, entityId, kind)
+                    handleDrop({ date: day.date, entityId, kind })
                   }
                   workspaceId={workspaceId}
                 />

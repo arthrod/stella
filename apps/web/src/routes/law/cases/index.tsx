@@ -6,10 +6,12 @@ import {
   useSuspenseQuery,
 } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 import * as v from "valibot";
 
 import { Button } from "@stll/ui/components/button";
+import { Skeleton } from "@stll/ui/components/skeleton";
+import { stellaToast } from "@stll/ui/components/toast";
 
 import { DecisionFilters } from "@/features/case-law/components/decision-filters";
 import { DecisionTable } from "@/features/case-law/components/decision-table";
@@ -33,7 +35,10 @@ import {
   createPublicLawCanonicalUrl,
   createPublicLawHead,
 } from "@/lib/public-law-seo";
-import { ensureCriticalQueryData } from "@/lib/react-query";
+import {
+  ensureRouteInfiniteQueryData,
+  ensureRouteQueryData,
+} from "@/lib/react-query";
 
 const optionalBrowseStringSchema = (maxLength: number) =>
   v.optional(
@@ -48,6 +53,7 @@ const optionalBrowseStringSchema = (maxLength: number) =>
 const searchSchema = v.object({
   country: optionalBrowseStringSchema(3),
   court: optionalBrowseStringSchema(512),
+  notFound: v.optional(v.boolean()),
   year: optionalBrowseStringSchema(4),
 });
 
@@ -117,10 +123,11 @@ export const Route = createFileRoute("/law/cases/")({
   loaderDeps: ({ search }) => search,
   loader: async ({ context: { queryClient }, deps }) => {
     const [decisionPages] = await Promise.all([
-      queryClient.ensureInfiniteQueryData(
+      ensureRouteInfiniteQueryData(
+        queryClient,
         decisionsInfiniteOptions(createDecisionFiltersFromSearch(deps)),
       ),
-      ensureCriticalQueryData(queryClient, decisionFacetsOptions()),
+      ensureRouteQueryData(queryClient, decisionFacetsOptions()),
     ]);
 
     return {
@@ -147,8 +154,6 @@ export const Route = createFileRoute("/law/cases/")({
                   caseNumber: decision.caseNumber,
                   country: decision.country,
                   court: decision.court,
-                  decisionDate: decision.decisionDate,
-                  decisionId: decision.id,
                   language: decision.language,
                   languageAlternateCount: decision.languageAlternateCount,
                   slug: decision.slug,
@@ -164,7 +169,28 @@ export const Route = createFileRoute("/law/cases/")({
     });
   },
   component: PublicCaseLawIndex,
+  pendingComponent: PublicCaseLawIndexPending,
 });
+
+// The loader fetches decisions + facets (both delayed by slow-load), so without
+// a pendingComponent the route flashes the glowing logo. Reuse the real
+// DecisionTable skeleton plus the page chrome during route-pending.
+function PublicCaseLawIndexPending() {
+  const t = useTranslations();
+  return (
+    <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold">{t("common.caseLaw")}</h1>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Skeleton className="h-9 w-40 rounded-md" />
+        <Skeleton className="h-9 w-32 rounded-md" />
+        <Skeleton className="h-9 w-32 rounded-md" />
+      </div>
+      <DecisionTable decisions={[]} isLoading />
+    </main>
+  );
+}
 
 function PublicCaseLawIndex() {
   const t = useTranslations();
@@ -172,10 +198,28 @@ function PublicCaseLawIndex() {
     select: ({ country, court, year }) => ({ country, court, year }),
   });
   const { country, court, year } = search;
+  const notFound = Route.useSearch({ select: (s) => s.notFound });
+  const navigate = Route.useNavigate();
+
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (notFound flag -> toast + navigate); move into the navigation that sets notFound
+  useEffect(() => {
+    if (!notFound) {
+      return;
+    }
+    stellaToast.add({
+      title: t("caseLaw.decisionNotFound"),
+      type: "error",
+    });
+    void navigate({
+      replace: true,
+      search: (prev) => ({ ...prev, notFound: undefined }),
+    });
+  }, [notFound, navigate, t]);
   const routeFilters = createDecisionFiltersFromSearch(search);
   const [filters, setFilters] = useState<DecisionListFilters>(routeFilters);
   const { data: browseFacets } = useSuspenseQuery(decisionFacetsOptions());
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived state, recomputing filters from search params; compute in render or lift to key prop
   useEffect(() => {
     setFilters(createDecisionFiltersFromSearch({ country, court, year }));
   }, [country, court, year]);
@@ -272,6 +316,7 @@ function BrowseGroup({
   createSearch: (value: string) => CaseLawIndexSearch;
   title: string;
 }) {
+  const format = useFormatter();
   if (buckets.length === 0) {
     return null;
   }
@@ -290,7 +335,7 @@ function BrowseGroup({
               {bucket.value}
             </Link>
             <span className="text-muted-foreground shrink-0 text-xs">
-              {bucket.count}
+              {format.number(bucket.count)}
             </span>
           </li>
         ))}

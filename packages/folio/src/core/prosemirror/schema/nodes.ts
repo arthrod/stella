@@ -22,6 +22,7 @@ import type {
   TabStop,
   TextFormatting,
   NumberFormat,
+  TableBorders,
   TableFormatting,
   TableRowFormatting,
   TableCell,
@@ -66,6 +67,18 @@ export type ParagraphAttrs = {
 
   // List properties
   numPr?: {
+    numId?: number;
+    ilvl?: number;
+  };
+  /**
+   * The style-sourced numPr value when `numPr` came from the paragraph
+   * style rather than direct formatting. While `numPr` still equals this,
+   * fromProseDoc omits it from serialized formatting (writing it as direct
+   * `<w:numPr>` would flip Word's level-indent precedence on reload). List
+   * commands that change `numPr` make the values diverge, which re-enables
+   * direct serialization — no explicit clearing needed.
+   */
+  numPrFromStyle?: {
     numId?: number;
     ilvl?: number;
   };
@@ -177,6 +190,13 @@ export type ParagraphAttrs = {
   /** Original inline paragraph formatting from DOCX (pre-style-resolution).
    *  Used by fromProseDoc for lossless round-trip serialization. */
   _originalFormatting?: ParagraphFormatting;
+
+  /** Import-effective spacing baseline for HTML auto-spacing detection.
+   *  PM-only; never serialized back into DOCX formatting. */
+  _autospacingBase?: {
+    before?: number | null;
+    after?: number | null;
+  };
 
   /** Full section properties for paragraphs that end a section.
    *  Used by layout engine for per-section column/page config and round-trip. */
@@ -513,6 +533,8 @@ export type TableAttrs = {
   };
   /** Table look flags for conditional formatting (w:tblLook) */
   look?: TableLook;
+  /** Table-level borders (w:tblBorders) — full BorderSpec per side */
+  borders?: TableBorders;
   /** Original table formatting from DOCX for lossless round-trip serialization */
   _originalFormatting?: TableFormatting;
 };

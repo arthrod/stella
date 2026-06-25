@@ -6,6 +6,7 @@ import type { ResolveParams } from "@tanstack/react-router";
 import { LayersIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import {
   BreadcrumbItem,
   BreadcrumbSeparator,
@@ -150,7 +151,7 @@ export const WorkspaceBreadcrumb = ({
           title={client.displayName}
           to="/workspaces"
         >
-          {client.displayName}
+          <BidiText>{client.displayName}</BidiText>
         </Link>
       </BreadcrumbItem>
       <BreadcrumbSeparator className="shrink-0" />
@@ -310,7 +311,9 @@ export const WorkspaceBreadcrumb = ({
                     }}
                   />
                 </span>
-                <span className="truncate">{displayName}</span>
+                <BidiText as="span" className="truncate">
+                  {displayName}
+                </BidiText>
                 {workspace.reference && !isEditingRef ? (
                   <span
                     className="text-foreground-muted shrink-0 text-sm"
@@ -392,6 +395,7 @@ export const WorkspaceBreadcrumb = ({
           activeOptions={{ exact: true, includeSearch: false }}
           activeProps={{ className: "text-foreground font-semibold" }}
           className="hover:text-foreground max-w-80 truncate font-semibold transition-colors"
+          dir="auto"
           onClick={() => {
             startEditingName();
           }}

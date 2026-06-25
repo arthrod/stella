@@ -38,7 +38,7 @@ import type {
   RunPropertyChange,
 } from "../../types/document";
 import { HIGHLIGHT_COLOR_VALUES } from "../../types/documentEnumValues";
-// oxlint-disable-next-line import/no-cycle
+// oxlint-disable-next-line import/no-cycle -- OOXML model is mutually recursive: shape textboxes hold paragraphs, paragraphs hold runs
 import { serializeParagraph } from "./paragraphSerializer";
 import { escapeXml, intAttr } from "./xmlUtils";
 
@@ -399,7 +399,7 @@ export function serializeTextFormatting(
   }
 
   // Vertical alignment
-  if (formatting.vertAlign && formatting.vertAlign !== "baseline") {
+  if (formatting.vertAlign) {
     parts.push(`<w:vertAlign w:val="${formatting.vertAlign}"/>`);
   }
 

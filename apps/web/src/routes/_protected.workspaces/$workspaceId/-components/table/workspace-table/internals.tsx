@@ -41,6 +41,24 @@ export const tableEndFillerCellStyle: CSSProperties = {
 export const getVerticalScrollbarWidth = (element: HTMLElement) =>
   Math.max(0, element.offsetWidth - element.clientWidth);
 
+// Nearest scrollable ancestor of an element, used as an IntersectionObserver
+// root so observers report against the real scroll viewport (the grouped table
+// flows inside an ancestor `overflow-auto`, not its own scroll box). `null`
+// falls back to the browser viewport.
+export const getScrollableAncestor = (
+  element: HTMLElement,
+): HTMLElement | null => {
+  let current = element.parentElement;
+  while (current) {
+    const { overflowY } = getComputedStyle(current);
+    if (overflowY === "auto" || overflowY === "scroll") {
+      return current;
+    }
+    current = current.parentElement;
+  }
+  return null;
+};
+
 export type ColumnDragPinning = "left" | "right" | "center";
 
 export type ColumnDragData = {
@@ -84,7 +102,7 @@ export const getGridPinningStyles = (column: TableColumn): CSSProperties => {
     return {
       gridColumn: "-2 / -1",
       position: "sticky",
-      right: 0,
+      insetInlineEnd: 0,
       zIndex: 2,
     };
   }
@@ -93,8 +111,12 @@ export const getGridPinningStyles = (column: TableColumn): CSSProperties => {
     return {};
   }
 
+  // TanStack only ever pins to "left" (the logical inline-start of the
+  // table); `getStart("left")` is the cumulative inline offset of the
+  // pinned columns. Resolve it to `inset-inline-start` so the frozen
+  // column docks to the start edge under both LTR and RTL.
   return {
-    left: `${column.getStart("left")}px`,
+    insetInlineStart: `${column.getStart("left")}px`,
     position: "sticky",
     zIndex: column.id === selectColId ? 21 : 20,
   };
@@ -115,7 +137,7 @@ export const PinnedBoundary = ({ column }: PinnedBoundaryProps) => {
   return (
     <span
       aria-hidden="true"
-      className="bg-border pointer-events-none absolute inset-y-0 right-0 z-40 w-px"
+      className="bg-border pointer-events-none absolute inset-y-0 end-0 z-40 w-px"
     />
   );
 };

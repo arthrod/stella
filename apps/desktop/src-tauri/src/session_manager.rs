@@ -1,5 +1,5 @@
 use notify::{
-  event::AccessKind, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+  Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event::AccessKind,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -44,10 +45,10 @@ fn register_takeover_dialog(label: &str) -> tokio::sync::oneshot::Receiver<bool>
 /// Called by the takeover dialog's Allow/Deny buttons via invoke.
 pub fn set_takeover_response(label: &str, approved: bool) {
   let mut guard = TAKEOVER_SENDERS.lock().unwrap_or_else(|e| e.into_inner());
-  if let Some(ref mut map) = *guard {
-    if let Some(tx) = map.remove(label) {
-      let _ = tx.send(approved);
-    }
+  if let Some(ref mut map) = *guard
+    && let Some(tx) = map.remove(label)
+  {
+    let _ = tx.send(approved);
   }
 }
 
@@ -92,7 +93,7 @@ struct DesktopSession {
   local_open_seen: bool,
   closed_recheck_count: u8,
   retry_notice_shown: bool,
-  _watcher: Option<RecommendedWatcher>,
+  watcher: Option<RecommendedWatcher>,
   checkpoint_timer: Option<JoinHandle<()>>,
   open_poll_timer: Option<JoinHandle<()>>,
   sse_listener: Option<JoinHandle<()>>,
@@ -233,13 +234,11 @@ fn did_remote_checkpoint_advance(
   local_checkpoint_at: &Option<String>,
   remote_checkpoint_at: &Option<String>,
 ) -> bool {
-  let remote = match remote_checkpoint_at {
-    Some(r) => r,
-    None => return false,
+  let Some(remote) = remote_checkpoint_at else {
+    return false;
   };
-  let local = match local_checkpoint_at {
-    Some(l) => l,
-    None => return true,
+  let Some(local) = local_checkpoint_at else {
+    return true;
   };
   remote > local
 }
@@ -313,11 +312,6 @@ async fn lsof_reports_open(file_path: &Path) -> bool {
   }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-async fn lsof_reports_open(_: &Path) -> bool {
-  false
-}
-
 async fn local_file_appears_open(file_path: &Path, file_name: &str) -> bool {
   let dir = file_path.parent().unwrap_or(Path::new("."));
 
@@ -329,7 +323,15 @@ async fn local_file_appears_open(file_path: &Path, file_name: &str) -> bool {
     return true;
   }
 
-  lsof_reports_open(file_path).await
+  #[cfg(any(target_os = "macos", target_os = "linux"))]
+  {
+    lsof_reports_open(file_path).await
+  }
+
+  #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+  {
+    false
+  }
 }
 
 impl SessionManager {
@@ -391,20 +393,17 @@ impl SessionManager {
       // Token lives in OS keychain; skip sessions without one. The timeout
       // keeps a stalled keychain (pending authorization prompt) from holding
       // the session manager lock indefinitely during startup.
-      let session_token = match crate::keychain::get_token_with_timeout(
+      let Some(session_token) = crate::keychain::get_token_with_timeout(
         &persisted.id,
         KEYCHAIN_RESTORE_TIMEOUT,
       )
       .await
-      {
-        Some(t) => t,
-        None => {
-          tracing::warn!(
-              session_id = %persisted.id,
-              "session token missing from keychain, skipping restore"
-          );
-          continue;
-        }
+      else {
+        tracing::warn!(
+            session_id = %persisted.id,
+            "session token missing from keychain, skipping restore"
+        );
+        continue;
       };
 
       let session = DesktopSession {
@@ -431,7 +430,7 @@ impl SessionManager {
         local_open_seen: false,
         closed_recheck_count: 0,
         retry_notice_shown: false,
-        _watcher: None,
+        watcher: None,
         checkpoint_timer: None,
         open_poll_timer: None,
         sse_listener: None,
@@ -452,7 +451,7 @@ impl SessionManager {
     self
       .sessions
       .values()
-      .filter(|s| !s.takeover_detected)
+      .filter(|s| !s.takeover_detected && s.watcher.is_none())
       .map(|s| s.id.clone())
       .collect()
   }
@@ -648,7 +647,7 @@ impl SessionManager {
       local_open_seen: false,
       closed_recheck_count: 0,
       retry_notice_shown: false,
-      _watcher: None,
+      watcher: None,
       checkpoint_timer: None,
       open_poll_timer: None,
       sse_listener: None,
@@ -806,9 +805,8 @@ impl SessionManager {
   /// Show a takeover request as a native macOS dialog with Allow/Deny buttons.
   /// The response is sent back to the API automatically.
   pub fn show_takeover_request(&self, session_id: &str, requested_by: &str) {
-    let session = match self.sessions.get(session_id) {
-      Some(s) => s,
-      None => return,
+    let Some(session) = self.sessions.get(session_id) else {
+      return;
     };
 
     let file_name = session.file_name.clone();
@@ -870,9 +868,8 @@ impl SessionManager {
 
   /// Respond to a takeover request (called from tray menu action).
   pub async fn respond_to_takeover(&self, session_id: &str, approved: bool) -> bool {
-    let session = match self.sessions.get(session_id) {
-      Some(s) => s,
-      None => return false,
+    let Some(session) = self.sessions.get(session_id) else {
+      return false;
     };
 
     let url = format!(
@@ -922,7 +919,7 @@ impl SessionManager {
     open_path_native(self.support_root.to_string_lossy().as_ref()).is_ok()
   }
 
-  pub fn email_support(&self) -> bool {
+  pub fn email_support() -> bool {
     let subject = urlencode("stella desktop support");
     open_url(&format!("mailto:{SUPPORT_EMAIL}?subject={subject}"))
   }
@@ -979,9 +976,6 @@ impl SessionManager {
     let session_token = session.session_token.clone();
     let file_name = session.file_name.clone();
     let last_checkpoint_sha = session.last_checkpoint_sha.clone();
-    // Release the mutable borrow before calling other self methods
-    #[allow(dropping_references)]
-    drop(session);
 
     self.persist_sessions().await;
     self.emit_state_change();
@@ -997,9 +991,8 @@ impl SessionManager {
       )
       .await;
 
-    let session = match self.sessions.get_mut(session_id) {
-      Some(s) => s,
-      None => return false,
+    let Some(session) = self.sessions.get_mut(session_id) else {
+      return false;
     };
     session.checkpoint_in_flight = false;
 
@@ -1044,9 +1037,6 @@ impl SessionManager {
         } else {
           SessionStatus::Ready
         };
-
-        #[allow(dropping_references)]
-        drop(session);
 
         self.persist_sessions().await;
         self.emit_state_change();
@@ -1144,12 +1134,12 @@ impl SessionManager {
       let error_body: Option<ErrorResponse> = response.json().await.ok();
 
       if status.as_u16() == 409 {
-        if let Some(ref err) = error_body {
-          if err.code.as_deref() == Some(TAKEN_OVER_CODE) {
-            return CheckpointResult::TakenOver(err.message.clone().unwrap_or_else(
-              || crate::i18n::t("notification.takenOverLocalError").to_string(),
-            ));
-          }
+        if let Some(ref err) = error_body
+          && err.code.as_deref() == Some(TAKEN_OVER_CODE)
+        {
+          return CheckpointResult::TakenOver(err.message.clone().unwrap_or_else(
+            || crate::i18n::t("notification.takenOverLocalError").to_string(),
+          ));
         }
         return CheckpointResult::SessionClosed(
           error_body
@@ -1240,22 +1230,19 @@ impl SessionManager {
     let sid = session.id.clone();
     let session_token = session.session_token.clone();
     let pending_finalize = session.pending_finalize;
-    #[allow(dropping_references)]
-    drop(session);
 
     self.persist_sessions().await;
     self.emit_state_change();
 
     let result = self.do_finalize(&sid, &api_base_url, &session_token).await;
 
-    let session = match self.sessions.get_mut(session_id) {
-      Some(s) => s,
-      None => return false,
+    let Some(session) = self.sessions.get_mut(session_id) else {
+      return false;
     };
     session.finalize_in_flight = false;
 
     match result {
-      FinalizeResult::Finalized { version_number, .. } => {
+      FinalizeResult::Finalized { version_number } => {
         if session.changed_during_remote_save {
           session.changed_during_remote_save = false;
           session.last_error = Some(
@@ -1366,12 +1353,12 @@ impl SessionManager {
       let error_body: Option<ErrorResponse> = response.json().await.ok();
 
       if status.as_u16() == 409 {
-        if let Some(ref err) = error_body {
-          if err.code.as_deref() == Some(TAKEN_OVER_CODE) {
-            return FinalizeResult::TakenOver(err.message.clone().unwrap_or_else(
-              || crate::i18n::t("notification.takenOverLocalError").to_string(),
-            ));
-          }
+        if let Some(ref err) = error_body
+          && err.code.as_deref() == Some(TAKEN_OVER_CODE)
+        {
+          return FinalizeResult::TakenOver(err.message.clone().unwrap_or_else(|| {
+            crate::i18n::t("notification.takenOverLocalError").to_string()
+          }));
         }
         return FinalizeResult::SessionClosed(
           error_body
@@ -1386,13 +1373,9 @@ impl SessionManager {
     }
 
     match response.json::<FinalizeResponse>().await {
-      Ok(FinalizeResponse::Finalized {
-        entity_id,
-        version_number,
-      }) => FinalizeResult::Finalized {
-        entity_id,
-        version_number,
-      },
+      Ok(FinalizeResponse::Finalized { version_number, .. }) => {
+        FinalizeResult::Finalized { version_number }
+      }
       Ok(FinalizeResponse::NoChanges) => FinalizeResult::NoChanges,
       Err(e) => FinalizeResult::Error(format!(
         "stella desktop received an invalid finalize response: {e}"
@@ -1514,7 +1497,7 @@ impl SessionManager {
         Ok(mut w) => {
           let _ = w.watch(&watch_dir, RecursiveMode::NonRecursive);
           ensure_open_poll_loop(session, manager, &sid);
-          session._watcher = Some(w);
+          session.watcher = Some(w);
         }
         Err(e) => {
           tracing::warn!(error = %e, "failed to create file watcher");
@@ -1526,9 +1509,8 @@ impl SessionManager {
   // --- Internal helpers ---
 
   async fn mark_session_taken_over(&mut self, session_id: &str, message: &str) {
-    let session = match self.sessions.get_mut(session_id) {
-      Some(s) => s,
-      None => return,
+    let Some(session) = self.sessions.get_mut(session_id) else {
+      return;
     };
 
     session.cancel_timers();
@@ -1584,12 +1566,11 @@ impl SessionManager {
       session.cancel_timers();
       self.session_ids_by_key.remove(&session.key);
 
-      if remove_local_files {
-        if let Some(parent) = Path::new(&session.file_path).parent() {
-          self
-            .schedule_cleanup_path(parent.to_string_lossy().to_string())
-            .await;
-        }
+      if remove_local_files && let Some(parent) = Path::new(&session.file_path).parent()
+      {
+        self
+          .schedule_cleanup_path(parent.to_string_lossy().to_string())
+          .await;
       }
     }
 
@@ -1657,9 +1638,8 @@ impl SessionManager {
     manager_arc: &Arc<Mutex<SessionManager>>,
     session_id: &str,
   ) {
-    let session = match self.sessions.get_mut(session_id) {
-      Some(s) => s,
-      None => return,
+    let Some(session) = self.sessions.get_mut(session_id) else {
+      return;
     };
 
     // Don't spawn if already active or session is in error state
@@ -1749,10 +1729,10 @@ impl SessionManager {
       let _ = handle.emit("state-changed", &snapshot);
 
       // Rebuild tray menu to reflect new state
-      if let Ok(menu) = crate::tray::build_tray_menu(handle, &snapshot) {
-        if let Some(tray) = handle.tray_by_id("main") {
-          let _ = tray.set_menu(Some(menu));
-        }
+      if let Ok(menu) = crate::tray::build_tray_menu(handle, &snapshot)
+        && let Some(tray) = handle.tray_by_id("main")
+      {
+        let _ = tray.set_menu(Some(menu));
       }
     }
   }
@@ -1836,12 +1816,8 @@ enum CheckpointResult {
   Error(String),
 }
 
-#[allow(dead_code)]
 enum FinalizeResult {
-  Finalized {
-    entity_id: String,
-    version_number: i64,
-  },
+  Finalized { version_number: i64 },
   NoChanges,
   TakenOver(String),
   SessionClosed(String),

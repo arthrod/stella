@@ -3,6 +3,18 @@ import { describe, expect, test } from "bun:test";
 import { parseAddress, parseEntity, parseStatus } from "./parse.js";
 import type { KrsLookupResponse, KrsRawAdres } from "./types.js";
 
+const readFixture = async (name: string): Promise<KrsLookupResponse> => {
+  const value: unknown = await Bun.file(
+    new URL(`__fixtures__/${name}`, import.meta.url),
+  ).json();
+  // SAFETY: fixtures are captured directly from the live KRS API and
+  // committed alongside the tests; runtime validation here would only
+  // catch drift between an upstream payload and the committed JSON,
+  // which is precisely what the assertions below check anyway.
+  // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion
+  return value as KrsLookupResponse;
+};
+
 describe("parseAddress", () => {
   test("composes a Polish street address from atoms", () => {
     const address = parseAddress({
@@ -306,12 +318,8 @@ describe("parseStatus", () => {
 
 describe("parseEntity (fixture-driven)", () => {
   test("parses the CD Projekt fixture", async () => {
-    const body = await Bun.file(
-      new URL("__fixtures__/lookup-cd-projekt.json", import.meta.url),
-    ).json();
-    // SAFETY: fixtures are captured directly from the live KRS API.
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    const entity = parseEntity(body as KrsLookupResponse, "0000006865");
+    const body = await readFixture("lookup-cd-projekt.json");
+    const entity = parseEntity(body, "0000006865");
 
     expect(entity.krsNumber).toBe("0000006865");
     expect(entity.register).toBe("RejP");
@@ -319,6 +327,12 @@ describe("parseEntity (fixture-driven)", () => {
     expect(entity.legalForm).toBe("SPÓŁKA AKCYJNA");
     expect(entity.identifiers.nip).toBe("7342867148");
     expect(entity.identifiers.regon).toBe("49270733300000");
+    // Share capital surfaced verbatim from
+    // dzial1.kapital.wysokoscKapitaluZakladowego (Polish comma decimal).
+    expect(entity.shareCapital).toEqual({
+      amount: "99910510,00",
+      currency: "PLN",
+    });
     expect(entity.address?.street).toBe("JAGIELLOŃSKA 74");
     expect(entity.address?.postalCode).toBe("03-301");
     expect(entity.address?.city).toBe("WARSZAWA");
@@ -334,12 +348,8 @@ describe("parseEntity (fixture-driven)", () => {
   });
 
   test("parses the Caritas association (RejS) fixture", async () => {
-    const body = await Bun.file(
-      new URL("__fixtures__/lookup-caritas.json", import.meta.url),
-    ).json();
-    // SAFETY: fixtures captured live.
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    const entity = parseEntity(body as KrsLookupResponse, "0000198645");
+    const body = await readFixture("lookup-caritas.json");
+    const entity = parseEntity(body, "0000198645");
 
     expect(entity.register).toBe("RejS");
     expect(entity.name).toContain("CARITAS");
@@ -348,12 +358,8 @@ describe("parseEntity (fixture-driven)", () => {
   });
 
   test("parses the Getin Noble bankruptcy fixture", async () => {
-    const body = await Bun.file(
-      new URL("__fixtures__/lookup-getin-noble.json", import.meta.url),
-    ).json();
-    // SAFETY: fixtures captured live.
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion
-    const entity = parseEntity(body as KrsLookupResponse, "0000304735");
+    const body = await readFixture("lookup-getin-noble.json");
+    const entity = parseEntity(body, "0000304735");
     expect(entity.name).toContain("W UPADŁOŚCI");
     expect(entity.status).toEqual({ type: "bankruptcy" });
   });
@@ -367,6 +373,7 @@ describe("parseEntity (fixture-driven)", () => {
     expect(entity.name).toBe("0000006865");
     expect(entity.legalForm).toBeNull();
     expect(entity.identifiers).toEqual({ nip: null, regon: null });
+    expect(entity.shareCapital).toBeNull();
     expect(entity.address).toBeNull();
     expect(entity.registeredSeat).toBeNull();
     // Defaults to RejP because the discriminator is absent.

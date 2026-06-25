@@ -21,6 +21,7 @@ import {
   AdapterFetchError,
   TelemetryError,
 } from "@/api/lib/errors/tagged-errors";
+import { logger } from "@/api/lib/observability/logger";
 import { isRecord } from "@/api/lib/type-guards";
 
 /**
@@ -139,11 +140,17 @@ const CDM_TYPE_MAP: Record<string, string> = {
  */
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/u;
 
-const queryDecisions = async (
-  dateFrom: string,
-  dateTo: string,
-  signal: AbortSignal,
-): Promise<SparqlResult[]> => {
+type QueryDecisionsOptions = {
+  dateFrom: string;
+  dateTo: string;
+  signal: AbortSignal;
+};
+
+const queryDecisions = async ({
+  dateFrom,
+  dateTo,
+  signal,
+}: QueryDecisionsOptions): Promise<SparqlResult[]> => {
   if (!ISO_DATE.test(dateFrom) || !ISO_DATE.test(dateTo)) {
     throw new AdapterFetchError({
       message: `Invalid date format: ${dateFrom} / ${dateTo}`,
@@ -203,11 +210,11 @@ LIMIT ${SPARQL_LIMIT}`.trim();
   const bindings = json.results.bindings;
 
   if (bindings.length === SPARQL_LIMIT) {
-    // eslint-disable-next-line no-console -- adapter diagnostic
-    console.warn(
-      `[eu-ecj] SPARQL response hit LIMIT ${SPARQL_LIMIT}` +
-        ` for date ${dateFrom}; some decisions may be missing`,
-    );
+    logger.warn("case_law.ingestion.sparql_limit_hit", {
+      adapterKey: ADAPTER_KEYS.EU_ECJ,
+      limit: SPARQL_LIMIT,
+      date: dateFrom,
+    });
   }
 
   return bindings;
@@ -223,14 +230,14 @@ LIMIT ${SPARQL_LIMIT}`.trim();
  *      "62023TJ0201" → "T-201/23"
  */
 export const celexToCaseNumber = (celex: string): string => {
-  const match = /^6(\d{4})(CJ|TJ|CC|CO|TO|FJ)(\d+)/u.exec(celex);
+  const match = /^6(?<year>\d{4})(?<type>CJ|TJ|CC|CO|TO|FJ)(?<num>\d+)/u.exec(
+    celex,
+  );
   if (!match) {
     return celex;
   }
 
-  const yearStr = match[1];
-  const typeStr = match[2];
-  const numStr = match[3];
+  const { year: yearStr, type: typeStr, num: numStr } = match.groups ?? {};
   if (!yearStr || !typeStr || !numStr) {
     return celex;
   }
@@ -276,21 +283,23 @@ const fetchFulltext = async (
     // everything up to the outermost </div> before <!--,
     // avoiding early termination on inner div comments.
     const bodyMatch =
-      /<div[^>]*id="TexteOnly"[^>]*>([\s\S]*)<\/div>\s*<!--/iu.exec(html);
+      /<div[^>]*id="TexteOnly"[^>]*>(?<body>[\s\S]*)<\/div>\s*<!--/iu.exec(
+        html,
+      );
     if (!bodyMatch) {
       // Fallback: extract <body> content
-      const fallback = /<body[^>]*>([\s\S]*)<\/body>/iu.exec(html);
-      if (!fallback?.[1]) {
+      const fallback = /<body[^>]*>(?<body>[\s\S]*)<\/body>/iu.exec(html);
+      if (!fallback?.groups?.["body"]) {
         return undefined;
       }
-      const text = stripHtml(fallback[1])
+      const text = stripHtml(fallback.groups["body"])
         // eslint-disable-next-line no-control-regex -- strip control chars for PG
         .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/gu, "")
         .trim();
       return text.length > 100 ? text : undefined;
     }
 
-    const text = stripHtml(bodyMatch[1] ?? "")
+    const text = stripHtml(bodyMatch.groups?.["body"] ?? "")
       // eslint-disable-next-line no-control-regex -- strip control chars for PG
       .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/gu, "")
       .trim();
@@ -351,7 +360,11 @@ export const euEcjAdapter: SourceAdapter = {
         const dateTo = dateFrom;
 
         // 1. Query SPARQL for decisions on this date
-        const bindings = await queryDecisions(dateFrom, dateTo, abortSignal);
+        const bindings = await queryDecisions({
+          dateFrom,
+          dateTo,
+          signal: abortSignal,
+        });
 
         const decisions: IngestionResult[] = [];
 
@@ -369,6 +382,7 @@ export const euEcjAdapter: SourceAdapter = {
 
           // 3. Fetch fulltext in each language
           for (const lang of ECJ_LANGUAGES) {
+            // oxlint-disable-next-line no-await-in-loop -- polite sequential fulltext fetch per language against EUR-Lex
             const fulltext = await fetchFulltext(
               celex,
               lang,
@@ -400,7 +414,7 @@ export const euEcjAdapter: SourceAdapter = {
               metadata: { celex },
               rawHash: hashContent(raw),
               parserVersion: PARSER_VERSION,
-              // TODO: integrate court-specific parser for AST
+              // Court-specific AST parsing is not available for EUR-Lex yet.
               documentAst: EMPTY_AST,
               sourceRaw: undefined,
             });
@@ -409,6 +423,7 @@ export const euEcjAdapter: SourceAdapter = {
           // Rate-limit per decision (not per language) to
           // keep total sleep within the page timeout budget.
           if (!abortSignal.aborted) {
+            // oxlint-disable-next-line no-await-in-loop -- deliberate crawl delay between sequential per-decision fetches against EUR-Lex
             await Bun.sleep(500);
           }
         }

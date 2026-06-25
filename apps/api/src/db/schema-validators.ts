@@ -115,6 +115,26 @@ export const propertyToolSchema = t.Union([
 
 export type PropertyTool = Static<typeof propertyToolSchema>;
 
+/**
+ * One AI (or manual) column bound to a playbook. `sourceId` is a
+ * stable, client-supplied UUID that survives edits so applying a
+ * playbook twice maps a bundle column back to the same materialized
+ * property instead of duplicating it. `prompt` is empty for
+ * manual-input columns.
+ */
+export const playbookBundleColumnSchema = t.Object({
+  sourceId: t.String({ format: "uuid" }),
+  name: t.String({ minLength: 1, maxLength: 256 }),
+  content: propertyContentSchema,
+  prompt: t.String({ maxLength: 1000 }),
+});
+export type PlaybookBundleColumn = Static<typeof playbookBundleColumnSchema>;
+
+export const playbookBundleSchema = t.Array(playbookBundleColumnSchema, {
+  maxItems: 100,
+});
+export type PlaybookBundle = Static<typeof playbookBundleSchema>;
+
 export const fieldContentSchema = t.Union([
   t.Object({
     version: v1,
@@ -258,25 +278,6 @@ export const boundingBoxesSchema = t.Object({
 });
 
 export type BoundingBoxes = Static<typeof boundingBoxesSchema>;
-
-export const propertyConditionSchema = t.Union([
-  t.Object({
-    version: v1,
-    type: t.Literal("string"),
-    operator: t.UnionEnum(["eq"]),
-    value: t.String({ minLength: 1, maxLength: 1000 }),
-  }),
-  t.Object({
-    version: v1,
-    type: t.Literal("string-array"),
-    operator: t.UnionEnum(["contains-every"]),
-    value: t.Array(t.String({ minLength: 1, maxLength: 1000 }), {
-      minItems: 1,
-    }),
-  }),
-]);
-
-export type PropertyCondition = Static<typeof propertyConditionSchema>;
 
 // -- Billing schemas --
 

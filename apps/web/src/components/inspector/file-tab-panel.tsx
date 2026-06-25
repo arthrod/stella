@@ -246,6 +246,7 @@ export const FileTabPanel = ({
     },
   });
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reconciles the editable markdown draft (user-edited via setMarkdownDraft elsewhere) with server text, deliberately preserving a dirty draft for the same field; not pure derived state, and a key reset would clobber unsaved edits on every refetch, so kept
   useEffect(() => {
     if (!isMarkdownDisplay) {
       markdownDraftSourceFieldIdRef.current = null;
@@ -362,7 +363,7 @@ export const FileTabPanel = ({
                 render={
                   <Button
                     className={cn(
-                      "transition-all",
+                      "transition-[color,background-color,box-shadow]",
                       flashingMinimizeTabId === tab.id &&
                         "bg-primary/10 text-primary ring-primary/60 animate-pulse ring-2",
                     )}
@@ -570,7 +571,7 @@ export const FileTabPanel = ({
     if (isEditingNativeDocx) {
       return (
         <Button
-          className="transition-all"
+          className="transition-colors"
           onClick={() => {
             docxActionsRef.current.get(tab.id)?.finalize();
           }}
@@ -585,7 +586,7 @@ export const FileTabPanel = ({
       return (
         <Button
           className={cn(
-            "transition-all",
+            "transition-[color,background-color,box-shadow]",
             isPromptingDocxUnlock &&
               "bg-primary/10 text-primary ring-primary/60 animate-pulse ring-2",
           )}
@@ -951,8 +952,8 @@ export const FileTabPanel = ({
               // mounted by default and the same `<SuggestionsFacet>`
               // (rendered by the fullscreen branch above) reuses
               // the registration.
-              // TODO: replace with an in-app approval flow that
-              // doesn't need the full editor mounted.
+              // Replace with an in-app approval flow that doesn't need the
+              // full editor mounted.
               //
               // Only the *active* tab is allowed to redirect.
               // Non-active PDF tabs stay mounted (CSS-hidden) so

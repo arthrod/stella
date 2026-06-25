@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@stll/ui": "workspace:*",
-    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/api": "^2.11.1",
     "better-result": "catalog:",
     "react": "catalog:react19",
     "react-dom": "catalog:react19",
@@ -31,7 +31,6 @@
     "@types/react": "catalog:react19",
     "@types/react-dom": "catalog:react19",
     "@vitejs/plugin-react": "catalog:",
-    "typescript": "catalog:",
     "vite": "catalog:"
   }
 }

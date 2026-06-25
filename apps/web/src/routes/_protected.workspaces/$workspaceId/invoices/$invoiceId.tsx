@@ -17,7 +17,7 @@ import {
   UndoIcon,
   XCircleIcon,
 } from "lucide-react";
-import { useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 import * as v from "valibot";
 
 import { applyMarkupCents, prorateHourlyCents } from "@stll/money";
@@ -33,15 +33,19 @@ import {
 } from "@stll/ui/components/alert-dialog";
 import { Button } from "@stll/ui/components/button";
 import { Dialog, DialogPopup } from "@stll/ui/components/dialog";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { Field, FieldError } from "@stll/ui/components/field";
 import { Form } from "@stll/ui/components/form";
 import { Input } from "@stll/ui/components/input";
 import { Label } from "@stll/ui/components/label";
+import { Skeleton } from "@stll/ui/components/skeleton";
 import { Textarea } from "@stll/ui/components/textarea";
 import { stellaToast } from "@stll/ui/components/toast";
+import { cn } from "@stll/ui/lib/utils";
 
 import { DatePickerPopover } from "@/components/date-picker-popover";
 import { usePermissions } from "@/hooks/use-permissions";
+import { getFormattingLocale } from "@/i18n/i18n-store";
 import { api } from "@/lib/api";
 import { toAPIError } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
@@ -78,8 +82,8 @@ function InvoiceDetailPage() {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b px-4 py-3">
         <Link params={{ workspaceId }} to="/workspaces/$workspaceId/invoices">
-          <Button size="icon" variant="ghost">
-            <ArrowLeftIcon className="size-4" />
+          <Button aria-label={t("common.back")} size="icon" variant="ghost">
+            <DirectionalIcon className="size-4" icon={ArrowLeftIcon} />
           </Button>
         </Link>
         <h1 className="text-sm font-medium">
@@ -88,19 +92,99 @@ function InvoiceDetailPage() {
       </div>
 
       <div className="flex-1 overflow-auto p-6">
-        <Suspense
-          fallback={
-            <div className="text-muted-foreground py-8 text-center text-sm">
-              {t("billing.loading")}
-            </div>
-          }
-        >
+        <Suspense fallback={<InvoiceDetailSkeleton />}>
           <InvoiceDetail invoiceId={invoiceId} workspaceId={workspaceId} />
         </Suspense>
       </div>
     </div>
   );
 }
+
+// Stable keys so skeleton rows/cells never fall back to array-index keys.
+const INFO_CELL_KEYS = ["a", "b", "c", "d"] as const;
+const ENTRY_ROW_KEYS = ["a", "b", "c", "d", "e"] as const;
+// Plain `<table>` (not TanStack) with: matter, date, narrative, hours, amount.
+const ENTRY_COLUMN_KEYS = [
+  "matter",
+  "date",
+  "narrative",
+  "hours",
+  "amount",
+] as const;
+const ENTRY_END_ALIGNED_COLUMNS = new Set(["hours", "amount"]);
+
+// Mirrors the real InvoiceDetail layout (header row, info grid, time-entries
+// table) so only values fill in when the query resolves; the page does not jump.
+const InvoiceDetailSkeleton = () => (
+  <div className="mx-auto flex max-w-4xl flex-col gap-6">
+    {/* Header */}
+    <div className="flex items-start justify-between">
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-3">
+          <Skeleton className="h-6 w-40" />
+          <Skeleton className="h-5 w-16 rounded-md" />
+        </div>
+        <Skeleton className="h-4 w-28" />
+      </div>
+      <div className="flex items-center gap-2">
+        <Skeleton className="h-8 w-24 rounded-md" />
+        <Skeleton className="h-8 w-24 rounded-md" />
+      </div>
+    </div>
+
+    {/* Info grid */}
+    <div className="grid grid-cols-2 gap-4 rounded-lg border p-4 sm:grid-cols-4">
+      {INFO_CELL_KEYS.map((key) => (
+        <div key={key}>
+          <Skeleton className="h-3 w-20" />
+          <Skeleton className="mt-1.5 h-4 w-24" />
+        </div>
+      ))}
+    </div>
+
+    {/* Time entries */}
+    <div className="rounded-lg border">
+      <div className="flex items-center justify-between border-b px-4 py-3">
+        <Skeleton className="h-4 w-36" />
+        <Skeleton className="h-3 w-16" />
+      </div>
+      <div className="overflow-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b">
+              {ENTRY_COLUMN_KEYS.map((column) => (
+                <th className="px-4 py-2" key={column}>
+                  <Skeleton
+                    className={cn(
+                      "h-3 w-16",
+                      ENTRY_END_ALIGNED_COLUMNS.has(column) && "ms-auto",
+                    )}
+                  />
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {ENTRY_ROW_KEYS.map((rowKey) => (
+              <tr className="border-b last:border-0" key={rowKey}>
+                {ENTRY_COLUMN_KEYS.map((column) => (
+                  <td className="px-4 py-2" key={column}>
+                    <Skeleton
+                      className={cn(
+                        "h-4 w-3/5",
+                        ENTRY_END_ALIGNED_COLUMNS.has(column) && "ms-auto w-12",
+                      )}
+                    />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+);
 
 const showErrorToast = (title: string) => {
   stellaToast.add({ type: "error", title });
@@ -114,6 +198,7 @@ const InvoiceDetail = ({
   invoiceId: string;
 }) => {
   const t = useTranslations();
+  const format = useFormatter();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
@@ -275,7 +360,9 @@ const InvoiceDetail = ({
         {invoice.paidAt && (
           <InfoCell
             label={t("billing.invoices.paidAt")}
-            value={new Date(invoice.paidAt).toLocaleDateString()}
+            value={new Date(invoice.paidAt).toLocaleDateString(
+              getFormattingLocale(),
+            )}
           />
         )}
       </div>
@@ -340,7 +427,13 @@ const InvoiceDetail = ({
                       {entry.invoiceNarrative ?? entry.narrative}
                     </td>
                     <td className="px-4 py-2 text-end tabular-nums">
-                      {(entry.billedMinutes / 60).toFixed(1)}h
+                      {format.number(entry.billedMinutes / 60, {
+                        style: "unit",
+                        unit: "hour",
+                        unitDisplay: "short",
+                        minimumFractionDigits: 1,
+                        maximumFractionDigits: 1,
+                      })}
                     </td>
                     <td className="px-4 py-2 text-end tabular-nums">
                       {formatCurrencyAmount(
@@ -354,6 +447,7 @@ const InvoiceDetail = ({
                     {invoiceStatus === "draft" && (
                       <td className="px-4 py-2">
                         <Button
+                          aria-label={t("common.remove")}
                           className="size-6"
                           onClick={() => removeEntryMutation.mutate(entry.id)}
                           size="icon"
@@ -420,6 +514,7 @@ const InvoiceDetail = ({
                     {invoiceStatus === "draft" && (
                       <td className="px-4 py-2">
                         <Button
+                          aria-label={t("common.remove")}
                           className="size-6"
                           onClick={() =>
                             removeExpenseMutation.mutate(expense.id)
@@ -781,6 +876,7 @@ const EditInvoiceForm = ({
           <Field name={field.name}>
             <Label>{t("common.currency")}</Label>
             <Input
+              dir="ltr"
               maxLength={3}
               onBlur={field.handleBlur}
               onChange={(e) => field.handleChange(e.target.value.toUpperCase())}

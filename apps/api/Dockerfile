@@ -2,18 +2,29 @@
 FROM oven/bun:1.3.14-slim@sha256:d56a2534ffd262e92c12fd3249d3924d296d97086da773f821d7d0477435ea04 AS base
 WORKDIR /app
 
+FROM base AS install-inputs
+# Preserve Bun's committed root lockfile and full workspace manifest map.
+# Turbo's pruned bun.lock is a generated approximation and can drift from
+# Bun's catalog/resolution semantics.
+COPY . .
+RUN mkdir -p /json && \
+    cp bun.lock package.json /json/ && \
+    for f in bunfig.toml .npmrc; do [ ! -e "$f" ] || cp "$f" /json/; done && \
+    find apps packages -mindepth 2 -maxdepth 2 -name package.json \
+      -not -path '*/node_modules/*' \
+      -exec cp --parents -t /json/ {} +
+
 # Prune the monorepo for the API
 FROM base AS pruner
-# Keep in sync with the turbo version in the root package.json; an unpinned
-# major lets a new turbo release change `turbo prune` lockfile output mid-flight.
-RUN bun install -g turbo@2.9.16
+# Keep in sync with the turbo version in the root package.json.
+RUN bun install -g turbo@2.9.18
 COPY . .
 RUN turbo prune @stll/api @stll/legal-atlas-runner --docker
 
 # Install dependencies using only package manifests (cached layer)
 FROM base AS deps
-COPY --from=pruner /app/out/json/ .
-RUN bun install --frozen-lockfile --ignore-scripts
+COPY --from=install-inputs /json/ .
+RUN bun install --filter @stll/api --filter @stll/legal-atlas-runner --frozen-lockfile --ignore-scripts --network-concurrency=8
 
 # Copy source code and compile the API to a Bun binary.
 #
@@ -57,8 +68,12 @@ RUN groupadd --system --gid 1001 stella && \
     useradd --system --uid 1001 --gid stella --no-create-home stella
 COPY --chown=stella:stella --from=builder /app/server /app/server
 COPY --chown=stella:stella --from=builder /app/apps/legal-atlas-runner/dist/index.js /app/legal-atlas.js
+# Loose files for the one-off migrate task (the API itself is the compiled
+# /app/server binary). migrate.ts runs the drizzle migrator over Bun's SQL
+# client; it imports db-url.ts and reads the drizzle/ migration folder.
 COPY --chown=stella:stella --from=builder /app/apps/api/drizzle.config.ts /app/apps/api/drizzle.config.ts
 COPY --chown=stella:stella --from=builder /app/apps/api/src/db-url.ts /app/apps/api/src/db-url.ts
+COPY --chown=stella:stella --from=builder /app/apps/api/src/db/migrate.ts /app/apps/api/src/db/migrate.ts
 COPY --chown=stella:stella --from=builder /app/apps/api/drizzle /app/apps/api/drizzle
 RUN mkdir -p '/$bunfs/root'
 COPY --chown=stella:stella --from=builder /app/runtime-workers /\$bunfs/root/workers

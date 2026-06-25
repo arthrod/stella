@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PgDialect } from "drizzle-orm/pg-core";
 import fc from "fast-check";
 
-import type { ViewFilterCondition } from "@/api/lib/views-schema";
+import type { ConditionNode } from "@stll/conditions";
 
 import {
   applyFilters,
@@ -13,104 +13,76 @@ import {
 
 // -- buildFilterConditions (builtin filters) --
 
-const builtinFilter = (
-  overrides: Partial<Extract<ViewFilterCondition, { field: "builtin" }>>,
-): ViewFilterCondition =>
-  ({
-    id: "f1",
-    field: "builtin" as const,
-    builtinField: "status" as const,
-    op: "eq" as const,
-    value: undefined,
-    ...overrides,
-  }) as ViewFilterCondition;
+const builtinCompare = (
+  field: "status" | "priority",
+  op: "eq" | "neq",
+  value: string,
+): ConditionNode => ({
+  type: "compare",
+  left: { type: "builtin", field },
+  op,
+  right: { type: "literal", value },
+});
+
+const builtinPredicate = (
+  field: "status" | "priority",
+  op: "in" | "is_empty",
+  value?: string[],
+): ConditionNode => ({
+  type: "predicate",
+  operand: { type: "builtin", field },
+  op,
+  ...(value !== undefined && { value }),
+});
 
 describe("buildFilterConditions (builtin)", () => {
   test("eq with empty string returns no conditions", () => {
-    const conds = buildFilterConditions([
-      builtinFilter({ op: "eq", value: "" }),
-    ]);
-    expect(conds).toHaveLength(0);
-  });
-
-  test("eq with undefined value returns no conditions", () => {
-    const conds = buildFilterConditions([
-      builtinFilter({ op: "eq", value: undefined }),
-    ]);
+    const conds = buildFilterConditions([builtinCompare("status", "eq", "")]);
     expect(conds).toHaveLength(0);
   });
 
   test("eq with valid value returns one condition", () => {
     const conds = buildFilterConditions([
-      builtinFilter({ op: "eq", value: "open" }),
+      builtinCompare("status", "eq", "open"),
     ]);
     expect(conds).toHaveLength(1);
   });
 
   test("neq with empty string returns no conditions", () => {
-    const conds = buildFilterConditions([
-      builtinFilter({ op: "neq", value: "" }),
-    ]);
-    expect(conds).toHaveLength(0);
-  });
-
-  test("neq with undefined value returns no conditions", () => {
-    const conds = buildFilterConditions([
-      builtinFilter({ op: "neq", value: undefined }),
-    ]);
+    const conds = buildFilterConditions([builtinCompare("status", "neq", "")]);
     expect(conds).toHaveLength(0);
   });
 
   test("neq with valid value returns one condition", () => {
     const conds = buildFilterConditions([
-      builtinFilter({ op: "neq", value: "done" }),
+      builtinCompare("status", "neq", "done"),
     ]);
     expect(conds).toHaveLength(1);
   });
 
   test("in with empty array returns no conditions", () => {
-    const conds = buildFilterConditions([
-      builtinFilter({ op: "in", value: [] }),
-    ]);
+    const conds = buildFilterConditions([builtinPredicate("status", "in", [])]);
     expect(conds).toHaveLength(0);
   });
 
   test("in with values returns one condition", () => {
     const conds = buildFilterConditions([
-      builtinFilter({ op: "in", value: ["open", "done"] }),
+      builtinPredicate("status", "in", ["open", "done"]),
     ]);
     expect(conds).toHaveLength(1);
   });
 
   test("is_empty returns one condition", () => {
-    const conds = buildFilterConditions([builtinFilter({ op: "is_empty" })]);
-    expect(conds).toHaveLength(1);
-  });
-
-  test("unknown builtinField returns no conditions", () => {
     const conds = buildFilterConditions([
-      builtinFilter({
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- intentionally invalid value
-        builtinField: "nonexistent" as "status",
-      }),
+      builtinPredicate("status", "is_empty"),
     ]);
-    expect(conds).toHaveLength(0);
+    expect(conds).toHaveLength(1);
   });
 
   test("multiple filters produce multiple conditions", () => {
     const conds = buildFilterConditions([
-      builtinFilter({
-        id: "f1",
-        builtinField: "status",
-        op: "eq",
-        value: "open",
-      }),
-      builtinFilter({
-        id: "f2",
-        builtinField: "priority",
-        op: "neq",
-        value: "low",
-      }),
+      builtinCompare("status", "eq", "open"),
+      builtinCompare("priority", "neq", "low"),
     ]);
     expect(conds).toHaveLength(2);
   });
@@ -118,29 +90,33 @@ describe("buildFilterConditions (builtin)", () => {
 
 // -- buildFilterConditions (kind filters) --
 
+const kindIn = (value: string[]): ConditionNode => ({
+  type: "predicate",
+  operand: { type: "kind" },
+  op: "in",
+  value,
+});
+
 describe("buildFilterConditions (kind)", () => {
   test("kind filter with empty value produces no conditions", () => {
-    const conds = buildFilterConditions([
-      {
-        id: "f1",
-        field: "kind",
-        op: "in",
-        value: [],
-      },
-    ]);
+    const conds = buildFilterConditions([kindIn([])]);
     expect(conds).toHaveLength(0);
   });
 
   test("kind filter with values produces one condition", () => {
-    const conds = buildFilterConditions([
-      {
-        id: "f1",
-        field: "kind",
-        op: "in",
-        value: ["task"],
-      },
-    ]);
+    const conds = buildFilterConditions([kindIn(["task"])]);
     expect(conds).toHaveLength(1);
+  });
+
+  test("kind filter including document expands to folder", () => {
+    const dialect = new PgDialect();
+    const [cond] = buildFilterConditions([kindIn(["document"])]);
+    if (!cond) {
+      throw new Error("expected kind condition");
+    }
+    const { sql, params } = dialect.sqlToQuery(cond);
+    expect(sql).toContain('"kind"');
+    expect(params).toContain("folder");
   });
 });
 
@@ -184,6 +160,28 @@ const makeIntField = (entityId: string, propertyId: string, value: number) => ({
   },
 });
 
+const propertyCompare = (
+  propertyId: string,
+  op: "eq" | "neq",
+  value: string,
+): ConditionNode => ({
+  type: "compare",
+  left: { type: "property", propertyId },
+  op,
+  right: { type: "literal", value },
+});
+
+const propertyPredicate = (
+  propertyId: string,
+  op: "contains" | "is_empty",
+  value?: string,
+): ConditionNode => ({
+  type: "predicate",
+  operand: { type: "property", propertyId },
+  op,
+  ...(value !== undefined && { value }),
+});
+
 describe("applyFilters (in-memory)", () => {
   test("empty filters returns all items", () => {
     const items = [makeEntity("1", "task"), makeEntity("2", "task")];
@@ -192,9 +190,7 @@ describe("applyFilters (in-memory)", () => {
 
   test("kind filter includes matching entities", () => {
     const items = [makeEntity("1", "task"), makeEntity("2", "document")];
-    const filtered = applyFilters(items, [
-      { id: "f1", field: "kind", op: "in", value: ["task"] },
-    ]);
+    const filtered = applyFilters(items, [kindIn(["task"])]);
     expect(filtered).toHaveLength(1);
     expect(filtered[0]?.entityId).toBe("1");
   });
@@ -205,9 +201,7 @@ describe("applyFilters (in-memory)", () => {
       makeEntity("2", "folder"),
       makeEntity("3", "task"),
     ];
-    const filtered = applyFilters(items, [
-      { id: "f1", field: "kind", op: "in", value: ["document"] },
-    ]);
+    const filtered = applyFilters(items, [kindIn(["document"])]);
     expect(filtered).toHaveLength(2);
   });
 
@@ -217,13 +211,7 @@ describe("applyFilters (in-memory)", () => {
       makeEntity("2", "task", [["p1", "beta"]]),
     ];
     const filtered = applyFilters(items, [
-      {
-        id: "f1",
-        field: "property",
-        propertyId: "p1",
-        op: "eq",
-        value: "alpha",
-      },
+      propertyCompare("p1", "eq", "alpha"),
     ]);
     expect(filtered).toHaveLength(1);
     expect(filtered[0]?.entityId).toBe("1");
@@ -235,13 +223,7 @@ describe("applyFilters (in-memory)", () => {
       makeEntity("2", "task", [["p1", "beta"]]),
     ];
     const filtered = applyFilters(items, [
-      {
-        id: "f1",
-        field: "property",
-        propertyId: "p1",
-        op: "neq",
-        value: "alpha",
-      },
+      propertyCompare("p1", "neq", "alpha"),
     ]);
     expect(filtered).toHaveLength(1);
     expect(filtered[0]?.entityId).toBe("2");
@@ -253,13 +235,7 @@ describe("applyFilters (in-memory)", () => {
       makeEntity("2", "task", [["p1", "goodbye"]]),
     ];
     const filtered = applyFilters(items, [
-      {
-        id: "f1",
-        field: "property",
-        propertyId: "p1",
-        op: "contains",
-        value: "hello",
-      },
+      propertyPredicate("p1", "contains", "hello"),
     ]);
     expect(filtered).toHaveLength(1);
     expect(filtered[0]?.entityId).toBe("1");
@@ -270,31 +246,18 @@ describe("applyFilters (in-memory)", () => {
       makeEntity("1", "task", [["p1", "value"]]),
       makeEntity("2", "task", []),
     ];
-    const filtered = applyFilters(items, [
-      {
-        id: "f1",
-        field: "property",
-        propertyId: "p1",
-        op: "is_empty",
-      },
-    ]);
+    const filtered = applyFilters(items, [propertyPredicate("p1", "is_empty")]);
     expect(filtered).toHaveLength(1);
     expect(filtered[0]?.entityId).toBe("2");
   });
 
   test("builtin filters pass through in-memory (always true)", () => {
     const items = [makeEntity("1", "task"), makeEntity("2", "task")];
+    // Builtin filters are server-side only; nodes referencing builtin
+    // operands pass through in-memory.
     const filtered = applyFilters(items, [
-      {
-        id: "f1",
-        field: "builtin",
-        builtinField: "status",
-        op: "eq",
-        value: "open",
-      },
+      builtinCompare("status", "eq", "open"),
     ]);
-    // Builtin filters are server-side only; in-memory always
-    // returns true
     expect(filtered).toHaveLength(2);
   });
 });
@@ -337,6 +300,150 @@ describe("applySorts (in-memory)", () => {
     const sorted = applySorts(items, [{ propertyId: "p1", desc: true }]);
 
     expect(sorted.map((item) => item.entityId)).toEqual(["2", "1"]);
+  });
+
+  test("orders ints numerically, not lexicographically (10 after 9)", () => {
+    const items = [
+      {
+        entityId: "ten",
+        kind: "task" as const,
+        fields: [makeIntField("ten", "p1", 10)],
+      },
+      {
+        entityId: "nine",
+        kind: "task" as const,
+        fields: [makeIntField("nine", "p1", 9)],
+      },
+      {
+        entityId: "two",
+        kind: "task" as const,
+        fields: [makeIntField("two", "p1", 2)],
+      },
+    ];
+
+    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+
+    expect(sorted.map((item) => item.entityId)).toEqual(["two", "nine", "ten"]);
+  });
+
+  test("int sort stays numeric when a row is missing the field (missing sorts last)", () => {
+    const items = [
+      {
+        entityId: "ten",
+        kind: "task" as const,
+        fields: [makeIntField("ten", "p1", 10)],
+      },
+      { entityId: "missing", kind: "task" as const, fields: [] },
+      {
+        entityId: "nine",
+        kind: "task" as const,
+        fields: [makeIntField("nine", "p1", 9)],
+      },
+    ];
+
+    const asc = applySorts(items, [{ propertyId: "p1", desc: false }]);
+    expect(asc.map((item) => item.entityId)).toEqual([
+      "nine",
+      "ten",
+      "missing",
+    ]);
+
+    // Missing values bucket to the end regardless of direction.
+    const desc = applySorts(items, [{ propertyId: "p1", desc: true }]);
+    expect(desc.map((item) => item.entityId)).toEqual([
+      "ten",
+      "nine",
+      "missing",
+    ]);
+  });
+
+  test("int sort treats whitespace-only legacy text as missing", () => {
+    const items = [
+      makeEntity("whitespace", "task", [["p1", "   "]]),
+      {
+        entityId: "negative",
+        kind: "task" as const,
+        fields: [makeIntField("negative", "p1", -1)],
+      },
+      {
+        entityId: "positive",
+        kind: "task" as const,
+        fields: [makeIntField("positive", "p1", 1)],
+      },
+    ];
+
+    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+
+    expect(sorted.map((item) => item.entityId)).toEqual([
+      "negative",
+      "positive",
+      "whitespace",
+    ]);
+  });
+
+  test("int sort parses legacy numeric text values", () => {
+    const items = [
+      {
+        entityId: "twenty",
+        kind: "task" as const,
+        fields: [makeIntField("twenty", "p1", 20)],
+      },
+      makeEntity("ten", "task", [["p1", "10"]]),
+      {
+        entityId: "nine",
+        kind: "task" as const,
+        fields: [makeIntField("nine", "p1", 9)],
+      },
+    ];
+
+    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+
+    expect(sorted.map((item) => item.entityId)).toEqual([
+      "nine",
+      "ten",
+      "twenty",
+    ]);
+  });
+
+  test("property: int sort with missing rows is numerically monotonic", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.option(fc.integer(), { nil: undefined }), {
+          minLength: 1,
+          maxLength: 20,
+        }),
+        (values) => {
+          const items = values.map((value, index) =>
+            value === undefined
+              ? { entityId: String(index), kind: "task" as const, fields: [] }
+              : {
+                  entityId: String(index),
+                  kind: "task" as const,
+                  fields: [makeIntField(String(index), "p1", value)],
+                },
+          );
+
+          const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+          const nums = sorted.map((item) => {
+            const c = item.fields[0]?.content;
+            return c?.type === "int" ? c.value : null;
+          });
+
+          // Defined ints appear before any missing, in non-decreasing order.
+          let seenNull = false;
+          let prev = -Infinity;
+          for (const n of nums) {
+            if (n === null) {
+              seenNull = true;
+              continue;
+            }
+            expect(seenNull).toBe(false);
+            expect(n).toBeGreaterThanOrEqual(prev);
+            prev = n;
+          }
+        },
+      ),
+    );
   });
 
   test("property: ascending string sort is monotonic", () => {
@@ -428,5 +535,43 @@ describe("buildSortExpressions", () => {
       expect(sql).toContain(`"entities".${column}`);
       expect(sql).not.toContain('"fields"."property_id" =');
     }
+  });
+
+  test("property sort emits a numeric key so int fields order numerically", () => {
+    const dialect = new PgDialect();
+    const expressions = buildSortExpressions([
+      { propertyId: "p1", desc: false },
+    ]);
+
+    // A guarded numeric cast, ordered before the text key.
+    const numericExpr = expressions[0];
+    const textExpr = expressions[1];
+    if (!numericExpr || !textExpr) {
+      throw new Error("expected numeric and text sort expressions");
+    }
+
+    const numericSql = dialect.sqlToQuery(numericExpr).sql;
+    expect(numericSql).toContain("::numeric");
+    expect(numericSql).toContain("BTRIM");
+    expect(numericSql).toContain('"properties"');
+    expect(numericSql).toContain("'int'");
+    expect(numericSql).toContain("~");
+    expect(numericSql).toContain("NULLS LAST");
+
+    const textSql = dialect.sqlToQuery(textExpr).sql;
+    expect(textSql).toContain("->>'value'");
+    expect(textSql).not.toContain("::numeric");
+  });
+
+  test("descending property sort keeps missing/non-int values last", () => {
+    const dialect = new PgDialect();
+    const [numericExpr] = buildSortExpressions([
+      { propertyId: "p1", desc: true },
+    ]);
+    if (!numericExpr) {
+      throw new Error("expected numeric sort expression");
+    }
+    const sql = dialect.sqlToQuery(numericExpr).sql;
+    expect(sql).toContain("DESC NULLS LAST");
   });
 });

@@ -13,6 +13,7 @@ import {
   groupSlashItemsBySection,
   type SlashSectionKey,
 } from "@/components/chat/prompt-slash-list.logic";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import type { TranslationKey } from "@/i18n/types";
 
 // Prompts and SKILL.md skills are one user-facing concept ("skills"), so
@@ -23,16 +24,25 @@ const SECTION_LABEL_KEYS = {
   "built-in": "knowledge.agentSkills.builtInSection",
 } satisfies Record<SlashSectionKey, TranslationKey>;
 
-const getItemKey = (item: SlashItem): string =>
-  item.kind === "prompt"
-    ? `prompt:${item.prompt.id}`
-    : `skill:${item.skill.id}`;
+const getItemKey = (item: SlashItem): string => {
+  if (item.kind === "prompt") {
+    return `prompt:${item.prompt.id}`;
+  }
+  if (item.kind === "skill") {
+    return `skill:${item.skill.id}`;
+  }
+  return `command:${item.command.id}`;
+};
 
-const getItemName = (item: SlashItem): string =>
-  item.kind === "prompt" ? item.prompt.name : item.skill.name;
-
-const getItemSecondary = (item: SlashItem): string =>
-  item.kind === "prompt" ? item.prompt.body : item.skill.description;
+const getItemName = (item: SlashItem): string => {
+  if (item.kind === "prompt") {
+    return item.prompt.name;
+  }
+  if (item.kind === "skill") {
+    return item.skill.name;
+  }
+  return item.command.name;
+};
 
 type PromptSlashListHandle = ReturnType<
   NonNullable<SuggestionOptions["render"]>
@@ -49,6 +59,15 @@ export const PromptSlashList = ({
   ref,
 }: PromptSlashListProps) => {
   const t = useTranslations();
+  const getItemSecondary = (item: SlashItem): string => {
+    if (item.kind === "prompt") {
+      return item.prompt.body;
+    }
+    if (item.kind === "skill") {
+      return item.skill.description;
+    }
+    return t(item.command.descriptionKey);
+  };
   const [isOpen, setIsOpen] = useState(true);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -58,13 +77,14 @@ export const PromptSlashList = ({
 
   const safeIndex = Math.min(selectedIndex, Math.max(0, itemCount - 1));
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset selection to 0 when items change; setSelectedIndex is also driven by keyboard nav + hover, so selectedIndex cannot be pure derived state and this stays a reset effect (component is mounted by a tiptap suggestion render(), so lift-to-key does not apply)
   useEffect(() => {
     setSelectedIndex(0);
   }, [items]);
 
   // Scroll the active item into view as keyboard nav moves it
   // outside the popup's clipping area.
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const list = listRef.current;
     if (!list) {
       return;

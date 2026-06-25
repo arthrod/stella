@@ -48,6 +48,7 @@ import type {
 import { resolveColor } from "../../utils/colorResolver";
 import { mergeTextFormatting } from "../../utils/textFormattingMerge";
 import { emuToPixels } from "../../utils/units";
+import { setAutospacingBaseValue } from "../autospacingBase";
 import { buildRunFormattingOverrideAttrs } from "../extensions/marks/RunFormattingOverrideExtension";
 import { schema } from "../schema";
 import type {
@@ -58,6 +59,7 @@ import type {
   TableCellAttrs,
 } from "../schema/nodes";
 import { assertValidProseMirrorDocument } from "../validation";
+import { marksToTextFormatting } from "./fromProseDoc";
 import { shadingToRunShadingAttrs } from "./runShadingMark";
 
 /**
@@ -87,7 +89,14 @@ export function toProseDoc(
   const paragraphs = document.package.document.content;
   const nodes: PMNode[] = [];
 
-  const styleResolver = createStyleEngine(options?.styles);
+  // Default to the document's own styles (symmetric with `theme` below) so a
+  // run's character-style formatting is always flattened onto direct marks.
+  // The save-side `w:rStyle` reconciliation relies on this: without it, an
+  // unexpanded run would look like the user stripped the style's formatting
+  // (eigenpal/docx-editor#833).
+  const styleResolver = createStyleEngine(
+    options?.styles ?? document.package.styles,
+  );
   const theme = options?.theme ?? document.package.theme ?? null;
   let textBoxGroupIndex = 0;
 
@@ -322,7 +331,9 @@ function convertParagraph(
       content.type === "simpleField" ||
       content.type === "complexField"
     ) {
-      emitInlineNode(convertField(content, getInheritedRunFormatting));
+      emitInlineNode(
+        convertField(content, getInheritedRunFormatting, styleResolver),
+      );
     } else if (content.type === "inlineSdt") {
       emitInlineNode(
         convertInlineSdt(content, getInheritedRunFormatting, styleResolver),
@@ -491,6 +502,9 @@ function paragraphFormattingToAttrs(
   if (formatting?.numPr) {
     attrs.numPr = formatting.numPr;
   }
+  if (formatting?.numPrFromStyle) {
+    attrs.numPrFromStyle = formatting.numPrFromStyle;
+  }
   // List rendering info from parsed numbering definitions
   if (paragraph.listRendering?.numFmt) {
     attrs.listNumFmt = paragraph.listRendering.numFmt;
@@ -564,9 +578,10 @@ function paragraphFormattingToAttrs(
   };
 
   // If we have a style resolver, resolve the style and get base properties
+  let stylePpr: Paragraph["formatting"] | undefined;
   if (styleResolver) {
     const resolved = styleResolver.resolveParagraphStyle(styleId);
-    const stylePpr = resolved.paragraphFormatting;
+    stylePpr = resolved.paragraphFormatting;
 
     // Apply style-based values as defaults (inline overrides)
     set("alignment", formatting?.alignment ?? stylePpr?.alignment);
@@ -580,11 +595,26 @@ function paragraphFormattingToAttrs(
     set("spacingExplicit", formatting?.spacingExplicit);
     set("indentLeft", formatting?.indentLeft ?? stylePpr?.indentLeft);
     set("indentRight", formatting?.indentRight ?? stylePpr?.indentRight);
+    // When the paragraph explicitly removes the style's numbering (direct
+    // numId=0 under a numbered style), Word also drops the style's
+    // marker-positioning firstLine/hanging — the paragraph keeps only the
+    // indents it states itself (#765: a direct left=357 renders indented
+    // instead of hanging the first line back to the margin). Outside that
+    // case w:ind merges per attribute: a direct left-only indent keeps the
+    // style's firstLine (Word's own Increase Indent emits exactly that).
+    const numberingRemoved =
+      formatting?.numPr?.numId === 0 &&
+      stylePpr?.numPr !== undefined &&
+      stylePpr.numPr.numId !== 0;
+    const styleFirstLine = numberingRemoved ? undefined : stylePpr;
     set(
       "indentFirstLine",
-      formatting?.indentFirstLine ?? stylePpr?.indentFirstLine,
+      formatting?.indentFirstLine ?? styleFirstLine?.indentFirstLine,
     );
-    set("hangingIndent", formatting?.hangingIndent ?? stylePpr?.hangingIndent);
+    set(
+      "hangingIndent",
+      formatting?.hangingIndent ?? styleFirstLine?.hangingIndent,
+    );
     set("borders", formatting?.borders ?? stylePpr?.borders);
     set("shading", formatting?.shading ?? stylePpr?.shading);
     set("tabs", formatting?.tabs ?? stylePpr?.tabs);
@@ -619,6 +649,7 @@ function paragraphFormattingToAttrs(
     // numId === 0 means "no numbering" per OOXML spec — skip it
     if (!formatting?.numPr && stylePpr?.numPr && stylePpr.numPr.numId !== 0) {
       attrs.numPr = stylePpr.numPr;
+      attrs.numPrFromStyle = stylePpr.numPr;
     }
   } else {
     // No style resolver - use inline formatting only
@@ -670,6 +701,21 @@ function paragraphFormattingToAttrs(
   }
   if (paragraph.renderedPageBreakBefore) {
     attrs.renderedPageBreakBefore = true;
+  }
+
+  const beforeAutospacing =
+    formatting?.beforeAutospacing ?? stylePpr?.beforeAutospacing;
+  const afterAutospacing =
+    formatting?.afterAutospacing ?? stylePpr?.afterAutospacing;
+  if (beforeAutospacing || afterAutospacing) {
+    const base: NonNullable<ParagraphAttrs["_autospacingBase"]> = {};
+    if (beforeAutospacing) {
+      setAutospacingBaseValue(base, "before", attrs.spaceBefore);
+    }
+    if (afterAutospacing) {
+      setAutospacingBaseValue(base, "after", attrs.spaceAfter);
+    }
+    attrs._autospacingBase = base;
   }
 
   return attrs;
@@ -1176,6 +1222,9 @@ function convertTable(
   }
   if (table.formatting?.look) {
     attrs.look = table.formatting.look;
+  }
+  if (table.formatting?.borders) {
+    attrs.borders = table.formatting.borders;
   }
   if (table.formatting) {
     attrs._originalFormatting = table.formatting;
@@ -1780,6 +1829,7 @@ function convertTableCell(
 function convertField(
   field: SimpleField | ComplexField,
   getInheritedRunFormatting: RunFormattingResolver,
+  styleResolver?: StyleEngine | null,
 ): PMNode | null {
   // Extract display text and formatting from field content/result
   let displayText = "";
@@ -1799,13 +1849,31 @@ function convertField(
     }
   }
 
-  // Merge style formatting with field run formatting (inline takes precedence)
+  // Collapsed complex field with no result run at all — fall back to the field's
+  // captured run formatting so a footer PAGE number keeps its size/color instead
+  // of rendering at the default (eigenpal/docx-editor#909). Only when the result
+  // is genuinely empty: a present-but-unformatted result run intentionally
+  // inherits paragraph defaults and must not adopt the field code's formatting.
+  if (
+    !fieldFormatting &&
+    field.type === "complexField" &&
+    field.fieldResult.length === 0
+  ) {
+    fieldFormatting = field.formatting;
+  }
+
+  // Merge inherited paragraph formatting, the field run's own character style,
+  // then its inline formatting (each later layer wins) — the same precedence as
+  // `convertRun`. Flattening the character style here means a field result
+  // styled only by a `w:rStyle` (e.g. a PAGE/REF field) keeps its style-derived
+  // marks, so the save-side `w:rStyle` reconciliation does not treat the field
+  // as diverging and strip the link (eigenpal/docx-editor#833).
   const inheritedFormatting = getInheritedRunFormatting(fieldFormatting);
-  const mergedFormatting = mergeTextFormatting(
-    inheritedFormatting,
+  const { marks } = buildRunMarks(
     fieldFormatting,
+    inheritedFormatting,
+    styleResolver,
   );
-  const marks = textFormattingToMarks(mergedFormatting);
 
   return schema.node(
     "field",
@@ -1867,7 +1935,11 @@ function convertInlineSdt(
       content.type === "simpleField" ||
       content.type === "complexField"
     ) {
-      const fieldNode = convertField(content, getInheritedRunFormatting);
+      const fieldNode = convertField(
+        content,
+        getInheritedRunFormatting,
+        styleResolver,
+      );
       if (fieldNode) {
         inlineNodes.push(fieldNode);
       }
@@ -1920,29 +1992,74 @@ function convertRun(
   styleResolver?: StyleEngine | null,
 ): PMNode[] {
   const nodes: PMNode[] = [];
-
-  // Merge style formatting with run's inline formatting
-  // Inline formatting takes precedence over style formatting
-  //
-  // Use getRunStyleOwnProperties (not resolveRunStyle) to avoid docDefaults
-  // from the character style overriding paragraph style properties.
-  // The styleFormatting parameter already includes docDefaults from paragraph
-  // style resolution, so we only need the character style's own properties.
-  const runStyleFormatting = run.formatting?.styleId
-    ? styleResolver?.getRunStyleOwnProperties(run.formatting.styleId)
-    : undefined;
-  const mergedFormatting = mergeTextFormatting(
-    mergeTextFormatting(styleFormatting, runStyleFormatting),
+  const { marks, mergedFormatting } = buildRunMarks(
     run.formatting,
+    styleFormatting,
+    styleResolver,
   );
-  const marks = textFormattingToMarks(mergedFormatting);
 
   for (const content of run.content) {
-    const contentNodes = convertRunContent(content, marks);
+    const contentNodes = convertRunContent(content, marks, mergedFormatting);
     nodes.push(...contentNodes);
   }
 
   return nodes;
+}
+
+/**
+ * Build the marks for a run, layering per the OOXML cascade: inherited
+ * (docDefaults + paragraph style) formatting, then the run's character style
+ * (w:rStyle), then direct run formatting on top.
+ *
+ * Use getRunStyleOwnProperties (not resolveRunStyle) to avoid docDefaults
+ * from the character style overriding paragraph style properties.
+ * The inherited formatting already includes docDefaults from paragraph
+ * style resolution, so we only need the character style's own properties.
+ *
+ * When the run references a character style, a `characterStyle` mark carries
+ * the reference (plus a snapshot of the style's own properties in mark
+ * normal form) so `fromProseDoc` re-serializes `w:rStyle` instead of baking
+ * the style's formatting into the run. Unknown styleIds resolve to nothing:
+ * no formatting is flattened, and the reference round-trips verbatim.
+ */
+type BuiltRunMarks = {
+  marks: ReturnType<typeof schema.mark>[];
+  // The fully merged run formatting (inherited < character style < direct),
+  // returned so callers can forward it to `convertRunContent` for attributes
+  // that are read off the formatting rather than the marks (e.g. footnote
+  // anchor vertAlign superscript).
+  mergedFormatting: TextFormatting | undefined;
+};
+
+function buildRunMarks(
+  runFormatting: TextFormatting | undefined,
+  inheritedFormatting: TextFormatting | undefined,
+  styleResolver: StyleEngine | null | undefined,
+): BuiltRunMarks {
+  const styleId = runFormatting?.styleId;
+  const runStyleFormatting = styleId
+    ? styleResolver?.getRunStyleOwnProperties(styleId)
+    : undefined;
+  const mergedFormatting = mergeTextFormatting(
+    mergeTextFormatting(inheritedFormatting, runStyleFormatting),
+    runFormatting,
+  );
+  const marks = textFormattingToMarks(mergedFormatting);
+
+  if (styleId) {
+    const styleRPr = runStyleFormatting
+      ? marksToTextFormatting(textFormattingToMarks(runStyleFormatting))
+      : undefined;
+    marks.push(
+      schema.mark("characterStyle", {
+        styleId,
+        _styleRPr:
+          styleRPr && Object.keys(styleRPr).length > 0 ? styleRPr : null,
+      }),
+    );
+  }
+
+  return { marks, mergedFormatting };
 }
 
 /**
@@ -1951,6 +2068,7 @@ function convertRun(
 function convertRunContent(
   content: RunContent,
   marks: ReturnType<typeof schema.mark>[],
+  formatting?: TextFormatting,
 ): PMNode[] {
   switch (content.type) {
     case "text":
@@ -2003,6 +2121,11 @@ function convertRunContent(
       const footnoteMark = schema.mark("footnoteRef", {
         id: content.id.toString(),
         noteType: "footnote",
+        vertAlign:
+          formatting?.vertAlign === "baseline" ||
+          formatting?.vertAlign === "superscript"
+            ? formatting.vertAlign
+            : null,
       });
       return [schema.text(content.id.toString(), [...marks, footnoteMark])];
     }
@@ -2012,6 +2135,11 @@ function convertRunContent(
       const endnoteMark = schema.mark("footnoteRef", {
         id: content.id.toString(),
         noteType: "endnote",
+        vertAlign:
+          formatting?.vertAlign === "baseline" ||
+          formatting?.vertAlign === "superscript"
+            ? formatting.vertAlign
+            : null,
       });
       return [schema.text(content.id.toString(), [...marks, endnoteMark])];
     }
@@ -2296,15 +2424,12 @@ function convertHyperlink(
   for (const child of hyperlink.children) {
     if (child.type === "run") {
       // Merge style formatting with run's inline formatting
-      const runStyleFormatting = child.formatting?.styleId
-        ? styleResolver?.getRunStyleOwnProperties(child.formatting.styleId)
-        : undefined;
       const inheritedFormatting = getInheritedRunFormatting(child.formatting);
-      const mergedFormatting = mergeTextFormatting(
-        mergeTextFormatting(inheritedFormatting, runStyleFormatting),
+      const { marks: runMarks, mergedFormatting } = buildRunMarks(
         child.formatting,
+        inheritedFormatting,
+        styleResolver,
       );
-      const runMarks = textFormattingToMarks(mergedFormatting);
       // Add link mark to run marks
       const allMarks = [...runMarks, linkMark];
 
@@ -2313,7 +2438,7 @@ function convertHyperlink(
       // silently dropped TOC entries' tab between title and page number,
       // collapsing the right-aligned page number flush against the title.
       for (const content of child.content) {
-        nodes.push(...convertRunContent(content, allMarks));
+        nodes.push(...convertRunContent(content, allMarks, mergedFormatting));
       }
     }
   }
@@ -2324,7 +2449,7 @@ function convertHyperlink(
 /**
  * Convert TextFormatting to ProseMirror marks
  */
-function textFormattingToMarks(
+export function textFormattingToMarks(
   formatting: TextFormatting | undefined,
 ): ReturnType<typeof schema.mark>[] {
   if (!formatting) {

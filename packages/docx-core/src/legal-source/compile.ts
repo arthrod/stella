@@ -77,7 +77,10 @@ export const draftToDocument = (draft: LegalDraft): Document => {
   const title = draft.meta.title ?? "Untitled document";
   const numbering = createNumberingDefinitions(draft.meta.numbering);
 
-  content.push(paragraph(title.toUpperCase(), "Title", { bold: true }));
+  // Keep the title in its original case; the Title style carries allCaps so Word
+  // uppercases it with correct locale rules (toUpperCase is locale-blind and would
+  // corrupt e.g. Turkish dotted-i, and permanently bakes casing into the text).
+  content.push(paragraph(title, "Title", { bold: true }));
 
   for (const block of draft.blocks) {
     appendBlock(content, block, {
@@ -253,7 +256,7 @@ const paragraph = (
 // reviewing lawyer sees at a glance everything still pending.
 // Surrounding text inherits the run options (bold/italic) but not
 // the highlight.
-const PLACEHOLDER_PATTERN = /\[\[([^\][]+?)\]\]/gu;
+const PLACEHOLDER_PATTERN = /\[\[(?<inner>[^\][]+?)\]\]/gu;
 
 const textRunsWithPlaceholders = (
   text: string,
@@ -269,7 +272,7 @@ const textRunsWithPlaceholders = (
     if (start > cursor) {
       runs.push(textRun(text.slice(cursor, start), options));
     }
-    const inner = match[1] ?? "";
+    const inner = match.groups?.["inner"] ?? "";
     runs.push(textRun(inner, options, { highlight: "yellow" }));
     cursor = start + match[0].length;
   }

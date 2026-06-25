@@ -160,6 +160,7 @@ const runRolledBack = async <T>(
   let value: T | undefined;
   try {
     await testDb.transaction(async (tx) => {
+      // oxlint-disable-next-line node/callback-return -- must call tx.rollback() after capturing the value
       value = await callback(tx);
       tx.rollback();
     });
@@ -317,8 +318,7 @@ const resolveFileNameInTestTx = async ({
   await resolveEntityCreateFileName({
     // SAFETY: the helper only uses Drizzle query-builder methods shared by
     // the production Bun SQL transaction and the PGlite test transaction.
-    // eslint-disable-next-line typescript/no-unsafe-type-assertion
-    tx: tx as unknown as Transaction,
+    tx: asTestRaw<Transaction>(tx),
     workspaceId: seededWorkspaceId,
     propertyId: seededPropertyId,
     parentId: seededParentId,

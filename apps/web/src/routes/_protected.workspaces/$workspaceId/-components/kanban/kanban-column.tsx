@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 
 import {
@@ -22,7 +22,7 @@ import {
   SquareCheckIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 
 import type { OptionColor } from "@stll/api/types";
 import {
@@ -54,6 +54,7 @@ import {
 } from "@stll/ui/components/popover";
 import { cn } from "@stll/ui/lib/utils";
 
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { useExternalFileDrop } from "@/hooks/use-external-file-drop";
 import type {
   EntityKind,
@@ -123,6 +124,7 @@ export const KanbanColumn = ({
   taskOnly,
 }: KanbanColumnProps) => {
   const t = useTranslations();
+  const format = useFormatter();
   const columnRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const dragHandleRef = useRef<HTMLDivElement>(null);
@@ -161,6 +163,7 @@ export const KanbanColumn = ({
   const virtualCards = cardVirtualizer.getVirtualItems();
   const lastVirtualCard = virtualCards.at(-1);
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- load-more trigger; virtualizer onChange isn't equivalent because the re-check must also fire on prop changes (isLoadingMore flipping false, entities.length growing, hasMore toggling), which onChange wouldn't observe
   useEffect(() => {
     if (!hasMore || isLoadingMore || !onLoadMore || !lastVirtualCard) {
       return;
@@ -173,9 +176,7 @@ export const KanbanColumn = ({
 
   const isDraggable = columnValue !== null && onReorderColumn !== undefined;
 
-  // Store callbacks in refs to keep effect deps stable.
-  const onDropRef = useRef(onDrop);
-  onDropRef.current = onDrop;
+  const handleEntityDrop = useEffectEvent(onDrop);
 
   const { isDropTarget, isInnerActive } = useExternalFileDrop({
     externalRef: columnRef,
@@ -184,7 +185,7 @@ export const KanbanColumn = ({
   });
   const isFileDragOver = isDropTarget && !isInnerActive;
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = columnRef.current;
     const handle = dragHandleRef.current;
     if (!el) {
@@ -250,7 +251,7 @@ export const KanbanColumn = ({
           if (typeof entityId !== "string") {
             return;
           }
-          onDropRef.current(entityId);
+          handleEntityDrop(entityId);
         },
       }),
     ];
@@ -387,7 +388,7 @@ export const KanbanColumn = ({
               {title}
             </button>
             <span className="text-muted-foreground text-xs">
-              {entities.length}
+              {format.number(entities.length)}
             </span>
           </span>
         )}
@@ -401,7 +402,10 @@ export const KanbanColumn = ({
         )}
         {hasColumnActions && (
           <Menu>
-            <MenuTrigger render={<Button size="icon-xs" variant="ghost" />}>
+            <MenuTrigger
+              aria-label={t("common.actions")}
+              render={<Button size="icon-xs" variant="ghost" />}
+            >
               <EllipsisVerticalIcon />
             </MenuTrigger>
             <MenuPopup>
@@ -472,8 +476,6 @@ export const KanbanColumn = ({
           </Menu>
         )}
       </div>
-      {/* biome-ignore lint/a11y/noStaticElementInteractions: context menu on column body */}
-      {/* biome-ignore lint/a11y/noNoninteractiveElementInteractions: context menu on column body */}
       <div
         className="flex-1 overflow-y-auto p-2"
         onContextMenu={handleContextMenu}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffectEvent, useRef, useState } from "react";
 
 import { dropTargetForElements } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { PlusIcon, SquareCheckIcon } from "lucide-react";
@@ -12,6 +12,7 @@ import {
 } from "@stll/ui/components/menu";
 import { cn } from "@stll/ui/lib/utils";
 
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import type { EntityKind } from "@/lib/types";
 import { ENTITY_DRAG_TYPE } from "@/routes/_protected.workspaces/$workspaceId/-components/drag-constants";
 import type { CalendarTask } from "@/routes/_protected.workspaces/$workspaceId/-queries/calendar-tasks";
@@ -80,10 +81,9 @@ export const CalendarDayCell = ({
   const dropRef = useRef<HTMLDivElement>(null);
   const [isDropTarget, setIsDropTarget] = useState(false);
 
-  const onDropRef = useRef(onDrop);
-  onDropRef.current = onDrop;
+  const handleEntityDrop = useEffectEvent(onDrop);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = dropRef.current;
     if (!el || !isEditable) {
       return undefined;
@@ -98,7 +98,7 @@ export const CalendarDayCell = ({
         const entityId = source.data["entityId"];
         const kind = source.data["kind"];
         if (typeof entityId === "string") {
-          onDropRef.current(
+          handleEntityDrop(
             entityId,
             typeof kind === "string" ? kind : "document",
           );
@@ -108,8 +108,6 @@ export const CalendarDayCell = ({
   }, [isEditable]);
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: context menu on day cell
-    // biome-ignore lint/a11y/noNoninteractiveElementInteractions: context menu on day cell
     <div
       ref={dropRef}
       className={cn(
@@ -142,6 +140,7 @@ export const CalendarDayCell = ({
         {isEditable && (
           <Menu>
             <MenuTrigger
+              aria-label={t("common.add")}
               render={
                 <button
                   aria-label={t("common.add")}

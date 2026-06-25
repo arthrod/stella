@@ -30,6 +30,7 @@ import {
 import type {
   BlockSdtAttrs,
   CharacterSpacingAttrs,
+  CharacterStyleAttrs,
   CommentAttrs,
   EmphasisMarkAttrs,
   FieldAttrs,
@@ -153,6 +154,11 @@ const NOTE_TYPES = [
   "endnote",
 ] as const satisfies readonly NonNullable<FootnoteRefAttrs["noteType"]>[];
 
+const NOTE_REF_VERT_ALIGNS = [
+  "baseline",
+  "superscript",
+] as const satisfies readonly NonNullable<FootnoteRefAttrs["vertAlign"]>[];
+
 const TEXT_BOX_DOCX_PLACEMENTS = [
   "standalone",
   "inlineWithPrevious",
@@ -232,6 +238,7 @@ const runShadingAttrsCache = new WeakMap<Mark, RunShadingAttrs>();
 const fontSizeAttrsCache = new WeakMap<Mark, FontSizeAttrs>();
 const fontFamilyAttrsCache = new WeakMap<Mark, FontFamilyAttrs>();
 const characterSpacingAttrsCache = new WeakMap<Mark, CharacterSpacingAttrs>();
+const characterStyleAttrsCache = new WeakMap<Mark, CharacterStyleAttrs>();
 const emphasisMarkAttrsCache = new WeakMap<Mark, EmphasisMarkAttrs>();
 const textEffectAttrsCache = new WeakMap<Mark, TextEffectAttrs>();
 const footnoteRefAttrsCache = new WeakMap<Mark, FootnoteRefAttrs>();
@@ -414,6 +421,7 @@ export const readParagraphAttrs = (
   validateNumPr(attrs["numPr"], issues);
   optionalBookmarkArray(attrs["bookmarks"], issues);
   optionalEmptyHyperlinkArray(attrs["_emptyHyperlinks"], issues);
+  optionalAutospacingBase(attrs, issues);
   optionalSectionProperties(
     attrs,
     "_sectionProperties",
@@ -497,6 +505,14 @@ export const readTableAttrs = (
   optionalRecord(attrs, "floating", "table.attrs.floating", issues);
   optionalInsetMap(attrs, "cellMargins", "table.attrs.cellMargins", issues);
   optionalRecord(attrs, "look", "table.attrs.look", issues);
+  optionalBorderMap(attrs, "borders", "table.attrs.borders", issues, [
+    "top",
+    "bottom",
+    "left",
+    "right",
+    "insideH",
+    "insideV",
+  ]);
   optionalRecord(
     attrs,
     "_originalFormatting",
@@ -1157,6 +1173,29 @@ export const expectRunShadingMarkAttrs = (mark: Mark): RunShadingAttrs =>
     "run shading attrs",
   );
 
+export const readCharacterStyleMarkAttrs = (
+  mark: Mark,
+): ReadProseMirrorAttrsResult<CharacterStyleAttrs> => {
+  const attrs = attrsRecord(mark.attrs);
+  const issues: ProseMirrorAttrIssue[] = [];
+  expectMarkType(mark, "characterStyle", issues);
+
+  requiredString(attrs, "styleId", "characterStyle.attrs.styleId", issues);
+  optionalRecord(attrs, "_styleRPr", "characterStyle.attrs._styleRPr", issues);
+
+  return attrsResult(attrs, issues);
+};
+
+export const expectCharacterStyleMarkAttrs = (
+  mark: Mark,
+): CharacterStyleAttrs =>
+  expectCachedMarkAttrs(
+    mark,
+    characterStyleAttrsCache,
+    readCharacterStyleMarkAttrs,
+    "character style attrs",
+  );
+
 export const readFontSizeMarkAttrs = (
   mark: Mark,
 ): ReadProseMirrorAttrsResult<FontSizeAttrs> => {
@@ -1300,6 +1339,13 @@ export const readFootnoteRefMarkAttrs = (
     "footnoteRef.attrs.noteType",
     issues,
     NOTE_TYPES,
+  );
+  optionalOneOf(
+    attrs,
+    "vertAlign",
+    "footnoteRef.attrs.vertAlign",
+    issues,
+    NOTE_REF_VERT_ALIGNS,
   );
 
   return attrsResult(attrs, issues);
@@ -1926,6 +1972,37 @@ const optionalRecord = (
   if (value !== undefined && value !== null && !isRecord(value)) {
     issues.push({ path, message: "Expected an object." });
   }
+};
+
+const optionalAutospacingBase = (
+  attrs: Record<string, unknown>,
+  issues: ProseMirrorAttrIssue[],
+): void => {
+  const value = attrs["_autospacingBase"];
+  if (value === undefined || value === null) {
+    return;
+  }
+
+  if (!isRecord(value)) {
+    issues.push({
+      path: "paragraph.attrs._autospacingBase",
+      message: "Expected an object.",
+    });
+    return;
+  }
+
+  optionalNumber(
+    value,
+    "before",
+    "paragraph.attrs._autospacingBase.before",
+    issues,
+  );
+  optionalNumber(
+    value,
+    "after",
+    "paragraph.attrs._autospacingBase.after",
+    issues,
+  );
 };
 
 const optionalArray = (

@@ -54,6 +54,31 @@ const authUserVisibleCheck = sql`(
         '${sql.raw(SETTING_ORGANIZATION_ID)}', true
       ))
   )
+  OR (
+    "user".deleted_at IS NOT NULL
+    AND (
+      EXISTS (
+        SELECT 1
+        FROM task_assignees ta
+        JOIN workspaces w ON w.id = ta.workspace_id
+        WHERE ta.user_id = "user".id
+          AND ta.workspace_id = ANY(${wsIdsArray})
+          AND w.organization_id = (SELECT current_setting(
+            '${sql.raw(SETTING_ORGANIZATION_ID)}', true
+          ))
+      )
+      OR EXISTS (
+        SELECT 1
+        FROM entities e
+        JOIN workspaces w ON w.id = e.workspace_id
+        WHERE (e.created_by = "user".id OR e.last_edited_by = "user".id)
+          AND e.workspace_id = ANY(${wsIdsArray})
+          AND w.organization_id = (SELECT current_setting(
+            '${sql.raw(SETTING_ORGANIZATION_ID)}', true
+          ))
+      )
+    )
+  )
 )`;
 
 const allowAllRows = sql`true`;
@@ -101,6 +126,13 @@ const fileChatThreadScopeCheck = sql`(
   ${userCheck} AND
   ${organizationCheck} AND
   ${workspaceCheck}
+)`;
+
+// Per-user mapping of an org-scoped template to its latest chat
+// thread. Templates have no workspace, so the scope is user + org.
+const templateChatThreadScopeCheck = sql`(
+  ${userCheck} AND
+  ${organizationCheck}
 )`;
 
 // Derived chat tables store only `thread_id` and derive all tenancy
@@ -654,5 +686,28 @@ export const fileChatThreadPolicies = () => [
     for: "delete",
     to: stella,
     using: fileChatThreadScopeCheck,
+  }),
+];
+
+export const templateChatThreadPolicies = () => [
+  p.pgPolicy("template_chat_thread_select", {
+    for: "select",
+    to: stella,
+    using: templateChatThreadScopeCheck,
+  }),
+  p.pgPolicy("template_chat_thread_insert", {
+    for: "insert",
+    to: stella,
+    withCheck: templateChatThreadScopeCheck,
+  }),
+  p.pgPolicy("template_chat_thread_update", {
+    for: "update",
+    to: stella,
+    using: templateChatThreadScopeCheck,
+  }),
+  p.pgPolicy("template_chat_thread_delete", {
+    for: "delete",
+    to: stella,
+    using: templateChatThreadScopeCheck,
   }),
 ];

@@ -1,23 +1,20 @@
 import JSZip from "jszip";
 
 const REGEX_HAS_PAGE_SET_UP_PR = /<pageSetUpPr[\s/>]/u;
-const REGEX_EXTRACT_PAGE_SET_UP_PR = /<pageSetUpPr([^/]*?)\/>/gu;
-// oxlint-disable-next-line sonarjs/slow-regex -- worksheet attribute rewrite runs on bounded XLSX XML entries
+const REGEX_EXTRACT_PAGE_SET_UP_PR = /<pageSetUpPr(?<attrs>[^/]*?)\/>/gu;
 const REGEX_REMOVE_FIT_TO_PAGE = /\s*fitToPage="[^"]*"/u;
 const REGEX_HAS_OPEN_SHEET_PR = /<sheetPr[^>]*>[\s\S]*?<\/sheetPr>/u;
-const REGEX_EXTRACT_OPEN_SHEET_PR = /(<sheetPr[^>]*>)([\s\S]*?)(<\/sheetPr>)/u;
+const REGEX_EXTRACT_OPEN_SHEET_PR =
+  /(?<open><sheetPr[^>]*>)(?<inner>[\s\S]*?)(?<close><\/sheetPr>)/u;
 const REGEX_HAS_SELF_CLOSING_SHEET_PR = /<sheetPr[^>]*\/>/u;
-const REGEX_EXTRACT_SELF_CLOSING_SHEET_PR = /<sheetPr([^>]*?)\/>/u;
+const REGEX_EXTRACT_SELF_CLOSING_SHEET_PR = /<sheetPr(?<attrs>[^>]*?)\/>/u;
 const REGEX_SHEET_LANDMARK =
   /<(?:dimension|sheetViews|sheetFormatPr|sheetData)[\s/>]/u;
 const REGEX_WORKSHEET_OPEN = /<worksheet[^>]*>/u;
 const REGEX_HAS_PAGE_SETUP = /<pageSetup[\s/>]/u;
-const REGEX_EXTRACT_PAGE_SETUP = /<pageSetup([^/]*?)\/>/gu;
-// oxlint-disable-next-line sonarjs/slow-regex -- worksheet attribute rewrite runs on bounded XLSX XML entries
+const REGEX_EXTRACT_PAGE_SETUP = /<pageSetup(?<attrs>[^/]*?)\/>/gu;
 const REGEX_REMOVE_SCALE = /\s*scale="[^"]*"/u;
-// oxlint-disable-next-line sonarjs/slow-regex -- worksheet attribute rewrite runs on bounded XLSX XML entries
 const REGEX_REMOVE_FIT_TO_WIDTH = /\s*fitToWidth="[^"]*"/u;
-// oxlint-disable-next-line sonarjs/slow-regex -- worksheet attribute rewrite runs on bounded XLSX XML entries
 const REGEX_REMOVE_FIT_TO_HEIGHT = /\s*fitToHeight="[^"]*"/u;
 const REGEX_WORKSHEET_CLOSE = /<\/worksheet>/u;
 const REGEX_SHEET_FILENAME = /^xl\/worksheets\/sheet\d+\.xml$/u;

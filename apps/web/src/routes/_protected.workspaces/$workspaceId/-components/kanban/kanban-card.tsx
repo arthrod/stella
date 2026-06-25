@@ -1,10 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 
 import { draggable } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { centerUnderPointer } from "@atlaskit/pragmatic-drag-and-drop/element/center-under-pointer";
 import { setCustomNativeDragPreview } from "@atlaskit/pragmatic-drag-and-drop/element/set-custom-native-drag-preview";
 import { CalendarIcon } from "lucide-react";
-import { useLocale, useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 
 import {
   Avatar,
@@ -14,6 +14,7 @@ import {
 import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 import { cn } from "@stll/ui/lib/utils";
 
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { useInlineRename } from "@/hooks/use-inline-rename";
 import { isFileDisplayable } from "@/lib/types";
 import type {
@@ -24,9 +25,13 @@ import type {
 import { ActiveEditBadge } from "@/routes/_protected.workspaces/$workspaceId/-components/active-edit-badge";
 import { ENTITY_DRAG_TYPE } from "@/routes/_protected.workspaces/$workspaceId/-components/drag-constants";
 import { EntityKindIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/entity-kind-icon";
+import { FieldValue } from "@/routes/_protected.workspaces/$workspaceId/-components/field-value";
 import { InlineEdit } from "@/routes/_protected.workspaces/$workspaceId/-components/inline-edit";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
-import { getKanbanCardMetadataVisibility } from "@/routes/_protected.workspaces/$workspaceId/-components/kanban/kanban-card.logic";
+import {
+  getKanbanCardMetadataVisibility,
+  getKanbanCardRenameInitialValue,
+} from "@/routes/_protected.workspaces/$workspaceId/-components/kanban/kanban-card.logic";
 import { RowActions } from "@/routes/_protected.workspaces/$workspaceId/-components/row-actions";
 import { TaskBadges } from "@/routes/_protected.workspaces/$workspaceId/-components/tasks/task-badges";
 import {
@@ -37,10 +42,6 @@ import {
   STATUS_COLORS,
   STATUS_ICONS,
 } from "@/routes/_protected.workspaces/$workspaceId/-components/tasks/task-detail-constants";
-import {
-  emptyColor,
-  resolveOptionColor,
-} from "@/routes/_protected.workspaces/$workspaceId/-components/utils";
 import { useInspectorFlash } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-inspector-flash";
 import {
   formatRelativeTime,
@@ -74,13 +75,6 @@ export const KanbanCard = ({
     const tab = s.tabs.find((t) => t.id === s.activeId);
     return tab?.type === "pdf" && tab.entityId === entity.entityId;
   });
-  // For editing, use the text field value (not the file name)
-  const textField = Object.values(entity.fields).find(
-    (f) => f.content.type === "text",
-  );
-  const textName =
-    textField?.content.type === "text" ? textField.content.value.trim() : "";
-
   const rename = useInlineRename({
     initial: name,
     onCommit: (value) => {
@@ -90,7 +84,7 @@ export const KanbanCard = ({
 
   const dragRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = dragRef.current;
     if (!el) {
       return undefined;
@@ -138,7 +132,7 @@ export const KanbanCard = ({
   }, [entity.entityId, name, entity.kind, file?.mimeType, entity.parentId]);
 
   const startEditing = () => {
-    rename.startEditing(textName || name);
+    rename.startEditing(getKanbanCardRenameInitialValue(entity, name));
   };
 
   const icon = (
@@ -380,7 +374,7 @@ const KanbanEntityMetadataBadges = ({
   showDueDate,
 }: KanbanEntityMetadataBadgesProps) => {
   const t = useTranslations();
-  const locale = useLocale();
+  const format = useFormatter();
   const status = showStatus ? entity.status : null;
   const priority = showPriority ? entity.priority : null;
   const dueDate = showDueDate ? entity.dueDate : null;
@@ -462,7 +456,7 @@ const KanbanEntityMetadataBadges = ({
         <span className="bg-muted/60 flex max-w-full min-w-0 items-center gap-1 rounded px-1.5 py-0.5">
           <CalendarIcon className="size-3 shrink-0" />
           <span className="truncate">
-            {new Date(dueDate).toLocaleDateString(locale, {
+            {format.dateTime(new Date(dueDate), {
               day: "numeric",
               month: "short",
               year: "numeric",
@@ -483,105 +477,9 @@ type KanbanCardFieldValueProps = {
 const KanbanCardFieldValue = ({
   content,
   property,
-}: KanbanCardFieldValueProps) => {
-  if (
-    content.type === "error" ||
-    content.type === "pending" ||
-    content.type === "unsupported" ||
-    content.type === "file"
-  ) {
-    return null;
-  }
-
-  if (content.type === "text") {
-    if (!content.value.trim()) {
-      return null;
-    }
-    return (
-      <span className="text-muted-foreground line-clamp-2 min-w-0 basis-full text-xs leading-4">
-        {content.value}
-      </span>
-    );
-  }
-
-  if (content.type === "date") {
-    if (!content.value) {
-      return null;
-    }
-    return (
-      <span className="text-muted-foreground bg-muted/60 rounded px-1.5 py-0.5 text-xs leading-none">
-        {new Date(content.value).toLocaleDateString(undefined, {
-          day: "numeric",
-          month: "short",
-          year: "numeric",
-          timeZone: "UTC",
-        })}
-      </span>
-    );
-  }
-
-  if (content.type === "int") {
-    const value = new Intl.NumberFormat().format(content.value);
-    return (
-      <span className="text-muted-foreground bg-muted/60 rounded px-1.5 py-0.5 text-xs leading-none">
-        {content.currency ? `${value} ${content.currency}` : value}
-      </span>
-    );
-  }
-
-  if (content.type === "single-select") {
-    return <KanbanSelectChip property={property} value={content.value} />;
-  }
-
-  if (content.type === "multi-select") {
-    return content.value.map((value) => (
-      <KanbanSelectChip key={value} property={property} value={value} />
-    ));
-  }
-
-  return (
-    <span className="text-muted-foreground bg-muted/60 truncate rounded px-1.5 py-0.5 text-xs leading-none">
-      {content.citation ?? content.url}
-    </span>
-  );
-};
-
-const KanbanSelectChip = ({
-  property,
-  value,
-}: {
-  property: WorkspaceProperty;
-  value: string | null;
-}) => {
-  const t = useTranslations();
-  const color = (() => {
-    if (!value) {
-      return emptyColor;
-    }
-    if (
-      property.content.type !== "single-select" &&
-      property.content.type !== "multi-select"
-    ) {
-      return undefined;
-    }
-    const optionColor = property.content.options.find(
-      (option) => option.value === value,
-    )?.color;
-    return optionColor ? resolveOptionColor(optionColor) : undefined;
-  })();
-
-  return (
-    <span
-      className="max-w-full truncate rounded px-1.5 py-0.5 text-xs leading-none font-medium"
-      style={{
-        backgroundColor: color?.background,
-        color: color?.foreground,
-      }}
-    >
-      {value ?? t("common.empty")}
-    </span>
-  );
-};
+}: KanbanCardFieldValueProps) => (
+  <FieldValue content={content} property={property} variant="kanban" />
+);
 
 type KanbanCardFooterProps = {
   entity: WorkspaceEntity;

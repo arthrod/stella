@@ -10,6 +10,8 @@
 import JSZip from "jszip";
 import * as slimdom from "slimdom";
 
+import { clauseSlotPattern } from "@stll/template-conditions";
+
 import { HEADER_FOOTER_RE, paragraphText, W_NS } from "./ooxml";
 
 // ── Types ────────────────────────────────────────────
@@ -24,7 +26,10 @@ export type ClauseSlot = {
 
 // ── Regex ────────────────────────────────────────────
 
-const CLAUSE_SLOT_RE = /\{\{@clause:([^:}]+)(?::([^}]+))?\}\}/gu;
+// Canonical pattern from @stll/template-conditions (markers.ts). The name and
+// modifier captures exclude whitespace so the rebuilt patch key matches what
+// rich-patch's PLACEHOLDER_RE captures during replacement (they must agree).
+const CLAUSE_SLOT_RE = clauseSlotPattern();
 
 // ── Scanning ─────────────────────────────────────────
 
@@ -37,11 +42,11 @@ const scanParagraphs = (
   for (const p of paragraphs) {
     const text = paragraphText(p);
     for (const match of text.matchAll(CLAUSE_SLOT_RE)) {
-      const name = match[1];
+      const name = match.groups?.["name"];
       if (!name) {
         continue;
       }
-      const modifier = match[2] || undefined;
+      const modifier = match.groups?.["modifier"] || undefined;
       const patchKey = modifier
         ? `@clause:${name}:${modifier}`
         : `@clause:${name}`;
@@ -87,6 +92,7 @@ export const discoverClauseSlots = async (
       continue;
     }
 
+    // oxlint-disable-next-line no-await-in-loop -- bounded memory while streaming docx parts; accumulates into shared slots map
     const xml = await entry.async("string");
     scanParagraphs(slimdom.parseXmlDocument(xml), slots);
   }

@@ -1,9 +1,9 @@
 import { panic } from "better-result";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import path from "node:path";
 
 const ROOT_URL = "https://infosoud.gov.cz/";
-const OUTPUT_PATH = resolve(
+const OUTPUT_PATH = path.resolve(
   import.meta.dir,
   "../src/code-catalog.generated.ts",
 );
@@ -88,9 +88,9 @@ const extractJavaScriptUrls = (html: string): string[] =>
   Array.from(
     new Set(
       Array.from(
-        html.matchAll(/(?:src|href)="([^"]+\.js(?:\?[^"]*)?)"/gu),
+        html.matchAll(/(?:src|href)="(?<url>[^"]+\.js(?:\?[^"]*)?)"/gu),
         (match) => {
-          const url = match[1];
+          const url = match.groups?.["url"];
           if (!url) {
             throw new TypeError("Matched script URL was unexpectedly empty");
           }
@@ -126,6 +126,7 @@ const discoverCatalogBundleUrl = async (): Promise<string> => {
       break;
     }
 
+    // oxlint-disable-next-line no-await-in-loop -- sequential BFS crawl; each fetch enqueues the next chunk URLs to discover
     const scriptText = await fetchText(candidate);
     if (
       scriptText.includes("udalost:{") &&
@@ -277,8 +278,8 @@ const normalizeJavaScriptStrings = (literal: string): string => {
 
 const toJsonObjectLiteral = (literal: string): string =>
   normalizeJavaScriptStrings(literal).replaceAll(
-    /([{,]\s*)([A-Za-z_][A-Za-z0-9_]*):/gu,
-    (_match, prefix: string, key: string) => `${prefix}"${key}":`,
+    /(?<prefix>[{,]\s*)(?<key>[A-Za-z_][A-Za-z0-9_]*):/gu,
+    (_match: string, prefix: string, key: string) => `${prefix}"${key}":`,
   );
 
 const parseCatalogObject = (
@@ -475,7 +476,7 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  await mkdir(resolve(import.meta.dir, "../src"), { recursive: true });
+  await mkdir(path.resolve(import.meta.dir, "../src"), { recursive: true });
   await writeFile(OUTPUT_PATH, nextContents);
   console.log(`Wrote ${OUTPUT_PATH}`);
   console.log(`Source bundle: ${catalog.bundleUrl}`);

@@ -2,10 +2,13 @@ import { Suspense, useState } from "react";
 
 import { createFileRoute } from "@tanstack/react-router";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
-import { useTranslations } from "use-intl";
+import { useLocale, useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
+import { Skeleton } from "@stll/ui/components/skeleton";
 
+import { startOfWeek } from "@/i18n/week";
 import { ExpenseListView } from "@/routes/_protected.workspaces/$workspaceId/-components/billing/expense-list-view";
 
 export const Route = createFileRoute(
@@ -14,19 +17,45 @@ export const Route = createFileRoute(
   component: ExpensesPage,
 });
 
+const EXPENSE_ROW_KEYS = ["a", "b", "c", "d", "e", "f"];
+
+// Mirrors ExpenseListView's rest layout: the summary bar (totals + add entry)
+// above a list of expense rows, so only the values pop in once data lands.
+const ExpenseListSkeleton = () => (
+  <div className="flex flex-col gap-3">
+    {/* Summary bar */}
+    <div className="flex items-center justify-between">
+      <Skeleton className="h-5 w-32" />
+      <Skeleton className="h-8 w-28 rounded-md" />
+    </div>
+
+    {/* Expenses list */}
+    <div className="flex flex-col gap-1.5">
+      {EXPENSE_ROW_KEYS.map((key) => (
+        <div
+          className="flex items-center gap-3 rounded-md border px-3 py-2"
+          key={key}
+        >
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-4 w-40" />
+              <Skeleton className="h-4 w-14 rounded" />
+              <Skeleton className="h-4 w-12 rounded" />
+            </div>
+            <Skeleton className="h-3 w-56" />
+          </div>
+          <Skeleton className="h-4 w-20 shrink-0" />
+        </div>
+      ))}
+    </div>
+  </div>
+);
+
 const formatDateISO = (d: Date): string => {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
-};
-
-const getMonday = (date: Date): Date => {
-  const d = new Date(date);
-  const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  d.setDate(diff);
-  return d;
 };
 
 const addDays = (d: Date, n: number): Date => {
@@ -37,6 +66,7 @@ const addDays = (d: Date, n: number): Date => {
 
 function ExpensesPage() {
   const t = useTranslations();
+  const locale = useLocale();
   const workspaceId = Route.useParams({
     select: (p) => p.workspaceId,
   });
@@ -44,7 +74,7 @@ function ExpensesPage() {
   const [currentDate, setCurrentDate] = useState(() => new Date());
 
   // Show expenses for the current week
-  const monday = getMonday(currentDate);
+  const monday = startOfWeek(currentDate, locale);
   const sunday = addDays(monday, 6);
   const dateFrom = formatDateISO(monday);
   const dateTo = formatDateISO(sunday);
@@ -57,10 +87,10 @@ function ExpensesPage() {
     setCurrentDate(new Date());
   };
 
-  const dateLabel = `${monday.toLocaleDateString(undefined, {
+  const dateLabel = `${monday.toLocaleDateString(locale, {
     month: "short",
     day: "numeric",
-  })} – ${sunday.toLocaleDateString(undefined, {
+  })} – ${sunday.toLocaleDateString(locale, {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -78,23 +108,25 @@ function ExpensesPage() {
           </Button>
           <div className="flex items-center">
             <Button
+              aria-label={t("common.previous")}
               className="size-7"
               onClick={() => navigateWeek(-1)}
               size="icon"
               variant="ghost"
             >
-              <ChevronLeftIcon className="size-4" />
+              <DirectionalIcon className="size-4" icon={ChevronLeftIcon} />
             </Button>
             <span className="min-w-[10rem] text-center text-sm">
               {dateLabel}
             </span>
             <Button
+              aria-label={t("common.next")}
               className="size-7"
               onClick={() => navigateWeek(1)}
               size="icon"
               variant="ghost"
             >
-              <ChevronRightIcon className="size-4" />
+              <DirectionalIcon className="size-4" icon={ChevronRightIcon} />
             </Button>
           </div>
         </div>
@@ -102,13 +134,7 @@ function ExpensesPage() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-4">
-        <Suspense
-          fallback={
-            <div className="text-muted-foreground py-8 text-center text-sm">
-              {t("billing.loading")}
-            </div>
-          }
-        >
+        <Suspense fallback={<ExpenseListSkeleton />}>
           <ExpenseListView
             dateFrom={dateFrom}
             dateTo={dateTo}

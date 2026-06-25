@@ -3,6 +3,7 @@ import {
   AvatarFallback,
   AvatarImage,
 } from "@stll/ui/components/avatar";
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { cn } from "@stll/ui/lib/utils";
 
 import { getInitials } from "@/lib/get-initials";
@@ -10,11 +11,13 @@ import { getInitials } from "@/lib/get-initials";
 type UserAvatarProps = {
   image?: string | null | undefined;
   name?: string | null;
+  deleted?: boolean | undefined;
   className?: string | undefined;
   fallbackClassName?: string | undefined;
 };
 
 export const UserAvatar = ({
+  deleted = false,
   image,
   name,
   className,
@@ -23,9 +26,14 @@ export const UserAvatar = ({
   const displayName = name?.trim() || "Unknown user";
 
   return (
-    <Avatar className={className}>
+    <Avatar className={cn(className, deleted && "opacity-60 grayscale")}>
       {image ? <AvatarImage alt={displayName} src={image} /> : null}
-      <AvatarFallback className={fallbackClassName}>
+      <AvatarFallback
+        className={cn(
+          fallbackClassName,
+          deleted && "bg-muted text-muted-foreground",
+        )}
+      >
         {getInitials(name ?? null)}
       </AvatarFallback>
     </Avatar>
@@ -35,6 +43,7 @@ export const UserAvatar = ({
 type UserIdentityProps = {
   image?: string | null | undefined;
   name?: string | null;
+  deleted?: boolean | undefined;
   secondaryText?: string | null;
   className?: string;
   avatarClassName?: string;
@@ -44,6 +53,7 @@ type UserIdentityProps = {
 };
 
 export const UserIdentity = ({
+  deleted = false,
   image,
   name,
   secondaryText,
@@ -59,23 +69,32 @@ export const UserIdentity = ({
     <div className={cn("flex min-w-0 items-center gap-2", className)}>
       <UserAvatar
         className={avatarClassName}
+        deleted={deleted}
         fallbackClassName={avatarFallbackClassName}
         image={image}
         name={displayName}
       />
       <div className="min-w-0 flex-1">
-        <div className={cn("truncate text-sm font-medium", nameClassName)}>
+        <BidiText
+          as="div"
+          className={cn(
+            "truncate text-sm font-medium",
+            deleted && "text-muted-foreground",
+            nameClassName,
+          )}
+        >
           {displayName}
-        </div>
+        </BidiText>
         {secondaryText ? (
-          <div
+          <BidiText
+            as="div"
             className={cn(
               "text-muted-foreground truncate text-xs",
               secondaryClassName,
             )}
           >
             {secondaryText}
-          </div>
+          </BidiText>
         ) : null}
       </div>
     </div>

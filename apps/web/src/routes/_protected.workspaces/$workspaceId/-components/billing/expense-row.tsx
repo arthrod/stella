@@ -1,6 +1,7 @@
 import { PencilIcon, TrashIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 import { cn } from "@stll/ui/lib/utils";
 
@@ -49,7 +50,9 @@ export const ExpenseRow = ({
     <div className="group hover:bg-muted/50 flex items-center gap-3 rounded-md border px-3 py-2 transition-colors">
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium">{matterName}</span>
+          <BidiText as="span" className="truncate text-sm font-medium">
+            {matterName}
+          </BidiText>
           <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-[0.625rem]">
             {
               {
@@ -97,6 +100,7 @@ export const ExpenseRow = ({
       <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
         {expense.status === "draft" && canUpdateExpense && (
           <Button
+            aria-label={t("common.edit")}
             className="size-7"
             onClick={() => onEdit(expense.id)}
             size="icon"
@@ -107,6 +111,7 @@ export const ExpenseRow = ({
         )}
         {expense.status === "draft" && canDeleteExpense && (
           <Button
+            aria-label={t("common.delete")}
             className="text-destructive size-7"
             onClick={() => onDelete(expense.id)}
             size="icon"

@@ -60,6 +60,7 @@ import {
   applyFolioAIEditOperations,
   createFolioAIEditSnapshot,
 } from "../core/ai-edits";
+import { getCachedNumberingMap } from "../core/docx/numberingParser";
 // ProseMirror editor
 import {
   TextSelection,
@@ -86,6 +87,7 @@ import {
   clearFormatting,
   applyStyle,
   createStyleResolver,
+  toggleBidi,
   setRtl,
   setLtr,
   getTableContext,
@@ -102,6 +104,7 @@ import {
   mergeCells as pmMergeCells,
   splitCell as pmSplitCell,
   setCellBorder,
+  setTableBorderPreset,
   setCellVerticalAlign,
   setCellMargins,
   setCellTextDirection,
@@ -158,6 +161,9 @@ import {
   createSuggestionModePlugin,
   setSuggestionMode,
 } from "../core/prosemirror/plugins/suggestionMode";
+import { createTemplateDirectivesPlugin } from "../core/prosemirror/plugins/templateDirectives";
+import { createTemplatePreviewValuesPlugin } from "../core/prosemirror/plugins/templatePreviewValues";
+import { templateSlashMenuPlugin } from "../core/prosemirror/plugins/templateSlashMenu";
 import type { Comment } from "../core/types/content";
 import type {
   Document,
@@ -469,6 +475,11 @@ export function DocxEditor({
   onAnonymizationTermClick,
   selectedAnonymizationCanonical = null,
   anonymizationSelectionSeq,
+  showTemplateDirectives = false,
+  onSlashMenuChange,
+  onSlashMenuKeyAction,
+  customContextMenuItems,
+  onCustomContextAction,
   collaboration,
   featureFlags,
   onSelectiveSaveTripwire,
@@ -674,6 +685,35 @@ export function DocxEditor({
     () => autocompleteSuggestionPlugin({ keymap: true }),
     [],
   );
+  // Template-directive widgets. Installed only for the template
+  // editor (`showTemplateDirectives`); scans the doc for {{...}}
+  // markers and exposes their ranges for the paged overlay.
+  const templateDirectivesPlugin = useMemo(
+    () => createTemplateDirectivesPlugin(),
+    [],
+  );
+  // Slash-command trigger for the template editor. Owns only the
+  // `/`-trigger state and the open-menu keyboard contract; the host
+  // (template-studio) renders the menu and performs the insertion.
+  // Callbacks read through refs so the plugin identity stays stable.
+  const onSlashMenuChangeRef = useRef(onSlashMenuChange);
+  onSlashMenuChangeRef.current = onSlashMenuChange;
+  const onSlashMenuKeyActionRef = useRef(onSlashMenuKeyAction);
+  onSlashMenuKeyActionRef.current = onSlashMenuKeyAction;
+  const templateSlashMenu = useMemo(
+    () =>
+      templateSlashMenuPlugin({
+        onChange: (slashState) => onSlashMenuChangeRef.current?.(slashState),
+        onKeyAction: (action) =>
+          onSlashMenuKeyActionRef.current?.(action) ?? false,
+      }),
+    [],
+  );
+  // Inert until a host pushes preview values (template fill preview).
+  const templatePreviewPlugin = useMemo(
+    () => createTemplatePreviewValuesPlugin(),
+    [],
+  );
   const editorPlugins = useMemo(
     () => [
       autocompletePlugin,
@@ -682,6 +722,10 @@ export function DocxEditor({
       aiSuggestionPlugin,
       aiCitationPlugin,
       anonymizationDecorationsPlugin,
+      ...(showTemplateDirectives
+        ? [templateDirectivesPlugin, templateSlashMenu]
+        : []),
+      templatePreviewPlugin,
     ],
     [
       autocompletePlugin,
@@ -690,6 +734,10 @@ export function DocxEditor({
       aiSuggestionPlugin,
       aiCitationPlugin,
       anonymizationDecorationsPlugin,
+      showTemplateDirectives,
+      templateDirectivesPlugin,
+      templateSlashMenu,
+      templatePreviewPlugin,
     ],
   );
 
@@ -1982,8 +2030,12 @@ export function DocxEditor({
 
       focusActiveEditor();
     },
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-    [tableSelection, getActiveEditorView, focusActiveEditor],
+    [
+      tableSelection,
+      getActiveEditorView,
+      focusActiveEditor,
+      getCachedStyleResolver,
+    ],
   );
 
   // Context menu handler
@@ -2102,6 +2154,9 @@ export function DocxEditor({
           case "alignment":
             setAlignment(action.value)(commandState, view.dispatch);
             break;
+          case "toggleDirection":
+            toggleBidi(commandState, view.dispatch);
+            break;
           case "textColor": {
             // action.value can be a ColorValue object or a string like "#FF0000"
             const colorVal = action.value;
@@ -2144,7 +2199,8 @@ export function DocxEditor({
             break;
           case "applyStyle": {
             // Resolve style to get its formatting properties
-            // Use ref to avoid stale closure (handleFormat has [] deps)
+            // Use ref to avoid stale closure (handleFormat does not depend on
+            // the live document)
             const currentDoc = historyStateRef.current;
             const styleResolver = currentDoc?.package.styles
               ? getCachedStyleResolver(currentDoc.package.styles)
@@ -2161,6 +2217,9 @@ export function DocxEditor({
               if (resolved.runFormatting) {
                 styleAttrs.runFormatting = resolved.runFormatting;
               }
+              styleAttrs.numbering = currentDoc?.package.numbering
+                ? getCachedNumberingMap(currentDoc.package.numbering)
+                : null;
               applyStyle(action.value, styleAttrs)(commandState, view.dispatch);
             } else {
               // No styles available, just set the styleId
@@ -2173,8 +2232,7 @@ export function DocxEditor({
         }
       }
     },
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
-    [getActiveEditorView],
+    [getActiveEditorView, getCachedStyleResolver],
   );
 
   const handleContextMenu = useCallback(
@@ -2200,7 +2258,22 @@ export function DocxEditor({
         },
       ];
     }
-    const items: TextContextMenuItem[] = [
+    const items: TextContextMenuItem[] = [];
+    // Host-provided entries lead the menu — they're the surface-specific
+    // primary actions (e.g. the Template Studio's "Make field").
+    const custom = (customContextMenuItems ?? []).filter(
+      (item) => !item.requiresSelection || contextMenu.hasSelection,
+    );
+    for (const [index, item] of custom.entries()) {
+      items.push({
+        action: `custom:${item.id}`,
+        label: item.label,
+        emphasis: true,
+        ...(item.icon === undefined ? {} : { icon: item.icon }),
+        dividerAfter: index === custom.length - 1,
+      });
+    }
+    items.push(
       { action: "cut", label: t("cut"), shortcut: `${mod}+X` },
       { action: "copy", label: t("copy"), shortcut: `${mod}+C` },
       { action: "paste", label: t("paste"), shortcut: `${mod}+V` },
@@ -2216,7 +2289,7 @@ export function DocxEditor({
         shortcut: "Del",
         dividerAfter: !contextMenu.hasSelection && !contextMenu.cursorInTable,
       },
-    ];
+    );
     if (contextMenu.hasSelection) {
       items.push({
         action: "addComment",
@@ -2234,6 +2307,12 @@ export function DocxEditor({
         {
           action: "deleteColumn",
           label: t("deleteColumn"),
+          dividerAfter: true,
+        },
+        { action: "tableBordersAll", label: t("tableBordersAll") },
+        {
+          action: "tableBordersNone",
+          label: t("tableBordersNone"),
           dividerAfter: true,
         },
       );
@@ -2258,6 +2337,7 @@ export function DocxEditor({
     contextMenu.hasSelection,
     contextMenu.cursorInTable,
     contextMenu.cursorInTrackedChange,
+    customContextMenuItems,
     readOnly,
     t,
   ]);
@@ -2273,6 +2353,15 @@ export function DocxEditor({
       focusActiveEditor();
 
       if (readOnly && action !== "copy" && action !== "selectAll") {
+        return;
+      }
+
+      if (action.startsWith("custom:")) {
+        const { from, to } =
+          contextMenu.selectionRange.from !== contextMenu.selectionRange.to
+            ? contextMenu.selectionRange
+            : view.state.selection;
+        onCustomContextAction?.(action.slice("custom:".length), { from, to });
         return;
       }
 
@@ -2305,9 +2394,11 @@ export function DocxEditor({
             let text = "";
             for (const item of items) {
               if (item.types.includes("text/html")) {
+                // oxlint-disable-next-line no-await-in-loop -- sequential reads from a shared clipboard item; html accumulates into one outer variable
                 html = await (await item.getType("text/html")).text();
               }
               if (item.types.includes("text/plain")) {
+                // oxlint-disable-next-line no-await-in-loop -- sequential reads from a shared clipboard item; text accumulates into one outer variable
                 text = await (await item.getType("text/plain")).text();
               }
             }
@@ -2383,6 +2474,12 @@ export function DocxEditor({
         case "deleteColumn":
           pmDeleteColumn(view.state, view.dispatch);
           break;
+        case "tableBordersAll":
+          setTableBorderPreset("all")(view.state, view.dispatch);
+          break;
+        case "tableBordersNone":
+          setTableBorderPreset("none")(view.state, view.dispatch);
+          break;
         // Comment — same flow as floating comment button
         case "addComment": {
           // Use the stored selection range from when the context menu opened,
@@ -2443,6 +2540,7 @@ export function DocxEditor({
     [
       getActiveEditorView,
       focusActiveEditor,
+      onCustomContextAction,
       readOnly,
       contextMenu.selectionRange.from,
       contextMenu.selectionRange.to,
@@ -3296,7 +3394,7 @@ export function DocxEditor({
                   }}
                 >
                   {/* Editor content area */}
-                  {/* oxlint-disable-next-line jsx-a11y/no-static-element-interactions */}
+                  {/* oxlint-disable-next-line jsx-a11y/no-static-element-interactions -- editor canvas; mouse handlers delegate focus to the child contenteditable, not an interactive control */}
                   <div
                     ref={editorContentRef}
                     style={{ position: "relative", flex: 1, minWidth: 0 }}
@@ -3369,6 +3467,7 @@ export function DocxEditor({
                         ? { onEditorViewReady: reportEditorViewReady }
                         : {})}
                       externalPlugins={editorPlugins}
+                      showTemplateDirectives={showTemplateDirectives}
                       {...(collaboration !== undefined
                         ? { collaboration }
                         : {})}

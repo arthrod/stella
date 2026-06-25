@@ -1,15 +1,27 @@
 "use client";
 
+import type * as React from "react";
+import type { ComponentProps } from "react";
+
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 
+import { renderTooltipTrigger } from "@stll/ui/components/tooltip-trigger-helper";
 import { cn } from "@stll/ui/lib/utils";
 
 const PopoverCreateHandle = PopoverPrimitive.createHandle;
 
 const Popover = PopoverPrimitive.Root;
 
-function PopoverTrigger(props: PopoverPrimitive.Trigger.Props) {
-  return <PopoverPrimitive.Trigger data-slot="popover-trigger" {...props} />;
+function PopoverTrigger({
+  tooltip,
+  ...props
+}: PopoverPrimitive.Trigger.Props & { tooltip?: React.ReactNode }) {
+  return renderTooltipTrigger({
+    tooltip: tooltip ?? props["aria-label"] ?? props.title,
+    trigger: (
+      <PopoverPrimitive.Trigger data-slot="popover-trigger" {...props} />
+    ),
+  });
 }
 
 function PopoverPopup({
@@ -71,6 +83,27 @@ function PopoverPopup({
   );
 }
 
+/**
+ * Popover surface with the content layout baked in: children stack in a vertical
+ * flex container. coss renders popup children inside a separate inner Viewport,
+ * so layout utilities placed on the popup `className` silently miss the content.
+ * This wrapper removes that footgun — `className` styles the surface (e.g.
+ * width), `contentClassName` tweaks the content stack.
+ */
+function PopoverPanel({
+  children,
+  contentClassName,
+  ...props
+}: ComponentProps<typeof PopoverPopup> & { contentClassName?: string }) {
+  return (
+    <PopoverPopup {...props}>
+      <div className={cn("flex flex-col gap-3", contentClassName)}>
+        {children}
+      </div>
+    </PopoverPopup>
+  );
+}
+
 function PopoverClose({ ...props }: PopoverPrimitive.Close.Props) {
   return <PopoverPrimitive.Close data-slot="popover-close" {...props} />;
 }
@@ -104,6 +137,7 @@ export {
   PopoverTrigger,
   PopoverPopup,
   PopoverPopup as PopoverContent,
+  PopoverPanel,
   PopoverTitle,
   PopoverDescription,
   PopoverClose,

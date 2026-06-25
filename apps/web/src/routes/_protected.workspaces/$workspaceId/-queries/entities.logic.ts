@@ -1,8 +1,4 @@
-import type {
-  EntityKind,
-  ViewFilterCondition,
-  WorkspaceProperty,
-} from "@/lib/types";
+import type { ConditionNode, EntityKind, WorkspaceProperty } from "@/lib/types";
 
 export type ViewSort = {
   propertyId: string;
@@ -13,7 +9,7 @@ export type EntitiesFieldMode = "full" | "visible";
 
 export type EntitiesPageKey = {
   workspaceId: string;
-  filters: ViewFilterCondition[];
+  filters: ConditionNode[];
   sorts: ViewSort[];
   page: number;
   search?: string;
@@ -33,9 +29,23 @@ export type FilesystemEntitiesKey = Omit<
   "page" | "pageSize" | "excludedKinds" | "previewableForAi"
 >;
 
-export type KanbanGroupKey = Omit<EntitiesWindowKey, "excludedKinds"> & {
+export type KanbanGroupKey = EntitiesWindowKey & {
   groupByPropertyId: string;
   groupValue: string | null;
+  // The property's option values. Sent by the grouped table so the uncategorized
+  // group folds in stale (out-of-options) cells; omitted by the kanban board.
+  optionValues?: string[];
+  includeTotalCount?: boolean;
+};
+
+export type GroupCountsKey = {
+  workspaceId: string;
+  filters: ConditionNode[];
+  groupByPropertyId: string;
+  // The grouping property's option values. The counts depend on them (option
+  // buckets + the uncategorized fold), so a rename/delete of an option must
+  // invalidate the cache.
+  optionValues?: string[];
 };
 
 export const DEFAULT_ENTITY_VIEW_PAGE_SIZE = 100;
@@ -140,8 +150,11 @@ export const entitiesKeys = {
     limit,
     fieldMode,
     fieldIds,
+    excludedKinds,
     groupByPropertyId,
     groupValue,
+    optionValues,
+    includeTotalCount,
   }: KanbanGroupKey) => {
     const normalizedFieldMode = fieldMode ?? "full";
     return [
@@ -156,11 +169,24 @@ export const entitiesKeys = {
           normalizedFieldMode === "visible"
             ? normalizeVisibleFieldIds(fieldIds)
             : [],
+        excludedKinds: excludedKinds?.toSorted() ?? [],
         groupByPropertyId,
         groupValue,
+        optionValues: optionValues?.toSorted(),
+        includeTotalCount: includeTotalCount ?? false,
       },
     ];
   },
+  groupCounts: ({
+    workspaceId,
+    filters,
+    groupByPropertyId,
+    optionValues,
+  }: GroupCountsKey) => [
+    ...entitiesKeys.all(workspaceId),
+    "group-counts",
+    { filters, groupByPropertyId, optionValues: optionValues?.toSorted() },
+  ],
   summaries: (workspaceId: string) => [
     ...entitiesKeys.all(workspaceId),
     "summaries",

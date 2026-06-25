@@ -18,6 +18,7 @@
 import { TaggedError } from "better-result";
 
 import {
+  countCodePoints,
   WORKER_FONT_FINGERPRINT_TEXT,
   type MeasureRequestEntry,
   type MeasureResponseEntry,
@@ -31,7 +32,7 @@ class WorkerInitError extends TaggedError("WorkerInitError")<{
 
 type WorkerCanvasContext = {
   font: string;
-  measureText(text: string): { width: number };
+  measureText: (text: string) => { width: number };
 };
 
 let ctx: WorkerCanvasContext | null = null;
@@ -80,8 +81,12 @@ function measureEntry(entry: MeasureRequestEntry): MeasureResponseEntry | null {
   }
   const raw = context.measureText(entry.text).width;
   let width = raw;
-  if (entry.letterSpacing !== 0 && entry.text.length > 1) {
-    width += entry.letterSpacing * (entry.text.length - 1);
+  // Count code points so astral text matches the main thread's letter-spacing
+  // width (a surrogate pair is one glyph), keeping the prewarmed cache entry
+  // consistent with measureContainer.
+  const codePoints = countCodePoints(entry.text);
+  if (entry.letterSpacing !== 0 && codePoints > 1) {
+    width += entry.letterSpacing * (codePoints - 1);
   }
   width *= entry.horizontalScale;
   return {
@@ -138,7 +143,7 @@ if (typeof self !== "undefined" && typeof addEventListener === "function") {
   };
   addEventListener("message", (event: MessageEvent<MeasureWorkerRequest>) => {
     const reply = handleMeasureRequest(event.data);
-    // eslint-disable-next-line unicorn/require-post-message-target-origin
+    // eslint-disable-next-line unicorn/require-post-message-target-origin -- worker-scope postMessage takes no targetOrigin.
     workerScope.postMessage(reply);
   });
 }

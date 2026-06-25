@@ -35,6 +35,7 @@ import {
 } from "./floatingZones";
 import { getListMarkerInlineWidth } from "./listMarkerWidth";
 import {
+  buildRunFontStyle,
   measureTextWidth,
   measureRun,
   getFontMetrics,
@@ -132,20 +133,7 @@ type LineState = {
  * (FieldRun page numbers, etc.) consistent with TextRun handling.
  */
 function runToFontStyle(run: TextRun | TabRun | FieldRun | MathRun): FontStyle {
-  return {
-    fontFamily: run.fontFamily ?? DEFAULT_FONT_FAMILY,
-    fontSize: run.fontSize ?? DEFAULT_FONT_SIZE,
-    ...(run.bold !== undefined ? { bold: run.bold } : {}),
-    ...(run.italic !== undefined ? { italic: run.italic } : {}),
-    ...(run.letterSpacing !== undefined
-      ? { letterSpacing: run.letterSpacing }
-      : {}),
-    ...(run.allCaps ? { textTransform: "uppercase" as const } : {}),
-    ...(run.smallCaps ? { fontVariant: "small-caps" as const } : {}),
-    ...(run.horizontalScale !== undefined
-      ? { horizontalScale: run.horizontalScale }
-      : {}),
-  };
+  return buildRunFontStyle(run, DEFAULT_FONT_FAMILY, DEFAULT_FONT_SIZE);
 }
 
 /**
@@ -273,11 +261,11 @@ function parseRotationDegrees(transform: string | undefined): number {
   if (!transform) {
     return 0;
   }
-  const match = /rotate\(\s*([-\d.]+)\s*deg\s*\)/u.exec(transform);
+  const match = /rotate\(\s*(?<degrees>[-\d.]+)\s*deg\s*\)/u.exec(transform);
   if (!match) {
     return 0;
   }
-  const raw = Number.parseFloat(match[1]!);
+  const raw = Number.parseFloat(match.groups!["degrees"]!);
   if (!Number.isFinite(raw)) {
     return 0;
   }
@@ -354,9 +342,10 @@ function hasStackedMathLayout(run: MathRun): boolean {
   if (run.display === "block") {
     return true;
   }
-  const tagPattern = /<([A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)(?:\s|\/|>)/gu;
+  const tagPattern =
+    /<(?<tag>[A-Za-z_][\w.-]*(?::[A-Za-z_][\w.-]*)?)(?:\s|\/|>)/gu;
   for (const match of run.ommlXml.matchAll(tagPattern)) {
-    const tagName = match[1];
+    const tagName = match.groups?.["tag"];
     if (!tagName) {
       continue;
     }
@@ -481,6 +470,65 @@ function findWordBreaks(text: string): number[] {
   }
 
   return breaks;
+}
+
+function isBreakChar(char: string | undefined): boolean {
+  return char === " " || char === "-" || char === "\t";
+}
+
+function isSpaceOrTab(char: string | undefined): boolean {
+  return char === " " || char === "\t";
+}
+
+function trimTrailingSpacesAndTabs(text: string): string {
+  let end = text.length;
+  while (end > 0) {
+    const char = text[end - 1];
+    if (char !== " " && char !== "\t") {
+      break;
+    }
+    end--;
+  }
+  return text.slice(0, end);
+}
+
+/**
+ * Width of the unbreakable text glued to the end of each run.
+ * A run boundary is not itself a wrap opportunity: adjacent note markers and
+ * format-only word splits must wrap as one cluster.
+ */
+function computeTrailingGlueWidths(runs: Run[]): number[] {
+  const widths = Array.from({ length: runs.length }, () => 0);
+  for (let index = runs.length - 1; index >= 0; index--) {
+    const nextRun = runs[index + 1];
+    if (!nextRun || !isTextRun(nextRun)) {
+      continue;
+    }
+
+    const text = nextRun.text;
+    if (!text) {
+      widths[index] = widths[index + 1] ?? 0;
+      continue;
+    }
+    if (isSpaceOrTab(text[0])) {
+      continue;
+    }
+
+    const style = runToFontStyle(nextRun);
+    const breaks = findWordBreaks(text);
+    if (breaks.length === 0) {
+      widths[index] = measureTextWidth(text, style) + (widths[index + 1] ?? 0);
+      continue;
+    }
+
+    const firstBreak = breaks[0];
+    if (firstBreak === undefined) {
+      continue;
+    }
+    const leading = trimTrailingSpacesAndTabs(text.slice(0, firstBreak));
+    widths[index] = measureTextWidth(leading, style);
+  }
+  return widths;
 }
 
 /**
@@ -752,6 +800,8 @@ export function measureParagraph(
     };
   }
 
+  const trailingGlueWidths = computeTrailingGlueWidths(runs);
+
   // Initialize line state
   let currentLine: LineState = {
     fromRun: 0,
@@ -771,14 +821,11 @@ export function measureParagraph(
       : {}),
   };
 
-  /**
-   * Finalize and push the current line to the lines array
-   */
-  const finalizeLine = (): void => {
+  const calculateLineTypography = (line: LineState): LineTypography => {
     const typography = calculateTypographyMetrics(
-      currentLine.maxFontSize,
+      line.maxFontSize,
       spacing,
-      currentLine.maxFontMetrics,
+      line.maxFontMetrics,
     );
 
     // If an inline image or stacked equation is taller than the text-based
@@ -786,8 +833,8 @@ export function measureParagraph(
     // as tall glyphs on the text baseline.
     const finalTypography = { ...typography };
     const inlineObjectHeight = Math.max(
-      currentLine.maxImageHeightPx,
-      currentLine.maxMathHeightPx,
+      line.maxImageHeightPx,
+      line.maxMathHeightPx,
     );
     if (inlineObjectHeight > finalTypography.lineHeight) {
       const objectHeight = inlineObjectHeight;
@@ -797,7 +844,7 @@ export function measureParagraph(
       // with the painter's image-only `runsForLine.length === 1 && isImageRun(...)`
       // test in renderLine — the two pick paired line-height + alignment
       // strategies and disagreeing reintroduces the floating-label bug.
-      if (currentLine.fromRun === currentLine.toRun) {
+      if (line.fromRun === line.toRun) {
         // Object alone on the line: grow to the object height plus the
         // parent font's descent on BOTH sides so the row has visible
         // breathing room above and below it.
@@ -813,6 +860,50 @@ export function measureParagraph(
         finalTypography.ascent = objectHeight;
       }
     }
+
+    return finalTypography;
+  };
+
+  const getPostWrapAvailableWidth = (): number => {
+    if (!floatingZones || floatingZones.length === 0) {
+      return bodyContentWidth;
+    }
+
+    const lineTypography = calculateLineTypography(currentLine);
+    let nextCumulativeHeight = cumulativeHeight + lineTypography.lineHeight;
+    const estimatedLineHeight =
+      ptToPx(DEFAULT_FONT_SIZE) * DEFAULT_LINE_HEIGHT_MULTIPLIER;
+    const absoluteY = paragraphYOffset + nextCumulativeHeight;
+    const clearY = findClearLineY(
+      absoluteY,
+      estimatedLineHeight,
+      floatingZones,
+      bodyContentWidth,
+      MIN_WRAP_SEGMENT_WIDTH,
+    );
+    const skip = clearY - absoluteY;
+    if (skip > 0) {
+      nextCumulativeHeight += skip;
+    }
+
+    const floatingMargins = getFloatingMargins(
+      nextCumulativeHeight,
+      estimatedLineHeight,
+      floatingZones,
+      paragraphYOffset,
+    );
+
+    return Math.max(
+      1,
+      getFloatingAvailableWidth(floatingMargins, bodyContentWidth),
+    );
+  };
+
+  /**
+   * Finalize and push the current line to the lines array
+   */
+  const finalizeLine = (): void => {
+    const finalTypography = calculateLineTypography(currentLine);
 
     const line: MeasuredLine = {
       fromRun: currentLine.fromRun,
@@ -1035,23 +1126,40 @@ export function measureParagraph(
       const imageWidth = inlineBbox.width;
       const imageHeight = inlineBbox.height;
 
+      if (
+        currentLine.width > 0 &&
+        currentLine.width + imageWidth >
+          currentLine.availableWidth + WIDTH_TOLERANCE
+      ) {
+        // Image doesn't fit, start new line. Guarded on a non-empty line:
+        // wrapping an image that is already alone on the line can't make it fit
+        // and would just insert a blank row above it.
+        startNewLine(runIndex, 0);
+      }
+
+      // The measurer reserves the image's intrinsic box. The painter fits an
+      // over-wide plain inline image down with CSS `max-width: 100%`
+      // (eigenpal/docx-editor#760), but that is left as a purely visual cap: a
+      // CSS percentage of the line element doesn't correspond to a single
+      // computed width once first-line indents, list markers, or floating-image
+      // line offsets are in play, so predicting it here would under-reserve
+      // height and risk overlap. Reserving the intrinsic box keeps measurement,
+      // selection, and click geometry mutually consistent and never short.
+
       // The image's vertical footprint in the line includes its wp:inline
       // distT/distB wrap distances. These default to 0 for inline images
       // (unlike the block path's synthetic 6px). The painter applies them as
       // top/bottom margins on the <img>, so the run's flex baseline (the
-      // margin-box edge) stays consistent with this reserved height.
+      // margin-box edge) stays consistent with this reserved height. Record it
+      // only after the wrap check above: the footprint belongs to the line the
+      // image actually lands on, not the line it wrapped away from — otherwise
+      // the previous line inflates to image height while the image's own line
+      // stays text-height and following content paints over the overflow.
+      // (eigenpal/docx-editor#767, fixes #766.)
       const imageFootprintPx =
         imageHeight + (run.distTop ?? 0) + (run.distBottom ?? 0);
       if (imageFootprintPx > currentLine.maxImageHeightPx) {
         currentLine.maxImageHeightPx = imageFootprintPx;
-      }
-
-      if (
-        currentLine.width + imageWidth >
-        currentLine.availableWidth + WIDTH_TOLERANCE
-      ) {
-        // Image doesn't fit, start new line
-        startNewLine(runIndex, 0);
       }
 
       currentLine.width += imageWidth;
@@ -1064,20 +1172,14 @@ export function measureParagraph(
       // Measure the field at its resolved value when known so the line breaker
       // agrees with the painter; otherwise the cached fallback text.
       const fallback = fieldMeasureText(run, options?.fieldValues);
-      const style: FontStyle = {
-        fontFamily: run.fontFamily ?? DEFAULT_FONT_FAMILY,
-        fontSize: run.fontSize ?? DEFAULT_FONT_SIZE,
-        ...(run.bold !== undefined ? { bold: run.bold } : {}),
-        ...(run.italic !== undefined ? { italic: run.italic } : {}),
-        ...(run.letterSpacing !== undefined
-          ? { letterSpacing: run.letterSpacing }
-          : {}),
-        ...(run.allCaps ? { textTransform: "uppercase" as const } : {}),
-        ...(run.smallCaps ? { fontVariant: "small-caps" as const } : {}),
-        ...(run.horizontalScale !== undefined
-          ? { horizontalScale: run.horizontalScale }
-          : {}),
-      };
+      // Use the shared builder so the field result measures with the same fields
+      // the painter renders — notably eastAsiaFontFamily, so a CJK field result
+      // (DATE/TIME/PAGEREF/REF) wraps and tab-positions with its East-Asian font.
+      const style = buildRunFontStyle(
+        run,
+        DEFAULT_FONT_FAMILY,
+        DEFAULT_FONT_SIZE,
+      );
       updateMaxFont(style);
 
       const fieldWidth = measureTextWidth(fallback, style);
@@ -1209,10 +1311,25 @@ export function measureParagraph(
           continue;
         }
 
-        // Check if word fits on current line
+        // Check if word fits on current line. If this is the last word in a
+        // run and the next run starts without whitespace, include that glued
+        // width in the wrap decision so a note marker or format-only word
+        // split is not stranded on the next line (eigenpal/docx-editor#991).
+        const isRunTail = nextBreak === text.length;
+        const rawGlueWidth =
+          // eslint-disable-next-line unicorn/prefer-at -- hot path: direct index avoids .at() overhead.
+          isRunTail && word.length > 0 && !isBreakChar(word[word.length - 1])
+            ? (trailingGlueWidths[runIndex] ?? 0)
+            : 0;
+        const glueWidth =
+          rawGlueWidth > 0 &&
+          wordWidth + rawGlueWidth <=
+            getPostWrapAvailableWidth() + WIDTH_TOLERANCE
+            ? rawGlueWidth
+            : 0;
         if (
           currentLine.width > 0 &&
-          currentLine.width + wordWidth >
+          currentLine.width + wordWidth + glueWidth >
             currentLine.availableWidth + WIDTH_TOLERANCE
         ) {
           // Word doesn't fit, start new line

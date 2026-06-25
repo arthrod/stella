@@ -9,23 +9,27 @@ import {
   notInArray,
   sql,
 } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { t } from "elysia";
+
+import type { ConditionNode } from "@stll/conditions";
 
 import type { SafeDb, SafeDbError } from "@/api/db";
 import { cellMetadata, entities, properties } from "@/api/db/schema";
 import type { EntityKind } from "@/api/db/schema-validators";
+import {
+  buildKanbanGroupCondition,
+  tGroupByPropertyId,
+} from "@/api/handlers/entities/kanban-group-condition";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { acquireCellLock } from "@/api/lib/cell-lock";
+import { tConditionNode } from "@/api/lib/conditions/contract";
 import { tSafeId } from "@/api/lib/custom-schema";
 import { buildFilterConditions } from "@/api/lib/entity-filters";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
-import {
-  tViewFilterConditionSchema,
-  type ViewFilterCondition,
-} from "@/api/lib/views-schema";
 
 import {
   buildColumnFlagMutation,
@@ -46,7 +50,19 @@ const config = {
   body: t.Object({
     propertyId: tSafeId("property"),
     flag: t.Literal(VERIFIED_COLUMN_FLAG),
-    filters: t.Array(tViewFilterConditionSchema),
+    filters: t.Array(tConditionNode),
+    set: t.Optional(t.Boolean()),
+    // Undo of a prior mark: only remove flags stamped with this operation
+    // timestamp (returned as `addedAt` from the original mark).
+    onlyAddedAt: t.Optional(t.String()),
+    // When set, scopes the batch to a single grouped-view subtable using the
+    // same group condition the grouped table renders with, so "mark this group
+    // as reviewed" touches exactly the rows that group shows.
+    groupByPropertyId: t.Optional(tGroupByPropertyId),
+    groupValue: t.Optional(t.Nullable(t.String({ maxLength: 1000 }))),
+    // The property's option values, so marking the uncategorized subtable folds
+    // in stale-valued cells the same way the grouped table renders them.
+    optionValues: t.Optional(t.Array(t.String({ maxLength: 1000 }))),
   }),
 } satisfies HandlerConfig;
 
@@ -66,7 +82,10 @@ type ProcessColumnFlagBatchArgs = {
   workspaceId: SafeId<"workspace">;
   propertyId: SafeId<"property">;
   flag: string;
-  filters: ViewFilterCondition[];
+  set: boolean;
+  onlyAddedAt: string | undefined;
+  filters: ConditionNode[];
+  groupCondition: SQL | null;
   userId: SafeId<"user">;
   cursor: SafeId<"entity"> | null;
   addedAt: string;
@@ -78,7 +97,10 @@ const processColumnFlagBatch = async ({
   workspaceId,
   propertyId,
   flag,
+  set,
+  onlyAddedAt,
   filters,
+  groupCondition,
   userId,
   cursor,
   addedAt,
@@ -116,6 +138,7 @@ const processColumnFlagBatch = async ({
           isNotNull(entities.currentVersionId),
           notInArray(entities.kind, TABLE_COLUMN_FLAG_EXCLUDED_ENTITY_KINDS),
           ...buildFilterConditions(filters),
+          ...(groupCondition ? [groupCondition] : []),
           ...(cursorCondition ? [cursorCondition] : []),
         ),
       )
@@ -148,6 +171,7 @@ const processColumnFlagBatch = async ({
     }
 
     for (const target of targets) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential lock acquisition in a deterministic order avoids deadlocks within the transaction
       await acquireCellLock({
         tx,
         entityVersionId: target.entityVersionId,
@@ -177,6 +201,8 @@ const processColumnFlagBatch = async ({
       workspaceId,
       propertyId: property.id,
       flag,
+      set,
+      ...(onlyAddedAt !== undefined && { onlyAddedAt }),
       targets,
       existingRows,
       userId,
@@ -212,6 +238,19 @@ const processColumnFlagBatch = async ({
 const markColumnFlag = createSafeHandler(
   config,
   async function* ({ safeDb, workspaceId, body, user, recordAuditEvent }) {
+    let groupCondition: SQL | null = null;
+    if (body.groupByPropertyId !== undefined) {
+      const conditionResult = buildKanbanGroupCondition({
+        groupByPropertyId: body.groupByPropertyId,
+        groupValue: body.groupValue ?? null,
+        optionValues: body.optionValues,
+      });
+      if (Result.isError(conditionResult)) {
+        return Result.err(conditionResult.error);
+      }
+      groupCondition = conditionResult.value;
+    }
+
     let updatedCount = 0;
     let cursor: SafeId<"entity"> | null = null;
     const addedAt = new Date().toISOString();
@@ -226,7 +265,10 @@ const markColumnFlag = createSafeHandler(
           workspaceId,
           propertyId: body.propertyId,
           flag: body.flag,
+          set: body.set ?? true,
+          onlyAddedAt: body.onlyAddedAt,
           filters: body.filters,
+          groupCondition,
           userId: user.id,
           cursor,
           addedAt,
@@ -252,7 +294,9 @@ const markColumnFlag = createSafeHandler(
       cursor = txResult.nextCursor;
     }
 
-    return Result.ok({ success: true, updatedCount });
+    // `addedAt` stamps every flag this mark added; the client passes it back as
+    // `onlyAddedAt` to undo precisely.
+    return Result.ok({ success: true, updatedCount, addedAt });
   },
 );
 

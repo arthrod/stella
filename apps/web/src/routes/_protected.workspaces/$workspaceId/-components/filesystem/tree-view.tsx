@@ -2,6 +2,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -29,6 +30,7 @@ import {
 import { useDebouncedCallback } from "use-debounce";
 import { useLocale, useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -50,6 +52,7 @@ import {
 } from "@/components/drag-preview";
 import type { DragPreviewData } from "@/components/drag-preview";
 import { FileTreeNameCell } from "@/components/file-tree/file-tree";
+import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
 import { HOTKEYS } from "@/lib/hotkeys";
 import { isFileDisplayable } from "@/lib/types";
 import type {
@@ -539,16 +542,16 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
   // Only react to `toggleVersion` changes; `toggleAll` is
   // intentionally excluded to avoid an infinite loop
   // (toggleAll → allExpanded → setFolderState → re-render).
-  const toggleAllRef = useRef(toggleAll);
-  toggleAllRef.current = toggleAll;
+  const handleToggleAll = useEffectEvent(toggleAll);
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (toggleVersion bump → toggleAll); the trigger is in ViewToolbar's FolderExpandToggle (separate file), but the toggle reads local expandedIds/allFolderIds here, so the action can't be lifted to the button without threading local state up
   useEffect(() => {
     if (toggleVersion === 0) {
       return;
     }
-    toggleAllRef.current();
+    handleToggleAll();
   }, [toggleVersion]);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     setFolderState({
       allExpanded,
       hasFolders: allFolderIds.size > 0,
@@ -635,39 +638,50 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
   const [isRootDropTarget, setIsRootDropTarget] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const rootBarRef = useRef<HTMLDivElement>(null);
-  const moveEntityRefRoot = useRef(moveEntity);
-  moveEntityRefRoot.current = moveEntity;
+  const handleMoveEntitiesToRoot = useEffectEvent((entityIds: string[]) => {
+    for (const entityId of entityIds) {
+      moveEntity.mutate(
+        { workspaceId, entityId, parentId: null },
+        {
+          onError: () => {
+            stellaToast.add({
+              title: t("errors.actionFailed"),
+              type: "error",
+            });
+          },
+        },
+      );
+    }
+  });
 
   // Track whether an entity drag is active and whether any
   // dragged entity is nested (has a parentId). Only show the
   // root drop bar when at least one entity can be moved to root.
-  useEffect(
-    () =>
-      monitorForElements({
-        canMonitor: ({ source }) => source.data["type"] === ENTITY_DRAG_TYPE,
-        onDragStart: ({ source }) => {
-          const entities = source.data["entities"];
-          const parentId = source.data["parentId"];
-          const hasNested = isDragEntityList(entities)
-            ? entities.some((entity) => entity.parentId !== null)
-            : typeof parentId === "string";
-          if (hasNested) {
-            setIsDragActive(true);
-          }
-        },
-        onDrop: () => setIsDragActive(false),
-      }),
-    [],
+  useMountEffect(() =>
+    monitorForElements({
+      canMonitor: ({ source }) => source.data["type"] === ENTITY_DRAG_TYPE,
+      onDragStart: ({ source }) => {
+        const entities = source.data["entities"];
+        const parentId = source.data["parentId"];
+        const hasNested = isDragEntityList(entities)
+          ? entities.some((entity) => entity.parentId !== null)
+          : typeof parentId === "string";
+        if (hasNested) {
+          setIsDragActive(true);
+        }
+      },
+      onDrop: () => setIsDragActive(false),
+    }),
   );
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     setFilesystemSelectedIds(selectedIds);
   }, [selectedIds, setFilesystemSelectedIds]);
 
-  useEffect(() => clearFilesystemSelectedIds, [clearFilesystemSelectedIds]);
+  useMountEffect(() => clearFilesystemSelectedIds);
 
   // Dedicated root-level drop bar (visible during drags).
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = rootBarRef.current;
     if (!el) {
       return undefined;
@@ -683,22 +697,10 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
         if (!entityIds) {
           return;
         }
-        for (const entityId of entityIds) {
-          moveEntityRefRoot.current.mutate(
-            { workspaceId, entityId, parentId: null },
-            {
-              onError: () => {
-                stellaToast.add({
-                  title: t("errors.actionFailed"),
-                  type: "error",
-                });
-              },
-            },
-          );
-        }
+        handleMoveEntitiesToRoot(entityIds);
       },
     });
-  }, [workspaceId, t]);
+  }, []);
 
   if (data.length === 0) {
     return (
@@ -711,8 +713,7 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
   }
 
   return (
-    // TODO: fix this
-    // oxlint-disable-next-line jsx_a11y/no-static-element-interactions, jsx_a11y/click-events-have-key-events
+    // oxlint-disable-next-line jsx_a11y/no-static-element-interactions, jsx_a11y/click-events-have-key-events -- layout container; click-empty-to-deselect is a mouse convenience, keyboard deselect is the Escape hotkey
     <div
       className="flex h-full flex-1 flex-col overflow-hidden p-2"
       onClick={(e) => {
@@ -734,10 +735,12 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
               <BreadcrumbList>
                 <BreadcrumbItem>
                   <button
+                    aria-label={t("workspaces.copyToMatter.rootFolder")}
                     className="text-muted-foreground hover:text-foreground text-xs"
                     onClick={() => {
                       void navigateToFolder();
                     }}
+                    title={t("workspaces.copyToMatter.rootFolder")}
                     type="button"
                   >
                     <FolderIcon className="size-3.5" />
@@ -1168,6 +1171,11 @@ const FilesystemRow = ({
     onStartEditing(null);
   };
 
+  const isBulkSelected = selectedIds.size > 1 && isSelected;
+  const bulkEntitiesRef = useRef<WorkspaceEntity[] | undefined>(undefined);
+  const getBulkSelectedEntities = () =>
+    isBulkSelected ? getSelectedEntities(selectedIds) : undefined;
+
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -1175,6 +1183,7 @@ const FilesystemRow = ({
     if (!isSelected) {
       onSelect(node.entityId, false);
     }
+    bulkEntitiesRef.current = getBulkSelectedEntities();
     const x = e.clientX;
     const y = e.clientY;
     setMenuState({
@@ -1196,30 +1205,51 @@ const FilesystemRow = ({
   const { isDropTarget: isExternalDropTarget, pendingDrop } =
     useVersionOrNewFileDrop({ entity: node, workspaceId, rowRef });
 
-  // Store volatile values in refs so the effect doesn't
-  // re-register drag/drop handlers on every render.
-  // Re-registering mid-drag tears down the active drop target
-  // and causes drops to silently fail.
-  const expandedRef = useRef(expanded);
-  expandedRef.current = expanded;
-  const ancestorIdsRef = useRef(ancestorIds);
-  ancestorIdsRef.current = ancestorIds;
-  const moveEntityRef = useRef(moveEntity);
-  moveEntityRef.current = moveEntity;
-  const onToggleFolderRef = useRef(onToggleFolder);
-  onToggleFolderRef.current = onToggleFolder;
-  const selectedIdsRef = useRef(selectedIds);
-  selectedIdsRef.current = selectedIds;
-  const getSelectedDragItemsRef = useRef(getSelectedDragItems);
-  getSelectedDragItemsRef.current = getSelectedDragItems;
-  const getSelectedEntitiesRef = useRef(getSelectedEntities);
-  getSelectedEntitiesRef.current = getSelectedEntities;
+  const isExpanded = useEffectEvent(() => expanded);
+  const isAncestor = useEffectEvent((entityId: string) =>
+    ancestorIds.has(entityId),
+  );
+  const getCurrentSelectedIds = useEffectEvent(() => selectedIds);
+  const getCurrentSelectedDragItems = useEffectEvent((ids: Set<string>) =>
+    getSelectedDragItems(ids),
+  );
+  const getCurrentSelectedEntities = useEffectEvent((ids: Set<string>) =>
+    getSelectedEntities(ids),
+  );
+  const toggleCurrentFolder = useEffectEvent(() => {
+    onToggleFolder(node.entityId);
+  });
+  const moveEntitiesToFolder = useEffectEvent((entityIds: string[]) => {
+    for (const entityId of entityIds) {
+      if (isAncestor(entityId)) {
+        continue;
+      }
+      if (entityId === node.entityId) {
+        continue;
+      }
+      moveEntity.mutate(
+        {
+          workspaceId,
+          entityId,
+          parentId: node.entityId,
+        },
+        {
+          onError: () => {
+            stellaToast.add({
+              title: t("errors.actionFailed"),
+              type: "error",
+            });
+          },
+        },
+      );
+    }
+  });
 
   const scheduleAutoExpand = useDebouncedCallback(() => {
-    onToggleFolderRef.current(node.entityId);
+    toggleCurrentFolder();
   }, 600);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = rowRef.current;
     if (!el) {
       return undefined;
@@ -1228,7 +1258,7 @@ const FilesystemRow = ({
       draggable({
         element: el,
         getInitialData: () => {
-          const sel = selectedIdsRef.current;
+          const sel = getCurrentSelectedIds();
           const isMulti = sel.size > 1 && sel.has(node.entityId);
           // When the dragged item is part of a multi-selection,
           // include all selected entity IDs in the drag data.
@@ -1236,7 +1266,7 @@ const FilesystemRow = ({
           // Include metadata for each entity so drop targets
           // (e.g. the chat panel) can create mentions for all.
           const entities = isMulti
-            ? getSelectedEntitiesRef.current(sel).map((e) => ({
+            ? getCurrentSelectedEntities(sel).map((e) => ({
                 entityId: e.entityId,
                 name: getEntityName(e),
                 kind: e.kind,
@@ -1267,9 +1297,9 @@ const FilesystemRow = ({
           setCustomNativeDragPreview({
             nativeSetDragImage,
             render: ({ container }) => {
-              const sel = selectedIdsRef.current;
+              const sel = getCurrentSelectedIds();
               if (sel.size > 1 && sel.has(node.entityId)) {
-                const items = getSelectedDragItemsRef.current(sel);
+                const items = getCurrentSelectedDragItems(sel);
                 return renderMultiDragPreview(container, items);
               }
               return renderDragPreview(container, {
@@ -1295,13 +1325,13 @@ const FilesystemRow = ({
                 return (
                   entityId !== null &&
                   entityId !== node.entityId &&
-                  !ancestorIdsRef.current.has(entityId)
+                  !isAncestor(entityId)
                 );
               },
               getData: () => ({ entityId: node.entityId }),
               onDragEnter: () => {
                 setIsFolderDropTarget(true);
-                if (!expandedRef.current) {
+                if (!isExpanded()) {
                   scheduleAutoExpand();
                 }
               },
@@ -1316,29 +1346,7 @@ const FilesystemRow = ({
                 if (!entityIds) {
                   return;
                 }
-                for (const entityId of entityIds) {
-                  if (ancestorIdsRef.current.has(entityId)) {
-                    continue;
-                  }
-                  if (entityId === node.entityId) {
-                    continue;
-                  }
-                  moveEntityRef.current.mutate(
-                    {
-                      workspaceId,
-                      entityId,
-                      parentId: node.entityId,
-                    },
-                    {
-                      onError: () => {
-                        stellaToast.add({
-                          title: t("errors.actionFailed"),
-                          type: "error",
-                        });
-                      },
-                    },
-                  );
-                }
+                moveEntitiesToFolder(entityIds);
               },
             }),
           ]
@@ -1406,9 +1414,9 @@ const FilesystemRow = ({
         />
       ) : (
         <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate" title={name}>
+          <BidiText as="span" className="truncate" title={name}>
             {name}
-          </span>
+          </BidiText>
           {node.activeEditBy && (
             <ActiveEditBadge
               className="shrink-0"
@@ -1454,8 +1462,6 @@ const FilesystemRow = ({
       {extraCells}
     </>
   );
-
-  const isBulkSelected = selectedIds.size > 1 && isSelected;
 
   const openInInspector = (() => {
     if (isBulkSelected) {
@@ -1510,23 +1516,6 @@ const FilesystemRow = ({
     return undefined;
   })();
 
-  // Capture bulk entities at context-menu-open time. Base UI's Menu
-  // steals focus on open, which can trigger a click event that clears
-  // selectedIds before RowActions re-renders. Using a ref preserves
-  // the selection snapshot from when the menu was triggered.
-  const bulkEntitiesRef = useRef<WorkspaceEntity[] | undefined>(undefined);
-  if (isContextOpen && isBulkSelected) {
-    bulkEntitiesRef.current = getSelectedEntities(selectedIds);
-  } else if (!isContextOpen) {
-    bulkEntitiesRef.current = undefined;
-  }
-  let bulkEntities: WorkspaceEntity[] | undefined;
-  if (isContextOpen) {
-    bulkEntities = bulkEntitiesRef.current;
-  } else if (isBulkSelected) {
-    bulkEntities = getSelectedEntities(selectedIds);
-  }
-
   const rowActionsNode = (
     <span className="flex justify-end">
       <RowActions
@@ -1536,7 +1525,9 @@ const FilesystemRow = ({
         onOpenChange={(o) => {
           if (!o) {
             setMenuState({ type: "closed" });
+            bulkEntitiesRef.current = undefined;
           } else if (menuState.type === "closed") {
+            bulkEntitiesRef.current = getBulkSelectedEntities();
             // Trigger-button click: Base UI positions the menu against
             // the trigger element, so no virtual anchor is needed.
             setMenuState({ type: "trigger" });
@@ -1545,7 +1536,7 @@ const FilesystemRow = ({
         onRename={startEditing}
         onSubfolderCreated={onSubfolderCreated}
         open={isContextOpen}
-        selectedEntities={bulkEntities}
+        selectedEntities={isContextOpen ? bulkEntitiesRef.current : undefined}
         workspaceId={workspaceId}
       />
     </span>

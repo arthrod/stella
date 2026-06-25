@@ -192,7 +192,7 @@ export const AddMcpServerSheet = ({
         onOpenChange(next);
       }}
     >
-      <SheetPopup className="w-full sm:max-w-[460px]" side="right">
+      <SheetPopup className="w-full sm:max-w-[460px]" side="inline-end">
         <SheetHeader>
           <SheetTitle>{t("knowledge.mcp.addServerCardTitle")}</SheetTitle>
         </SheetHeader>
@@ -211,6 +211,7 @@ export const AddMcpServerSheet = ({
               <Input
                 autoComplete="url"
                 autoFocus
+                dir="ltr"
                 id="mcp-url"
                 inputMode="url"
                 onChange={(event) =>

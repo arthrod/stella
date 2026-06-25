@@ -2,9 +2,9 @@ import type {
   BoundingBox,
   AgendaItemKind,
   AgendaItemSource,
+  ConditionNode,
   EntityKind,
   OptionColor,
-  PropertyCondition,
   ViewLayout,
   ViewLayoutType,
 } from "@stll/api/types";
@@ -15,7 +15,7 @@ import type { FileRouteTypes } from "@/routeTree.gen";
 
 export type {
   EntityKind,
-  ViewFilterCondition,
+  ConditionNode,
   AgendaItemKind,
   AgendaItemSource,
   ViewLayout,
@@ -58,7 +58,7 @@ export const isFileDisplayable = (file: {
 
 export type PropertyDependency = {
   dependsOnPropertyId: string;
-  condition: PropertyCondition | null;
+  condition: ConditionNode | null;
 };
 
 type ManualInputTool = {
@@ -218,6 +218,7 @@ export type WorkspaceEntity = {
   createdAt: string;
   createdBy: string | null;
   createdByImage: string | null;
+  createdByDeletedAt: string | null;
   updatedAt: string | null;
   version: number;
   status: string | null;
@@ -272,6 +273,7 @@ export type FileMention = {
 export type PersonMention = {
   name: string;
   image: string | null;
+  deletedAt?: string | null;
   /** Only set when space is extremely constrained. */
   hideAvatar?: boolean;
 };

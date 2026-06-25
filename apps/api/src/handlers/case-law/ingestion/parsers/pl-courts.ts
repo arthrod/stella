@@ -11,7 +11,7 @@
  */
 
 import * as cheerio from "cheerio";
-import type { AnyNode } from "domhandler";
+import { type AnyNode, isTag, isText } from "domhandler";
 
 import type {
   Block,
@@ -27,6 +27,12 @@ import {
 } from "@/api/handlers/case-law/ingestion/parsers/validate-ast";
 import { sanitizeUrl } from "@/api/lib/sanitize-url";
 import { includes } from "@/api/lib/type-guards";
+
+import {
+  appendTextInline,
+  inlinesToPlainText,
+  walkInlines as walkInlinesShared,
+} from "./shared-inlines";
 
 type ParsePlDecisionInput = {
   caseNumber: string;
@@ -67,7 +73,6 @@ const DECISION_TITLES: ReadonlySet<string> = new Set(
 );
 const CASE_NUMBER_RE = /^sygn(?:atura)?\.?\s*akt[:\s]/iu;
 const REASONS_HEADING_RE = /^uzasadnienie\b/iu;
-// oxlint-disable-next-line sonarjs/slow-regex -- heading check runs against one normalized line, not unbounded document text
 const HOLDING_HEADING_RE = /^(?:orzeka|postanawia|uchwala|zarządza)\s*:?\s*$/iu;
 const HOLDING_ITEM_RE = /^(?:[IVXLC]+\s*[.)]|[0-9]+\s*[.)]|[a-z][)])\s*/u;
 const OPERATIVE_VERB_RE =
@@ -94,7 +99,6 @@ const hasHtmlTags = (content: string): boolean =>
 const normalizeWhitespace = (text: string): string =>
   text
     .replace(/\u00a0/gu, " ")
-    // oxlint-disable-next-line sonarjs/slow-regex -- source text is already split from one court document and replacement is line-local
     .replace(/[ \t]+\n/gu, "\n")
     .trim();
 
@@ -203,111 +207,12 @@ const textInline = (text: string, anonymized = false): Inline[] =>
       ]
     : [];
 
-const appendTextInline = (
-  target: Inline[],
-  text: string,
-  anonymized = false,
-): void => {
-  if (!text) {
-    return;
-  }
-
-  const last = target.at(-1);
-  if (
-    last?.type === "text" &&
-    last.anonymized === (anonymized ? true : undefined)
-  ) {
-    last.text += text;
-    return;
-  }
-
-  target.push({
-    type: "text",
-    text,
-    ...(anonymized && { anonymized: true as const }),
-  });
-};
-
 const walkInlines = (
   $: cheerio.CheerioAPI,
   el: cheerio.Cheerio<AnyNode>,
   anonymized = false,
-): Inline[] => {
-  const inlines: Inline[] = [];
-
-  el.contents().each((_, node) => {
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type === "text") {
-      appendTextInline(inlines, $(node).text(), anonymized);
-      return;
-    }
-
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type !== "tag") {
-      return;
-    }
-
-    const $node = $(node);
-    const tag = node.tagName.toLowerCase();
-    const isAnon = anonymized || $node.hasClass("anon-block");
-
-    if (tag === "br") {
-      inlines.push({ type: "line-break" });
-      return;
-    }
-
-    if (tag === "strong" || tag === "b") {
-      const children = walkInlines($, $node, isAnon);
-      if (children.length > 0) {
-        inlines.push({ type: "bold", children });
-      }
-      return;
-    }
-
-    if (tag === "em" || tag === "i") {
-      const children = walkInlines($, $node, isAnon);
-      if (children.length > 0) {
-        inlines.push({ type: "italic", children });
-      }
-      return;
-    }
-
-    if (tag === "a") {
-      const children = walkInlines($, $node, isAnon);
-      const href = sanitizeUrl($node.attr("href") ?? "");
-      if (href && children.length > 0) {
-        inlines.push({ type: "link", href, children });
-      } else if (children.length > 0) {
-        inlines.push(...children);
-      }
-      return;
-    }
-
-    inlines.push(...walkInlines($, $node, isAnon));
-  });
-
-  return inlines;
-};
-
-const inlinesToPlainText = (inlines: readonly Inline[]): string => {
-  let text = "";
-
-  for (const inline of inlines) {
-    if (inline.type === "text") {
-      text += inline.text;
-      continue;
-    }
-
-    if (inline.type === "line-break") {
-      text += "\n";
-      continue;
-    }
-
-    text += inlinesToPlainText(inline.children);
-  }
-
-  return text;
-};
+): Inline[] =>
+  walkInlinesShared($, el, { sanitizeHref: sanitizeUrl, anonymized });
 
 const inferParagraphRole = (
   state: ParserState,
@@ -460,8 +365,7 @@ const parseChildren = (
   root: cheerio.Cheerio<AnyNode>,
 ): void => {
   root.contents().each((_, node) => {
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type === "text") {
+    if (isText(node)) {
       const text = normalizeWhitespace($(node).text());
       if (!text) {
         return;
@@ -476,13 +380,17 @@ const parseChildren = (
       return;
     }
 
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type !== "tag") {
+    if (!isTag(node)) {
       return;
     }
 
     const $node = $(node);
     const tag = node.tagName.toLowerCase();
+
+    // isTag() also matches <script>/<style>; never emit their raw text.
+    if (tag === "script" || tag === "style") {
+      return;
+    }
 
     if (tag === "p" || tag === "li") {
       parseParagraphElement($, state, $node);

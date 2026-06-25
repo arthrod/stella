@@ -33,7 +33,7 @@ export class LayoutSelectionGate {
   #pendingRender: RenderCallback | null = null;
 
   /** Registered render callbacks */
-  #renderCallbacks = new Set<RenderCallback>();
+  readonly #renderCallbacks = new Set<RenderCallback>();
 
   /**
    * Set the document state sequence (call when document changes).
@@ -132,6 +132,7 @@ export class LayoutSelectionGate {
   #executeRender(): void {
     for (const callback of this.#renderCallbacks) {
       try {
+        // oxlint-disable-next-line node/callback-return -- run every render callback; returning would stop the loop early
         callback();
       } catch {
         // render callback error — swallow silently

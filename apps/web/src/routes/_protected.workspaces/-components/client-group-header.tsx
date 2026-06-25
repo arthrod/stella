@@ -1,6 +1,9 @@
 import { useNavigate } from "@tanstack/react-router";
 import { ChevronRightIcon } from "lucide-react";
+import { useFormatter } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { cn } from "@stll/ui/lib/utils";
 
 import type { WorkspaceGroup } from "@/routes/_protected.workspaces/-types";
@@ -19,6 +22,7 @@ export const ClientGroupHeader = ({
   onToggle,
 }: ClientGroupHeaderProps) => {
   const navigate = useNavigate();
+  const format = useFormatter();
   const matterCount = group.workspaces.length;
 
   return (
@@ -33,11 +37,13 @@ export const ClientGroupHeader = ({
       onClick={onToggle}
       type="button"
     >
-      <ChevronRightIcon
+      <DirectionalIcon
         className={cn(
           "text-muted-foreground size-3.5 shrink-0 transition-transform",
           !collapsed && "rotate-90",
         )}
+        flip={collapsed}
+        icon={ChevronRightIcon}
       />
       <h3 className="text-sm font-semibold">
         {group.type === "personal" ? (
@@ -64,7 +70,7 @@ export const ClientGroupHeader = ({
             role="link"
             tabIndex={0}
           >
-            {group.clientName}
+            <BidiText>{group.clientName}</BidiText>
           </span>
         )}
       </h3>
@@ -74,14 +80,14 @@ export const ClientGroupHeader = ({
           "text-muted-foreground text-[0.625rem] tabular-nums",
         )}
       >
-        {matterCount}
+        {format.number(matterCount)}
       </span>
       {group.type === "client" && group.responsibleAttorneyName && (
         <>
           <span className="text-foreground-subtle">·</span>
-          <span className="text-muted-foreground text-xs">
+          <BidiText as="span" className="text-muted-foreground text-xs">
             {group.responsibleAttorneyName}
-          </span>
+          </BidiText>
         </>
       )}
     </button>

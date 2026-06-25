@@ -24,7 +24,7 @@ import {
 } from "react";
 import type { RefObject } from "react";
 
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { getRouteApi } from "@tanstack/react-router";
 import { LoaderCircleIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
@@ -36,6 +36,7 @@ import type {
   FolioAIEditSeverity,
   FolioAIEditSnapshot,
 } from "@stll/folio";
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { cn } from "@stll/ui/lib/utils";
 
 import { PromptBar } from "@/components/ai-suggestions/host";
@@ -52,15 +53,17 @@ import { useChatEditor } from "@/components/chat-editor-provider";
 import { ChatApprovalContext } from "@/components/chat/chat-approval-context";
 import { ChatMattersContext } from "@/components/chat/chat-matters-context";
 import { ChatThreadMessages } from "@/components/chat/chat-thread-messages";
-import type {
-  ActiveDocxEditApprovalPart,
-  ApprovalToolName,
-  PersistedChatMessage,
-} from "@/components/chat/chat-ui-tools";
+import { getActiveDocxEditApprovalPart } from "@/components/chat/chat-ui-tools";
+import type { ApprovalToolName } from "@/components/chat/chat-ui-tools";
 import { useAIKeyGate } from "@/components/require-ai-key";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { ChatAnonymizationLayer } from "@/lib/anonymize/use-chat-anonymization-layer";
+import { useIsChatDraftEmpty } from "@/lib/chat-draft-store";
 import type { ChatThreadId, ChatThreadRef } from "@/lib/chat-thread-ref";
 import { useDevStore } from "@/lib/dev-store";
+import { useModelSelectorStore } from "@/lib/model-selector-store";
+import { matchReservedChatCommand } from "@/lib/reserved-chat-commands";
+import { SuggestedFollowupChips } from "@/routes/_protected.chat/-components/suggested-followup-chips";
 import { useChatSession } from "@/routes/_protected.chat/-hooks/use-chat-session";
 import { useChatUserContext } from "@/routes/_protected.chat/-hooks/use-chat-user-context";
 import type {
@@ -69,6 +72,7 @@ import type {
 } from "@/routes/_protected.chat/-queries";
 import {
   chatThreadOptions,
+  chatThreadSuggestedPromptsOptions,
   fileChatThreadOptions,
 } from "@/routes/_protected.chat/-queries";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
@@ -179,9 +183,8 @@ const DIRECTIVE_NAMES = new Set([
   "recitals",
 ]);
 const DIRECTIVE_NAME_CHAR_RE = /[a-z_]/iu;
-// oxlint-disable-next-line sonarjs/slow-regex -- input is single-line paragraph text; linear backtracking only
-const PLACEHOLDER_RE = /\[\[([^\]]+?)\]\]/gu;
-const CLAUSE_HEADING_RE = /^@clause +\d+ *"([^"]*)" *$/iu;
+const PLACEHOLDER_RE = /\[\[(?<inner>[^\]]+?)\]\]/gu;
+const CLAUSE_HEADING_RE = /^@clause +\d+ *"(?<title>[^"]*)" *$/iu;
 const stripDirectivePrefix = (line: string): string => {
   const trimmed = line.trimStart();
   if (!trimmed.startsWith("@")) {
@@ -214,7 +217,7 @@ const cleanDirectiveText = (text: string): string => {
   const lines = text.split("\n").map((line) => {
     const clauseMatch = CLAUSE_HEADING_RE.exec(line);
     if (clauseMatch) {
-      return clauseMatch[1] ?? "";
+      return clauseMatch.groups?.["title"] ?? "";
     }
     return stripDirectivePrefix(line);
   });
@@ -383,7 +386,7 @@ const prepareOperations = (
 // requiring `severity`/`area`, so old stored approvals can still
 // reach this code with the fields missing. Type narrowing says
 // they're always present; the runtime check is for legacy data.
-/* oxlint-disable typescript/no-unnecessary-condition */
+/* oxlint-disable typescript/no-unnecessary-condition -- legacy stored approvals predate the severity/area schema; runtime fallback for old data */
 const inputOperationSeverity = (
   operation: ToolInputOperation,
 ): FolioAIEditSeverity | "unspecified" => operation.severity ?? "unspecified";
@@ -610,50 +613,6 @@ const queueReviewSuggestions = ({
   return { queuedIds, skipped };
 };
 
-const isApplyActiveDocxEditsInput = (
-  input: unknown,
-): input is ApplyActiveDocxEditsInput =>
-  typeof input === "object" &&
-  input !== null &&
-  "operations" in input &&
-  Array.isArray(input.operations);
-
-const getActiveDocxEditApprovalPart = (
-  messages: PersistedChatMessage[],
-  approvalId: string,
-):
-  | (ActiveDocxEditApprovalPart & { input: ApplyActiveDocxEditsInput })
-  | null => {
-  for (
-    let messageIndex = messages.length - 1;
-    messageIndex >= 0;
-    messageIndex -= 1
-  ) {
-    const message = messages.at(messageIndex);
-    if (!message || message.role !== "assistant") {
-      continue;
-    }
-
-    for (const part of message.parts) {
-      if (part.type !== "tool-apply-active-docx-edits") {
-        continue;
-      }
-
-      if (
-        (part.state === "approval-requested" ||
-          part.state === "approval-responded" ||
-          part.state === "output-denied") &&
-        part.approval.id === approvalId &&
-        isApplyActiveDocxEditsInput(part.input)
-      ) {
-        return part;
-      }
-    }
-  }
-
-  return null;
-};
-
 // No tools are auto-blocked when an active file is present. The
 // prompt already steers the model away from create-document for
 // edit requests on the active file (in favour of
@@ -826,7 +785,7 @@ const FileChatOverlayInner = ({
   const [editorReady, setEditorReady] = useState(() =>
     Boolean(docxEditorRef?.current?.createAIEditSnapshot()),
   );
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (editorReady || !hasDocxEditSurface) {
       return undefined;
     }
@@ -870,6 +829,7 @@ const FileChatOverlayInner = ({
   }, [editorReady, hasDocxEditSurface, docxEditorRef]);
   // Reset readiness when the active file changes — the new doc has
   // its own mount cycle.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id derived state, lift to key prop
   useEffect(() => {
     setEditorReady(false);
   }, [activeFile?.entityId]);
@@ -994,6 +954,10 @@ const FileChatOverlayInner = ({
   const {
     error,
     messages,
+    olderCursor,
+    isLoadingOlder,
+    loadOlder,
+    loadOlderError,
     resendLatestMessage,
     sendMessage,
     queuedMessages,
@@ -1015,9 +979,16 @@ const FileChatOverlayInner = ({
     addToolOutput,
     streamdownComponents,
     approvalPendingMessageId,
-  } = useChatSession({ chat, conversationId: threadRef.threadId, workspaceId });
+  } = useChatSession({
+    chat,
+    conversationId: threadRef.threadId,
+    initialOlderCursor: data.olderCursor,
+    threadRef,
+    workspaceId,
+  });
   const { ensureAIAvailable, openIfAIUnavailable } = useAIKeyGate();
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (open AI-key gate on mount/dep change), move into handler
   useEffect(() => {
     openIfAIUnavailable();
   }, [openIfAIUnavailable]);
@@ -1045,8 +1016,31 @@ const FileChatOverlayInner = ({
     );
   }
 
+  // Check eligibility for suggested prompts using draft state (avoids
+  // unnecessary API calls when user is typing).
+  const lastMessageId = messages.at(-1)?.id ?? null;
+  const lastMessageRole = messages.at(-1)?.role ?? null;
+  const editorIsInitiallyEmpty = useIsChatDraftEmpty(threadRef);
+  const eligibleForSuggestions =
+    editorIsInitiallyEmpty &&
+    !isGenerating &&
+    lastMessageId !== null &&
+    lastMessageRole === "assistant";
+  const { data: suggestedPromptsData } = useQuery(
+    chatThreadSuggestedPromptsOptions({
+      activeOrganizationId,
+      enabled: eligibleForSuggestions,
+      lastMessageId: lastMessageId ?? "",
+      threadRef,
+    }),
+  );
+  const suggestedPrompts = suggestedPromptsData?.prompts ?? [];
+  const suggestedFollowupPrompt = suggestedPrompts.at(0) ?? undefined;
+
   const editorController = useChatEditor({
     placeholder: filePlaceholder,
+    reservedCommands: true,
+    suggestedFollowupPrompt,
     threadRef,
   });
   // Focus the composer when the user explicitly starts a new thread,
@@ -1057,7 +1051,7 @@ const FileChatOverlayInner = ({
   const shouldFocusComposerAfterNewThreadRef = useRef(false);
   const focusController = editorController.focus;
   const editorInstance = editorController.editor;
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (previousChatThreadIdRef.current === chatThreadId) {
       return undefined;
     }
@@ -1138,10 +1132,10 @@ const FileChatOverlayInner = ({
   const threadScrollRef = useRef<HTMLDivElement>(null);
   const hasMessages = messages.length > 0;
   const hasThreadContent = hasMessages || error !== undefined;
-  const lastMessageId = messages.at(-1)?.id ?? null;
   // Auto-open the thread panel as soon as the first message
   // lands so users see streaming without having to click the
   // chevron themselves.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived state (panel openness follows thread content), compute in render
   useEffect(() => {
     if (hasThreadContent) {
       setPanelOpen(true);
@@ -1209,15 +1203,20 @@ const FileChatOverlayInner = ({
               <ChatThreadMessages
                 approvalPendingMessageId={approvalPendingMessageId}
                 error={error}
+                hasOlderMessages={olderCursor !== null}
                 isGenerating={isGenerating}
+                isLoadingOlder={isLoadingOlder}
+                loadOlderError={loadOlderError}
                 messages={messages}
                 onAskUserEditAndRerun={handleAskUserEditAndRerun}
                 onAskUserSubmit={handleAskUserSubmit}
                 onCreateDocumentResolve={handleCreateDocumentResolve}
+                onLoadOlder={loadOlder}
                 onOpenCreatedDocument={handleOpenCreatedDocument}
                 onRemoveQueuedMessage={removeQueuedMessage}
                 onResend={resendLatestMessage}
                 queuedMessages={queuedMessages}
+                scrollContainerRef={threadScrollRef}
                 showThinkingIndicator
                 showToolCallDetails={showToolCallDetails}
                 streamdownComponents={streamdownComponents}
@@ -1232,6 +1231,41 @@ const FileChatOverlayInner = ({
           enabled={false}
           workspaceId={workspaceId ?? threadRef.threadId}
         />
+        {/* Float the chips above the floating composer (matching the bar's
+            centered width) instead of leaving them in normal flow after the
+            full-height viewer; z below the thread panel so the panel wins. */}
+        <div className="absolute start-1/2 bottom-[88px] z-30 flex w-[min(560px,calc(100%-2rem))] -translate-x-1/2 px-1">
+          <SuggestedFollowupChips
+            isGenerating={isGenerating}
+            isEmpty={
+              editorController.isEmpty &&
+              editorController.attachments.length === 0
+            }
+            lastMessageId={messages.at(-1)?.id ?? null}
+            lastMessageRole={messages.at(-1)?.role ?? null}
+            messageCount={messages.length}
+            prompts={suggestedPrompts}
+            onSelect={(prompt) => {
+              // Mirror the PromptBar send guard: when an editable DOCX's edit
+              // snapshot isn't ready, block the chip send too so the model
+              // never sees a follow-up without current edit context.
+              if (!canSubmitWithCurrentDocxSnapshot()) {
+                return;
+              }
+              editorController.setContent(prompt);
+              void editorController.submit(async (draft) => {
+                if (!(await ensureAIAvailable())) {
+                  return;
+                }
+                // Pop the thread open on send (mirrors the PromptBar submit
+                // path) so a chip sent while the thread is collapsed still
+                // streams the reply into view.
+                setPanelOpen(true);
+                await sendMessage({ text: draft.html });
+              });
+            }}
+          />
+        </div>
         <PromptBar
           attentionPulseSeq={attentionPulseSeq}
           canSubmitNow={canSubmitWithCurrentDocxSnapshot}
@@ -1240,15 +1274,22 @@ const FileChatOverlayInner = ({
             (activeFile || activeExternal) && filePlaceholderAction ? (
               <span className="text-foreground-ghost flex min-w-0 items-center gap-1.5 text-[13px] leading-5">
                 <span className="shrink-0">{filePlaceholderAction}</span>
-                <span className="text-foreground-label max-w-64 truncate">
+                <BidiText
+                  as="span"
+                  className="text-foreground-label max-w-64 truncate"
+                >
                   {activeFile?.fileName ?? activeExternal?.title}
-                </span>
+                </BidiText>
               </span>
             ) : undefined
           }
           layout="floating"
           newThreadLabel={t("chat.newChat")}
           onNewThread={() => {
+            // Abort any live stream first: the rotation remount only
+            // swaps the surface, while the old Chat instance would
+            // keep streaming inside the query cache.
+            void stop();
             shouldFocusComposerAfterNewThreadRef.current = true;
             setPanelOpen(false);
             onNewThread();
@@ -1257,6 +1298,23 @@ const FileChatOverlayInner = ({
             void stop();
           }}
           onSubmit={({ prompt }) => {
+            const reservedCommand = matchReservedChatCommand(prompt);
+            if (reservedCommand?.id === "new") {
+              // Mirror the New Chat button: abort any live stream before
+              // rotating, or the old Chat keeps streaming in the query cache.
+              void stop();
+              shouldFocusComposerAfterNewThreadRef.current = true;
+              setPanelOpen(false);
+              onNewThread();
+              editorController.setContent("");
+              return;
+            }
+            if (reservedCommand?.id === "model") {
+              editorController.setContent("");
+              useModelSelectorStore.getState().open();
+              return;
+            }
+
             void ensureAIAvailable().then((available) => {
               if (!available) {
                 return;

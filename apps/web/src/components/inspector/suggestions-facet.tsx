@@ -15,12 +15,12 @@
  * registered and let the parent route to the DOCX main view, where
  * the editor is mounted by default and Accept actually works.
  *
- * TODO: replace this hop with a lightweight in-app approval flow
- * (apply/reject without needing the full editor mounted) so the
- * sidepeek doesn't have to context-switch.
+ * Replace this hop with a lightweight in-app approval flow (apply/reject
+ * without needing the full editor mounted) once sidepeek can edit DOCX
+ * suggestions without context-switching.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
 
 import { useShallow } from "zustand/react/shallow";
 
@@ -55,12 +55,9 @@ export const SuggestionsFacet = ({
   // can no-op on.
   const fallbackEditorRef = useRef<DocxEditorRef | null>(null);
 
-  // Latch the latest callback so the effect dep list can stay
-  // narrow (`[registration]`) — the callback ref doesn't drive
-  // re-runs and the parent passing a new function on every render
-  // can't loop us.
-  const onMissingEditorRef = useRef(onMissingEditor);
-  onMissingEditorRef.current = onMissingEditor;
+  const dispatchMissingEditor = useEffectEvent(() => {
+    onMissingEditor?.();
+  });
   // Latch the dispatch itself: once we've kicked the caller for a
   // missing editor, don't ask again until either this facet
   // unmounts or a registration appears. Without this guard the
@@ -83,10 +80,12 @@ export const SuggestionsFacet = ({
   // entity changes so a previous entity's "already redirected"
   // state doesn't suppress the redirect for the new one. Per
   // Codex review on PR #80.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id ref latch; can't key/remount: the inspector reuses this instance across entities by swapping entityId in place (see comment above), so a key would discard the live editor/registration state
   useEffect(() => {
     hasDispatchedRef.current = false;
   }, [entityId]);
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay dispatch of onMissingEditor callback; move into handler/derived guard
   useEffect(() => {
     if (registration !== undefined) {
       hasDispatchedRef.current = false;
@@ -95,8 +94,7 @@ export const SuggestionsFacet = ({
     if (hasDispatchedRef.current) {
       return;
     }
-    const dispatch = onMissingEditorRef.current;
-    if (!dispatch) {
+    if (!hasOnMissingEditor) {
       // No callback (this tab isn't active). Don't latch — when
       // the tab becomes active later, the callback appears and
       // `hasOnMissingEditor` flipping triggers a re-run that
@@ -105,7 +103,7 @@ export const SuggestionsFacet = ({
       return;
     }
     hasDispatchedRef.current = true;
-    dispatch();
+    dispatchMissingEditor();
   }, [registration, hasOnMissingEditor, entityId]);
 
   return (

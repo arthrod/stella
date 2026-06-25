@@ -168,15 +168,19 @@ const BulkTrigger = ({ triggerVariant }: BulkTriggerProps) => {
       <DialogTrigger
         render={
           <Button
+            aria-label={t("workspaces.properties.newColumn")}
             className="text-muted-foreground hover:bg-accent gap-1 px-2 font-normal"
             size="xs"
+            title={t("workspaces.properties.newColumn")}
             type="button"
             variant="ghost"
           />
         }
       >
         <PlusIcon className="size-3" />
-        {t("workspaces.properties.newColumn")}
+        <span className="hidden sm:inline">
+          {t("workspaces.properties.newColumn")}
+        </span>
       </DialogTrigger>
     );
   }
@@ -432,7 +436,7 @@ const DraftCard = ({
     }),
     // The editor reads `state.value` only on init; subsequent updates
     // flow through `handleChange`, so a stable handle is fine.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- draft.prompt/onChange intentionally excluded; the editor reads state.value only on init, so the handle must stay stable across keystrokes
     [draft.id],
   );
 

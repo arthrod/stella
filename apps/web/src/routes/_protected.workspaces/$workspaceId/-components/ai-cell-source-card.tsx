@@ -1,5 +1,6 @@
-import { useLocale, useTranslations } from "use-intl";
+import { useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import {
   PreviewCard,
   PreviewCardPopup,
@@ -80,7 +81,9 @@ export const AICellSourceCard = ({
                 kind="document"
                 mimeType={primaryFile.mimeType}
               />
-              <span className="truncate">{primaryFile.fileName}</span>
+              <BidiText as="span" className="truncate">
+                {primaryFile.fileName}
+              </BidiText>
               {sourceFiles.length > 1 && (
                 <span className="text-muted-foreground shrink-0">
                   +{sourceFiles.length - 1}
@@ -147,14 +150,13 @@ const CellFlagProvenanceRow = ({
   provenance,
 }: CellFlagProvenanceRowProps) => {
   const getFlagLabel = useFlagLabel();
-  const locale = useLocale();
   const flag = cellFlagsById.get(flagId);
   if (!flag) {
     return null;
   }
   const Icon = flag.icon;
   const relativeTime = provenance
-    ? formatRelativeTime(provenance.addedAt, locale)
+    ? formatRelativeTime(provenance.addedAt)
     : null;
 
   return (

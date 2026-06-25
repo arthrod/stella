@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -54,9 +54,9 @@ jobs:
         run: bash scripts/check-migrations.sh
 
   apply-fresh:
-    # Validates that `drizzle-kit migrate` can apply every migration end-to-end
-    # against an empty Postgres. Catches: missing `_journal.json`, ordering bugs,
-    # syntax errors, and any migration that would crash on a real DB.
+    # Validates that the shipped migrate entrypoint can apply every migration
+    # end-to-end against an empty Postgres. Catches: ordering bugs, syntax
+    # errors, and any migration that would crash on a real DB.
     if: github.event.pull_request.draft != true || github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -89,7 +89,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
@@ -109,7 +109,9 @@ jobs:
         working-directory: apps/api
         env:
           DATABASE_URL: postgres://stella:stella@127.0.0.1:5432/stella
-        run: bun --bun drizzle-kit migrate
+        # Exercises the shipped migrate path (Bun SQL + drizzle migrator),
+        # the same entrypoint the deploy runs, not the drizzle-kit CLI.
+        run: bun run src/db/migrate.ts
 
       - name: Verify schema parity with schema.ts
         working-directory: apps/api

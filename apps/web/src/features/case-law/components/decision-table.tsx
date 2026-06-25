@@ -1,17 +1,111 @@
-import { useMemo } from "react";
-
 import { Link } from "@tanstack/react-router";
-import {
-  createColumnHelper,
-  createCoreRowModel,
-  flexRender,
-  tableFeatures,
-  useTable,
-} from "@tanstack/react-table";
-import type { CellContext } from "@tanstack/react-table";
 import { useFormatter, useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
+import { Skeleton } from "@stll/ui/components/skeleton";
+
 import { createCaseLawDecisionRouteParams } from "@/lib/case-law-route";
+
+// Stable keys so loading rows never fall back to array-index keys.
+const SKELETON_ROW_KEYS = ["a", "b", "c", "d", "e", "f", "g", "h"] as const;
+const SKELETON_CELL_KEYS = [
+  "caseNumber",
+  "court",
+  "country",
+  "date",
+  "type",
+] as const;
+
+export const DecisionTable = ({ decisions, isLoading }: DecisionTableProps) => {
+  const t = useTranslations();
+  const format = useFormatter();
+
+  if (!isLoading && decisions.length === 0) {
+    return (
+      <p className="text-muted-foreground py-8 text-center text-sm">
+        {t("caseLaw.emptyState")}
+      </p>
+    );
+  }
+
+  return (
+    <div className="border-border/45 bg-background/60 overflow-hidden rounded-md border">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-border/45 bg-muted/35 border-b">
+              <th
+                className="text-muted-foreground px-4 py-2 text-start font-medium"
+                scope="col"
+              >
+                {t("caseLaw.columns.caseNumber")}
+              </th>
+              <th
+                className="text-muted-foreground px-4 py-2 text-start font-medium"
+                scope="col"
+              >
+                {t("caseLaw.columns.court")}
+              </th>
+              <th
+                className="text-muted-foreground px-4 py-2 text-start font-medium"
+                scope="col"
+              >
+                {t("common.country")}
+              </th>
+              <th
+                className="text-muted-foreground px-4 py-2 text-start font-medium"
+                scope="col"
+              >
+                {t("common.date")}
+              </th>
+              <th
+                className="text-muted-foreground px-4 py-2 text-start font-medium"
+                scope="col"
+              >
+                {t("common.type")}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {isLoading
+              ? SKELETON_ROW_KEYS.map((rowKey) => (
+                  <tr
+                    className="border-border/35 border-b last:border-b-0"
+                    key={rowKey}
+                  >
+                    {SKELETON_CELL_KEYS.map((cellKey) => (
+                      <td className="px-4 py-2" key={cellKey}>
+                        <Skeleton className="h-4 w-3/5" />
+                      </td>
+                    ))}
+                  </tr>
+                ))
+              : decisions.map((decision) => (
+                  <tr
+                    className="border-border/35 hover:bg-muted/30 border-b last:border-b-0"
+                    key={decision.id}
+                  >
+                    <td className="px-4 py-2">
+                      {renderCaseNumberCell(decision)}
+                    </td>
+                    <td className="px-4 py-2">{decision.court}</td>
+                    <td className="px-4 py-2">
+                      {renderCountryCell(decision.country)}
+                    </td>
+                    <td className="px-4 py-2">
+                      {formatDecisionDate(decision.decisionDate, format)}
+                    </td>
+                    <td className="px-4 py-2">
+                      {decision.decisionType ?? "\u2014"}
+                    </td>
+                  </tr>
+                ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
 
 export type Decision = {
   id: string;
@@ -35,34 +129,22 @@ type DecisionTableProps = {
   isLoading: boolean;
 };
 
-// Static table: no optional sorting, filtering, pagination, or selection APIs.
-const decisionTableFeatures = tableFeatures({});
-type DecisionFeatures = typeof decisionTableFeatures;
-type DecisionCellContext<TValue> = CellContext<
-  DecisionFeatures,
-  Decision,
-  TValue
->;
+type IntlFormatter = ReturnType<typeof useFormatter>;
 
-const columnHelper = createColumnHelper<DecisionFeatures, Decision>();
-
-const renderCaseNumberCell = (info: DecisionCellContext<string>) => {
+const renderCaseNumberCell = (decision: Decision) => {
   const {
+    caseNumber,
     country,
     court,
-    decisionDate,
     headline,
-    id,
     language,
     languageAlternateCount,
     slug,
-  } = info.row.original;
+  } = decision;
   const routeParams = createCaseLawDecisionRouteParams({
-    caseNumber: info.getValue(),
+    caseNumber,
     country,
     court,
-    decisionDate,
-    decisionId: id,
     language,
     languageAlternateCount,
     slug,
@@ -76,13 +158,12 @@ const renderCaseNumberCell = (info: DecisionCellContext<string>) => {
           params={{
             country: routeParams.country,
             court: routeParams.court,
-            date: routeParams.date,
             language: routeParams.language,
             slug: routeParams.slug,
           }}
-          to="/law/$country/cases/$court/$date/$language/$slug"
+          to="/law/$country/cases/$court/$language/$slug"
         >
-          {info.getValue()}
+          <BidiText>{caseNumber}</BidiText>
         </Link>
       ) : (
         <Link
@@ -90,138 +171,43 @@ const renderCaseNumberCell = (info: DecisionCellContext<string>) => {
           params={{
             country: routeParams.country,
             court: routeParams.court,
-            date: routeParams.date,
             slug: routeParams.slug,
           }}
-          to="/law/$country/cases/$court/$date/$slug"
+          to="/law/$country/cases/$court/$slug"
         >
-          {info.getValue()}
+          <BidiText>{caseNumber}</BidiText>
         </Link>
       )}
       {headline && (
         <p
           className="text-muted-foreground [&_mark]:text-foreground [&_mark]:bg-warning/30 dark:[&_mark]:bg-warning/20 mt-0.5 line-clamp-2 text-xs [&_mark]:font-medium"
-          dangerouslySetInnerHTML={{ __html: headline }}
+          dangerouslySetInnerHTML={{
+            // safe-html: server-escaped + <mark>-highlighted by escapeAndHighlight() in the case-law decisions search handler
+            __html: headline,
+          }}
         />
       )}
     </div>
   );
 };
 
-const renderCountryCell = (info: DecisionCellContext<string>) => (
-  <span className="bg-muted rounded px-1.5 py-0.5 text-xs">
-    {info.getValue()}
-  </span>
+const renderCountryCell = (country: string) => (
+  <span className="bg-muted rounded px-1.5 py-0.5 text-xs">{country}</span>
 );
 
-export const DecisionTable = ({ decisions, isLoading }: DecisionTableProps) => {
-  const t = useTranslations();
-  const format = useFormatter();
-
-  const columns = useMemo(
-    () =>
-      // Preserve each column's inferred value type while returning one column array.
-      columnHelper.columns([
-        columnHelper.accessor("caseNumber", {
-          header: t("caseLaw.columns.caseNumber"),
-          cell: renderCaseNumberCell,
-        }),
-        columnHelper.accessor("court", {
-          header: t("caseLaw.columns.court"),
-        }),
-        columnHelper.accessor("country", {
-          header: t("common.country"),
-          cell: renderCountryCell,
-        }),
-        columnHelper.accessor("decisionDate", {
-          header: t("common.date"),
-          cell: (info) => {
-            const value = info.getValue();
-            if (value === null) {
-              return "\u2014";
-            }
-            const date = value instanceof Date ? value : new Date(value);
-            if (Number.isNaN(date.getTime())) {
-              return "\u2014";
-            }
-            return format.dateTime(date, {
-              dateStyle: "medium",
-              timeZone: "UTC",
-            });
-          },
-        }),
-        columnHelper.accessor("decisionType", {
-          header: t("common.type"),
-          cell: (info) => info.getValue() ?? "—",
-        }),
-      ]),
-    [t, format],
-  );
-
-  const table = useTable({
-    features: decisionTableFeatures,
-    rowModels: { coreRowModel: createCoreRowModel() },
-    data: decisions,
-    columns,
-    getRowId: (row) => row.id,
+const formatDecisionDate = (
+  value: Decision["decisionDate"],
+  format: IntlFormatter,
+): string => {
+  if (value === null) {
+    return "\u2014";
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "\u2014";
+  }
+  return format.dateTime(date, {
+    dateStyle: "medium",
+    timeZone: "UTC",
   });
-
-  if (isLoading) {
-    return (
-      <p className="text-muted-foreground py-8 text-center text-sm">
-        {t("caseLaw.loading")}
-      </p>
-    );
-  }
-
-  if (decisions.length === 0) {
-    return (
-      <p className="text-muted-foreground py-8 text-center text-sm">
-        {t("caseLaw.emptyState")}
-      </p>
-    );
-  }
-
-  return (
-    <div className="border-border/45 bg-background/60 overflow-hidden rounded-md border">
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            {table.getHeaderGroups().map((headerGroup) => (
-              <tr
-                className="border-border/45 bg-muted/35 border-b"
-                key={headerGroup.id}
-              >
-                {headerGroup.headers.map((header) => (
-                  <th
-                    className="text-muted-foreground px-4 py-2 text-start font-medium"
-                    key={header.id}
-                  >
-                    {flexRender(
-                      header.column.columnDef.header,
-                      header.getContext(),
-                    )}
-                  </th>
-                ))}
-              </tr>
-            ))}
-          </thead>
-          <tbody>
-            {table.getRowModel().rows.map((row) => (
-              <tr
-                className="border-border/35 hover:bg-muted/30 border-b last:border-b-0"
-                key={row.id}
-              >
-                {row.getAllCells().map((cell) => (
-                  <td className="px-4 py-2" key={cell.id}>
-                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
 };

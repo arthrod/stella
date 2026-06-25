@@ -68,7 +68,7 @@ jobs:
       # The pinned-SHA checkout further down then re-checks out
       # the release commit for everything else.
       - name: Checkout workflow scripts
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           sparse-checkout: scripts
@@ -168,7 +168,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           # Pin to the resolved commit SHA to eliminate tag/branch
           # ref ambiguity. The tag name is preserved in
@@ -264,7 +264,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           # Pinned to the SHA resolved by the resolve job; never to
           # the bare tag name. See resolve job for rationale.
@@ -599,7 +599,7 @@ jobs:
       id-token: write   # OIDC for AWS S3 + CloudFront
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           # Pinned to the SHA resolved by the resolve job; never to
           # the bare tag name. See resolve job for rationale.
@@ -624,6 +624,20 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_DEPLOY }}
           aws-region: ${{ vars.AWS_REGION }}
+
+      # Register the bucket and distribution id (and the account id the
+      # bucket name embeds) as masked values so they render as *** in the
+      # public job log instead of plaintext. These are repo variables, which
+      # GitHub does not mask automatically the way it does secrets.
+      - name: Mask downloads CDN identifiers in logs
+        env:
+          BUCKET: ${{ vars.DOWNLOADS_BUCKET }}
+          DIST_ID: ${{ vars.DOWNLOADS_DIST_ID }}
+        run: |
+          echo "::add-mask::$BUCKET"
+          echo "::add-mask::$DIST_ID"
+          account_id="$(printf '%s' "$BUCKET" | grep -oE '[0-9]{12}' | head -n1 || true)"
+          [ -n "$account_id" ] && echo "::add-mask::$account_id"
 
       - name: Mirror latest.json to downloads CDN
         env:

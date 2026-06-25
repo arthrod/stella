@@ -30,12 +30,13 @@ import type {
   MoveToRangeStart,
   ParagraphPropertyChange,
   TabStop,
-  BorderSpec,
   ShadingProperties,
   TextFormatting,
   TrackedChangeInfo,
 } from "../../types/document";
-// oxlint-disable-next-line import/no-cycle
+import { numPrEqual } from "../numberingParser";
+import { serializeBorder } from "./borderSerializer";
+// oxlint-disable-next-line import/no-cycle -- OOXML model is mutually recursive: paragraphs hold runs, shape-textbox runs hold paragraphs
 import { serializeRun, serializeTextFormatting } from "./runSerializer";
 import { serializeSectionProperties } from "./sectionPropertiesSerializer";
 import { escapeXml, intAttr } from "./xmlUtils";
@@ -43,59 +44,6 @@ import { escapeXml, intAttr } from "./xmlUtils";
 // ============================================================================
 // BORDER SERIALIZATION
 // ============================================================================
-
-/**
- * Serialize a single border element
- */
-function serializeBorder(
-  border: BorderSpec | undefined,
-  elementName: string,
-): string {
-  if (!border || border.style === "none" || border.style === "nil") {
-    return "";
-  }
-
-  const attrs: string[] = [`w:val="${border.style}"`];
-
-  if (border.size !== undefined) {
-    attrs.push(`w:sz="${intAttr(border.size)}"`);
-  }
-
-  if (border.space !== undefined) {
-    attrs.push(`w:space="${intAttr(border.space)}"`);
-  }
-
-  // Color
-  if (border.color) {
-    if (border.color.auto) {
-      attrs.push('w:color="auto"');
-    } else if (border.color.rgb) {
-      attrs.push(`w:color="${border.color.rgb}"`);
-    }
-
-    if (border.color.themeColor) {
-      attrs.push(`w:themeColor="${border.color.themeColor}"`);
-    }
-
-    if (border.color.themeTint) {
-      attrs.push(`w:themeTint="${border.color.themeTint}"`);
-    }
-
-    if (border.color.themeShade) {
-      attrs.push(`w:themeShade="${border.color.themeShade}"`);
-    }
-  }
-
-  if (border.shadow) {
-    attrs.push('w:shadow="true"');
-  }
-
-  if (border.frame) {
-    attrs.push('w:frame="true"');
-  }
-
-  return `<w:${elementName} ${attrs.join(" ")}/>`;
-}
 
 /**
  * Serialize paragraph borders (w:pBdr)
@@ -267,12 +215,16 @@ function serializeSpacing(formatting: ParagraphFormatting): string {
     attrs.push(`w:lineRule="${formatting.lineSpacingRule}"`);
   }
 
-  if (formatting.beforeAutospacing) {
-    attrs.push('w:beforeAutospacing="1"');
+  if (formatting.beforeAutospacing !== undefined) {
+    attrs.push(
+      `w:beforeAutospacing="${formatting.beforeAutospacing ? "1" : "0"}"`,
+    );
   }
 
-  if (formatting.afterAutospacing) {
-    attrs.push('w:afterAutospacing="1"');
+  if (formatting.afterAutospacing !== undefined) {
+    attrs.push(
+      `w:afterAutospacing="${formatting.afterAutospacing ? "1" : "0"}"`,
+    );
   }
 
   if (attrs.length === 0) {
@@ -463,8 +415,18 @@ export function serializeParagraphFormatting(
     // Widow control
     pushToggle("widowControl", formatting.widowControl);
 
-    // Numbering
-    const numPrXml = serializeNumbering(formatting.numPr);
+    // Numbering. Skip numPr that still equals its style-sourced value (see
+    // ParagraphFormatting.numPrFromStyle) — the parser materialized it from
+    // the style and writing it back as direct formatting would flip Word's
+    // level-indent precedence on the saved file. Guards the direct
+    // serialize-a-parsed-Document path; the PM save path already drops it
+    // in fromProseDoc.
+    const styleSourcedNumPr =
+      formatting.numPrFromStyle != null &&
+      numPrEqual(formatting.numPr, formatting.numPrFromStyle);
+    const numPrXml = styleSourcedNumPr
+      ? ""
+      : serializeNumbering(formatting.numPr);
     if (numPrXml) {
       parts.push(numPrXml);
     }
@@ -748,8 +710,10 @@ function serializeComplexField(field: ComplexField): string {
 
   // Extract formatting from the first result run to apply to structural runs
   // (begin/separate/end). OOXML consumers expect consistent formatting across
-  // all runs in a complex field.
-  const resultFormatting = field.fieldResult[0]?.formatting;
+  // all runs in a complex field. Fall back to the field's captured run
+  // formatting when there is no result run, so a collapsed PAGE field's
+  // `w:rPr` (size/color) survives the round-trip (eigenpal/docx-editor#909).
+  const resultFormatting = field.fieldResult[0]?.formatting ?? field.formatting;
   const rPrXml = resultFormatting
     ? serializeTextFormatting(resultFormatting)
     : "";

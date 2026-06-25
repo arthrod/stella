@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import {
   CheckIcon,
@@ -28,12 +28,14 @@ import {
   PopoverPopup,
   PopoverTrigger,
 } from "@stll/ui/components/popover";
+import { TextSeparator } from "@stll/ui/components/separator";
 import { cn } from "@stll/ui/lib/utils";
 
 import {
   CatalogueRow,
   type CatalogueRowDisplay,
 } from "@/components/catalogue/catalogue-row";
+import { nativeToolLabelKey } from "@/components/catalogue/native-tool-label";
 import type { ContextMenuAction } from "@/components/context-menu";
 import type { PracticeJurisdiction } from "@/lib/jurisdictions";
 import {
@@ -43,6 +45,7 @@ import {
 
 const toRowDisplay = (entry: LoadedCatalogueEntry): CatalogueRowDisplay => ({
   slug: entry.slug,
+  kind: entry.kind,
   displayName: entry.displayName,
   description: entry.description,
   author: entry.author,
@@ -108,69 +111,46 @@ export const CatalogueStep = ({
     },
   );
 
-  const entries = useMemo(
-    () =>
-      loadCatalogue().filter((entry) =>
-        isCatalogueEntryAvailableDuringOnboarding(entry, {
-          unavailableNativeToolBackendSlugs,
-        }),
-      ),
-    [unavailableNativeToolBackendSlugs],
+  const entries = loadCatalogue().filter((entry) =>
+    isCatalogueEntryAvailableDuringOnboarding(entry, {
+      unavailableNativeToolBackendSlugs,
+    }),
   );
-  const selectableEntries = useMemo(
-    () =>
-      entries.filter(
-        (entry) =>
-          entry.kind !== "native-tool" ||
-          isToggleableNativeToolBackendSlug(entry.backendSlug),
-      ),
-    [entries],
+  const selectableEntries = entries.filter(
+    (entry) =>
+      entry.kind !== "native-tool" ||
+      isToggleableNativeToolBackendSlug(entry.backendSlug),
   );
-  const pinnedEntries = useMemo(
-    () =>
-      entries.filter((entry) => entry.kind === "native-tool" && entry.pinned),
-    [entries],
+  const pinnedEntries = entries.filter(
+    (entry) => entry.kind === "native-tool" && entry.pinned,
   );
-  const pinnedSlugSet = useMemo(
-    () => new Set(pinnedEntries.map((entry) => entry.slug)),
-    [pinnedEntries],
-  );
+  const pinnedSlugSet = new Set(pinnedEntries.map((entry) => entry.slug));
 
-  const practiceCountryCodes = useMemo(
-    () =>
-      new Set(
-        practiceJurisdictions.map((jurisdiction) =>
-          jurisdiction.countryCode.toUpperCase(),
-        ),
-      ),
-    [practiceJurisdictions],
+  const practiceCountryCodes = new Set(
+    practiceJurisdictions.map((jurisdiction) =>
+      jurisdiction.countryCode.toUpperCase(),
+    ),
   );
-  const recommendedSet = useMemo(
-    () => recommendedSlugsForJurisdictions(practiceCountryCodes),
-    [practiceCountryCodes],
-  );
-  const selectedSet = useMemo(() => new Set(selectedSlugs), [selectedSlugs]);
+  const recommendedSet = recommendedSlugsForJurisdictions(practiceCountryCodes);
+  const selectedSet = new Set(selectedSlugs);
 
-  const recommendedEntries = useMemo(
-    () =>
-      selectableEntries
-        .filter(
-          (entry) =>
-            recommendedSet.has(entry.slug) && !pinnedSlugSet.has(entry.slug),
-        )
-        .sort((left, right) =>
-          left.displayName.localeCompare(right.displayName),
-        ),
-    [selectableEntries, recommendedSet, pinnedSlugSet],
-  );
+  const localizedName = (entry: LoadedCatalogueEntry) => {
+    const key = nativeToolLabelKey({ slug: entry.slug, kind: entry.kind });
+    return key ? t(key) : entry.displayName;
+  };
 
-  const otherEntries = useMemo(
-    () =>
-      selectableEntries.filter(
-        (entry) =>
-          !recommendedSet.has(entry.slug) && !pinnedSlugSet.has(entry.slug),
-      ),
-    [selectableEntries, recommendedSet, pinnedSlugSet],
+  const recommendedEntries = selectableEntries
+    .filter(
+      (entry) =>
+        recommendedSet.has(entry.slug) && !pinnedSlugSet.has(entry.slug),
+    )
+    .sort((left, right) =>
+      localizedName(left).localeCompare(localizedName(right)),
+    );
+
+  const otherEntries = selectableEntries.filter(
+    (entry) =>
+      !recommendedSet.has(entry.slug) && !pinnedSlugSet.has(entry.slug),
   );
 
   const matchesSearch = (entry: LoadedCatalogueEntry) => {
@@ -191,6 +171,7 @@ export const CatalogueStep = ({
     }
     return (
       entry.displayName.toLowerCase().includes(normalised) ||
+      localizedName(entry).toLowerCase().includes(normalised) ||
       entry.description.toLowerCase().includes(normalised) ||
       entry.tags.some((tag) => tag.toLowerCase().includes(normalised))
     );
@@ -200,18 +181,13 @@ export const CatalogueStep = ({
   // jurisdiction filters. Recommended entries are no longer in a
   // separate section — they're just regular entries in this list, and
   // "Vybrat vše doporučené" bulk-adds the ones in `recommendedSet`.
-  const filteredEntries = useMemo(
-    () =>
-      [...recommendedEntries, ...otherEntries]
-        .filter(matchesSearch)
-        .sort((left, right) =>
-          left.displayName.localeCompare(right.displayName),
-        ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [recommendedEntries, otherEntries, query, jurisdictionFilter],
-  );
+  const filteredEntries = [...recommendedEntries, ...otherEntries]
+    .filter(matchesSearch)
+    .sort((left, right) =>
+      localizedName(left).localeCompare(localizedName(right)),
+    );
 
-  const allJurisdictionCodes = useMemo(() => {
+  const allJurisdictionCodes = (() => {
     const set = new Set<string>();
     for (const entry of [...recommendedEntries, ...otherEntries]) {
       for (const code of entry.jurisdictions) {
@@ -219,7 +195,7 @@ export const CatalogueStep = ({
       }
     }
     return [...set].sort();
-  }, [recommendedEntries, otherEntries]);
+  })();
 
   // Clicking a row focuses it on the left and surfaces the iOS
   // Privacy-Nutritional-Label-style detail panel on the right. The
@@ -238,6 +214,7 @@ export const CatalogueStep = ({
   // acknowledgement via the detail panel and are never auto-added.
   // Explicit removals are tracked by the parent wizard so remounting
   // this step cannot re-add a recommendation the user removed.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reconciles recommended-entry auto-selection up to the parent whenever recommendedEntries (driven by async deploy-availability), selectedSlugs, or removedSlugs change; no single event to relocate into and a mount-only effect would miss the async availability update
   useEffect(() => {
     const autoSelectionPlan = createCatalogueAutoSelectionPlan({
       recommendedEntries,
@@ -442,13 +419,12 @@ export const CatalogueStep = ({
               filteredEntries.some((entry) =>
                 recommendedSet.has(entry.slug),
               ) && (
-                <div className="my-2 flex items-center gap-3">
-                  <div className="bg-border h-px flex-1" />
-                  <span className="text-muted-foreground text-[10px] font-medium tracking-wider uppercase">
-                    {t("onboarding.catalogueCommunityHeading")}
-                  </span>
-                  <div className="bg-border h-px flex-1" />
-                </div>
+                <TextSeparator
+                  className="my-2"
+                  labelClassName="text-[10px] font-medium tracking-wider uppercase"
+                >
+                  {t("onboarding.catalogueCommunityHeading")}
+                </TextSeparator>
               )}
             {filteredEntries
               .filter((entry) => !recommendedSet.has(entry.slug))

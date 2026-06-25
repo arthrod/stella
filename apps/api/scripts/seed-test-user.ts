@@ -21,7 +21,7 @@
 import { panic } from "better-result";
 import { and, eq, inArray } from "drizzle-orm";
 import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import path from "node:path";
 
 import { member, organization, session, user } from "@/api/db/auth-schema";
 import { rootDb } from "@/api/db/root";
@@ -172,6 +172,7 @@ export async function ensureSeedColleagueUsers({
   colleagueCount?: number;
 } = {}) {
   for (const colleague of getSeedColleagues(colleagueCount)) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential seeding preserves insert order across colleague users
     await ensureUserExists(colleague);
   }
 }
@@ -186,6 +187,7 @@ export async function ensureSeedColleaguesInOrganization({
   await ensureSeedColleagueUsers({ colleagueCount });
 
   for (const colleague of getSeedColleagues(colleagueCount)) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential seeding preserves FK dependencies (memberships need users to exist)
     await ensureMembershipExists({
       organizationId,
       userId: colleague.id,
@@ -239,6 +241,7 @@ export async function ensureTestUsers(organizationId: string = TEST_ORG.id) {
   await ensureSeedColleagueUsers();
 
   for (const colleague of COLLEAGUES) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential seeding preserves FK dependencies (memberships need users to exist)
     await ensureMembershipExists({
       organizationId,
       userId: colleague.id,
@@ -346,10 +349,10 @@ async function seed() {
     origins: [],
   };
 
-  const outDir = resolve(import.meta.dir, "../../../.playwright");
+  const outDir = path.resolve(import.meta.dir, "../../../.playwright");
   mkdirSync(outDir, { recursive: true });
 
-  const outPath = resolve(outDir, "storage-state.json");
+  const outPath = path.resolve(outDir, "storage-state.json");
   await Bun.write(outPath, JSON.stringify(storageState, null, 2));
   console.log("Wrote storage state to:", outPath);
 

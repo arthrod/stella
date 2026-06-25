@@ -25,6 +25,10 @@ import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
+import {
+  remapDependencyRefs,
+  remapNodePropertyIds,
+} from "@/api/lib/conditions/ast-utils";
 import { allocateEntityStamp } from "@/api/lib/document-counter";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { escapeLike } from "@/api/lib/escape-like";
@@ -39,6 +43,7 @@ import { getS3 } from "@/api/lib/s3";
 import { upsertWorkspaceSearchDocument } from "@/api/lib/search/index-global";
 import { processExtraction } from "@/api/lib/search/process-extraction";
 import type { ViewLayout } from "@/api/lib/views-schema";
+import { parseViewLayout } from "@/api/lib/views-schema";
 import { PDF_MIME_TYPE } from "@/api/mime-types";
 
 const config = {
@@ -62,18 +67,13 @@ const remapPropertyId = (
 ) => propertyIdMap.get(propertyId) ?? propertyId;
 
 const remapLayout = (
-  layout: ViewLayout,
+  storedLayout: unknown,
   propertyIdMap: Map<string, SafeId<"property">>,
 ): ViewLayout => {
-  const remapFilters = layout.filters.map((filter) => {
-    if (filter.field !== "property") {
-      return filter;
-    }
-    return {
-      ...filter,
-      propertyId: remapPropertyId(filter.propertyId, propertyIdMap),
-    };
-  });
+  const layout = parseViewLayout(storedLayout);
+  const remapFilters = layout.filters.map((node) =>
+    remapNodePropertyIds(node, (id) => remapPropertyId(id, propertyIdMap)),
+  );
   const remapSorts = layout.sorts.map((sort) => ({
     ...sort,
     propertyId: remapPropertyId(sort.propertyId, propertyIdMap),
@@ -96,6 +96,13 @@ const remapLayout = (
       columnPinning: base.columnPinning.map((id) =>
         remapPropertyId(id, propertyIdMap),
       ),
+      // A grouped table carries a groupByPropertyId; remap it like kanban so a
+      // duplicated grouped table doesn't point at the source workspace's
+      // property. Built-in groupings (_kind, _status) aren't in the map and pass
+      // through unchanged.
+      groupByPropertyId: base.groupByPropertyId
+        ? remapPropertyId(base.groupByPropertyId, propertyIdMap)
+        : undefined,
     };
   }
 
@@ -308,6 +315,7 @@ const copyWorkspaceFiles = async ({
         return;
       }
 
+      // oxlint-disable-next-line no-await-in-loop -- worker drains the shared queue sequentially; bounded concurrency comes from running multiple copyNext workers
       const key = await copyWorkspaceFile({
         copy,
         organizationId,
@@ -395,20 +403,26 @@ const duplicateWorkspace = createSafeHandler(
           tx.query.properties.findMany({
             where: { workspaceId: { eq: sourceWorkspaceId } },
             orderBy: { createdAt: "asc" },
+            limit: LIMITS.propertiesCount,
           }),
+          // SAFETY: one workspace's property dependencies, bounded by propertiesCount² via the unique (propertyId, dependsOnPropertyId) index
+          // eslint-disable-next-line require-query-limit/require-query-limit
           tx.query.propertyDependencies.findMany({
             where: { workspaceId: { eq: sourceWorkspaceId } },
           }),
           tx.query.workspaceViews.findMany({
             where: { workspaceId: { eq: sourceWorkspaceId } },
             orderBy: { position: "asc" },
+            limit: LIMITS.viewsCount,
           }),
           tx.query.workspaceMembers.findMany({
             where: { workspaceId: { eq: sourceWorkspaceId } },
             columns: { userId: true },
+            limit: LIMITS.workspaceMembersCount,
           }),
           tx.query.workspaceContacts.findMany({
             where: { workspaceId: { eq: sourceWorkspaceId } },
+            limit: LIMITS.workspaceContactsCount,
           }),
           includeContent
             ? tx.query.entities.findMany({
@@ -634,18 +648,24 @@ const duplicateWorkspace = createSafeHandler(
       const newDependencies = snapshot.dependencies
         .map((dependency) => {
           const propertyId = propertyIdMap.get(dependency.propertyId);
-          const dependsOnPropertyId = propertyIdMap.get(
-            dependency.dependsOnPropertyId,
+          // Remaps the edge and the gate condition together so the copy can't
+          // remap one without the other; null when the edge endpoint is gone.
+          const refs = remapDependencyRefs(
+            {
+              dependsOnPropertyId: dependency.dependsOnPropertyId,
+              condition: dependency.condition,
+            },
+            (id) => propertyIdMap.get(id),
           );
-          if (!propertyId || !dependsOnPropertyId) {
+          if (!propertyId || !refs) {
             return null;
           }
           return {
             id: createSafeId<"propertyDependency">(),
             workspaceId: targetWorkspaceId,
             propertyId,
-            dependsOnPropertyId,
-            condition: dependency.condition,
+            dependsOnPropertyId: refs.dependsOnPropertyId,
+            condition: refs.condition,
           };
         })
         .filter((dependency) => dependency !== null);
@@ -705,12 +725,14 @@ const duplicateWorkspace = createSafeHandler(
           const newVersionId = createSafeId<"entityVersion">();
           const entityStamp =
             source.kind === "document"
-              ? await allocateEntityStamp(tx, targetWorkspaceId)
+              ? // oxlint-disable-next-line no-await-in-loop -- stamp allocation is a sequential per-workspace counter; must run in order within the transaction
+                await allocateEntityStamp(tx, targetWorkspaceId)
               : null;
           const newParentId = source.parentId
             ? (entityIdMap.get(source.parentId) ?? null)
             : null;
 
+          // oxlint-disable-next-line no-await-in-loop -- sequential inserts; children reference parent IDs created in earlier iterations via entityIdMap
           await tx.insert(entities).values({
             id: newEntityId,
             workspaceId: targetWorkspaceId,
@@ -748,6 +770,7 @@ const duplicateWorkspace = createSafeHandler(
             metadata: source.metadata,
           });
 
+          // oxlint-disable-next-line no-await-in-loop -- sequential version insert depends on the entity row created just above in this iteration
           await tx.insert(entityVersions).values({
             id: newVersionId,
             workspaceId: targetWorkspaceId,
@@ -758,6 +781,7 @@ const duplicateWorkspace = createSafeHandler(
             createdBy: user.id,
           });
 
+          // oxlint-disable-next-line no-await-in-loop -- sequential update sets currentVersionId on the just-created entity/version pair
           await tx
             .update(entities)
             .set({ currentVersionId: newVersionId })
@@ -778,6 +802,7 @@ const duplicateWorkspace = createSafeHandler(
             ];
           });
           if (newFields.length > 0) {
+            // oxlint-disable-next-line no-await-in-loop -- sequential field insert depends on the version created in this iteration
             await tx.insert(fields).values(newFields);
           }
 

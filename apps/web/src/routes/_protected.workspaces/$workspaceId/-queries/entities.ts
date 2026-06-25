@@ -4,6 +4,7 @@ import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
 import { toAPIError } from "@/lib/errors";
+import { ROUTE_QUERY_STALE_TIME_MS } from "@/lib/react-query";
 import type { QueryOptionsInput } from "@/lib/react-query";
 import { toSafeId } from "@/lib/safe-id";
 import type { WorkspaceEntity, WorkspaceField } from "@/lib/types";
@@ -18,6 +19,7 @@ import type {
   EntitiesPageKey,
   EntitiesWindowKey,
   FilesystemEntitiesKey,
+  GroupCountsKey,
   KanbanGroupKey,
 } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities.logic";
 
@@ -27,6 +29,7 @@ type EntitiesOptionsInput = QueryOptionsInput<EntitiesPageKey>;
 type EntitiesWindowOptionsInput = QueryOptionsInput<EntitiesWindowKey>;
 type FilesystemEntitiesOptionsInput = QueryOptionsInput<FilesystemEntitiesKey>;
 type KanbanGroupOptionsInput = QueryOptionsInput<KanbanGroupKey>;
+type GroupCountsOptionsInput = QueryOptionsInput<GroupCountsKey>;
 
 type RawWorkspaceEntity = Omit<
   WorkspaceEntity,
@@ -69,6 +72,7 @@ const toWorkspaceEntity = (entity: RawWorkspaceEntity): WorkspaceEntity => {
     createdAt: entity.createdAt,
     createdBy: entity.createdBy,
     createdByImage: entity.createdByImage,
+    createdByDeletedAt: entity.createdByDeletedAt,
     updatedAt: entity.updatedAt,
     version: entity.version,
     status: entity.status,
@@ -177,6 +181,7 @@ export const entitiesWindowOptions = (key: EntitiesWindowOptionsInput) =>
     },
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    staleTime: ROUTE_QUERY_STALE_TIME_MS,
   });
 
 export const filesystemEntitiesOptions = (
@@ -213,6 +218,7 @@ export const filesystemEntitiesOptions = (
 
       return { entities };
     },
+    staleTime: ROUTE_QUERY_STALE_TIME_MS,
   });
 
 export const kanbanGroupOptions = (key: KanbanGroupOptionsInput) =>
@@ -240,6 +246,11 @@ export const kanbanGroupOptions = (key: KanbanGroupOptionsInput) =>
                 ? key.groupByPropertyId
                 : toSafeId<"property">(key.groupByPropertyId),
             groupValue: key.groupValue,
+            excludedKinds: key.excludedKinds ?? [],
+            ...(key.optionValues !== undefined && {
+              optionValues: key.optionValues,
+            }),
+            includeTotalCount: key.includeTotalCount ?? false,
             ...(pageParam !== undefined && { cursor: pageParam }),
           },
           { fetch: { signal } },
@@ -256,6 +267,34 @@ export const kanbanGroupOptions = (key: KanbanGroupOptionsInput) =>
     },
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+  });
+
+// Per-group entity counts in one query, so the grouped table can skip
+// firing a row query for empty groups.
+export const groupCountsOptions = (key: GroupCountsOptionsInput) =>
+  queryOptions({
+    queryKey: entitiesKeys.groupCounts(key),
+    queryFn: async ({ signal }) => {
+      const response = await api
+        .entities({ workspaceId: toSafeId<"workspace">(key.workspaceId) })
+        ["group-counts"].post(
+          {
+            filters: key.filters,
+            groupByPropertyId:
+              key.groupByPropertyId === "_status" ||
+              key.groupByPropertyId === "_kind"
+                ? key.groupByPropertyId
+                : toSafeId<"property">(key.groupByPropertyId),
+          },
+          { fetch: { signal } },
+        );
+
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+
+      return response.data.counts;
+    },
   });
 
 // Defers the key so useSuspenseInfiniteQuery keeps showing stale
@@ -342,6 +381,7 @@ const fetchAllWorkspaceFolders = async ({
   const folders: WorkspaceFolder[] = [];
   let cursor: string | undefined;
   do {
+    // oxlint-disable-next-line no-await-in-loop -- cursor pagination: each page depends on the previous response's nextCursor, so requests are strictly sequential
     const response = await api
       .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
       .folders.get({
@@ -397,6 +437,7 @@ const fetchAllWorkspaceFiles = async ({
   const files: WorkspaceFile[] = [];
   let cursor: string | undefined;
   do {
+    // oxlint-disable-next-line no-await-in-loop -- cursor pagination: each page depends on the previous response's nextCursor, so requests are strictly sequential
     const response = await api
       .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
       .files.get({

@@ -69,7 +69,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -215,6 +215,18 @@ jobs:
           [[ -z "$AFFECTED_FLAG" ]] || args+=("$AFFECTED_FLAG")
           bun run typecheck -- "${args[@]}"
 
+      - name: React Compiler bailout guard
+        if: steps.changed-files.outputs.package_checks_required == 'true'
+        # Components the React Compiler bails out on (refs-in-render,
+        # try/finally, an ESLint suppression on the component) are not
+        # auto-memoized, so manual useMemo/useCallback there is load-bearing:
+        # removing it leaves unstable references that re-fire effects every
+        # render — loops that lint and typecheck do not catch. Fails when a
+        # baseline bailout file loses memoization or a new bailout component
+        # appears untracked. CI-only: it runs the JS compiler, too slow for the
+        # local loop. Regenerate: `bun scripts/rc-bailouts.ts --write-baseline`.
+        run: bun scripts/rc-bailouts.ts --check
+
       - name: Knip production dependency checks
         if: steps.changed-files.outputs.package_checks_required == 'true'
         # Static gate paired with the image compile/boot smokes
@@ -282,7 +294,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -302,7 +314,7 @@ jobs:
           run=false
           for file in "${changed_files[@]}"; do
             case "$file" in
-              apps/web/*|packages/*|VERSION|bun.lock|package.json|.github/workflows/ci.yml)
+              apps/web/*|packages/*|VERSION|bun.lock|bunfig.toml|package.json|.npmrc|.github/workflows/ci.yml)
                 run=true
                 break
                 ;;
@@ -393,7 +405,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -457,10 +469,16 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
+    env:
+      # Authenticated Docker Hub pulls (when these secrets are set) avoid the
+      # anonymous per-IP pull-rate limit that intermittently fails the docker
+      # stack bring-up on shared GitHub runners.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -511,15 +529,37 @@ jobs:
           cd ../web
           mv .env.example .env
 
+      - name: Log in to Docker Hub
+        # Skipped automatically until DOCKERHUB_USERNAME / DOCKERHUB_TOKEN repo
+        # secrets exist; authenticated pulls raise the rate limit well above the
+        # shared-runner anonymous cap that flakes the gotenberg image pull.
+        if: steps.changed.outputs.run == 'true' && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Start docker stack
         if: steps.changed.outputs.run == 'true'
         # `--wait` only on long-running services; `minio-setup` is a one-shot
         # bucket-creator container that exits 0, which `--wait` treats as
         # "not running" and fails the whole command. Run it separately in
-        # the foreground so we still block on its success.
+        # the foreground so we still block on its success. The whole bring-up
+        # is retried: image pulls and `--wait` health checks occasionally fail
+        # transiently on CI runners. Tear the stack down between attempts so a
+        # half-started stack does not poison the retry.
         run: |
-          docker compose --profile dev up -d --wait postgres minio valkey gotenberg
-          docker compose --profile dev up minio-setup
+          for attempt in 1 2 3; do
+            if docker compose --profile dev up -d --wait postgres minio valkey gotenberg \
+              && docker compose --profile dev up minio-setup; then
+              exit 0
+            fi
+            echo "::warning::docker stack start failed (attempt ${attempt}/3); tearing down and retrying"
+            docker compose --profile dev down --volumes --remove-orphans || true
+            sleep "$((attempt * 20))"
+          done
+          echo "::error::docker stack failed to start after 3 attempts"
+          exit 1
 
       - name: Run database migrations
         if: steps.changed.outputs.run == 'true'
@@ -543,14 +583,14 @@ jobs:
           # --preload registers the dev/test-only mock-AI generator; .env.example
           # sets USE_MOCK_AI=true, so e2e must route through the mock rather than
           # the real provider (which would fail on the placeholder API key).
-          NODE_ENV=development nohup bun --port 3001 --preload ./src/dev/register-mock-ai.ts src/index.ts > /tmp/api.log 2>&1 &
+          NODE_ENV=development E2E_DISABLE_AUTH_RATE_LIMIT=true nohup bun --port 3001 --preload ./src/dev/register-mock-ai.ts src/index.ts > /tmp/api.log 2>&1 &
           echo $! > /tmp/api.pid
 
       - name: Wait for API
         if: steps.changed.outputs.run == 'true'
         run: |
           for i in {1..60}; do
-            if curl -sf http://localhost:3001/health > /dev/null 2>&1; then
+            if curl --connect-timeout 2 --max-time 5 -sf http://localhost:3001/health > /dev/null 2>&1; then
               echo "API up after ${i}s"
               exit 0
             fi
@@ -571,7 +611,7 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         run: |
           for i in {1..60}; do
-            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+            if curl --connect-timeout 2 --max-time 5 -sf http://localhost:3000 > /dev/null 2>&1; then
               echo "Web up after ${i}s"
               exit 0
             fi
@@ -623,25 +663,14 @@ jobs:
             /tmp/web.log
           retention-days: 7
 
-  # Pruned-subset lockfile + prod-deps guard. The staging API image
-  # is built via `turbo prune @stll/api --docker` followed by
-  # `bun install --frozen-lockfile` against the pruned bun.lock.
-  # The other CI jobs all install against the full repo lockfile,
-  # so a workspace dep that resolves transitively from outside
-  # @stll/api's tree (e.g. via apps/web) can be missing from the
-  # relevant workspace block and still satisfy the full install —
-  # only to fail at deploy time when the prune drops the masking
-  # workspace. Mirror the Dockerfile's install path here so that
-  # class of drift fails the PR instead of the deploy.
+  # Image dependency guard. The API and legal-atlas-runner Dockerfiles use
+  # Turbo only for pruned source overlays; dependency installs come from the
+  # committed root bun.lock plus every workspace package.json so Bun remains
+  # the lockfile source of truth. Mirror that install path here so deploy-time
+  # lockfile drift fails the PR instead of the deploy.
   #
-  # The job then re-runs the install with `--production` (no
-  # devDependencies) and compiles + smokes the API entrypoints
-  # against that tree. This catches the second class of deploy-time
-  # failure: prod code (apps/api/src/** or apps/api/scripts/**) that
-  # imports a devDependency, or a `@stll/*` workspace package whose
-  # runtime imports are mis-classified as devDependencies. Without
-  # this gate, flipping the Dockerfile to `--production` would only
-  # fail at deploy time.
+  # The job then compiles the API entrypoints and runs the legal atlas runner
+  # production smoke against those Docker-style dependency trees.
   api-image-deps:
     needs: trust-check
     if: >-
@@ -654,7 +683,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -674,7 +703,7 @@ jobs:
           run=false
           for file in "${changed_files[@]}"; do
             case "$file" in
-              apps/api/*|apps/legal-atlas-runner/*|packages/*|bun.lock|package.json|turbo.json|.github/workflows/ci.yml)
+              apps/api/*|apps/legal-atlas-runner/*|packages/*|bun.lock|bunfig.toml|package.json|.npmrc|turbo.json|.github/workflows/ci.yml)
                 run=true
                 break
                 ;;
@@ -682,7 +711,7 @@ jobs:
           done
           echo "run=$run" >> "$GITHUB_OUTPUT"
           if [[ "$run" != "true" ]]; then
-            echo "::notice::No API/runner-image-affecting paths changed; skipping pruned-lockfile guard."
+            echo "::notice::No API/runner-image-affecting paths changed; skipping image dependency guard."
           fi
 
       - name: Setup Bun
@@ -693,45 +722,45 @@ jobs:
 
       - name: Install turbo
         if: steps.changed.outputs.run == 'true'
-        # Match apps/api/Dockerfile: a global turbo install, no
-        # workspace dependency resolution beforehand.
-        run: bun install -g turbo@^2
+        # Match the Dockerfiles: Turbo is only used for pruned source overlays.
+        run: bun install -g turbo@2.9.18
 
-      - name: Prune monorepo for @stll/api
+      - name: Prepare Docker install inputs
         if: steps.changed.outputs.run == 'true'
-        run: turbo prune @stll/api --docker
-
-      - name: Install pruned deps with frozen lockfile
-        if: steps.changed.outputs.run == 'true'
-        # This is the exact command the Docker build runs against
-        # the pruned bun.lock in `apps/api/Dockerfile`. It is the
-        # only place that catches workspace-block drift in the
-        # repo lockfile, because the full-repo `bun ci` other jobs
-        # use accepts a stale workspace block as long as the
-        # package resolves transitively somewhere in the graph.
         run: |
-          cd out/json
-          bun install --frozen-lockfile --ignore-scripts
+          set -euo pipefail
+          rm -rf install-json
+          mkdir -p install-json
+          cp bun.lock package.json install-json/
+          for f in bunfig.toml .npmrc; do [ ! -e "$f" ] || cp "$f" install-json/; done
+          find apps packages -mindepth 2 -maxdepth 2 -name package.json \
+            -not -path '*/node_modules/*' \
+            -exec cp --parents -t install-json/ {} +
+
+      - name: Prune monorepo for API image source
+        if: steps.changed.outputs.run == 'true'
+        run: turbo prune @stll/api @stll/legal-atlas-runner --docker
+
+      - name: Install API image deps with frozen root lockfile
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          rm -rf api-install
+          cp -a install-json api-install
+          cd api-install
+          bun install --filter @stll/api --filter @stll/legal-atlas-runner --frozen-lockfile --ignore-scripts
         env:
           NPM_TOKEN: ""
 
-      - name: Prod-deps API compile smoke
+      - name: API image compile smoke
         if: steps.changed.outputs.run == 'true'
-        # Empirically prove the pruned API tree builds and its
-        # runtime worker entrypoints resolve with devDependencies
-        # stripped. Runs a fresh `bun install --production` in a
-        # parallel dir (so the lockfile-drift install above stays
-        # unchanged), overlays the full pruned source via
-        # `cp -a ../full/. .` (mirrors `COPY --from=pruner
-        # /app/out/full/ .` in `apps/api/Dockerfile`), and compiles the
-        # API binary plus runtime workers.
+        # Overlay pruned source the same way apps/api/Dockerfile copies
+        # /app/out/full/ onto the dependency layer, then compile the API
+        # binary and runtime workers.
         run: |
           set -euo pipefail
-          rm -rf out-prod
-          cp -a out out-prod
-          cd out-prod/json
-          bun install --production --frozen-lockfile --ignore-scripts
-          cp -a ../full/. .
+          cd api-install
+          cp -a ../out/full/. .
           export NODE_ENV=production
           bun build \
             --compile \
@@ -758,9 +787,11 @@ jobs:
           set -euo pipefail
           rm -rf out-runner
           turbo prune @stll/legal-atlas-runner --docker --out-dir out-runner
-          cd out-runner/json
-          bun install --production --frozen-lockfile --ignore-scripts
-          cp -a ../full/. .
+          rm -rf runner-install
+          cp -a install-json runner-install
+          cd runner-install
+          bun install --filter @stll/legal-atlas-runner --production --frozen-lockfile --ignore-scripts
+          cp -a ../out-runner/full/. .
           bun --filter @stll/legal-atlas-runner build
           bun apps/legal-atlas-runner/dist/index.js smoke
           set +e
@@ -794,7 +825,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -842,6 +873,120 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         run: bun test packages/scripts/src/dev-runner.test.ts
 
+  # Rust checks for the Tauri desktop crate. ci-checks only runs
+  # `cargo fmt --check` (a parse-only pass that needs no compile);
+  # check/clippy/doc must run where the desktop crate actually builds
+  # so platform-gated macOS and Windows code is covered.
+  #
+  # The matrix mirrors the release matrix (macos-14 + windows-latest)
+  # rather than Linux: the desktop app ships only those two targets,
+  # and clippy analyzes the active `cfg` for its host — so these two
+  # runners cover the `#[cfg(target_os = "macos")]` / `"windows"`
+  # code that ships, with no need for the Linux webkit2gtk system
+  # libraries a Linux clippy run would require. Windows builds the
+  # test binaries but does not execute them: hosted Windows currently
+  # exits before the Rust test harness starts with a native entrypoint
+  # error in the Tauri-linked binary. macOS executes the test suite.
+  # Both are standard GitHub-hosted runners, free for public repositories.
+  desktop-clippy:
+    name: Desktop Rust (${{ matrix.os }})
+    needs: trust-check
+    if: >-
+      needs.trust-check.outputs.trusted == 'true'
+      || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            runner: macos-14
+            target: aarch64-apple-darwin
+          - os: windows
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check whether desktop-affecting paths changed
+        id: changed
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base_ref="origin/$BASE_REF"
+          # No `mapfile`: the macOS runner's default bash is 3.2, which
+          # lacks it. A while-read over process substitution keeps the
+          # loop in the current shell so `run`/`break` persist.
+          run=false
+          while IFS= read -r file; do
+            case "$file" in
+              apps/desktop/*|.github/workflows/ci.yml)
+                run=true
+                break
+                ;;
+            esac
+          done < <(git diff --name-only "$base_ref"...HEAD)
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          if [[ "$run" != "true" ]]; then
+            echo "::notice::No desktop-affecting paths changed; skipping desktop clippy."
+          fi
+
+      - name: Setup Rust
+        if: steps.changed.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+          components: clippy
+
+      # No cargo cache action here: the job is path-filtered to desktop
+      # changes, so it runs rarely and a cold compile (well under the
+      # timeout) is acceptable. It also keeps the LGPL-3.0 rust-cache
+      # action out of the dependency-review-enforced diff.
+      - name: Check
+        if: steps.changed.outputs.run == 'true'
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --all-targets --target ${{ matrix.target }} --locked
+
+      - name: Clippy
+        if: steps.changed.outputs.run == 'true'
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --all-targets --target ${{ matrix.target }} --locked -- -D warnings
+
+      - name: Test
+        if: steps.changed.outputs.run == 'true' && matrix.os == 'macos'
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --all-targets --target ${{ matrix.target }} --locked
+
+      - name: Build test binaries
+        if: steps.changed.outputs.run == 'true' && matrix.os == 'windows'
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --all-targets --target ${{ matrix.target }} --locked --no-run
+
+      - name: Install cargo-deny
+        if: steps.changed.outputs.run == 'true' && matrix.os == 'macos'
+        run: cargo install cargo-deny --version 0.19.0 --locked
+
+      - name: License audit
+        if: steps.changed.outputs.run == 'true' && matrix.os == 'macos'
+        run: cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml check --config apps/desktop/src-tauri/deny.toml --hide-inclusion-graph
+
+      - name: Docs
+        if: steps.changed.outputs.run == 'true'
+        run: cargo doc --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --no-deps --target ${{ matrix.target }} --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   # Aggregation job for branch protection. The ruleset requires
   # this check to pass, which ensures untrusted PRs cannot be
   # merged without CI and trusted PRs must pass all checks.
@@ -864,6 +1009,7 @@ jobs:
         e2e,
         api-image-deps,
         windows-scripts,
+        desktop-clippy,
       ]
     runs-on: ubuntu-latest
     permissions:
@@ -873,6 +1019,7 @@ jobs:
         env:
           API_IMAGE_DEPS_RESULT: ${{ needs.api-image-deps.result }}
           CI_RESULT: ${{ needs.ci-checks.result }}
+          DESKTOP_CLIPPY_RESULT: ${{ needs.desktop-clippy.result }}
           E2E_RESULT: ${{ needs.e2e.result }}
           EVENT: ${{ github.event_name }}
           LANDING_RESULT: ${{ needs.landing-build.result }}
@@ -895,7 +1042,8 @@ jobs:
                   || "$LANDING_RESULT" == "failure" || "$LANDING_RESULT" == "cancelled" \
                   || "$E2E_RESULT" == "failure" || "$E2E_RESULT" == "cancelled" \
                   || "$API_IMAGE_DEPS_RESULT" == "failure" || "$API_IMAGE_DEPS_RESULT" == "cancelled" \
-                  || "$WINDOWS_SCRIPTS_RESULT" == "failure" || "$WINDOWS_SCRIPTS_RESULT" == "cancelled" ]]; then
+                  || "$WINDOWS_SCRIPTS_RESULT" == "failure" || "$WINDOWS_SCRIPTS_RESULT" == "cancelled" \
+                  || "$DESKTOP_CLIPPY_RESULT" == "failure" || "$DESKTOP_CLIPPY_RESULT" == "cancelled" ]]; then
               echo "::error::CI checks failed."
               exit 1
             fi
@@ -909,12 +1057,12 @@ jobs:
 
           # "cancelled" means cancel-in-progress replaced this
           # run with a newer one; the newer run is authoritative.
-          if [[ "$CI_RESULT" == "cancelled" || "$WEB_RESULT" == "cancelled" || "$LANDING_RESULT" == "cancelled" || "$E2E_RESULT" == "cancelled" || "$API_IMAGE_DEPS_RESULT" == "cancelled" || "$WINDOWS_SCRIPTS_RESULT" == "cancelled" ]]; then
+          if [[ "$CI_RESULT" == "cancelled" || "$WEB_RESULT" == "cancelled" || "$LANDING_RESULT" == "cancelled" || "$E2E_RESULT" == "cancelled" || "$API_IMAGE_DEPS_RESULT" == "cancelled" || "$WINDOWS_SCRIPTS_RESULT" == "cancelled" || "$DESKTOP_CLIPPY_RESULT" == "cancelled" ]]; then
             echo "CI run was superseded by a newer run (cancel-in-progress). Passing."
             exit 0
           fi
 
-          if [[ "$CI_RESULT" == "failure" || "$WEB_RESULT" == "failure" || "$LANDING_RESULT" == "failure" || "$E2E_RESULT" == "failure" || "$API_IMAGE_DEPS_RESULT" == "failure" || "$WINDOWS_SCRIPTS_RESULT" == "failure" ]]; then
+          if [[ "$CI_RESULT" == "failure" || "$WEB_RESULT" == "failure" || "$LANDING_RESULT" == "failure" || "$E2E_RESULT" == "failure" || "$API_IMAGE_DEPS_RESULT" == "failure" || "$WINDOWS_SCRIPTS_RESULT" == "failure" || "$DESKTOP_CLIPPY_RESULT" == "failure" ]]; then
             echo "::error::CI checks failed."
             exit 1
           fi

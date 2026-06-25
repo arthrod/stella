@@ -1,21 +1,24 @@
 import { deepEquals } from "bun";
 
+import type { ConditionNode } from "@stll/conditions";
+
 import type { Transaction } from "@/api/db";
 import { properties, propertyDependencies } from "@/api/db/schema";
-import type { PropertyCondition } from "@/api/db/schema-validators";
 import { lockWorkspacePropertyWrites } from "@/api/handlers/properties/property-lock";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
+import {
+  collectNodePropertyIds,
+  remapDependencyRefs,
+  remapNodePropertyIds,
+} from "@/api/lib/conditions/ast-utils";
+import { parseStoredCondition } from "@/api/lib/conditions/parse-stored";
 import { LIMITS } from "@/api/lib/limits";
 import { serializeAITool } from "@/api/lib/markdown/ai-tool";
 import { brandPersistedPropertyId } from "@/api/lib/safe-id-boundaries";
 import { sortDeep } from "@/api/lib/sort-deep";
-import type {
-  ViewFilterCondition,
-  ViewLayout,
-  ViewTemplateProperty,
-} from "@/api/lib/views-schema";
+import type { ViewLayout, ViewTemplateProperty } from "@/api/lib/views-schema";
 
 type WorkspacePropertyTemplateSource = {
   id: string;
@@ -28,7 +31,7 @@ type WorkspacePropertyTemplateSource = {
 type WorkspacePropertyDependencySource = {
   propertyId: string;
   dependsOnPropertyId: string;
-  condition: PropertyCondition | null;
+  condition: ConditionNode | null;
 };
 
 type ResolveTemplatePropertiesOptions = {
@@ -60,13 +63,13 @@ export const collectTemplateProperties = ({
   });
   const dependenciesByPropertyId = new Map<
     string,
-    { dependsOnSourceId: string; condition: PropertyCondition | null }[]
+    { dependsOnSourceId: string; condition: ConditionNode | null }[]
   >();
   for (const dep of dependencies) {
     const list = dependenciesByPropertyId.get(dep.propertyId) ?? [];
     list.push({
       dependsOnSourceId: dep.dependsOnPropertyId,
-      condition: dep.condition,
+      condition: parseStoredCondition(dep.condition),
     });
     dependenciesByPropertyId.set(dep.propertyId, list);
   }
@@ -106,7 +109,7 @@ const addDependencySourceIds = (
     string,
     readonly {
       dependsOnSourceId: string;
-      condition: PropertyCondition | null;
+      condition: ConditionNode | null;
     }[]
   >,
 ): void => {
@@ -151,6 +154,8 @@ export const resolveTemplateProperties = async ({
 
   const existingProperties = await readExistingProperties(tx, workspaceId);
   const systemFileProperty = findSystemFileProperty(existingProperties);
+  // SAFETY: one workspace's property-dependency edges, bounded by its properties (<= LIMITS.propertiesCount per endpoint)
+  // eslint-disable-next-line require-query-limit/require-query-limit
   const existingDependencyEdges = await tx.query.propertyDependencies.findMany({
     where: { workspaceId: { eq: workspaceId } },
     columns: { propertyId: true },
@@ -226,6 +231,7 @@ export const resolveTemplateProperties = async ({
   }
 
   for (const templateProperty of templatePropertiesToCreate) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential inserts preserve column order and feed the source-id mapping
     const [inserted] = await tx
       .insert(properties)
       .values({
@@ -248,6 +254,7 @@ export const resolveTemplateProperties = async ({
     propertyIdBySourceId.set(templateProperty.sourceId, inserted.id);
     nextPropertyIds.push(inserted.id);
 
+    // oxlint-disable-next-line no-await-in-loop -- audit row depends on the property id inserted in this same iteration
     await recordAuditEvent(tx, {
       action: AUDIT_ACTION.CREATE,
       resourceType: AUDIT_RESOURCE_TYPE.PROPERTY,
@@ -295,6 +302,7 @@ const readExistingProperties = (
       system: true,
     },
     orderBy: { createdAt: "asc" },
+    limit: LIMITS.propertiesCount,
   });
 
 type ExistingProperty = Awaited<
@@ -368,22 +376,27 @@ const recreateTemplateDependencies = async ({
 
     const resolvedEdges = (templateProperty.dependencies ?? []).flatMap(
       (dep) => {
-        const dependsOnPropertyId = propertyIdBySourceId.get(
-          dep.dependsOnSourceId,
+        // Remaps the edge and the gate condition together (so neither is
+        // forgotten); null when the edge endpoint did not remap — the workflow
+        // planner then treats the property as having no inputs.
+        const refs = remapDependencyRefs(
+          {
+            dependsOnPropertyId: dep.dependsOnSourceId,
+            condition: dep.condition,
+          },
+          (id) => propertyIdBySourceId.get(id),
         );
-        // Drop edges where either endpoint failed to remap; the
-        // missing-property branch above already declined to create
-        // them, so the workflow planner will treat the property as
-        // having no inputs rather than crashing.
-        if (!dependsOnPropertyId || dependsOnPropertyId === propertyId) {
+        if (!refs || refs.dependsOnPropertyId === propertyId) {
           return [];
         }
         return [
           {
             workspaceId,
             propertyId: brandPersistedPropertyId(propertyId),
-            dependsOnPropertyId: brandPersistedPropertyId(dependsOnPropertyId),
-            condition: dep.condition,
+            dependsOnPropertyId: brandPersistedPropertyId(
+              refs.dependsOnPropertyId,
+            ),
+            condition: refs.condition,
           },
         ];
       },
@@ -663,10 +676,12 @@ const collectLayoutPropertyIds = (layout: ViewLayout): Set<string> => {
     add(sort.propertyId);
   }
 
-  for (const filter of layout.filters) {
-    if (filter.field === "property") {
-      add(filter.propertyId);
-    }
+  const filterPropertyIds = new Set<string>();
+  for (const node of layout.filters) {
+    collectNodePropertyIds(node, filterPropertyIds);
+  }
+  for (const id of filterPropertyIds) {
+    add(id);
   }
 
   if (layout.type === "table") {
@@ -675,6 +690,9 @@ const collectLayoutPropertyIds = (layout: ViewLayout): Set<string> => {
     }
     for (const id of layout.columnPinning) {
       add(id);
+    }
+    if (layout.groupByPropertyId) {
+      add(layout.groupByPropertyId);
     }
   }
 
@@ -714,20 +732,16 @@ const remapLayoutPropertyIds = (
     ...sort,
     propertyId: remap(sort.propertyId),
   }));
-  layout.filters = layout.filters.map((filter): ViewFilterCondition => {
-    if (filter.field !== "property") {
-      return filter;
-    }
-
-    return {
-      ...filter,
-      propertyId: remap(filter.propertyId),
-    };
-  });
+  layout.filters = layout.filters.map((node) =>
+    remapNodePropertyIds(node, remap),
+  );
 
   if (layout.type === "table") {
     layout.columnOrder = layout.columnOrder.map(remap);
     layout.columnPinning = layout.columnPinning.map(remap);
+    if (layout.groupByPropertyId) {
+      layout.groupByPropertyId = remap(layout.groupByPropertyId);
+    }
   }
 
   if (layout.type === "kanban" && layout.groupByPropertyId) {

@@ -11,7 +11,7 @@ import {
   Text,
 } from "@react-email/components";
 
-import { getTranslator } from "../i18n/translate";
+import { getEmailDirection, getTranslator } from "../i18n/translate";
 import type { SupportedLang } from "../i18n/translate";
 import { BRAND_FOOTER_TEXT, ICON_URL, brand, sharedStyles } from "./_shared";
 
@@ -20,6 +20,7 @@ const otpTypeKey = {
   "email-verification": "otp.emailVerification",
   "forget-password": "otp.forgetPassword",
   "change-email": "otp.changeEmail",
+  "delete-account": "otp.deleteAccount",
 } as const;
 
 type Props = {
@@ -35,7 +36,7 @@ export const Email = ({ otp, type, lang }: Props) => {
   const tr = getTranslator(lang);
 
   return (
-    <Html lang={lang}>
+    <Html lang={lang} dir={getEmailDirection(lang)}>
       <Head />
       <Preview>{tr("otp.preview")}</Preview>
       <Body style={sharedStyles.body}>

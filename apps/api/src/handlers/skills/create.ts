@@ -15,6 +15,7 @@ import { DatabaseError, HandlerError } from "@/api/lib/errors/tagged-errors";
 import { LIMITS } from "@/api/lib/limits";
 import { PG_ERROR } from "@/api/lib/pg-error";
 
+import { hashAuthoredSkillContent } from "./authored-content-hash";
 import { authorizeSkillInstallScope } from "./install";
 import { uniqueSlug } from "./slug";
 
@@ -96,14 +97,40 @@ const createSkill = createSafeRootHandler(
       );
     }
 
+    // Team skills are org-wide visible in the chat skill catalogue but are only
+    // capped per-user above, so cap them per-org too: otherwise enough members
+    // each authoring team skills can push the catalogue past
+    // agentSkillsChatMetadataMax and silently hide the overflow from the model.
+    if (body.scope === "team") {
+      const teamCount = yield* Result.await(
+        safeDb((tx) =>
+          tx.$count(
+            agentSkills,
+            and(
+              eq(agentSkills.organizationId, session.activeOrganizationId),
+              eq(agentSkills.scope, "team"),
+            ),
+          ),
+        ),
+      );
+      if (teamCount >= LIMITS.agentSkillsTeamPerOrganization) {
+        return Result.err(
+          new HandlerError({
+            status: 400,
+            message: "Team skill limit reached for this organization",
+          }),
+        );
+      }
+    }
+
     const slug = uniqueSlug(body.name);
 
-    // contentHash is an integrity marker; for authored skills it
-    // derives from the body so future edits change the hash.
-    const contentHash = new Bun.CryptoHasher("sha256")
-      .update(body.body)
-      .digest("hex")
-      .slice(0, 64);
+    const contentHash = hashAuthoredSkillContent({
+      body: body.body,
+      description: body.description,
+      name: body.name,
+      version: null,
+    });
 
     const insertResult = await safeDb(async (tx) => {
       const rows = await tx

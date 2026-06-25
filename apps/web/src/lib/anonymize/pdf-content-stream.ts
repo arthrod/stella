@@ -5,7 +5,7 @@ import type { PDF, PdfDict, PdfRef } from "@libpdf/core";
  * A redaction region on a specific page for content stream
  * neutralisation. Coordinates are in PDF user space.
  */
-type RedactionBox = {
+export type RedactionBox = {
   x: number;
   y: number;
   width: number;
@@ -147,7 +147,7 @@ const isInRedactionZone = (
  * text positioning operators (Td, TD, Tm) and replaces string
  * content in text-showing operators (Tj, TJ, ', ") with spaces.
  */
-const neutraliseTextOperators = (
+export const neutraliseTextOperators = (
   content: string,
   boxes: RedactionBox[],
 ): string => {
@@ -163,7 +163,7 @@ const neutraliseTextOperators = (
   // PDF generators may mix \r\n, \r, and \n in the same
   // stream; normalising to a single EOL changes byte
   // length and corrupts the stream.
-  const parts = content.split(/(\r\n|\r|\n)/u);
+  const parts = content.split(/(?<eol>\r\n|\r|\n)/u);
   // parts = [line0, eol0, line1, eol1, ..., lastLine]
   const lines: string[] = [];
   const eols: string[] = [];
@@ -205,22 +205,22 @@ const neutraliseTextOperators = (
     }
 
     // Track text position from Td/TD operators
-    const tdMatch = /^([\d.-]+)\s+([\d.-]+)\s+T[dD]$/u.exec(trimmed);
+    const tdMatch = /^(?<tx>[\d.-]+)\s+(?<ty>[\d.-]+)\s+T[dD]$/u.exec(trimmed);
     if (tdMatch) {
-      tx += Number(tdMatch[1]);
-      ty += Number(tdMatch[2]);
+      tx += Number(tdMatch.groups?.["tx"]);
+      ty += Number(tdMatch.groups?.["ty"]);
       result.push(line);
       continue;
     }
 
     // Track text position from Tm operator (set text matrix)
     const tmMatch =
-      /^[\d.-]+\s+[\d.-]+\s+[\d.-]+\s+[\d.-]+\s+([\d.-]+)\s+([\d.-]+)\s+Tm$/u.exec(
+      /^[\d.-]+\s+[\d.-]+\s+[\d.-]+\s+[\d.-]+\s+(?<tx>[\d.-]+)\s+(?<ty>[\d.-]+)\s+Tm$/u.exec(
         trimmed,
       );
     if (tmMatch) {
-      tx = Number(tmMatch[1]);
-      ty = Number(tmMatch[2]);
+      tx = Number(tmMatch.groups?.["tx"]);
+      ty = Number(tmMatch.groups?.["ty"]);
       result.push(line);
       continue;
     }
@@ -312,7 +312,7 @@ const isHexDigit = (c: string | undefined): boolean =>
  * E.g., "(Hello)" -> "(     )"
  *       "<48656C6C6F>" -> "<2020202020>"
  */
-const replaceStringContent = (line: string): string => {
+export const replaceStringContent = (line: string): string => {
   let i = 0;
   const result: string[] = [];
 

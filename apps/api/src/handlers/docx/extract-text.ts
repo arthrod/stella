@@ -10,6 +10,7 @@ import type {
   BlockDirectiveKind,
   ExtractedDocument,
   ExtractedParagraph,
+  FieldMeta,
   ParagraphSource,
 } from "./types";
 
@@ -22,8 +23,7 @@ import type {
  * each other.
  */
 const DIRECTIVE_RE =
-  // oxlint-disable-next-line sonarjs/slow-regex -- DOCX directive text is one paragraph collected from OOXML
-  /^\s*\{\{(#if|#elseif|#else|#each|\/if|\/each)\s*(.*?)\}\}\s*$/u;
+  /^\s*\{\{(?<tag>#if|#elseif|#else|#each|\/if|\/each)\s*(?<expr>.*?)\}\}\s*$/u;
 
 const DIRECTIVE_KIND_MAP: Record<string, BlockDirectiveKind> = {
   "#if": "if",
@@ -168,14 +168,12 @@ const extractParagraphsFromContainer = (
   let chars = 0;
   let index = startIndex;
 
-  for (const child of container.childNodes) {
-    if (!isElement(child)) {
-      continue;
-    }
-    if (child.localName !== "p" || child.namespaceURI !== W_NS) {
-      continue;
-    }
-
+  // Descendant paragraphs, not just direct children: document text
+  // commonly sits inside tables (w:tbl/w:tr/w:tc) or content controls
+  // (w:sdt), and discovery (`discover-template.ts`) already indexes
+  // paragraphs this way, so extraction must enumerate the same set or
+  // table content stays invisible to version diffs and AI context.
+  for (const child of container.getElementsByTagNameNS(W_NS, "p")) {
     const text = collectText(child);
     const { style, alignment } = readParagraphProps(child);
 
@@ -203,8 +201,8 @@ const extractParagraphsFromContainer = (
     const dm = DIRECTIVE_RE.exec(text);
     if (dm) {
       entry.isDirective = true;
-      const tag = dm[1];
-      const expr = dm[2];
+      const tag = dm.groups?.["tag"];
+      const expr = dm.groups?.["expr"];
       if (tag !== undefined) {
         entry.directiveKind = DIRECTIVE_KIND_MAP[tag];
       }
@@ -241,6 +239,7 @@ const extractHeaderFooterParagraphs = async (
     .toSorted();
 
   for (const path of entries) {
+    // oxlint-disable-next-line no-await-in-loop -- sequential to keep running paragraph index contiguous across parts
     const xml = await archive.readEntryString(path);
     if (xml === null) {
       continue;
@@ -317,6 +316,29 @@ export const extractText = async (
   const charCount = headers.chars + bodyResult.chars + footers.chars;
 
   return { paragraphs, charCount, view: "accepted" };
+};
+
+/**
+ * Rendered document body for AI-draft fields that opted into seeing it
+ * ({@link FieldMeta.aiSeesDocument}). Returns `undefined` — and skips the
+ * extraction entirely — when no AI-draft field opted in, so the generator
+ * prompt and token cost stay unchanged for non-opted templates.
+ */
+export const documentTextForAiFields = async (
+  docxBytes: Uint8Array,
+  fields: readonly FieldMeta[],
+): Promise<string | undefined> => {
+  const wantsDocumentText = fields.some(
+    (field) =>
+      field.aiPrompt !== undefined &&
+      field.aiPrompt !== "" &&
+      field.aiSeesDocument === true,
+  );
+  if (!wantsDocumentText) {
+    return undefined;
+  }
+  const { paragraphs } = await extractText(docxBytes);
+  return paragraphs.map((paragraph) => paragraph.text).join("\n");
 };
 
 // ── Markdown extraction ─────────────────────────────────

@@ -1,13 +1,21 @@
-import { createContext, use, useEffect, useRef, useState } from "react";
-import type { RefObject } from "react";
+import { createContext, use, useCallback, useRef, useState } from "react";
+import type { RefCallback, RefObject } from "react";
 
 import { panic } from "better-result";
 
-const NEAR_BOTTOM_THRESHOLD_PX = 50;
+// The view is "pinned" (auto-scroll follows, button hidden) only when
+// essentially at the bottom. A scroll-up past this both releases the lock and
+// shows the button in lockstep — keeping that threshold small is what stops
+// the resize observer from yanking the view back and flickering the button.
+const PINNED_BOTTOM_THRESHOLD_PX = 8;
 
 type StickToBottomContext = {
-  scrollRef: RefObject<HTMLDivElement | null>;
-  contentRef: RefObject<HTMLDivElement | null>;
+  scrollRef: RefCallback<HTMLDivElement>;
+  /** The element `scrollRef` is attached to, for consumers that read or
+   *  adjust scroll metrics directly (e.g. load-older anchoring and the
+   *  IntersectionObserver root in the chat transcript). */
+  scrollElementRef: RefObject<HTMLDivElement | null>;
+  contentRef: RefCallback<HTMLDivElement>;
   isAtBottom: boolean;
   isScrollable: boolean;
   scrollToBottom: () => void;
@@ -26,6 +34,15 @@ export const useStickToBottomContext = (): StickToBottomContext => {
   }
   return ctx;
 };
+
+/**
+ * Like {@link useStickToBottomContext} but returns null instead of
+ * panicking when no provider is present. For components that may
+ * render both inside a `Conversation` and inside a bespoke scroll
+ * container (e.g. the file-chat overlay).
+ */
+export const useMaybeStickToBottomContext = (): StickToBottomContext | null =>
+  use(StickToBottomContext);
 
 /**
  * Checks whether the user is actively selecting text inside
@@ -59,8 +76,7 @@ const isSelectingInside = (scrollEl: HTMLElement | null): boolean => {
  * and rAF-synchronized ResizeObserver callbacks.
  */
 export const useStickToBottom = () => {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const contentRef = useRef<HTMLDivElement>(null);
+  const scrollElementRef = useRef<HTMLDivElement | null>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   /** Whether the scroll container has more content than fits the viewport. */
   const [isScrollable, setIsScrollable] = useState(false);
@@ -76,7 +92,7 @@ export const useStickToBottom = () => {
   const programmaticScroll = useRef(false);
 
   const scrollToBottom = () => {
-    const el = scrollRef.current;
+    const el = scrollElementRef.current;
     if (!el) {
       return;
     }
@@ -86,13 +102,12 @@ export const useStickToBottom = () => {
     setIsAtBottom(true);
   };
 
-  // Track user scroll direction to detect intentional scroll-up.
-  useEffect(() => {
-    const el = scrollRef.current;
+  const scrollRef = useCallback((el: HTMLDivElement | null) => {
     if (!el) {
       return undefined;
     }
 
+    scrollElementRef.current = el;
     let lastScrollTop = el.scrollTop;
 
     const onScroll = () => {
@@ -104,10 +119,9 @@ export const useStickToBottom = () => {
       }
       lastScrollTop = currentTop;
 
-      const nearBottom =
-        el.scrollHeight - el.scrollTop - el.clientHeight <=
-        NEAR_BOTTOM_THRESHOLD_PX;
-      if (nearBottom) {
+      const distanceFromBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom <= PINNED_BOTTOM_THRESHOLD_PX) {
         userScrolledUp.current = false;
         programmaticScroll.current = false;
       }
@@ -115,7 +129,12 @@ export const useStickToBottom = () => {
       // Skip isAtBottom updates during programmatic smooth
       // scrolls to prevent the scroll button from flickering.
       if (!programmaticScroll.current) {
-        setIsAtBottom(nearBottom);
+        // Button visibility tracks the escape state exactly, so the two can
+        // never disagree: hidden only while pinned/following, shown the
+        // moment the user has scrolled away (which also pauses auto-scroll).
+        // Releasing the lock only near the bottom (above) is what prevents
+        // the resize-observer yank-and-flicker, without a dead band.
+        setIsAtBottom(!userScrolledUp.current);
       }
     };
 
@@ -142,26 +161,27 @@ export const useStickToBottom = () => {
     el.addEventListener("scroll", onScroll, { passive: true });
     el.addEventListener("wheel", onWheel, { passive: true });
     return () => {
+      scrollElementRef.current = null;
       el.removeEventListener("scroll", onScroll);
       el.removeEventListener("wheel", onWheel);
     };
   }, []);
 
-  // Observe content resizes and auto-scroll when pinned.
-  useEffect(() => {
-    const content = contentRef.current;
+  const contentRef = useCallback((content: HTMLDivElement | null) => {
     if (!content) {
       return undefined;
     }
 
+    let raf = 0;
     const observer = new ResizeObserver(() => {
       // Defer to rAF to avoid layout thrashing; the
       // ResizeObserver callback fires between style
       // recalc and paint, so reading scroll metrics here
       // can force a synchronous layout. Matching the
       // original library's synchronization approach.
-      requestAnimationFrame(() => {
-        const el = scrollRef.current;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const el = scrollElementRef.current;
         if (!el) {
           return;
         }
@@ -169,7 +189,7 @@ export const useStickToBottom = () => {
         if (userScrolledUp.current) {
           return;
         }
-        if (isSelectingInside(scrollRef.current)) {
+        if (isSelectingInside(scrollElementRef.current)) {
           return;
         }
         el.scrollTo({
@@ -181,8 +201,18 @@ export const useStickToBottom = () => {
     });
 
     observer.observe(content);
-    return () => observer.disconnect();
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
   }, []);
 
-  return { scrollRef, contentRef, isAtBottom, isScrollable, scrollToBottom };
+  return {
+    scrollRef,
+    scrollElementRef,
+    contentRef,
+    isAtBottom,
+    isScrollable,
+    scrollToBottom,
+  };
 };

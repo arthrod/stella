@@ -2,7 +2,7 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as v from "valibot";
 
 import { pageTitle } from "@/lib/page-title";
-import { ensureCriticalQueryData } from "@/lib/react-query";
+import { ensureRouteQueryData } from "@/lib/react-query";
 import { loadAuthContext } from "@/routes/-auth-context";
 import { OnboardingWizard } from "@/routes/onboarding/-components/onboarding-wizard";
 import { nativeToolDeployAvailabilityOptions } from "@/routes/onboarding/-queries";
@@ -33,11 +33,12 @@ export const Route = createFileRoute("/onboarding")({
 
     return authContext;
   },
-  loader: async ({ context: { queryClient } }) =>
-    await ensureCriticalQueryData(
+  loader: async ({ context: { queryClient } }) => {
+    await ensureRouteQueryData(
       queryClient,
       nativeToolDeployAvailabilityOptions,
-    ),
+    );
+  },
   head: () => ({
     meta: [{ title: pageTitle("onboarding.orgTitle") }],
   }),

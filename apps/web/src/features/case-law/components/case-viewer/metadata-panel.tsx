@@ -1,10 +1,12 @@
 import { useState } from "react";
 
-import { useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 
 import { getDocumentAstMetadata } from "@stll/legal-ast/document-ast";
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 
+import { getFormattingLocale } from "@/i18n/i18n-store";
 import type { TranslationKey } from "@/i18n/types";
 import { sanitizeHref } from "@/lib/sanitize-href";
 
@@ -20,11 +22,10 @@ const MONOLINGUAL_COUNTRIES = new Set(["CZE", "SVK", "POL", "AUT"]);
  */
 const humanizeSourceUrl = (url: string): string => {
   // Regional courts: API endpoint → public page
-  const finaldocMatch = /rozhodnuti\.justice\.cz\/api\/finaldoc\/(.+)/u.exec(
-    url,
-  );
+  const finaldocMatch =
+    /rozhodnuti\.justice\.cz\/api\/finaldoc\/(?<id>.+)/u.exec(url);
   if (finaldocMatch) {
-    return `https://rozhodnuti.justice.cz/rozhodnuti/${finaldocMatch[1]}`;
+    return `https://rozhodnuti.justice.cz/rozhodnuti/${finaldocMatch.groups?.["id"]}`;
   }
   return url;
 };
@@ -79,7 +80,12 @@ const MetadataField = ({
     return null;
   }
 
-  const display = value instanceof Date ? value.toLocaleDateString() : value;
+  const display =
+    value instanceof Date ? (
+      value.toLocaleDateString(getFormattingLocale())
+    ) : (
+      <BidiText>{value}</BidiText>
+    );
 
   return (
     <div>
@@ -145,6 +151,7 @@ const getPopularName = (meta: Record<string, unknown>): string | null => {
 
 export const MetadataPanel = ({ decision }: MetadataPanelProps) => {
   const t = useTranslations();
+  const format = useFormatter();
   const [expanded, setExpanded] = useState(false);
 
   const astMeta = getDocumentAstMetadata(decision.documentAst);
@@ -263,12 +270,12 @@ export const MetadataPanel = ({ decision }: MetadataPanelProps) => {
       {decision.citationsFrom.length > 0 && (
         <div>
           <h4 className="text-muted-foreground mb-1 text-xs font-semibold">
-            {`${t("caseLaw.viewer.cites")} (${decision.citationsFrom.length})`}
+            {`${t("caseLaw.viewer.cites")} (${format.number(decision.citationsFrom.length)})`}
           </h4>
           <ul className="space-y-1">
             {decision.citationsFrom.slice(0, 10).map((citation) => (
               <li className="text-muted-foreground text-xs" key={citation.id}>
-                {citation.citationText}
+                <BidiText>{citation.citationText}</BidiText>
               </li>
             ))}
           </ul>
@@ -278,12 +285,12 @@ export const MetadataPanel = ({ decision }: MetadataPanelProps) => {
       {decision.citationsTo.length > 0 && (
         <div>
           <h4 className="text-muted-foreground mb-1 text-xs font-semibold">
-            {`${t("caseLaw.viewer.citedBy")} (${decision.citationsTo.length})`}
+            {`${t("caseLaw.viewer.citedBy")} (${format.number(decision.citationsTo.length)})`}
           </h4>
           <ul className="space-y-1">
             {decision.citationsTo.slice(0, 10).map((citation) => (
               <li className="text-muted-foreground text-xs" key={citation.id}>
-                {citation.citationText}
+                <BidiText>{citation.citationText}</BidiText>
               </li>
             ))}
           </ul>

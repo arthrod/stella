@@ -1,4 +1,5 @@
-import { useI18nStore } from "@/i18n/i18n-store";
+import { getFormatter, getFormattingLocale } from "@/i18n/i18n-store";
+import { startOfWeek } from "@/i18n/week";
 import type {
   WorkspaceEntity,
   WorkspaceField,
@@ -51,7 +52,7 @@ export const getFieldValue = (field: WorkspaceField | undefined) => {
       return field.content.value.join(", ");
     case "date":
       return field.content.value
-        ? new Date(field.content.value).toLocaleDateString(undefined, {
+        ? getFormatter().dateTime(new Date(field.content.value), {
             year: "numeric",
             month: "short",
             day: "numeric",
@@ -133,8 +134,7 @@ export const formatRelativeTime = (
     return "-";
   }
 
-  const lang = useI18nStore.getState().lang;
-  const currentLocale = locale ?? lang;
+  const currentLocale = locale ?? getFormattingLocale();
 
   const date = new Date(isoString);
   const now = Date.now();
@@ -170,17 +170,9 @@ export const formatRelativeTime = (
   });
 };
 
-/** Monday of the current ISO week (local time). */
-export const getWeekStart = (): Date => {
-  const now = new Date();
-  const day = now.getDay();
-  // Shift Sunday (0) to 7 so Monday is always day 1
-  const diff = (day === 0 ? 7 : day) - 1;
-  const monday = new Date(now);
-  monday.setDate(now.getDate() - diff);
-  monday.setHours(0, 0, 0, 0);
-  return monday;
-};
+/** Start of the current week (local time), per the locale's first weekday. */
+export const getWeekStart = (locale: string): Date =>
+  startOfWeek(new Date(), locale);
 
 /** Format a Date as `YYYY-MM-DD` in local time (not UTC). */
 export const toISODate = (d: Date): string => {
@@ -198,7 +190,7 @@ export const formatFullTimestamp = (
     return null;
   }
 
-  const currentLocale = locale ?? useI18nStore.getState().lang;
+  const currentLocale = locale ?? getFormattingLocale();
 
   return new Date(isoString).toLocaleString(currentLocale, {
     dateStyle: "full",

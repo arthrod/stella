@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { UseMutationResult } from "@tanstack/react-query";
 import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
@@ -19,13 +19,14 @@ import {
   WandSparklesIcon,
 } from "lucide-react";
 import { useDebouncedCallback } from "use-debounce";
-import { useLocale, useTranslations } from "use-intl";
+import { useFormatter, useLocale, useTranslations } from "use-intl";
 
 import type {
   EntityKind,
   GlobalSearchHit,
   GlobalSearchResultType,
 } from "@stll/api/types";
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 import { Checkbox } from "@stll/ui/components/checkbox";
 import {
@@ -39,14 +40,28 @@ import {
 import { Input } from "@stll/ui/components/input";
 import { Skeleton } from "@stll/ui/components/skeleton";
 import { stellaToast } from "@stll/ui/components/toast";
+import { contentDir } from "@stll/ui/hooks/use-content-dir";
 
 import { DatePickerPopover } from "@/components/date-picker-popover";
 import { getChatHitRoute } from "@/components/search-dialog.logic";
+import {
+  clearTime,
+  resolveUpdatedFrom,
+  resolveUpdatedTo,
+  setCustomTime,
+  setPresetTime,
+  toggleArrayMember,
+} from "@/components/search-filters.logic";
+import type {
+  SearchFilters,
+  TimeFilter,
+} from "@/components/search-filters.logic";
 import { UserAvatar } from "@/components/user-avatar";
 import {
   isPublicLawPreviewEnabled,
   usePublicLawPreviewEnabled,
 } from "@/hooks/use-public-law-preview";
+import { useI18nStore } from "@/i18n/i18n-store";
 import type { TranslationKey } from "@/i18n/types";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
@@ -56,7 +71,6 @@ import { toAPIError } from "@/lib/errors";
 import { resolveMatterColor } from "@/lib/matter-colors";
 import { toSafeId } from "@/lib/safe-id";
 import {
-  presetUpdatedFrom,
   searchFacetOptions,
   searchInfiniteOptions,
   TIME_PRESETS,
@@ -234,21 +248,6 @@ const mergeSelectedBuckets = (
   return [...buckets, ...missing];
 };
 
-type TimeFilter =
-  | { mode: "preset"; preset: TimePreset }
-  | { mode: "custom"; updatedFrom?: string; updatedTo?: string };
-
-type SearchFilters = {
-  workspaceIds: string[];
-  types: GlobalSearchResultType[];
-  editedByUserIds: string[];
-  mimeTypes: string[];
-  time?: TimeFilter;
-};
-
-const filterUpdatedTo = (filters: SearchFilters): string | undefined =>
-  filters.time?.mode === "custom" ? filters.time.updatedTo : undefined;
-
 type SearchDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -262,6 +261,9 @@ export const SearchDialog = ({
 }: SearchDialogProps) => {
   const t = useTranslations();
   const locale = useLocale();
+  // The AI search API caps locale at 16 chars; send the base language, not the
+  // formatting locale (which may carry a region and -u- extensions).
+  const apiLocale = useI18nStore((s) => s.loadedLang);
   const navigate = useNavigate();
   const user = useAuthenticatedUser();
   const publicLawPreviewEnabled = usePublicLawPreviewEnabled();
@@ -275,8 +277,6 @@ export const SearchDialog = ({
   const [resultsElement, setResultsElement] = useState<HTMLDivElement | null>(
     null,
   );
-  const loadMoreRef = useRef<HTMLDivElement>(null);
-
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [recentSearches, setRecentSearches] = useState<RecentSearch[]>([]);
@@ -298,17 +298,12 @@ export const SearchDialog = ({
   // whenever the user picks a new preset or runs a new query, while
   // staying stable across pagination so `fetchNextPage` keeps using
   // the same cutoff as page 1.
-  const updatedFrom = useMemo(() => {
-    if (filters.time?.mode === "preset") {
-      return presetUpdatedFrom(filters.time.preset);
-    }
-    if (filters.time?.mode === "custom") {
-      return filters.time.updatedFrom;
-    }
-    return undefined;
+  const updatedFrom = useMemo(
+    () => resolveUpdatedFrom(filters.time),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: include searchQuery so each new query gets a fresh preset cutoff
-  }, [filters.time, searchQuery]);
-  const updatedTo = filterUpdatedTo(filters);
+    [filters.time, searchQuery],
+  );
+  const updatedTo = resolveUpdatedTo(filters.time);
   const selectedSearchTypes = filters.types.filter(
     (type) =>
       isSearchKindOption(type) &&
@@ -367,6 +362,12 @@ export const SearchDialog = ({
   });
   const virtualHits = hitVirtualizer.getVirtualItems();
 
+  // Refresh the recents snapshot from localStorage each time the dialog opens.
+  // The recents are also locally mutated by the result/search handlers, so this
+  // is a triggered read of an external store into shared state, not pure derived
+  // state: a render-time read would re-read on every render and clobber those
+  // local mutations.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- read localStorage recents into locally-mutated state on the open transition; render-time read would clobber in-session mutations
   useEffect(() => {
     if (!open) {
       return;
@@ -497,7 +498,7 @@ export const SearchDialog = ({
 
     summarizeSearchMutation.mutate({
       query: trimmedQuery,
-      locale,
+      locale: apiLocale,
       ...searchFilterParams,
       limit: 5,
     });
@@ -518,7 +519,7 @@ export const SearchDialog = ({
     createSummaryChatMutation.mutate(
       {
         query: trimmedQuery,
-        locale,
+        locale: apiLocale,
         title: summaryData.title,
         summary: summaryData.summary,
         citations: summaryData.citations,
@@ -550,7 +551,7 @@ export const SearchDialog = ({
     }
 
     refineSearchMutation.mutate(
-      { query: trimmedQuery, locale },
+      { query: trimmedQuery, locale: apiLocale },
       {
         onSuccess: (refined, variables) => {
           debouncedSetQuery.cancel();
@@ -588,86 +589,46 @@ export const SearchDialog = ({
   };
 
   const toggleTypeFilter = (type: GlobalSearchResultType) => {
-    setFilters((prev) => {
-      const next = prev.types.includes(type)
-        ? prev.types.filter((item) => item !== type)
-        : [...prev.types, type];
-      return {
-        ...prev,
-        types: next,
-      };
-    });
+    setFilters((prev) => ({
+      ...prev,
+      types: toggleArrayMember(prev.types, type),
+    }));
   };
 
   const toggleWorkspaceFilter = (workspaceId: string) => {
-    setFilters((prev) => {
-      const next = prev.workspaceIds.includes(workspaceId)
-        ? prev.workspaceIds.filter((id) => id !== workspaceId)
-        : [...prev.workspaceIds, workspaceId];
-      return { ...prev, workspaceIds: next };
-    });
+    setFilters((prev) => ({
+      ...prev,
+      workspaceIds: toggleArrayMember(prev.workspaceIds, workspaceId),
+    }));
   };
 
   const toggleEditorFilter = (editorId: string) => {
-    setFilters((prev) => {
-      const next = prev.editedByUserIds.includes(editorId)
-        ? prev.editedByUserIds.filter((id) => id !== editorId)
-        : [...prev.editedByUserIds, editorId];
-      return {
-        ...prev,
-        editedByUserIds: next,
-      };
-    });
+    setFilters((prev) => ({
+      ...prev,
+      editedByUserIds: toggleArrayMember(prev.editedByUserIds, editorId),
+    }));
   };
 
   const setTimePreset = (preset: TimePreset | undefined) => {
-    setFilters((prev): SearchFilters => {
-      const { time: _, ...rest } = prev;
-      if (!preset) {
-        return rest;
-      }
-      return { ...rest, time: { mode: "preset", preset } };
-    });
+    setFilters((prev) => setPresetTime(prev, preset));
   };
 
   const setCustomDateRange = (range: {
     updatedFrom?: string;
     updatedTo?: string;
   }) => {
-    setFilters((prev): SearchFilters => {
-      const { time: _, ...rest } = prev;
-      return {
-        ...rest,
-        time: {
-          mode: "custom",
-          ...(range.updatedFrom !== undefined && {
-            updatedFrom: range.updatedFrom,
-          }),
-          ...(range.updatedTo !== undefined && {
-            updatedTo: range.updatedTo,
-          }),
-        },
-      };
-    });
+    setFilters((prev) => setCustomTime(prev, range));
   };
 
   const clearTimeFilter = () => {
-    setFilters((prev): SearchFilters => {
-      const { time: _, ...rest } = prev;
-      return rest;
-    });
+    setFilters(clearTime);
   };
 
   const toggleMimeTypeFilter = (mimeType: string) => {
-    setFilters((prev) => {
-      const next = prev.mimeTypes.includes(mimeType)
-        ? prev.mimeTypes.filter((item) => item !== mimeType)
-        : [...prev.mimeTypes, mimeType];
-      return {
-        ...prev,
-        mimeTypes: next,
-      };
-    });
+    setFilters((prev) => ({
+      ...prev,
+      mimeTypes: toggleArrayMember(prev.mimeTypes, mimeType),
+    }));
   };
 
   const handleResultClick = async (hit: GlobalSearchHit) => {
@@ -696,13 +657,11 @@ export const SearchDialog = ({
       const slug =
         "slug" in hit && typeof hit.slug === "string" ? hit.slug : null;
       await navigate({
-        to: "/law/$country/cases/$court/$date/$slug",
+        to: "/law/$country/cases/$court/$slug",
         params: createCaseLawDecisionRouteParams({
           caseNumber: hit.caseNumber,
           country: hit.country,
           court: hit.court,
-          decisionDate: hit.decisionDate,
-          decisionId: hit.decisionId,
           slug,
         }),
         search: {
@@ -764,6 +723,11 @@ export const SearchDialog = ({
   const commandHits = hasTypedQuery && hasResults ? allHits : [];
   const filterEditorIdsKey = filters.editedByUserIds.join("|");
 
+  // Clear any prior AI summary whenever the effective search changes. The
+  // debounced `searchQuery` updates asynchronously (no handler to co-locate
+  // with) and the filter setters fan out across ~7 handlers, so there is no
+  // single trigger site to relay the reset into.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset on debounced searchQuery/filter changes; no single event site (debounced query updates post-commit, filters set in many handlers)
   useEffect(() => {
     summarizeSearchMutation.reset();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset is the stable mutation method needed here
@@ -777,33 +741,29 @@ export const SearchDialog = ({
     searchQuery,
   ]);
 
-  useEffect(() => {
-    const root = resultsElement;
-    const target = loadMoreRef.current;
-    if (!hasQuery || !hasNextPage || !root || !target) {
-      return undefined;
-    }
+  const loadMoreRef = useCallback(
+    (target: HTMLDivElement | null) => {
+      const root = resultsElement;
+      if (!hasQuery || !hasNextPage || !root || !target) {
+        return undefined;
+      }
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const entry = entries.at(0);
-        if (!entry?.isIntersecting || isFetchingNextPage) {
-          return;
-        }
-        void fetchNextPage();
-      },
-      { root, rootMargin: "160px 0px" },
-    );
+      const observer = new IntersectionObserver(
+        (entries) => {
+          const entry = entries.at(0);
+          if (!entry?.isIntersecting || isFetchingNextPage) {
+            return;
+          }
+          void fetchNextPage();
+        },
+        { root, rootMargin: "160px 0px" },
+      );
 
-    observer.observe(target);
-    return () => observer.disconnect();
-  }, [
-    fetchNextPage,
-    hasNextPage,
-    hasQuery,
-    isFetchingNextPage,
-    resultsElement,
-  ]);
+      observer.observe(target);
+      return () => observer.disconnect();
+    },
+    [fetchNextPage, hasNextPage, hasQuery, isFetchingNextPage, resultsElement],
+  );
 
   return (
     <CommandDialog onOpenChange={onOpenChange} open={open}>
@@ -838,6 +798,7 @@ export const SearchDialog = ({
             <CommandInput
               autoFocus
               className="text-sm"
+              dir={contentDir(query)}
               onKeyDownCapture={handleCommandInputKeyDownCapture}
               placeholder={t("search.placeholder")}
             />
@@ -1189,7 +1150,7 @@ type SummaryBodyProps = {
   onCitationClick: (citationId: string) => void;
 };
 
-const CITATION_RE = /\[(\d+)\]/gu;
+const CITATION_RE = /\[(?<number>\d+)\]/gu;
 
 const SummaryBody = ({
   citations,
@@ -1204,7 +1165,7 @@ const SummaryBody = ({
 
   for (const match of text.matchAll(CITATION_RE)) {
     const start = match.index;
-    const numberText = match[1];
+    const numberText = match.groups?.["number"];
     const number = numberText ? Number(numberText) : Number.NaN;
     const citation = citationByNumber.get(number);
 
@@ -1257,7 +1218,7 @@ const SearchRecents = ({
   const t = useTranslations();
   const hasRecents = recentSearches.length > 0 || recentFiles.length > 0;
 
-  // TODO: Add scoped quick-create actions.
+  // Scoped quick-create actions belong here once the action model is settled.
   if (!hasRecents) {
     return (
       <div className="flex h-full items-center justify-center px-4 py-8">
@@ -1315,10 +1276,15 @@ const SearchRecents = ({
                   <FileTextIcon className="text-muted-foreground size-4 shrink-0" />
                 )}
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate">{file.title}</span>
-                  <span className="text-muted-foreground block truncate text-xs">
+                  <BidiText as="span" className="block truncate">
+                    {file.title}
+                  </BidiText>
+                  <BidiText
+                    as="span"
+                    className="text-muted-foreground block truncate text-xs"
+                  >
                     {file.workspaceName}
-                  </span>
+                  </BidiText>
                 </span>
               </Button>
             ))}
@@ -1497,27 +1463,30 @@ const FacetBucketList = ({
   buckets,
   selected,
   onChange,
-}: FacetBucketListProps) => (
-  <div className="space-y-0.5">
-    {buckets.map((bucket) => (
-      <Button
-        className="h-auto w-full justify-start gap-2 px-2 py-1 text-xs"
-        key={bucket.value}
-        onClick={() => onChange(bucket.value)}
-        size="sm"
-        variant="ghost"
-      >
-        <Checkbox checked={selected.includes(bucket.value)} tabIndex={-1} />
-        <span className="flex-1 truncate text-start">
-          {bucket.label ?? bucket.value}
-        </span>
-        <span className="text-muted-foreground tabular-nums">
-          {bucket.count}
-        </span>
-      </Button>
-    ))}
-  </div>
-);
+}: FacetBucketListProps) => {
+  const format = useFormatter();
+  return (
+    <div className="space-y-0.5">
+      {buckets.map((bucket) => (
+        <Button
+          className="h-auto w-full justify-start gap-2 px-2 py-1 text-xs"
+          key={bucket.value}
+          onClick={() => onChange(bucket.value)}
+          size="sm"
+          variant="ghost"
+        >
+          <Checkbox checked={selected.includes(bucket.value)} tabIndex={-1} />
+          <span className="flex-1 truncate text-start">
+            {bucket.label ?? bucket.value}
+          </span>
+          <span className="text-muted-foreground tabular-nums">
+            {format.number(bucket.count)}
+          </span>
+        </Button>
+      ))}
+    </div>
+  );
+};
 
 const FACET_SEARCH_DEBOUNCE_MS = 250;
 const FACET_SEARCH_LIMIT = 20;
@@ -1641,12 +1610,12 @@ const SearchResultItem = ({
   onClick,
 }: SearchResultItemProps) => {
   const t = useTranslations();
-  const locale = useLocale();
+  const format = useFormatter();
   const date = new Date(hit.updatedAt);
-  const formatted = new Intl.DateTimeFormat(locale, {
+  const formatted = format.dateTime(date, {
     month: "short",
     year: "numeric",
-  }).format(date);
+  });
   let editorMeta: { image: string | null; name: string } | null = null;
   if (hit.type === "document" && hit.lastEditedByName) {
     editorMeta = {
@@ -1702,6 +1671,7 @@ const SearchResultItem = ({
           <p
             className="text-muted-foreground [&_mark]:bg-highlight [&_mark]:text-highlight-foreground mt-0.5 line-clamp-2 text-xs font-normal [&_mark]:font-medium"
             dangerouslySetInnerHTML={{
+              // safe-html: server-escaped + <mark>-highlighted by escapeAndHighlight() in the global search mappers
               __html: hit.headline,
             }}
           />

@@ -12,6 +12,7 @@
 
 import type { Node as PMNode, Mark } from "prosemirror-model";
 
+import { numPrEqual } from "../../docx/numberingParser";
 import { narrowEnum, ShapeOutlineStyleSchema } from "../../docx/parserEnums";
 import type {
   ImageWrap,
@@ -64,6 +65,7 @@ import {
 import { pixelsToEmu } from "../../utils/units";
 import {
   expectCharacterSpacingMarkAttrs,
+  expectCharacterStyleMarkAttrs,
   expectCommentMarkAttrs,
   expectEmphasisMarkAttrs,
   expectTextEffectMarkAttrs,
@@ -91,6 +93,10 @@ import {
   expectTrackedChangeMarkAttrs,
   expectUnderlineMarkAttrs,
 } from "../attrs";
+import {
+  autospacingMatchesBase,
+  hasAutospacingBaseSide,
+} from "../autospacingBase";
 import type { RunFormattingOverrideAttrs } from "../schema/marks";
 import type {
   ParagraphAttrs,
@@ -126,9 +132,9 @@ function parseTransformAttr(
     return undefined;
   }
   const transform: ImageTransform = {};
-  const rotateMatch = /rotate\(([-\d.]+)deg\)/u.exec(transformStr);
+  const rotateMatch = /rotate\((?<deg>[-\d.]+)deg\)/u.exec(transformStr);
   if (rotateMatch) {
-    const rotation = Number.parseFloat(rotateMatch[1]!);
+    const rotation = Number.parseFloat(rotateMatch.groups!["deg"]!);
     if (Number.isFinite(rotation)) {
       transform.rotation = rotation;
     }
@@ -678,6 +684,20 @@ function convertPMParagraph(
   return paragraph;
 }
 
+/**
+ * Whether the paragraph's numbering still comes verbatim from its style —
+ * serialize no direct `<w:numPr>` then. The moment a list command changes
+ * `numPr` the values diverge and the numbering serializes as direct
+ * formatting, so a stale provenance value can never swallow a user edit.
+ */
+function isStyleSourcedNumPr(attrs: ParagraphAttrs): boolean {
+  return (
+    attrs.numPrFromStyle != null &&
+    attrs.numPr != null &&
+    numPrEqual(attrs.numPr, attrs.numPrFromStyle)
+  );
+}
+
 function paragraphAttrsToFormatting(
   attrs: ParagraphAttrs,
 ): ParagraphFormatting | undefined {
@@ -690,9 +710,53 @@ function paragraphAttrsToFormatting(
   //
   // We then apply overrides for any properties the user may have changed
   // via editor commands (alignment, list toggle, etc.).
+  const spaceBefore = Reflect.get(attrs, "spaceBefore");
+  const spaceAfter = Reflect.get(attrs, "spaceAfter");
+  const beforeHasAutospacingBase = hasAutospacingBaseSide(
+    attrs._autospacingBase,
+    "before",
+  );
+  const afterHasAutospacingBase = hasAutospacingBaseSide(
+    attrs._autospacingBase,
+    "after",
+  );
+  const beforeOriginalAutospacing =
+    attrs._originalFormatting?.beforeAutospacing === true;
+  const afterOriginalAutospacing =
+    attrs._originalFormatting?.afterAutospacing === true;
+  const beforeAutospacingEdited = beforeHasAutospacingBase
+    ? !autospacingMatchesBase(attrs._autospacingBase, "before", spaceBefore)
+    : beforeOriginalAutospacing && attrs._autospacingBase == null;
+  const afterAutospacingEdited = afterHasAutospacingBase
+    ? !autospacingMatchesBase(attrs._autospacingBase, "after", spaceAfter)
+    : afterOriginalAutospacing && attrs._autospacingBase == null;
+  const shouldSerializeSpaceBefore =
+    typeof spaceBefore === "number" &&
+    (!beforeHasAutospacingBase || beforeAutospacingEdited);
+  const shouldSerializeSpaceAfter =
+    typeof spaceAfter === "number" &&
+    (!afterHasAutospacingBase || afterAutospacingEdited);
+
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
     const result = { ...orig };
+
+    if (beforeAutospacingEdited) {
+      result.beforeAutospacing = false;
+      if (typeof spaceBefore === "number") {
+        result.spaceBefore = spaceBefore;
+      } else {
+        delete result.spaceBefore;
+      }
+    }
+    if (afterAutospacingEdited) {
+      result.afterAutospacing = false;
+      if (typeof spaceAfter === "number") {
+        result.spaceAfter = spaceAfter;
+      } else {
+        delete result.spaceAfter;
+      }
+    }
 
     // Override properties that user may have changed via editor commands.
     // Only override if the PM attr differs from the original value.
@@ -703,15 +767,21 @@ function paragraphAttrsToFormatting(
         delete result.alignment;
       }
     }
-    if (
+    if (isStyleSourcedNumPr(attrs)) {
+      // The numbering still comes verbatim from the paragraph style — don't
+      // materialize it as direct formatting (see ParagraphAttrs.numPrFromStyle).
+      delete result.numPr;
+      delete result.numPrFromStyle;
+    } else if (
       attrs.numPr !== orig.numPr &&
-      JSON.stringify(attrs.numPr) !== JSON.stringify(orig.numPr)
+      !numPrEqual(attrs.numPr, orig.numPr)
     ) {
       if (attrs.numPr) {
         result.numPr = attrs.numPr;
       } else {
         delete result.numPr;
       }
+      delete result.numPrFromStyle;
     }
     if (attrs.styleId !== (orig.styleId ?? undefined)) {
       if (attrs.styleId) {
@@ -750,8 +820,10 @@ function paragraphAttrsToFormatting(
   const outlineLevel = Reflect.get(attrs, "outlineLevel");
   const hasFormatting =
     attrs.alignment ||
-    attrs.spaceBefore ||
-    attrs.spaceAfter ||
+    shouldSerializeSpaceBefore ||
+    shouldSerializeSpaceAfter ||
+    beforeAutospacingEdited ||
+    afterAutospacingEdited ||
     attrs.lineSpacing ||
     attrs.indentLeft ||
     attrs.indentRight ||
@@ -774,11 +846,17 @@ function paragraphAttrsToFormatting(
   if (attrs.alignment) {
     f.alignment = attrs.alignment;
   }
-  if (attrs.spaceBefore) {
-    f.spaceBefore = attrs.spaceBefore;
+  if (shouldSerializeSpaceBefore) {
+    f.spaceBefore = spaceBefore;
   }
-  if (attrs.spaceAfter) {
-    f.spaceAfter = attrs.spaceAfter;
+  if (beforeAutospacingEdited) {
+    f.beforeAutospacing = false;
+  }
+  if (shouldSerializeSpaceAfter) {
+    f.spaceAfter = spaceAfter;
+  }
+  if (afterAutospacingEdited) {
+    f.afterAutospacing = false;
   }
   if (attrs.lineSpacing) {
     f.lineSpacing = attrs.lineSpacing;
@@ -801,7 +879,7 @@ function paragraphAttrsToFormatting(
   if (attrs.hangingIndent) {
     f.hangingIndent = attrs.hangingIndent;
   }
-  if (attrs.numPr) {
+  if (attrs.numPr && !isStyleSourcedNumPr(attrs)) {
     f.numPr = attrs.numPr;
   }
   if (attrs.styleId) {
@@ -859,6 +937,20 @@ function extractParagraphContent(
   let currentHyperlinkKey: string | null = null;
   const openedComments = new Set<number>();
 
+  // A single comment id must round-trip to a single contiguous comment range.
+  // Pre-compute the last offset at which each comment appears so the range
+  // spans any interrupting node that drops the mark (a tracked-change run, or
+  // an atom whose node spec can't carry the comment mark) instead of being
+  // split into several ranges for one id — invalid OOXML that Word rejects as
+  // unreadable content (eigenpal/docx-editor#927).
+  const commentLastOffset = new Map<number, number>();
+  // oxlint-disable-next-line unicorn/no-array-for-each -- ProseMirror Node.forEach
+  paragraph.forEach((node, offset) => {
+    for (const commentId of getCommentMarkIds(node.marks)) {
+      commentLastOffset.set(commentId, offset);
+    }
+  });
+
   const flushCurrentInline = () => {
     if (currentRun) {
       content.push(currentRun);
@@ -872,41 +964,41 @@ function extractParagraphContent(
     }
   };
 
-  const syncCommentRanges = (node: PMNode) => {
+  const syncCommentRanges = (node: PMNode, offset: number) => {
     const nodeCommentIds = getCommentMarkIds(node.marks);
-    let changed = false;
+
+    // Close an open range only once this node is past the comment's last
+    // occurrence; a comment that reappears later stays open so the range spans
+    // the gap (eigenpal/docx-editor#927).
+    const toClose: number[] = [];
     for (const commentId of openedComments) {
-      if (!nodeCommentIds.has(commentId)) {
-        changed = true;
-        break;
+      const lastOffset = commentLastOffset.get(commentId) ?? offset;
+      if (!nodeCommentIds.has(commentId) && lastOffset <= offset) {
+        toClose.push(commentId);
       }
     }
-    if (!changed) {
-      for (const commentId of nodeCommentIds) {
-        if (!openedComments.has(commentId)) {
-          changed = true;
-          break;
-        }
+
+    const toOpen: number[] = [];
+    for (const commentId of nodeCommentIds) {
+      if (!openedComments.has(commentId)) {
+        toOpen.push(commentId);
       }
     }
-    if (!changed) {
+
+    if (toClose.length === 0 && toOpen.length === 0) {
       return;
     }
 
     flushCurrentInline();
 
-    for (const commentId of [...openedComments]) {
-      if (!nodeCommentIds.has(commentId)) {
-        content.push({ type: "commentRangeEnd", id: commentId });
-        openedComments.delete(commentId);
-      }
+    // Stable id ordering keeps shared-boundary emission deterministic.
+    for (const commentId of toClose.toSorted((a, b) => a - b)) {
+      content.push({ type: "commentRangeEnd", id: commentId });
+      openedComments.delete(commentId);
     }
-
-    for (const commentId of nodeCommentIds) {
-      if (!openedComments.has(commentId)) {
-        content.push({ type: "commentRangeStart", id: commentId });
-        openedComments.add(commentId);
-      }
+    for (const commentId of toOpen.toSorted((a, b) => a - b)) {
+      content.push({ type: "commentRangeStart", id: commentId });
+      openedComments.add(commentId);
     }
   };
 
@@ -922,8 +1014,8 @@ function extractParagraphContent(
     }
   };
 
-  const processInlineNode = (node: PMNode): void => {
-    syncCommentRanges(node);
+  const processInlineNode = (node: PMNode, offset: number): void => {
+    syncCommentRanges(node, offset);
     const linkMark = node.marks.find((m) => m.type.name === "hyperlink");
 
     // Check for footnote/endnote reference mark
@@ -931,7 +1023,7 @@ function extractParagraphContent(
     if (noteRefMark && !linkMark) {
       // Finish any current content
       flushCurrentInline();
-      content.push(createNoteReferenceRun(noteRefMark));
+      content.push(createNoteReferenceRun(noteRefMark, node.marks));
       return;
     }
 
@@ -1071,7 +1163,7 @@ function extractParagraphContent(
         const splitOffset = Math.max(item.attrs.offset - offset, consumed);
         const segment = node.text.slice(consumed, splitOffset);
         if (segment) {
-          processInlineNode(node.type.schema.text(segment, node.marks));
+          processInlineNode(node.type.schema.text(segment, node.marks), offset);
         }
         flushCurrentInline();
         content.push(createEmptyHyperlink(item.attrs));
@@ -1081,12 +1173,12 @@ function extractParagraphContent(
 
       const remainder = node.text.slice(consumed);
       if (remainder) {
-        processInlineNode(node.type.schema.text(remainder, node.marks));
+        processInlineNode(node.type.schema.text(remainder, node.marks), offset);
       }
       return;
     }
 
-    processInlineNode(node);
+    processInlineNode(node, offset);
   });
 
   flushEmptyHyperlinksThroughOffset(Number.POSITIVE_INFINITY);
@@ -1253,7 +1345,7 @@ function createHyperlink(linkMark: Mark): Hyperlink {
 function addNodeToHyperlink(hyperlink: Hyperlink, node: PMNode): void {
   const noteRefMark = node.marks.find((m) => m.type.name === "footnoteRef");
   if (noteRefMark) {
-    hyperlink.children.push(createNoteReferenceRun(noteRefMark));
+    hyperlink.children.push(createNoteReferenceRun(noteRefMark, node.marks));
     return;
   }
 
@@ -1286,7 +1378,29 @@ function addNodeToHyperlink(hyperlink: Hyperlink, node: PMNode): void {
   }
 }
 
-function createNoteReferenceRun(noteRefMark: Mark): Run {
+function getNoteReferenceVertAlign(
+  noteAttrs: ReturnType<typeof expectFootnoteRefMarkAttrs>,
+  marks: readonly Mark[],
+): "baseline" | "superscript" | "subscript" | undefined {
+  if (marks.some((mark) => mark.type.name === "subscript")) {
+    return "subscript";
+  }
+  if (marks.some((mark) => mark.type.name === "superscript")) {
+    return "superscript";
+  }
+  if (
+    noteAttrs.vertAlign === "baseline" ||
+    noteAttrs.vertAlign === "superscript"
+  ) {
+    return noteAttrs.vertAlign;
+  }
+  return undefined;
+}
+
+function createNoteReferenceRun(
+  noteRefMark: Mark,
+  marks: readonly Mark[],
+): Run {
   const noteAttrs = expectFootnoteRefMarkAttrs(noteRefMark);
   const noteType =
     noteAttrs.noteType === "endnote" ? "endnoteRef" : "footnoteRef";
@@ -1298,10 +1412,15 @@ function createNoteReferenceRun(noteRefMark: Mark): Run {
     type: noteType,
     id: noteId,
   };
-  return {
+  const run: Run = {
     type: "run",
     content: [noteRef],
   };
+  const vertAlign = getNoteReferenceVertAlign(noteAttrs, marks);
+  if (vertAlign) {
+    run.formatting = { vertAlign };
+  }
+  return run;
 }
 
 /**
@@ -1834,8 +1953,9 @@ function createShapeRun(node: PMNode): Run {
 /**
  * Convert ProseMirror marks to TextFormatting
  */
-function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
+export function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
   const formatting: TextFormatting = {};
+  let characterStyleRPr: TextFormatting | undefined;
 
   for (const mark of marks) {
     switch (mark.type.name) {
@@ -2016,13 +2136,107 @@ function marksToTextFormatting(marks: readonly Mark[]): TextFormatting {
         );
         break;
 
+      case "characterStyle": {
+        const attrs = expectCharacterStyleMarkAttrs(mark);
+        formatting.styleId = attrs.styleId;
+        characterStyleRPr = attrs._styleRPr;
+        break;
+      }
+
       // hyperlink is handled separately
       default:
         break;
     }
   }
 
+  if (characterStyleRPr) {
+    return subtractCharacterStyleFormatting(formatting, characterStyleRPr);
+  }
+
   return formatting;
+}
+
+/**
+ * Negatable boolean run-property keys whose serializer emits an explicit
+ * `w:val="0"` override when the value is `false` (see `serializeTextFormatting`
+ * in `runSerializer.ts`). Each entry pairs a base key with the complex-script
+ * mirror that `marksToTextFormatting` sets alongside it (the bold/italic marks
+ * set `*Cs` too), so a negative override disables both. Keys without a complex
+ * mirror use `null`.
+ */
+const NEGATABLE_STYLE_KEYS: readonly [
+  keyof TextFormatting,
+  keyof TextFormatting | null,
+][] = [
+  ["bold", "boldCs"],
+  ["italic", "italicCs"],
+  ["strike", null],
+  ["doubleStrike", null],
+  ["allCaps", null],
+  ["smallCaps", null],
+  ["hidden", null],
+  ["emboss", null],
+  ["imprint", null],
+  ["shadow", null],
+  ["outline", null],
+  ["rtl", null],
+];
+
+/**
+ * Drop run formatting values that the run's character style already provides
+ * (the `w:rStyle` reference re-imposes them on load), so a styled run
+ * serializes back to a style reference instead of baked direct formatting.
+ *
+ * `styleRPr` is the load-time snapshot from the characterStyle mark, captured
+ * in the same normal form this module produces from marks, so value equality
+ * is a faithful "came from the style and is unchanged" check. Values that
+ * differ (user edits, direct overrides from the source document) stay as
+ * direct formatting, which wins over the style per the OOXML cascade.
+ *
+ * When the user *removes* a boolean property the style supplied (e.g. toggling
+ * off bold on text whose `w:rStyle` is bold), that key is no longer present in
+ * `formatting`, so the subtraction loop above never sees it. Without a counter,
+ * the run keeps the style reference and Word re-applies the removed formatting
+ * on load. The second pass emits an explicit negative override (`false`) for
+ * each negatable boolean the style set to `true` but the run no longer carries.
+ */
+function subtractCharacterStyleFormatting(
+  formatting: TextFormatting,
+  styleRPr: TextFormatting,
+): TextFormatting {
+  const result: TextFormatting = {};
+
+  // SAFETY: Object.keys over a TextFormatting yields its own keys.
+  for (const key of Object.keys(formatting) as (keyof TextFormatting)[]) {
+    const value = formatting[key];
+    if (value === undefined) {
+      continue;
+    }
+    const styleValue = key === "styleId" ? undefined : styleRPr[key];
+    // Both values come out of marksToTextFormatting, so equal values have
+    // identical key insertion order and stringify identically.
+    if (
+      styleValue !== undefined &&
+      JSON.stringify(value) === JSON.stringify(styleValue)
+    ) {
+      continue;
+    }
+    // SAFETY: dynamic property copy between identical TextFormatting keys.
+    (result as Record<string, unknown>)[key] = value;
+  }
+
+  for (const [key, csKey] of NEGATABLE_STYLE_KEYS) {
+    if (styleRPr[key] !== true || formatting[key] !== undefined) {
+      continue;
+    }
+    // SAFETY: dynamic property copy between known boolean TextFormatting keys.
+    (result as Record<string, unknown>)[key] = false;
+    if (csKey !== null) {
+      (result as Record<string, unknown>)[csKey] = false;
+    }
+  }
+
+  return result;
 }
 
 function applyRunFormattingOverrideAttrs(
@@ -2237,6 +2451,15 @@ function tableAttrsToFormatting(
         delete result.look;
       }
     }
+    // Borders: toProseDoc seeds attrs.borders with the same reference as
+    // orig.borders, so a difference means a border command replaced them.
+    if (attrs.borders !== (orig.borders ?? undefined)) {
+      if (attrs.borders) {
+        result.borders = attrs.borders;
+      } else {
+        delete result.borders;
+      }
+    }
     // Width: check if changed
     const tableWidth = attrs.width;
     const tableWidthType = attrs.widthType;
@@ -2271,7 +2494,8 @@ function tableAttrsToFormatting(
     attrs.justification ||
     attrs.floating ||
     attrs.cellMargins ||
-    attrs.look;
+    attrs.look ||
+    attrs.borders;
 
   if (!hasFormatting) {
     return undefined;
@@ -2309,6 +2533,9 @@ function tableAttrsToFormatting(
   }
   if (attrs.look) {
     f.look = attrs.look;
+  }
+  if (attrs.borders) {
+    f.borders = attrs.borders;
   }
   return f;
 }

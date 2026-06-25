@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import nodePath from "node:path";
 
 Object.assign(import.meta.env, {
   VITE_API_URL: "http://localhost:3001",
@@ -22,9 +22,9 @@ const { isWorkspaceDocumentRoutePath } =
 const { WORKSPACE_PRIMARY_NAV_ITEMS } =
   await import("@/components/workspace-primary-nav");
 
-const repoRoot = resolve(import.meta.dir, "../../../..");
+const repoRoot = nodePath.resolve(import.meta.dir, "../../../..");
 const readSource = async (path: string) =>
-  await Bun.file(resolve(repoRoot, path)).text();
+  await Bun.file(nodePath.resolve(repoRoot, path)).text();
 const expectNoDirectAuthImport = (source: string) => {
   expect(source).not.toMatch(/@\/lib\/auth["']/u);
 };
@@ -55,7 +55,6 @@ describe("public law sitemap", () => {
             slug: "stable-official-slug",
             country: "CZE",
             court: "Nejvyssi soud",
-            decisionDate: "2017-09-20",
             language: "cs",
             languageAlternates: [],
             updatedAt: "2026-01-01T00:00:00.000Z",
@@ -204,7 +203,6 @@ describe("public law sitemap", () => {
         slug: "stable-official-slug",
         country: "CZE",
         court: "Nejvyssi soud",
-        decisionDate: "2017-09-20",
         language: "cs",
         languageAlternates: [],
         updatedAt: "2026-01-01T00:00:00.000Z",
@@ -213,7 +211,7 @@ describe("public law sitemap", () => {
 
     expect(xml).not.toContain("http://localhost:3000/law/cases</loc>");
     expect(xml).toContain(
-      "http://localhost:3000/law/cze/cases/nejvyssi-soud/2017-09-20/stable-official-slug",
+      "http://localhost:3000/law/cze/cases/nejvyssi-soud/stable-official-slug",
     );
     expect(xml).not.toContain("xmlns:xhtml");
     expect(xml).not.toContain("hreflang");
@@ -227,7 +225,6 @@ describe("public law sitemap", () => {
         slug: "c-123-22",
         country: "EU",
         court: "Court of Justice",
-        decisionDate: "2024-03-07",
         language: "en",
         languageAlternates: [
           {
@@ -236,7 +233,6 @@ describe("public law sitemap", () => {
             slug: "c-123-22",
             country: "EU",
             court: "Court of Justice",
-            decisionDate: "2024-03-07",
             language: "en",
             updatedAt: "2026-01-01T00:00:00.000Z",
           },
@@ -246,7 +242,6 @@ describe("public law sitemap", () => {
             slug: "c-123-22-cs",
             country: "EU",
             court: "Court of Justice",
-            decisionDate: "2024-03-07",
             language: "cs",
             updatedAt: "2026-01-01T00:00:00.000Z",
           },
@@ -257,10 +252,10 @@ describe("public law sitemap", () => {
 
     expect(xml).toContain('xmlns:xhtml="http://www.w3.org/1999/xhtml"');
     expect(xml).toContain(
-      "http://localhost:3000/law/eu/cases/court-of-justice/2024-03-07/en/c-123-22",
+      "http://localhost:3000/law/eu/cases/court-of-justice/en/c-123-22",
     );
     expect(xml).toContain(
-      'hreflang="cs" href="http://localhost:3000/law/eu/cases/court-of-justice/2024-03-07/cs/c-123-22-cs"',
+      'hreflang="cs" href="http://localhost:3000/law/eu/cases/court-of-justice/cs/c-123-22-cs"',
     );
     expect(xml).toContain('hreflang="x-default"');
   });
@@ -273,7 +268,6 @@ describe("public law sitemap", () => {
         slug: "c-123-22",
         country: "EU",
         court: "Court of Justice",
-        decisionDate: "2024-03-07",
         language: "en",
         languageAlternates: [
           {
@@ -282,7 +276,6 @@ describe("public law sitemap", () => {
             slug: "c-123-22",
             country: "EU",
             court: "Court of Justice",
-            decisionDate: "2024-03-07",
             language: "EN",
             updatedAt: "2026-01-01T00:00:00.000Z",
           },
@@ -292,7 +285,6 @@ describe("public law sitemap", () => {
             slug: "c-123-22-duplicate",
             country: "EU",
             court: "Court of Justice",
-            decisionDate: "2024-03-07",
             language: "en",
             updatedAt: "2026-01-01T00:00:00.000Z",
           },
@@ -302,7 +294,6 @@ describe("public law sitemap", () => {
             slug: "c-123-22-cs",
             country: "EU",
             court: "Court of Justice",
-            decisionDate: "2024-03-07",
             language: "cs",
             updatedAt: "2026-01-01T00:00:00.000Z",
           },
@@ -323,7 +314,6 @@ describe("public law sitemap", () => {
         slug: "c-123-22",
         country: "EU",
         court: "Court of Justice",
-        decisionDate: "2024-03-07",
         language: "en",
         languageAlternates: [
           {
@@ -332,7 +322,6 @@ describe("public law sitemap", () => {
             slug: "c-123-22",
             country: "EU",
             court: "Court of Justice",
-            decisionDate: "2024-03-07",
             language: "not a language",
             updatedAt: "2026-01-01T00:00:00.000Z",
           },
@@ -342,7 +331,6 @@ describe("public law sitemap", () => {
             slug: "c-123-22-cs",
             country: "EU",
             court: "Court of Justice",
-            decisionDate: "2024-03-07",
             language: "",
             updatedAt: "2026-01-01T00:00:00.000Z",
           },
@@ -401,7 +389,6 @@ describe("public law sitemap", () => {
         slug: null,
         country: "CZE",
         court: "Nejvyssi soud",
-        decisionDate: "2017-09-20",
         language: "cs",
         languageAlternates: [],
         updatedAt: "2026-01-01T00:00:00.000Z",
@@ -410,7 +397,7 @@ describe("public law sitemap", () => {
 
     expect(xml).toContain("<lastmod>2026-01-01</lastmod>");
     expect(xml).toContain(
-      "http://localhost:3000/law/cze/cases/nejvyssi-soud/2017-09-20/20-cdo-470-2017",
+      "http://localhost:3000/law/cze/cases/nejvyssi-soud/20-cdo-470-2017",
     );
     expect(xml).toContain("<lastmod>2026-01-01</lastmod>");
     expect(xml).not.toContain("analysis");
@@ -493,7 +480,7 @@ describe("public law sitemap", () => {
     const source = await readSource("apps/web/src/routes/_protected.tsx");
 
     expect(source).toContain("ssr: false");
-    expect(source).toContain("pendingComponent: () => null");
+    expect(source).toContain("pendingComponent: ProtectedPendingSkeleton");
   });
 
   test("document routes do not prefetch parent overview billing data", async () => {
@@ -518,9 +505,9 @@ describe("public law sitemap", () => {
     const source = await readSource("apps/web/src/routes/law/cases/index.tsx");
 
     expect(source).toContain("loader:");
-    expect(source).toContain("ensureInfiniteQueryData");
+    expect(source).toContain("ensureRouteInfiniteQueryData");
     expect(source).toContain(
-      "ensureCriticalQueryData(queryClient, decisionFacetsOptions())",
+      "ensureRouteQueryData(queryClient, decisionFacetsOptions())",
     );
     expect(source).toContain("decisionsInfiniteOptions(");
     expect(source).toContain("validateSearch: searchSchema");
@@ -575,7 +562,10 @@ describe("public law sitemap", () => {
     expect(navSource).toContain("getWorkspacePrimaryNavItems");
     expect(navSource).toContain('item.id !== "caseLaw"');
     expect(appSidebarSource).toContain("usePublicLawPreviewEnabled");
-    expect(publicShellSource).toContain("usePublicLawPreviewEnabled");
+    // The server-rendered shell must use the isomorphic host/env gate;
+    // the browser-only preview hook would mismatch hydration there.
+    expect(publicShellSource).toContain("isPublicLawRouteEnabled");
+    expect(publicShellSource).not.toContain("usePublicLawPreviewEnabled");
   });
 
   test("direct case-law callers are filtered by the shared dark-launch helper", async () => {
@@ -595,23 +585,34 @@ describe("public law sitemap", () => {
     expect(searchSource).toContain("usePublicLawPreviewEnabled");
   });
 
-  test("start client initializes i18n before hydrating", async () => {
+  test("start client orders i18n around hydration per path kind", async () => {
     const source = await readSource("apps/web/src/client.tsx");
-    const initializeIndex = source.indexOf("initializeI18n().finally");
-    const hydrateIndex = source.indexOf("hydrateRoot(");
 
-    expect(initializeIndex).toBeGreaterThan(-1);
-    expect(hydrateIndex).toBeGreaterThan(initializeIndex);
+    // Public SSR paths hydrate first (against the server's English) and
+    // load the persisted locale after first paint; app paths keep the
+    // resolve-locale-then-hydrate boot model.
+    expect(source).toContain("isPublicSsrPath(window.location.pathname)");
+    expect(source).toContain("void initializeI18n().finally(hydrate);");
+    const ssrBranchIndex = source.indexOf(
+      "isPublicSsrPath(window.location.pathname)",
+    );
+    const appBranchIndex = source.indexOf(
+      "void initializeI18n().finally(hydrate);",
+    );
+    expect(ssrBranchIndex).toBeGreaterThan(-1);
+    expect(appBranchIndex).toBeGreaterThan(ssrBranchIndex);
   });
 
   test("app provider preserves browser time zones for app timestamps", async () => {
-    const source = await readSource("apps/web/src/app-providers.tsx");
+    const timeZoneSource = await readSource("apps/web/src/i18n/time-zone.ts");
 
-    expect(source).toContain('const SERVER_I18N_TIME_ZONE = "UTC"');
-    expect(source).toContain(
+    expect(timeZoneSource).toContain('const SERVER_I18N_TIME_ZONE = "UTC"');
+    expect(timeZoneSource).toContain(
       "Intl.DateTimeFormat().resolvedOptions().timeZone",
     );
-    expect(source).toContain("timeZone={resolveAppI18nTimeZone()}");
+
+    const providerSource = await readSource("apps/web/src/app-providers.tsx");
+    expect(providerSource).toContain("timeZone={resolveAppTimeZone()}");
   });
 
   test("case-law list keeps date-only legal dates in UTC", async () => {

@@ -1,16 +1,18 @@
-import { useCallback, useState } from "react";
+import { useState } from "react";
 
 import { useTranslations } from "use-intl";
 
 import { Input } from "@stll/ui/components/input";
 import { cn } from "@stll/ui/lib/utils";
 
+import { getFormatter } from "@/i18n/i18n-store";
+
 const BILLING_INCREMENT = 6;
 
-const RE_HM = /^(?:(\d+)h)?\s*(?:(\d+)m)?$/iu;
-const RE_COLON = /^(\d+):(\d{1,2})$/u;
-const RE_DECIMAL = /^(\d+(?:\.\d+))$/u;
-const RE_PLAIN = /^(\d+)$/u;
+const RE_HM = /^(?:(?<hours>\d+)h)?\s*(?:(?<mins>\d+)m)?$/iu;
+const RE_COLON = /^(?<hours>\d+):(?<mins>\d{1,2})$/u;
+const RE_DECIMAL = /^(?<value>\d+(?:\.\d+))$/u;
+const RE_PLAIN = /^(?<value>\d+)$/u;
 
 /**
  * Parses a user-entered duration string into minutes.
@@ -25,28 +27,30 @@ const parseDuration = (raw: string): number | null => {
 
   // "1h30m" or "1h" or "30m"
   const hm = RE_HM.exec(s);
-  if (hm && (hm[1] || hm[2])) {
-    const hours = Number(hm[1] ?? 0);
-    const mins = Number(hm[2] ?? 0);
+  if (hm?.groups && (hm.groups["hours"] || hm.groups["mins"])) {
+    const hours = Number(hm.groups["hours"] ?? 0);
+    const mins = Number(hm.groups["mins"] ?? 0);
     return hours * 60 + mins;
   }
 
   // "1:30" (h:mm)
   const colon = RE_COLON.exec(s);
   if (colon) {
-    return Number(colon[1]) * 60 + Number(colon[2]);
+    return (
+      Number(colon.groups?.["hours"]) * 60 + Number(colon.groups?.["mins"])
+    );
   }
 
   // Decimal hours: "1.5"
   const decimal = RE_DECIMAL.exec(s);
   if (decimal) {
-    return Math.round(Number(decimal[1]) * 60);
+    return Math.round(Number(decimal.groups?.["value"]) * 60);
   }
 
   // Plain integer: treated as minutes
   const plain = RE_PLAIN.exec(s);
   if (plain) {
-    return Number(plain[1]);
+    return Number(plain.groups?.["value"]);
   }
 
   return null;
@@ -68,6 +72,17 @@ export const formatMinutes = (minutes: number): string => {
 };
 
 export const formatDecimalHours = (minutes: number): string =>
+  getFormatter().number(minutes / 60, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+/**
+ * ASCII decimal hours for the editable input hint. The hint must round-trip
+ * through parseDuration, which only accepts ASCII digits and a "." separator;
+ * localized digits or a comma separator would be rejected on blur.
+ */
+const formatDecimalHoursInput = (minutes: number): string =>
   (minutes / 60).toFixed(2);
 
 type DurationInputProps = {
@@ -87,7 +102,7 @@ export const DurationInput = ({
   const [displayValue, setDisplayValue] = useState(() => formatMinutes(value));
   const [isFocused, setIsFocused] = useState(false);
 
-  const handleBlur = useCallback(() => {
+  const handleBlur = () => {
     setIsFocused(false);
     const parsed = parseDuration(displayValue);
     if (parsed !== null && parsed > 0) {
@@ -97,17 +112,20 @@ export const DurationInput = ({
     } else {
       setDisplayValue(formatMinutes(value));
     }
-  }, [displayValue, onChange, value]);
+  };
 
-  const handleFocus = useCallback(() => {
+  const handleFocus = () => {
     setIsFocused(true);
-  }, []);
+  };
 
   return (
     <div className={cn("relative", className)}>
+      {/* Structured numeric time (e.g. 0:30) has no strong directional
+          character, so dir="auto" would inherit RTL; keep it LTR. */}
       <Input
         autoFocus={autoFocus}
         className="tabular-nums"
+        dir="ltr"
         onBlur={handleBlur}
         onChange={(e) => setDisplayValue(e.currentTarget.value)}
         onFocus={handleFocus}
@@ -122,7 +140,7 @@ export const DurationInput = ({
       {!isFocused && value > 0 && (
         <span className="text-muted-foreground pointer-events-none absolute end-2 top-1/2 -translate-y-1/2 text-xs">
           {t("billing.decimalHours", {
-            hours: formatDecimalHours(value),
+            hours: formatDecimalHoursInput(value),
           })}
         </span>
       )}

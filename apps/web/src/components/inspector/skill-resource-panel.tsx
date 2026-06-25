@@ -60,7 +60,10 @@ export const SkillResourcePanel = ({
 
   const renderMode = detectRenderMode(tab.mimeType, tab.resourcePath);
   const isEditable =
-    renderMode !== "pdf" && tab.origin !== "built-in" && tab.skillId !== null;
+    renderMode !== "pdf" &&
+    tab.origin !== "built-in" &&
+    tab.origin !== "bundled" &&
+    tab.skillId !== null;
   // Markdown edits in the shared Folio WYSIWYG editor (auto-saving), so the ICP
   // never touches raw markdown (a "Show raw" toggle is there for power users).
   // Other text files keep the raw editor below.
@@ -71,6 +74,7 @@ export const SkillResourcePanel = ({
   const [draft, setDraft] = useState(tab.content);
   const [saving, setSaving] = useState(false);
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id derived state, lift to a key prop on the panel
   useEffect(() => {
     setEditing(false);
     setDraft(tab.content);
@@ -152,8 +156,10 @@ export const SkillResourcePanel = ({
       const stored = toStoredMarkdown(next, content);
       const response =
         target === "body"
-          ? await skill.patch({ body: stored, queryKey: ["skills"] })
-          : await skill.resources.patch({
+          ? // oxlint-disable-next-line no-await-in-loop -- sequential save queue: each write must land before retrying with newer markdown
+            await skill.patch({ body: stored, queryKey: ["skills"] })
+          : // oxlint-disable-next-line no-await-in-loop -- sequential save queue: each write must land before retrying with newer markdown
+            await skill.resources.patch({
               path: resourcePath,
               content: stored,
               queryKey: ["skills"],

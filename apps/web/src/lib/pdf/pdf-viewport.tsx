@@ -3,6 +3,7 @@ import {
   useEffect,
   useEffectEvent,
   useId,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -19,6 +20,7 @@ import { Input } from "@stll/ui/components/input";
 import { ScrollArea } from "@stll/ui/components/scroll-area";
 
 import { useTheme } from "@/components/theme-provider";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { usePageVisibility } from "@/lib/pdf/hooks/use-page-visibility";
 import { usePDFControlledScaleOffset } from "@/lib/pdf/hooks/use-pdf-controlled-scale-offset";
 import { usePDFDocument } from "@/lib/pdf/hooks/use-pdf-document";
@@ -30,6 +32,7 @@ import type { PDFDocument } from "@/lib/pdf/pdf-loader";
 import type { PDFPageProps } from "@/lib/pdf/pdf-page";
 import { approximateFraction } from "@/lib/pdf/pdfjs-utils";
 import { getDevicePixelRatio } from "@/lib/pdf/utils";
+import { composeRefs } from "@/lib/slot";
 
 export { usePDFStore } from "@/lib/pdf/pdf-context";
 
@@ -71,6 +74,7 @@ export const PDFViewport = ({
 }: PDFViewportProps) => {
   const [password, setPassword] = useState(initialPassword);
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-prop: re-sync local password to the initialPassword prop. Not pure derived state — setPassword is also driven by the password prompt below, so it cannot be computed in render; keep until a key-reset is wired through every PDFViewport call site.
   useEffect(() => {
     setPassword(initialPassword);
   }, [initialPassword]);
@@ -120,7 +124,7 @@ const PDFViewerContent = ({
   );
 
   const effectiveScale = scale + scaleOffset;
-  const pageIds = pages.keys().toArray();
+  const pageIds = useMemo(() => pages.keys().toArray(), [pages]);
   const viewportStyle: PDFViewportStyle = {
     "--pdf-page-filter": shouldInvert ? "invert(1) hue-rotate(180deg)" : "none",
     "--scale-factor": effectiveScale,
@@ -130,25 +134,25 @@ const PDFViewerContent = ({
 
   const containerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     startTransition(() => {
       setDocument(document);
     });
   }, [document, setDocument]);
 
   useTextSelection(containerRef);
-  usePDFFitToWidth({
+  const fitToWidthRef = usePDFFitToWidth({
     containerRef,
   });
   usePDFControlledScaleOffset({
     containerRef,
     controlledScaleOffset: scaleOffset,
   });
-  const lastReportedPageRef = usePageVisibility({
-    containerRef,
-    pageIds,
-    onPageChanged,
-  });
+  const { containerRef: pageVisibilityRef, lastReportedPageRef } =
+    usePageVisibility({
+      pageIds,
+      onPageChanged,
+    });
   usePDFExternalPageSync({
     page,
     pageIds,
@@ -159,15 +163,21 @@ const PDFViewerContent = ({
     onPageCountChanged?.(count);
   });
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- notify the parent when the derived page count changes. The mutation lives in the zustand PDF store (out of this file), so there is no local setter to fold this into; keep until the store can emit the count itself.
   useEffect(() => {
     onPageCountChangedEvent(pageIds.length);
   }, [pageIds.length]);
+
+  const pdfContentRef = useMemo(
+    () => composeRefs(containerRef, fitToWidthRef, pageVisibilityRef),
+    [fitToWidthRef, pageVisibilityRef],
+  );
 
   return (
     <ScrollArea>
       <div className={className}>
         <div
-          ref={containerRef}
+          ref={pdfContentRef}
           className={contentClassName}
           style={viewportStyle}
         >

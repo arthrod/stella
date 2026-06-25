@@ -118,6 +118,8 @@ export const loadAnonymizationGazetteerEntries = async ({
           workspaceMatch,
         ),
       )
+      // SAFETY: anonymization detection gazetteer must load every term to avoid under-masking; org-wide entries are capped at LIMITS.anonymizationBlacklistEntriesPerOrganization and workspace terms at LIMITS.anonymizationBlacklistEntriesPerWorkspace, both enforced on the write paths, so the union is bounded.
+      // eslint-disable-next-line require-query-limit/require-query-limit
       .orderBy(asc(anonymizationBlacklistEntries.canonical)),
   );
 
@@ -134,5 +136,5 @@ export const loadAnonymizationGazetteerEntries = async ({
   );
 };
 
-// TODO: Add org-wide custom regex rules here once @stll/anonymize-wasm
-// exposes a safe first-class custom regex detector API.
+// Org-wide custom regex rules belong here once @stll/anonymize-wasm exposes a
+// safe first-class custom regex detector API.

@@ -18,13 +18,14 @@ import {
   extractLegacyCaseLawDecisionIdFromRouteParam,
   normalizeCaseLawLanguageSegment,
 } from "@/lib/case-law-route";
+import { APIError } from "@/lib/errors";
 import { pageTitleLiteral } from "@/lib/page-title";
 import {
   createCaseLawDecisionJsonLd,
   createPublicLawCanonicalUrl,
   createPublicLawHead,
 } from "@/lib/public-law-seo";
-import { ensureCriticalQueryData } from "@/lib/react-query";
+import { ensureRouteQueryData } from "@/lib/react-query";
 import type { SafeId } from "@/lib/safe-id";
 import { toSafeId } from "@/lib/safe-id";
 
@@ -128,6 +129,21 @@ const buildDescription = (decision: {
     .filter(Boolean)
     .join(", ");
 
+const ensurePublicDecision = async <T,>(load: () => Promise<T>): Promise<T> => {
+  try {
+    return await load();
+  } catch (error) {
+    if (error instanceof APIError && error.status === 404) {
+      throw redirect({
+        to: "/law/cases",
+        search: { notFound: true },
+        replace: true,
+      });
+    }
+    throw error;
+  }
+};
+
 const redirectToCanonicalDecisionPath = ({
   canonicalParams,
   search,
@@ -137,11 +153,10 @@ const redirectToCanonicalDecisionPath = ({
 
   if (canonicalParams.language) {
     throw redirect({
-      to: "/law/$country/cases/$court/$date/$language/$slug",
+      to: "/law/$country/cases/$court/$language/$slug",
       params: {
         country: canonicalParams.country,
         court: canonicalParams.court,
-        date: canonicalParams.date,
         language: canonicalParams.language,
         slug: canonicalParams.slug,
       },
@@ -151,11 +166,10 @@ const redirectToCanonicalDecisionPath = ({
   }
 
   throw redirect({
-    to: "/law/$country/cases/$court/$date/$slug",
+    to: "/law/$country/cases/$court/$slug",
     params: {
       country: canonicalParams.country,
       court: canonicalParams.court,
-      date: canonicalParams.date,
       slug: canonicalParams.slug,
     },
     replace: true,
@@ -173,8 +187,6 @@ const createDecisionAlternateLinks = (
         caseNumber: alternate.caseNumber,
         country: alternate.country,
         court: alternate.court,
-        decisionDate: alternate.decisionDate,
-        decisionId: alternate.id,
         language: alternate.language,
         languageAlternates: decision.languageAlternates,
         slug: alternate.slug,
@@ -193,16 +205,17 @@ export const loadPublicCaseLawDecisionRoute = async ({
     params.slug,
   );
   if (legacyDecisionId) {
-    const decision = await ensureCriticalQueryData(
-      queryClient,
-      decisionOptions(extractId(legacyDecisionId)),
+    const decision = await ensurePublicDecision(
+      async () =>
+        await ensureRouteQueryData(
+          queryClient,
+          decisionOptions(extractId(legacyDecisionId)),
+        ),
     );
     const canonicalParams = createCaseLawDecisionRouteParams({
       caseNumber: decision.caseNumber,
       country: decision.country,
       court: decision.court,
-      decisionDate: decision.decisionDate,
-      decisionId: decision.id,
       language: decision.language,
       languageAlternates: decision.languageAlternates,
       slug: decision.slug,
@@ -220,23 +233,21 @@ export const loadPublicCaseLawDecisionRoute = async ({
   const normalizedRouteLanguage = normalizeCaseLawLanguageSegment(
     params.language,
   );
-  const decision = await ensureCriticalQueryData(
-    queryClient,
-    decisionBySlugOptions(
-      params.language === undefined
-        ? { slug: params.slug }
-        : {
-            language: normalizedRouteLanguage ?? params.language,
-            slug: params.slug,
-          },
-    ),
+  const decision = await ensurePublicDecision(
+    async () =>
+      await ensureRouteQueryData(
+        queryClient,
+        decisionBySlugOptions(
+          params.language === undefined || normalizedRouteLanguage === null
+            ? { slug: params.slug }
+            : { language: normalizedRouteLanguage, slug: params.slug },
+        ),
+      ),
   );
   const canonicalParams = createCaseLawDecisionRouteParams({
     caseNumber: decision.caseNumber,
     country: decision.country,
     court: decision.court,
-    decisionDate: decision.decisionDate,
-    decisionId: decision.id,
     language: decision.language,
     languageAlternates: decision.languageAlternates,
     slug: decision.slug,
@@ -294,18 +305,20 @@ export function PublicDecisionViewer({
   const publicPath = createCaseLawDecisionPath(params);
 
   return (
-    <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <main className="flex min-h-0 flex-1 overflow-hidden">
       {authStatus.isAuthenticated ? (
         <Suspense
           fallback={
-            <DecisionWorkspace
-              aiMode="locked"
-              decision={decision}
-              decisionId={decisionId}
-              initialSearchQuery={initialSearchQuery}
-              publicPath={publicPath}
-              requestAuth={requestAuth}
-            />
+            <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+              <DecisionWorkspace
+                aiMode="locked"
+                decision={decision}
+                decisionId={decisionId}
+                initialSearchQuery={initialSearchQuery}
+                publicPath={publicPath}
+                requestAuth={requestAuth}
+              />
+            </div>
           }
         >
           <AuthenticatedCaseLawWorkspace
@@ -316,14 +329,16 @@ export function PublicDecisionViewer({
           />
         </Suspense>
       ) : (
-        <DecisionWorkspace
-          aiMode="locked"
-          decision={decision}
-          decisionId={decisionId}
-          initialSearchQuery={initialSearchQuery}
-          publicPath={publicPath}
-          requestAuth={requestAuth}
-        />
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <DecisionWorkspace
+            aiMode="locked"
+            decision={decision}
+            decisionId={decisionId}
+            initialSearchQuery={initialSearchQuery}
+            publicPath={publicPath}
+            requestAuth={requestAuth}
+          />
+        </div>
       )}
       {authRedirectTo !== null && (
         <Suspense fallback={null}>

@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { CheckIcon, XIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 import { Input } from "@stll/ui/components/input";
 import { Separator } from "@stll/ui/components/separator";
@@ -24,7 +25,7 @@ export const ClientFilterPopover = ({
   const t = useTranslations();
   const [search, setSearch] = useState("");
 
-  const clients = useMemo(() => {
+  const clients = (() => {
     const map = new Map<string, { id: string; displayName: string }>();
     for (const w of workspaces) {
       if (w.client) {
@@ -34,7 +35,7 @@ export const ClientFilterPopover = ({
     return [...map.values()].sort((a, b) =>
       a.displayName.localeCompare(b.displayName),
     );
-  }, [workspaces]);
+  })();
 
   const q = search.trim().toLowerCase();
   const filtered = q
@@ -77,7 +78,9 @@ export const ClientFilterPopover = ({
                 onClick={() => toggle(c.id)}
                 type="button"
               >
-                <span className="truncate">{c.displayName}</span>
+                <BidiText as="span" className="truncate">
+                  {c.displayName}
+                </BidiText>
                 {active && (
                   <CheckIcon className="text-primary size-3.5 shrink-0" />
                 )}

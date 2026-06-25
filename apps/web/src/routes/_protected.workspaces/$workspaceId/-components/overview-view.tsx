@@ -1,5 +1,5 @@
 import type * as React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import { draggable } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { setCustomNativeDragPreview } from "@atlaskit/pragmatic-drag-and-drop/element/set-custom-native-drag-preview";
@@ -18,13 +18,14 @@ import {
   SquareCheckIcon,
   UploadIcon,
 } from "lucide-react";
-import { useTranslations } from "use-intl";
+import { useLocale, useTranslations } from "use-intl";
 
 import {
   Avatar,
   AvatarFallback,
   AvatarImage,
 } from "@stll/ui/components/avatar";
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 import {
   Menu,
@@ -58,9 +59,16 @@ import {
   EmptyScreen,
 } from "@/components/empty-screen";
 import { PersonMentionLabel } from "@/components/person-mention-label";
-import { useI18nStore } from "@/i18n/i18n-store";
+import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
+import {
+  getFormatter,
+  getFormattingLocale,
+  useI18nStore,
+} from "@/i18n/i18n-store";
+import { getFirstWeekday } from "@/i18n/week";
 import { api } from "@/lib/api";
 import { toAPIError } from "@/lib/errors";
+import { routeQueryOptions } from "@/lib/react-query";
 import { formatFullTimestamp, formatRelativeTime } from "@/lib/relative-time";
 import { toSafeId } from "@/lib/safe-id";
 import { isFileDisplayable } from "@/lib/types";
@@ -97,6 +105,10 @@ type OverviewViewProps = {
   workspaceId: string;
 };
 
+const OVERVIEW_PANEL_CLASS = "bg-background overflow-hidden rounded-lg border";
+const TEAM_HEATMAP_GRID_CLASS =
+  "grid grid-cols-[minmax(3.5rem,1fr)_repeat(7,1.375rem)] items-center gap-x-1 px-3 sm:grid-cols-[minmax(8rem,1fr)_repeat(7,1.75rem)_2.5rem] sm:gap-x-2 sm:px-4";
+
 type UpcomingTaskContext = {
   entityId: string;
   name: string;
@@ -116,20 +128,37 @@ type UpcomingMenuState = {
 // ── Helpers ───────────────────────────────────────────────
 
 /**
- * Get the single-letter day abbreviation for a given
- * weekday index (0 = Monday) in the user's locale.
+ * Get the single-letter day abbreviation for a column index, where column 0
+ * is the locale's first weekday (Monday in most of Europe, Saturday in the
+ * Gulf, Sunday in the US).
  */
-const getLocaleDayLabel = (dayIndex: number, locale: string) => {
-  // Jan 5, 2026 is a Monday
-  const date = new Date(2026, 0, 5 + dayIndex);
+const getLocaleDayLabel = (
+  dayIndex: number,
+  locale: string,
+  firstWeekday: number,
+) => {
+  // Jan 4, 2026 is a Sunday (getDay() === 0); offset to the first weekday.
+  const date = new Date(2026, 0, 4 + firstWeekday + dayIndex);
   return date.toLocaleDateString(locale, { weekday: "narrow" }).toUpperCase();
 };
+
+// Round to one decimal and render the locale's translated `hour` unit, so the
+// suffix follows the active language rather than a hardcoded English "h".
+const formatHours = (hours: number) =>
+  getFormatter().number(Math.round(hours * 10) / 10, {
+    style: "unit",
+    unit: "hour",
+    unitDisplay: "short",
+    maximumFractionDigits: 1,
+  });
 
 // ── Main component ───────────────────────────────────────
 
 export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
   const t = useTranslations();
   const tWorkspaces = useTranslations("workspaces");
+  const locale = useLocale();
+  const firstWeekday = getFirstWeekday(locale);
   const lang = useI18nStore((s) => s.lang);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -256,7 +285,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
   // Re-compute the current date when the user returns to the
   // tab so the heatmap refreshes across day/week boundaries.
   const [today, setToday] = useState(() => toISODate(new Date()));
-  useEffect(() => {
+  useMountEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === "visible") {
         setToday(toISODate(new Date()));
@@ -264,9 +293,13 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
-  }, []);
+  });
 
-  const weekStart = useMemo(getWeekStart, [today]);
+  // `today` forces a recompute at day rollover; getWeekStart reads the current
+  // date itself, so the `today` dependency is intentional despite not being
+  // referenced. `locale` drives the first weekday.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const weekStart = useMemo(() => getWeekStart(locale), [today, locale]);
   const weekEnd = useMemo(() => {
     const end = new Date(weekStart);
     end.setDate(end.getDate() + 6);
@@ -274,10 +307,12 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
   }, [weekStart]);
 
   const { data: timeEntries } = useQuery(
-    timeEntriesOptions(workspaceId, {
-      dateFrom: toISODate(weekStart),
-      dateTo: toISODate(weekEnd),
-    }),
+    routeQueryOptions(
+      timeEntriesOptions(workspaceId, {
+        dateFrom: toISODate(weekStart),
+        dateTo: toISODate(weekEnd),
+      }),
+    ),
   );
 
   // Previous week for trend comparison
@@ -293,10 +328,12 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
   }, [weekStart]);
 
   const { data: prevTimeEntries } = useQuery(
-    timeEntriesOptions(workspaceId, {
-      dateFrom: toISODate(prevWeekStart),
-      dateTo: toISODate(prevWeekEnd),
-    }),
+    routeQueryOptions(
+      timeEntriesOptions(workspaceId, {
+        dateFrom: toISODate(prevWeekStart),
+        dateTo: toISODate(prevWeekEnd),
+      }),
+    ),
   );
 
   const prevWeekHours = useMemo(
@@ -327,7 +364,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
         const daily = Array.from({ length: 7 }, () => 0);
         const dailyEntries: Record<
           number,
-          { description: string; hours: number }[]
+          { id: string; description: string; hours: number }[]
         > = {};
 
         for (const entry of timeEntries) {
@@ -342,13 +379,14 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
           const d = parts[2] ?? 1;
           const entryDate = new Date(y, m - 1, d);
           const dayOfWeek = entryDate.getDay();
-          // Convert Sunday=0 to index 6, Monday=1 to 0
-          const dayIdx = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+          // Column 0 is the locale's first weekday.
+          const dayIdx = (dayOfWeek - firstWeekday + 7) % 7;
           const hours = entry.durationMinutes / 60;
           daily[dayIdx] = (daily[dayIdx] ?? 0) + hours;
 
           const entries = dailyEntries[dayIdx] ?? [];
           entries.push({
+            id: entry.id,
             description: entry.narrative || entry.taskCode || "—",
             hours,
           });
@@ -363,7 +401,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
           dailyEntries,
         };
       });
-  }, [members, timeEntries]);
+  }, [members, timeEntries, firstWeekday]);
 
   const totalHoursThisWeek = useMemo(
     () =>
@@ -378,7 +416,12 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
   const tasksWithDue = useMemo(
     () =>
       tasks
-        .filter((task) => task.dueDate !== null && task.status !== "closed")
+        .filter(
+          (task) =>
+            task.dueDate !== null &&
+            task.status !== "done" &&
+            task.status !== "cancelled",
+        )
         .toSorted(
           (a, b) =>
             new Date(a.dueDate ?? 0).getTime() -
@@ -388,7 +431,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
   );
 
   return (
-    <div className="@container flex flex-1 flex-col gap-6 overflow-y-auto p-6 tabular-nums">
+    <div className="@container flex flex-1 flex-col gap-6 overflow-y-auto p-4 tabular-nums sm:p-6">
       {/* Stats grid */}
       <div className="grid gap-3 @sm:grid-cols-2 @3xl:grid-cols-4">
         <StatCard
@@ -403,7 +446,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
               });
             }
           }}
-          value={String(data.documentCount)}
+          value={getFormatter().number(data.documentCount)}
         />
         <StatCard
           icon={<SquareCheckIcon className="size-4" />}
@@ -417,7 +460,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
               });
             }
           }}
-          value={`${data.taskCount}`}
+          value={getFormatter().number(data.taskCount)}
         />
         <StatCard
           icon={<CalendarClockIcon className="size-4" />}
@@ -438,7 +481,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
             if (!date) {
               return "—";
             }
-            return new Date(date).toLocaleDateString(lang, {
+            return new Date(date).toLocaleDateString(getFormattingLocale(), {
               month: "short",
               day: "numeric",
             });
@@ -453,7 +496,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
               params: { workspaceId },
             });
           }}
-          value={`${Math.round(totalHoursThisWeek * 10) / 10}h`}
+          value={formatHours(totalHoursThisWeek)}
         />
       </div>
 
@@ -537,6 +580,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
                                 mention={{
                                   name: task.assignedTo,
                                   image: task.assignedToImage,
+                                  deletedAt: task.assignedToDeletedAt,
                                 }}
                               />
                             )}
@@ -544,7 +588,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
                               <>
                                 {task.assignedTo ? " · " : ""}
                                 {new Date(task.dueDate).toLocaleDateString(
-                                  lang,
+                                  getFormattingLocale(),
                                   {
                                     month: "short",
                                     day: "numeric",
@@ -669,32 +713,36 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
         </section>
 
         {/* Time & Team */}
-        <section className="flex flex-col">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-muted-foreground text-sm font-medium">
+        <section className="flex min-w-0 flex-col">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-muted-foreground min-w-0 text-sm font-medium">
               <ClockIcon className="me-1.5 inline size-3.5" />
               {t("workspaces.overview.timeAndTeam")}
             </h2>
-            <Button className="h-7 text-xs" disabled size="sm" variant="ghost">
+            <Button
+              className="h-7 shrink-0 text-xs"
+              disabled
+              size="sm"
+              variant="ghost"
+            >
               <PlusIcon className="size-3" />
               {t("common.logTime")}
             </Button>
           </div>
-          <div className="flex-1 rounded-lg border">
-            {/* Day labels — i18n via Intl.DateTimeFormat */}
-            <div className="flex items-center gap-3 border-b px-3 py-1.5">
-              <span className="w-20 shrink-0 @lg:w-28" />
-              <div className="flex flex-1 justify-between">
-                {Array.from({ length: 7 }, (_, i) => (
-                  <span
-                    className="text-muted-foreground w-7 text-center text-[0.625rem]"
-                    key={i}
-                  >
-                    {getLocaleDayLabel(i, lang)}
-                  </span>
-                ))}
-              </div>
-              <span className="w-10 shrink-0" />
+          <div className={cn(OVERVIEW_PANEL_CLASS, "flex-1")}>
+            <div
+              className={cn(TEAM_HEATMAP_GRID_CLASS, "min-h-12 border-b py-2")}
+            >
+              <span />
+              {Array.from({ length: 7 }, (_, i) => (
+                <span
+                  className="text-muted-foreground text-center text-[0.625rem]"
+                  key={i}
+                >
+                  {getLocaleDayLabel(i, lang, firstWeekday)}
+                </span>
+              ))}
+              <span className="hidden sm:block" />
             </div>
             <div className="divide-y">
               {(() => {
@@ -710,10 +758,10 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
 
                   return (
                     <div
-                      className="flex items-center gap-3 px-3 py-2"
+                      className={cn(TEAM_HEATMAP_GRID_CLASS, "min-h-14 py-2.5")}
                       key={member.userId}
                     >
-                      <div className="flex w-20 shrink-0 items-center gap-2 @lg:w-28">
+                      <div className="flex min-w-0 items-center gap-2">
                         <Avatar className="size-5 text-[0.5rem]">
                           {member.image && <AvatarImage src={member.image} />}
                           <AvatarFallback>
@@ -725,120 +773,123 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
                               .slice(0, 2)}
                           </AvatarFallback>
                         </Avatar>
-                        <span className="truncate text-xs">{member.name}</span>
+                        <span className="min-w-0 truncate text-sm">
+                          {member.name}
+                        </span>
                       </div>
-                      <div className="flex flex-1 justify-between">
-                        {member.daily.map((hours, dayIdx) => {
-                          const opacity = maxDaily > 0 ? hours / maxDaily : 0;
-                          const entries = member.dailyEntries[dayIdx] ?? [];
+                      {member.daily.map((hours, dayIdx) => {
+                        const opacity = maxDaily > 0 ? hours / maxDaily : 0;
+                        const entries = member.dailyEntries[dayIdx] ?? [];
+                        const dayLabel = getLocaleDayLabel(
+                          dayIdx,
+                          lang,
+                          firstWeekday,
+                        );
 
-                          const cell = (
-                            <div
-                              className={cn(
-                                "bg-primary/10 size-5 rounded-sm transition-transform",
-                                hours > 0 && "cursor-pointer hover:scale-110",
-                              )}
-                              style={
-                                hours > 0
-                                  ? {
-                                      backgroundColor: `color-mix(in srgb, var(--color-primary) ${Math.round(opacity * 80 + 10)}%, transparent)`,
-                                    }
-                                  : undefined
-                              }
-                            />
-                          );
+                        const cell = (
+                          <div
+                            className={cn(
+                              "bg-primary/10 size-5 rounded-sm transition-transform",
+                              hours > 0 && "hover:scale-110",
+                            )}
+                            style={
+                              hours > 0
+                                ? {
+                                    backgroundColor: `color-mix(in srgb, var(--color-primary) ${Math.round(opacity * 80 + 10)}%, transparent)`,
+                                  }
+                                : undefined
+                            }
+                          />
+                        );
 
-                          if (hours === 0) {
-                            return (
-                              <div
-                                className="flex w-7 justify-center"
-                                key={dayIdx}
-                              >
-                                {cell}
-                              </div>
-                            );
-                          }
-
+                        if (hours === 0) {
                           return (
                             <div
-                              className="flex w-7 justify-center"
+                              className="flex size-6 items-center justify-center sm:size-7"
                               key={dayIdx}
                             >
-                              <Popover>
-                                <TooltipRoot>
-                                  <PopoverTrigger
-                                    render={
-                                      <TooltipTrigger
-                                        render={
-                                          <button
-                                            className="cursor-pointer"
-                                            type="button"
-                                          />
-                                        }
-                                      />
-                                    }
-                                  >
-                                    {cell}
-                                  </PopoverTrigger>
-                                  <TooltipPopup>
-                                    {Math.round(hours * 10) / 10}h
-                                  </TooltipPopup>
-                                </TooltipRoot>
-                                <PopoverPopup className="w-56" sideOffset={8}>
-                                  <div className="p-2">
-                                    <p className="text-muted-foreground mb-2 text-xs font-medium">
-                                      {member.name} ·{" "}
-                                      {getLocaleDayLabel(dayIdx, lang)}
-                                      {" · "}
-                                      {Math.round(hours * 10) / 10}h
-                                    </p>
-                                    {entries.length > 0 ? (
-                                      <div className="space-y-1.5">
-                                        {entries.map((entry) => (
-                                          <div
-                                            className="flex items-start justify-between gap-2"
-                                            key={entry.description}
-                                          >
-                                            <span className="text-xs">
-                                              {entry.description}
-                                            </span>
-                                            <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-                                              {Math.round(entry.hours * 10) /
-                                                10}
-                                              h
-                                            </span>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    ) : (
-                                      <p className="text-muted-foreground text-xs">
-                                        {t("common.noResults")}
-                                      </p>
-                                    )}
-                                  </div>
-                                </PopoverPopup>
-                              </Popover>
+                              {cell}
                             </div>
                           );
-                        })}
-                      </div>
-                      <span className="text-muted-foreground w-10 shrink-0 text-end text-xs tabular-nums">
-                        {total > 0 ? `${total}h` : ""}
+                        }
+
+                        return (
+                          <div
+                            className="flex size-6 items-center justify-center sm:size-7"
+                            key={dayIdx}
+                          >
+                            <Popover>
+                              <TooltipRoot>
+                                <PopoverTrigger
+                                  render={
+                                    <TooltipTrigger
+                                      render={
+                                        <button
+                                          aria-label={`${member.name}, ${dayLabel}: ${formatHours(hours)}`}
+                                          className="flex size-6 cursor-pointer items-center justify-center sm:size-7"
+                                          type="button"
+                                        />
+                                      }
+                                    />
+                                  }
+                                >
+                                  {cell}
+                                </PopoverTrigger>
+                                <TooltipPopup>
+                                  {formatHours(hours)}
+                                </TooltipPopup>
+                              </TooltipRoot>
+                              <PopoverPopup className="w-56" sideOffset={8}>
+                                <div className="p-2">
+                                  <p className="text-muted-foreground mb-2 text-xs font-medium">
+                                    {member.name} · {dayLabel}
+                                    {" · "}
+                                    {formatHours(hours)}
+                                  </p>
+                                  {entries.length > 0 ? (
+                                    <div className="space-y-1.5">
+                                      {entries.map((entry) => (
+                                        <div
+                                          className="flex items-start justify-between gap-2"
+                                          key={entry.id}
+                                        >
+                                          <span className="text-xs">
+                                            {entry.description}
+                                          </span>
+                                          <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
+                                            {formatHours(entry.hours)}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <p className="text-muted-foreground text-xs">
+                                      {t("common.noResults")}
+                                    </p>
+                                  )}
+                                </div>
+                              </PopoverPopup>
+                            </Popover>
+                          </div>
+                        );
+                      })}
+                      <span className="text-muted-foreground hidden text-end text-xs tabular-nums sm:block">
+                        {total > 0 ? formatHours(total) : ""}
                       </span>
                     </div>
                   );
                 });
               })()}
             </div>
-            <div className="border-t px-3 py-2">
-              <div className="flex items-center justify-between">
+            <div className="border-t px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
                 <span className="text-muted-foreground text-xs">
                   {t("workspaces.overview.totalThisWeek")}
                 </span>
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium tabular-nums">
                     {totalHoursThisWeek > 0
-                      ? `${Math.round(totalHoursThisWeek * 10) / 10}h`
+                      ? formatHours(totalHoursThisWeek)
                       : ""}
                   </span>
                   {prevWeekHours !== null &&
@@ -917,12 +968,11 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
               {t("common.uploadFiles")}
             </Button>
           </div>
-          <div className="divide-y rounded-lg border">
+          <div className={cn(OVERVIEW_PANEL_CLASS, "divide-y")}>
             {recentEntities.map((entity) => (
               <OverviewRow
                 entity={entity}
                 key={entity.entityId}
-                lang={lang}
                 workspaceId={workspaceId}
               />
             ))}
@@ -1006,18 +1056,19 @@ type OverviewEntity = {
   createdAt: string;
   createdBy: string | null;
   createdByImage: string | null;
+  createdByDeletedAt: string | null;
   assignedTo: string | null;
   assignedToImage: string | null;
+  assignedToDeletedAt: string | null;
   updatedAt: string | null;
 };
 
 type OverviewRowProps = {
   entity: OverviewEntity;
   workspaceId: string;
-  lang: string;
 };
 
-const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
+const OverviewRow = ({ entity, workspaceId }: OverviewRowProps) => {
   const [contextOpen, setContextOpen] = useState(false);
   const [contextAnchor, setContextAnchor] = useState<VirtualAnchor | null>(
     null,
@@ -1026,10 +1077,9 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
 
   useInspectorFlash(entity.entityId, rowRef);
 
-  // Construct a WorkspaceEntity from overview data so RowActions
-  // can render. The overview endpoint returns enough metadata to
-  // build a synthetic fields record for the primary file.
-  // Previously TODO by @nnad3N — now resolved.
+  // Construct a WorkspaceEntity from overview data so RowActions can render.
+  // The overview endpoint returns enough metadata to build a synthetic fields
+  // record for the primary file.
   const fullEntity = useMemo((): WorkspaceEntity => {
     const fields: WorkspaceEntity["fields"] = {};
     const propertyKey = entity.propertyId ?? entity.fieldId;
@@ -1059,6 +1109,7 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
       createdAt: entity.createdAt,
       createdBy: entity.createdBy,
       createdByImage: entity.createdByImage,
+      createdByDeletedAt: entity.createdByDeletedAt,
       updatedAt: entity.updatedAt,
       version: 0,
       status: entity.status,
@@ -1120,7 +1171,7 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
     />
   );
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = rowRef.current;
     if (!el) {
       return undefined;
@@ -1186,10 +1237,7 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
   })();
 
   const t = useTranslations();
-  const relTime = formatRelativeTime(
-    entity.updatedAt ?? entity.createdAt,
-    lang,
-  );
+  const relTime = formatRelativeTime(entity.updatedAt ?? entity.createdAt);
 
   /** Entities whose updatedAt is within this window of createdAt
    *  are considered "just uploaded" rather than "edited". */
@@ -1216,6 +1264,7 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
           mention={{
             name: entity.createdBy,
             image: entity.createdByImage,
+            deletedAt: entity.createdByDeletedAt,
           }}
         />
       )}
@@ -1241,21 +1290,19 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
           </span>
         </span>
         {icon}
-        <span className="truncate">{entity.name}</span>
+        <BidiText as="span" className="truncate">
+          {entity.name}
+        </BidiText>
       </span>
       {relTime && (
         <span
           className="text-muted-foreground shrink-0 text-xs tabular-nums"
-          title={formatFullTimestamp(
-            entity.updatedAt ?? entity.createdAt,
-            lang,
-          )}
+          title={formatFullTimestamp(entity.updatedAt ?? entity.createdAt)}
         >
           {relTime}
         </span>
       )}
-      {/* TODO: fix this */}
-      {/* oxlint-disable-next-line jsx_a11y/click-events-have-key-events, jsx_a11y/no-static-element-interactions */}
+      {/* oxlint-disable-next-line jsx_a11y/click-events-have-key-events, jsx_a11y/no-static-element-interactions -- non-interactive wrapper; only stops row-open clicks bubbling from the already-keyboard-accessible RowActions trigger */}
       <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
         <RowActions
           anchor={contextAnchor}
@@ -1287,7 +1334,7 @@ const OverviewRow = ({ entity, workspaceId, lang }: OverviewRowProps) => {
     // Use a <div> instead of <button> to avoid invalid
     // nested <button> elements (RowActions renders a
     // <button> menu trigger inside).
-    // eslint-disable-next-line jsx-a11y/no-static-element-interactions
+    // eslint-disable-next-line jsx-a11y/no-static-element-interactions -- div carries paired role="button"/tabIndex/onKeyDown; can't be a real button (nested buttons)
     <div
       className={cn(
         "group/row hover:bg-muted/50 flex items-center gap-3 px-4 py-2.5",

@@ -8,7 +8,7 @@ import {
 } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMatch, useNavigate } from "@tanstack/react-router";
+import { useMatch, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useTranslations } from "use-intl";
 import { useShallow } from "zustand/shallow";
 
@@ -40,6 +40,7 @@ import { useFileTabRename } from "@/components/inspector/use-file-tab-rename";
 import { usePdfTabZoom } from "@/components/inspector/use-pdf-tab-zoom";
 import { useTabContextMenu } from "@/components/inspector/use-tab-context-menu";
 import { getInspectorView } from "@/components/inspector/view-registry";
+import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
 import { usePermissions } from "@/hooks/use-permissions";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
@@ -147,6 +148,33 @@ export const InspectorPanel = ({ workspaceId }: InspectorPanelProps) => {
   });
   const pdfRouteJustification = pdfRouteMatch?.search.justification ?? null;
 
+  // A revive suggestion for a route-owned view is only meaningful
+  // while its owner route stays presented — leaving the route takes
+  // the bound main view away, so the ghost goes with it. File-tab
+  // suggestions don't need this watcher: the document route clears
+  // them itself via its `setFileMetadataLane(id, "closed")` unmount
+  // hook.
+  const suggestionOwnerRouteId = useInspectorStore((s) =>
+    s.reviveSuggestion !== null && isGenericInspectorTab(s.reviveSuggestion)
+      ? s.reviveSuggestion.ownerRouteId
+      : undefined,
+  );
+  const clearReviveSuggestion = useInspectorStore(
+    (s) => s.clearReviveSuggestion,
+  );
+  const suggestionOwnerRouteActive = useRouterState({
+    select: (routerState) =>
+      suggestionOwnerRouteId === undefined ||
+      routerState.matches.some(
+        (match) => match.routeId === suggestionOwnerRouteId,
+      ),
+  });
+  useExternalSyncEffect(() => {
+    if (!suggestionOwnerRouteActive) {
+      clearReviveSuggestion();
+    }
+  }, [suggestionOwnerRouteActive, clearReviveSuggestion]);
+
   const activeTab = tabs.find((tab) => tab.id === activeId);
   const activeMatterPanelColor =
     activeTab?.type === "matter"
@@ -203,7 +231,7 @@ export const InspectorPanel = ({ workspaceId }: InspectorPanelProps) => {
             current === tabId ? null : current,
           );
           clearAnonymization(tabId);
-          closeTab(tabId);
+          closeTab(tabId, { suggestRevive: true });
         });
         return;
       }
@@ -213,7 +241,7 @@ export const InspectorPanel = ({ workspaceId }: InspectorPanelProps) => {
         setEditingDocxTabId(null);
       }
       clearAnonymization(tabId);
-      closeTab(tabId);
+      closeTab(tabId, { suggestRevive: true });
     },
     [closeTab, docxActionsRef.current, editingDocxTabId, setEditingDocxTabId],
   );
@@ -229,14 +257,11 @@ export const InspectorPanel = ({ workspaceId }: InspectorPanelProps) => {
     }, 2200);
   }, []);
 
-  useEffect(
-    () => () => {
-      if (flashMinimizeTimerRef.current !== null) {
-        clearTimeout(flashMinimizeTimerRef.current);
-      }
-    },
-    [],
-  );
+  useMountEffect(() => () => {
+    if (flashMinimizeTimerRef.current !== null) {
+      clearTimeout(flashMinimizeTimerRef.current);
+    }
+  });
 
   const handleOpenFullView = useCallback(async () => {
     if (!activeTab || activeTab.type !== "pdf") {
@@ -372,6 +397,7 @@ export const InspectorPanel = ({ workspaceId }: InspectorPanelProps) => {
   // Commit the latest recency snapshot after the render commits so
   // discarded renders (Strict Mode, Concurrent) don't pollute the
   // ref — only the set actually shown to the user is recorded.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- deliberate commit-phase ref write: recording recency during render would capture discarded concurrent/Strict-Mode renders, which is exactly what the commit-only timing prevents, so kept
   useEffect(() => {
     pdfRecencyRef.current = Array.from(mountedPdfIds);
   }, [mountedPdfIds]);
@@ -398,20 +424,22 @@ export const InspectorPanel = ({ workspaceId }: InspectorPanelProps) => {
   });
 
   return (
-    <div className="bg-background flex h-full border-s shadow-lg">
-      <InspectorRail
-        activeId={activeId}
-        minimized={minimized}
-        onActivateTab={(tabId) => {
-          setActive(tabId);
-          setMinimized(false);
-        }}
-        onCloseTab={handleCloseTab}
-        onOpenChat={openChat}
-        onSetMinimized={setMinimized}
-        tabs={tabs}
-        workspaceId={workspaceId}
-      />
+    <div className="bg-background flex h-full shadow-lg md:border-s">
+      <div className="hidden md:contents">
+        <InspectorRail
+          activeId={activeId}
+          minimized={minimized}
+          onActivateTab={(tabId) => {
+            setActive(tabId);
+            setMinimized(false);
+          }}
+          onCloseTab={handleCloseTab}
+          onOpenChat={openChat}
+          onSetMinimized={setMinimized}
+          tabs={tabs}
+          workspaceId={workspaceId}
+        />
+      </div>
 
       {/* Task content */}
       {!minimized &&
@@ -579,6 +607,7 @@ const CurrentFileFieldSync = ({ tab }: { tab: FileTab }) => {
             field.content.type === "file",
         );
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- commit-phase ref bookkeeping that the relay effect below reads in the same commit; the two are order-coupled, so moving this into render would change their relative timing, hence kept
   useEffect(() => {
     if (activeFileField === undefined) {
       return;
@@ -590,6 +619,7 @@ const CurrentFileFieldSync = ({ tab }: { tab: FileTab }) => {
     );
   }, [activeFileField]);
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reacts to entity query data (latestFileFieldForProperty) refetching, which has no single setter call-site to move into; fires the replaceFileFieldId store action when a newer file version lands, so kept
   useEffect(() => {
     if (
       latestFileFieldForProperty === undefined ||

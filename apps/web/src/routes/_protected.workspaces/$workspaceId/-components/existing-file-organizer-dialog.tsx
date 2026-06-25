@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import {
@@ -16,7 +16,7 @@ import {
   Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { useLocale, useTranslations } from "use-intl";
+import { useFormatter, useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
 import { Checkbox } from "@stll/ui/components/checkbox";
@@ -29,12 +29,15 @@ import {
   DialogPopup,
   DialogTitle,
 } from "@stll/ui/components/dialog";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { Input } from "@stll/ui/components/input";
 import { Skeleton } from "@stll/ui/components/skeleton";
 import { Textarea } from "@stll/ui/components/textarea";
 import { stellaToast } from "@stll/ui/components/toast";
 import { cn } from "@stll/ui/lib/utils";
 
+import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
+import { useI18nStore } from "@/i18n/i18n-store";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { toAPIError } from "@/lib/errors";
@@ -113,7 +116,8 @@ export const ExistingFileOrganizerDialog = ({
   onOpenChange,
 }: ExistingFileOrganizerDialogProps) => {
   const t = useTranslations();
-  const locale = useLocale();
+  // organize-suggestions caps locale at 16 chars; send the base language.
+  const locale = useI18nStore((s) => s.loadedLang);
   const queryClient = useQueryClient();
   const analytics = useAnalytics();
   const userInstructionsKey = `stella.organize-suggestions.user-instructions.${workspaceId}`;
@@ -124,14 +128,10 @@ export const ExistingFileOrganizerDialog = ({
     return window.localStorage.getItem(userInstructionsKey) ?? "";
   });
   const [showInstructions, setShowInstructions] = useState(false);
-  const userInstructionsRef = useRef(userInstructions);
-  const localeRef = useRef(locale);
-  useEffect(() => {
-    userInstructionsRef.current = userInstructions;
-  }, [userInstructions]);
-  useEffect(() => {
-    localeRef.current = locale;
-  }, [locale]);
+  const getSuggestionRequestContext = useEffectEvent(() => ({
+    locale,
+    userInstructions: userInstructions.trim(),
+  }));
   const [rows, setRows] = useState<ExistingOrganizerRow[]>([]);
   const [suggestionStatus, setSuggestionStatus] =
     useState<SuggestionStatus>("idle");
@@ -203,6 +203,7 @@ export const ExistingFileOrganizerDialog = ({
     [existingFolders, files],
   );
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- data fetch + setState; migrate to TanStack Query
   useEffect(() => {
     if (!open || files.length === 0) {
       return undefined;
@@ -220,7 +221,8 @@ export const ExistingFileOrganizerDialog = ({
     let cancelled = false;
     const fetchSuggestions = async () => {
       setSuggestionStatus("generating");
-      const trimmedInstructions = userInstructionsRef.current.trim();
+      const { locale: requestLocale, userInstructions: trimmedInstructions } =
+        getSuggestionRequestContext();
       const response = await api
         .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
         ["organize-suggestions"].post({
@@ -233,7 +235,7 @@ export const ExistingFileOrganizerDialog = ({
             entityId: toSafeId<"entity">(file.entityId),
             originalName: file.originalName,
           })),
-          locale: localeRef.current,
+          locale: requestLocale,
           ...(trimmedInstructions.length > 0
             ? { userInstructions: trimmedInstructions }
             : {}),
@@ -472,6 +474,7 @@ export const ExistingFileOrganizerDialog = ({
         );
 
         if (row.parentId !== targetParentId) {
+          // oxlint-disable-next-line no-await-in-loop -- sequential entity moves share the same query-key cache invalidation and report progress on one toast; concurrent mutations would race and risk rate limits
           const moveResponse = await api
             .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
             .move.patch({
@@ -489,6 +492,7 @@ export const ExistingFileOrganizerDialog = ({
         }
 
         if (targetName !== row.originalName) {
+          // oxlint-disable-next-line no-await-in-loop -- sequential entity renames share the same query-key cache invalidation and report progress on one toast; concurrent mutations would race and risk rate limits
           const renameResponse = await api
             .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
             .rename.patch({
@@ -699,17 +703,20 @@ type SummaryStatProps = {
   tone: "primary" | "muted";
 };
 
-const SummaryStat = ({ count, label, tone }: SummaryStatProps) => (
-  <span
-    className={cn(
-      "flex items-center gap-1.5",
-      tone === "muted" && "text-muted-foreground",
-    )}
-  >
-    <span className="font-medium tabular-nums">{count}</span>
-    <span className="text-muted-foreground">{label}</span>
-  </span>
-);
+const SummaryStat = ({ count, label, tone }: SummaryStatProps) => {
+  const format = useFormatter();
+  return (
+    <span
+      className={cn(
+        "flex items-center gap-1.5",
+        tone === "muted" && "text-muted-foreground",
+      )}
+    >
+      <span className="font-medium tabular-nums">{format.number(count)}</span>
+      <span className="text-muted-foreground">{label}</span>
+    </span>
+  );
+};
 
 type UserInstructionsSectionProps = {
   disabled: boolean;
@@ -749,7 +756,10 @@ const UserInstructionsSection = ({
           {expanded ? (
             <ChevronDownIcon className="text-muted-foreground size-3.5 shrink-0" />
           ) : (
-            <ChevronRightIcon className="text-muted-foreground size-3.5 shrink-0" />
+            <DirectionalIcon
+              className="text-muted-foreground size-3.5 shrink-0"
+              icon={ChevronRightIcon}
+            />
           )}
           <span className="shrink-0 font-medium">
             {t("workspaces.importOrganizer.instructionsTitle")}
@@ -894,13 +904,10 @@ const OrganizerTreePreview = ({
   const root = useMemo(() => buildOrganizerTree(rows), [rows]);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isRootOver, setIsRootOver] = useState(false);
+  const handleMoveFile = useEffectEvent(onMoveFile);
+  const handleMoveFolder = useEffectEvent(onMoveFolder);
 
-  const onMoveFileRef = useRef(onMoveFile);
-  onMoveFileRef.current = onMoveFile;
-  const onMoveFolderRef = useRef(onMoveFolder);
-  onMoveFolderRef.current = onMoveFolder;
-
-  useEffect(() => {
+  useMountEffect(() => {
     const el = containerRef.current;
     if (!el) {
       return undefined;
@@ -928,13 +935,13 @@ const OrganizerTreePreview = ({
           return;
         }
         if (data.kind === "file") {
-          onMoveFileRef.current(data.rowId, "");
+          handleMoveFile(data.rowId, "");
         } else {
-          onMoveFolderRef.current(data.folderPath, "");
+          handleMoveFolder(data.folderPath, "");
         }
       },
     });
-  }, []);
+  });
 
   if (rows.length === 0) {
     return (
@@ -1001,13 +1008,10 @@ const OrganizerFolderNode = ({
   const [isEditing, setIsEditing] = useState(false);
 
   const t = useTranslations();
+  const handleMoveFile = useEffectEvent(onMoveFile);
+  const handleMoveFolder = useEffectEvent(onMoveFolder);
 
-  const onMoveFileRef = useRef(onMoveFile);
-  onMoveFileRef.current = onMoveFile;
-  const onMoveFolderRef = useRef(onMoveFolder);
-  onMoveFolderRef.current = onMoveFolder;
-
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = headerRef.current;
     const handle = dragHandleRef.current;
     if (!el || !handle) {
@@ -1050,9 +1054,9 @@ const OrganizerFolderNode = ({
             return;
           }
           if (data.kind === "file") {
-            onMoveFileRef.current(data.rowId, folder.path);
+            handleMoveFile(data.rowId, folder.path);
           } else if (data.folderPath !== folder.path) {
-            onMoveFolderRef.current(data.folderPath, folder.path);
+            handleMoveFolder(data.folderPath, folder.path);
           }
         },
       }),
@@ -1084,7 +1088,7 @@ const OrganizerFolderNode = ({
           {isExpanded ? (
             <ChevronDownIcon className="size-3.5" />
           ) : (
-            <ChevronRightIcon className="size-3.5" />
+            <DirectionalIcon className="size-3.5" icon={ChevronRightIcon} />
           )}
         </button>
         <div
@@ -1161,7 +1165,7 @@ const OrganizerFileNode = ({
   const liRef = useRef<HTMLLIElement>(null);
   const [isDragging, setIsDragging] = useState(false);
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const el = liRef.current;
     if (!el) {
       return undefined;
@@ -1241,6 +1245,7 @@ const InlineNameInput = ({
 }: InlineNameInputProps) => {
   const [draft, setDraft] = useState(value);
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id: syncs external value into local draft. Rendered at two call sites (file + folder rename); a key prop would remount and drop focus mid-edit, so keep the in-place effect.
   useEffect(() => {
     setDraft(value);
   }, [value]);
@@ -1297,7 +1302,10 @@ const DeleteFoldersSection = ({
         {expanded ? (
           <ChevronDownIcon className="text-muted-foreground size-3.5" />
         ) : (
-          <ChevronRightIcon className="text-muted-foreground size-3.5" />
+          <DirectionalIcon
+            className="text-muted-foreground size-3.5"
+            icon={ChevronRightIcon}
+          />
         )}
         <Trash2Icon className="text-muted-foreground size-4" />
         <span className="font-medium">
@@ -1446,6 +1454,7 @@ const ensureFolders = async ({
 
       const parentSafeId =
         currentParentId === null ? null : toSafeId<"entity">(currentParentId);
+      // oxlint-disable-next-line no-await-in-loop -- each created folder's id becomes the next segment's parentId, so nested-path creation is strictly order-dependent
       const response = await api
         .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
         .put({

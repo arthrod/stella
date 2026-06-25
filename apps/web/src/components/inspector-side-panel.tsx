@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useRef, useState } from "react";
 
 import { useMatch } from "@tanstack/react-router";
 import { MessageSquarePlusIcon, PanelRightIcon } from "lucide-react";
@@ -7,60 +7,12 @@ import { TOAST_RIGHT_OFFSET_VAR } from "@stll/ui/components/toast";
 
 import { useInspectorStore } from "@/components/inspector/inspector-store";
 import type { InspectorTab } from "@/components/inspector/inspector-store";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import {
   SIDE_RAIL_CONTAINER_CLASS,
   SIDE_RAIL_ICON_BUTTON_SIZE,
   TOOLBAR_ROW_HEIGHT,
 } from "@/lib/consts";
-
-const LazyInspectorPanel = lazy(
-  async () =>
-    await import("@/components/inspector/inspector-panel").then((m) => ({
-      default: m.InspectorPanel,
-    })),
-);
-
-// Visual shell for the inspector rail while the panel chunk is
-// loading. Mirrors the real rail's chrome (top toggle, bottom
-// "new chat") so the rail doesn't render as an empty strip during
-// the lazy chunk fetch. Buttons are inert; they activate once the
-// real panel mounts.
-const InspectorRailFallback = () => (
-  <div className="bg-background flex h-full border-s shadow-lg">
-    <div className={SIDE_RAIL_CONTAINER_CLASS}>
-      <div
-        aria-hidden="true"
-        className={`text-muted-foreground flex w-full shrink-0 items-center justify-center border-b ${TOOLBAR_ROW_HEIGHT}`}
-      >
-        <span
-          className={`flex items-center justify-center ${SIDE_RAIL_ICON_BUTTON_SIZE}`}
-        >
-          <PanelRightIcon className="size-4" />
-        </span>
-      </div>
-      <div className="flex-1" />
-      <div
-        aria-hidden="true"
-        className={`text-muted-foreground flex w-full shrink-0 items-center justify-center border-t ${TOOLBAR_ROW_HEIGHT}`}
-      >
-        <span
-          className={`flex items-center justify-center ${SIDE_RAIL_ICON_BUTTON_SIZE}`}
-        >
-          <MessageSquarePlusIcon className="size-4" />
-        </span>
-      </div>
-    </div>
-  </div>
-);
-
-const INSPECTOR_PANE_DEFAULT_WIDTH = 512;
-const INSPECTOR_PANE_MIN_WIDTH = 320;
-const INSPECTOR_PANE_MAX_WIDTH = 800;
-// Matches SIDE_RAIL_WIDTH (`w-12` = 48px) so the wrapper width
-// equals the rail's actual rendered width. Earlier this was 40,
-// leaving the rail 8px wider than its wrapper and pushing the
-// toast / find-replace right-offset CSS vars under the visible rail.
-const INSPECTOR_RAIL_WIDTH = 48;
 
 /**
  * Top-level inspector chrome — file viewers, chat tabs, and any
@@ -162,7 +114,7 @@ export const InspectorSidePanel = () => {
   // user hasn't minimized do we widen to the full pane width.
   const widthPx = `${showPaneContent ? width : INSPECTOR_RAIL_WIDTH}px`;
 
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     document.documentElement.style.setProperty(TOAST_RIGHT_OFFSET_VAR, widthPx);
     // Keep Folio's find/replace dialog out from under the right inspector
     // pane. Folio reads --folio-find-replace-right on the overlay so the
@@ -209,3 +161,52 @@ export const InspectorSidePanel = () => {
     </div>
   );
 };
+
+const LazyInspectorPanel = lazy(
+  async () =>
+    await import("@/components/inspector/inspector-panel").then((m) => ({
+      default: m.InspectorPanel,
+    })),
+);
+
+// Visual shell for the inspector rail while the panel chunk is
+// loading. Mirrors the real rail's chrome (top toggle, bottom
+// "new chat") so the rail doesn't render as an empty strip during
+// the lazy chunk fetch. Buttons are inert; they activate once the
+// real panel mounts.
+const InspectorRailFallback = () => (
+  <div className="bg-background flex h-full border-s shadow-lg">
+    <div className={SIDE_RAIL_CONTAINER_CLASS}>
+      <div
+        aria-hidden="true"
+        className={`text-muted-foreground flex w-full shrink-0 items-center justify-center border-b ${TOOLBAR_ROW_HEIGHT}`}
+      >
+        <span
+          className={`flex items-center justify-center ${SIDE_RAIL_ICON_BUTTON_SIZE}`}
+        >
+          <PanelRightIcon className="size-4" />
+        </span>
+      </div>
+      <div className="flex-1" />
+      <div
+        aria-hidden="true"
+        className={`text-muted-foreground flex w-full shrink-0 items-center justify-center border-t ${TOOLBAR_ROW_HEIGHT}`}
+      >
+        <span
+          className={`flex items-center justify-center ${SIDE_RAIL_ICON_BUTTON_SIZE}`}
+        >
+          <MessageSquarePlusIcon className="size-4" />
+        </span>
+      </div>
+    </div>
+  </div>
+);
+
+const INSPECTOR_PANE_DEFAULT_WIDTH = 512;
+const INSPECTOR_PANE_MIN_WIDTH = 320;
+const INSPECTOR_PANE_MAX_WIDTH = 800;
+// Matches SIDE_RAIL_WIDTH (`w-12` = 48px) so the wrapper width
+// equals the rail's actual rendered width. Earlier this was 40,
+// leaving the rail 8px wider than its wrapper and pushing the
+// toast / find-replace right-offset CSS vars under the visible rail.
+const INSPECTOR_RAIL_WIDTH = 48;

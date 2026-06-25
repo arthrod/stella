@@ -40,7 +40,11 @@ import {
   sendOrganizationInvitation,
   sendOTPEmail,
 } from "@/api/lib/email";
-import { AUTH_RATE_LIMIT_MAX_WINDOW, AUTH_RATE_LIMITS } from "@/api/lib/limits";
+import {
+  AUTH_RATE_LIMIT_MAX_WINDOW,
+  AUTH_RATE_LIMITS,
+  LIMITS,
+} from "@/api/lib/limits";
 import { extractLangFromRequest } from "@/api/lib/locale";
 import { isMemberRole } from "@/api/lib/member-roles";
 import type { MemberRole } from "@/api/lib/member-roles";
@@ -223,7 +227,7 @@ const createAuth = () => {
       useSecureCookies: !env.isDev,
     },
     rateLimit: {
-      enabled: true,
+      enabled: !env.E2E_DISABLE_AUTH_RATE_LIMIT,
       window: AUTH_RATE_LIMITS.global.window,
       max: AUTH_RATE_LIMITS.global.max,
       customStorage: createAuthRateLimitStorage(
@@ -295,7 +299,7 @@ const createAuth = () => {
       emailOTP({
         async sendVerificationOTP({ email, otp, type }, ctx) {
           if (env.isDev) {
-            // eslint-disable-next-line no-console
+            // eslint-disable-next-line no-console -- dev-only OTP echo for local testing (env.isDev gated; value printed verbatim by design)
             console.log(`[DEV] OTP for ${email}: ${otp} (type: ${type})`);
             stashDevOtp(email, otp);
             return;
@@ -322,7 +326,7 @@ const createAuth = () => {
         async sendInvitationEmail(data, request) {
           const inviteLink = `${env.FRONTEND_URL}/auth/accept-invitation/${data.id}`;
           if (env.isDev) {
-            // eslint-disable-next-line no-console
+            // eslint-disable-next-line no-console -- dev-only invitation-link echo for local testing
             console.log(
               `[DEV] Org invitation for ${data.email}: ${inviteLink}`,
             );
@@ -424,7 +428,7 @@ const createAuth = () => {
               id: { ne: session.id },
             },
             orderBy: { createdAt: "desc" },
-            limit: 10,
+            limit: LIMITS.newDeviceLoginSessionScanLimit,
             columns: {
               ipAddress: true,
               userAgent: true,

@@ -1,7 +1,7 @@
 import type { ComponentType } from "react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
-import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Result } from "better-result";
 import {
   AlignJustifyIcon,
@@ -27,6 +27,7 @@ import {
   MenuSeparator,
   MenuTrigger,
 } from "@stll/ui/components/menu";
+import { SegmentedIconToggle } from "@stll/ui/components/segmented-icon-toggle";
 import {
   Select,
   SelectItem,
@@ -35,10 +36,8 @@ import {
   SelectValue,
 } from "@stll/ui/components/select";
 import { stellaToast } from "@stll/ui/components/toast";
-import { cn } from "@stll/ui/lib/utils";
 
 import { FolderExpandToggle } from "@/components/file-tree/folder-expand-toggle";
-import Tooltip from "@/components/tooltip";
 import type { TranslationKey } from "@/i18n/types";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { apiUrl } from "@/lib/api-url";
@@ -51,6 +50,8 @@ import type {
 } from "@/lib/types";
 import { BulkAddColumns } from "@/routes/_protected.workspaces/$workspaceId/-components/bulk-add-columns";
 import { ExistingFileOrganizerDialog } from "@/routes/_protected.workspaces/$workspaceId/-components/existing-file-organizer-dialog";
+import { isGroupableProperty } from "@/routes/_protected.workspaces/$workspaceId/-components/kanban/kanban-view.logic";
+import { PlaybooksManager } from "@/routes/_protected.workspaces/$workspaceId/-components/playbooks-manager";
 import { PropertyIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/property-helpers";
 import { RowActions } from "@/routes/_protected.workspaces/$workspaceId/-components/row-actions";
 import { downloadFile } from "@/routes/_protected.workspaces/$workspaceId/-components/utils";
@@ -76,7 +77,7 @@ type ViewToolbarProps = {
 };
 
 export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
-  const { data: properties } = useSuspenseQuery(propertiesOptions(workspaceId));
+  const { data: properties = [] } = useQuery(propertiesOptions(workspaceId));
   const updateView = useUpdateView(workspaceId);
   const { filters, sorts, hiddenProperties } = view.layout;
   const folderState = useWorkspaceStore((s) => s.folderState);
@@ -100,7 +101,7 @@ export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
   };
 
   return (
-    <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 py-1">
+    <div className="flex min-w-0 shrink-0 [scrollbar-width:none] flex-nowrap items-center gap-1 overflow-x-auto px-2 py-1 [-ms-overflow-style:none] md:ms-auto md:flex-wrap md:justify-end md:overflow-visible [&::-webkit-scrollbar]:hidden">
       {view.layout.type === "filesystem" && folderState.hasFolders && (
         <>
           <FolderExpandToggle
@@ -112,6 +113,7 @@ export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
       )}
 
       <FilterChips
+        facetContext={{ workspaceId, filters }}
         filters={filters}
         onUpdate={(updatedFilters) => handleUpdate({ filters: updatedFilters })}
         properties={properties}
@@ -132,7 +134,7 @@ export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
       {view.layout.type === "kanban" && (
         <>
           <span className="bg-border mx-1 h-4 w-px" />
-          <KanbanGroupByControl
+          <GroupByControl
             groupByPropertyId={view.layout.groupByPropertyId}
             onChange={(groupByPropertyId) =>
               handleUpdate({ groupByPropertyId })
@@ -206,8 +208,22 @@ export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
       {view.layout.type === "table" && (
         <>
           <span className="bg-border mx-1 h-4 w-px" />
+          <GroupByControl
+            allowMultiSelectGrouping
+            allowNone
+            groupByPropertyId={view.layout.groupByPropertyId}
+            onChange={(groupByPropertyId) =>
+              handleUpdate(
+                groupByPropertyId
+                  ? { groupByPropertyId }
+                  : { groupByPropertyId: undefined },
+              )
+            }
+            properties={properties}
+          />
           <TableContentModeControl viewId={view.id} />
           <TableExportMenu view={view} workspaceId={workspaceId} />
+          <PlaybooksManager workspaceId={workspaceId} />
           <BulkAddColumns triggerVariant="labelled" workspaceId={workspaceId} />
         </>
       )}
@@ -290,35 +306,15 @@ const TableContentModeControl = ({ viewId }: TableContentModeControlProps) => {
   const setMode = useTableStore((s) => s.setContentMode);
 
   return (
-    <div className="border-border/70 bg-muted/30 inline-flex h-7 shrink-0 items-center overflow-hidden rounded-md border p-0.5">
-      {TABLE_CONTENT_MODE_OPTIONS.map((option) => {
-        const Icon = option.icon;
-        const isActive = mode === option.mode;
-        return (
-          <Tooltip
-            content={t(option.labelKey)}
-            key={option.mode}
-            render={
-              <Button
-                aria-label={t(option.labelKey)}
-                aria-pressed={isActive}
-                className={cn(
-                  "text-muted-foreground h-6 min-h-0 w-7 rounded-[4px] p-0",
-                  isActive &&
-                    "bg-muted text-foreground ring-border/80 hover:bg-muted hover:text-foreground shadow-xs ring-1",
-                )}
-                onClick={() => setMode(viewId, option.mode)}
-                size="icon-xs"
-                type="button"
-                variant="ghost"
-              />
-            }
-          >
-            <Icon className="size-3.5" />
-          </Tooltip>
-        );
-      })}
-    </div>
+    <SegmentedIconToggle
+      onChange={(next) => setMode(viewId, next)}
+      options={TABLE_CONTENT_MODE_OPTIONS.map((option) => ({
+        value: option.mode,
+        icon: option.icon,
+        label: t(option.labelKey),
+      }))}
+      value={mode}
+    />
   );
 };
 
@@ -432,10 +428,10 @@ const getExportFileName = (
     return null;
   }
 
-  const encodedMatch = /(?:^|;)\s*filename\*=UTF-8''([^;]+)/iu.exec(
+  const encodedMatch = /(?:^|;)\s*filename\*=UTF-8''(?<name>[^;]+)/iu.exec(
     contentDisposition,
   );
-  const encodedFileName = encodedMatch?.[1];
+  const encodedFileName = encodedMatch?.groups?.["name"];
   if (encodedFileName) {
     const decodedResult = Result.try(() => decodeURIComponent(encodedFileName));
     if (!Result.isError(decodedResult)) {
@@ -443,12 +439,18 @@ const getExportFileName = (
     }
   }
 
-  const quotedMatch = /(?:^|;)\s*filename="([^"]*)"/iu.exec(contentDisposition);
-  if (quotedMatch?.[1]) {
-    return quotedMatch[1];
+  const quotedMatch = /(?:^|;)\s*filename="(?<name>[^"]*)"/iu.exec(
+    contentDisposition,
+  );
+  if (quotedMatch?.groups?.["name"]) {
+    return quotedMatch.groups["name"];
   }
 
-  return /(?:^|;)\s*filename=([^;]+)/iu.exec(contentDisposition)?.[1] ?? null;
+  return (
+    /(?:^|;)\s*filename=(?<name>[^;]+)/iu.exec(contentDisposition)?.groups?.[
+      "name"
+    ] ?? null
+  );
 };
 
 type FilesystemOrganizerActionProps = {
@@ -467,11 +469,11 @@ const FilesystemOrganizerAction = ({
   // useSuspenseQuery) keeps a cache miss from suspending the toolbar
   // chrome — the action button just stays disabled until the data resolves.
   const { data: foldersData } = useQuery(workspaceFoldersOptions(workspaceId));
-  const allFolders = useMemo(() => foldersData ?? [], [foldersData]);
+  const allFolders = foldersData ?? [];
   const { data: filesData } = useQuery(workspaceFilesOptions(workspaceId));
-  const allFiles = useMemo(() => filesData ?? [], [filesData]);
+  const allFiles = filesData ?? [];
 
-  const existingFolders = useMemo(() => {
+  const existingFolders = (() => {
     const folderById = new Map(
       allFolders.map((folder) => [folder.entityId, folder]),
     );
@@ -501,45 +503,54 @@ const FilesystemOrganizerAction = ({
       path: resolvePath(folder.entityId, new Set()),
       parentId: folder.parentId,
     }));
-  }, [allFolders]);
-  const selectedFiles = useMemo(
-    () => allFiles.filter((file) => selectedIds.has(file.entityId)),
-    [allFiles, selectedIds],
+  })();
+  const selectedFiles = allFiles.filter((file) =>
+    selectedIds.has(file.entityId),
   );
   // Fall back to all files when the persisted selection no longer
   // matches anything in the workspace; otherwise the organizer would
   // be unusably empty after the user navigates away from the folder
   // where the selection was made.
-  const organizerSourceFiles = useMemo(
-    () => (selectedFiles.length > 0 ? selectedFiles : allFiles),
-    [allFiles, selectedFiles],
-  );
-  const organizerFiles = useMemo(
-    () =>
-      organizerSourceFiles.map((file) => ({
-        entityId: file.entityId,
-        originalName: file.fileName,
-        parentId: file.parentId,
-        mimeType: file.mimeType,
-      })),
-    [organizerSourceFiles],
-  );
+  const organizerSourceFiles =
+    selectedFiles.length > 0 ? selectedFiles : allFiles;
+  const organizerFiles = organizerSourceFiles.map((file) => ({
+    entityId: file.entityId,
+    originalName: file.fileName,
+    parentId: file.parentId,
+    mimeType: file.mimeType,
+  }));
 
   return (
     <>
       <Button
+        aria-label={
+          selectedFiles.length > 0
+            ? t("workspaces.importOrganizer.actionSelected", {
+                count: organizerFiles.length,
+              })
+            : t("workspaces.importOrganizer.action")
+        }
         disabled={organizerFiles.length === 0}
         onClick={() => setOpen(true)}
         size="xs"
+        title={
+          selectedFiles.length > 0
+            ? t("workspaces.importOrganizer.actionSelected", {
+                count: organizerFiles.length,
+              })
+            : t("workspaces.importOrganizer.action")
+        }
         type="button"
         variant="outline"
       >
         <Rows3Icon />
-        {selectedFiles.length > 0
-          ? t("workspaces.importOrganizer.actionSelected", {
-              count: organizerFiles.length,
-            })
-          : t("workspaces.importOrganizer.action")}
+        <span className="hidden sm:inline">
+          {selectedFiles.length > 0
+            ? t("workspaces.importOrganizer.actionSelected", {
+                count: organizerFiles.length,
+              })
+            : t("workspaces.importOrganizer.action")}
+        </span>
       </Button>
       <ExistingFileOrganizerDialog
         existingFolders={existingFolders}
@@ -552,23 +563,46 @@ const FilesystemOrganizerAction = ({
   );
 };
 
-type KanbanGroupByControlProps = {
+const GROUP_BY_NONE_VALUE = "_none";
+
+type GroupByControlProps = {
   properties: WorkspaceProperty[];
   groupByPropertyId: string | undefined;
   onChange: (propertyId: string) => void;
+  // When true, an explicit "None" option is offered and an unset
+  // grouping resolves to None instead of falling back to a property.
+  // Table views default to flat (no grouping); kanban always groups.
+  allowNone?: boolean;
+  // Multi-select grouping is valid for the table (a row can appear in several
+  // sections) but not the kanban board (a card belongs to one column).
+  allowMultiSelectGrouping?: boolean;
 };
 
-const KanbanGroupByControl = ({
+const GroupByControl = ({
   properties,
   groupByPropertyId,
   onChange,
-}: KanbanGroupByControlProps) => {
+  allowNone = false,
+  allowMultiSelectGrouping = false,
+}: GroupByControlProps) => {
   const t = useTranslations();
-  const eligible = properties.filter((p) => p.content.type === "single-select");
+  // The table groups by single- or multi-select (the counts query unnests
+  // multi-select arrays); the kanban board stays single-select only.
+  const eligible = properties.filter((property) =>
+    allowMultiSelectGrouping
+      ? isGroupableProperty(property)
+      : property.content.type === "single-select",
+  );
 
-  const resolvedId = resolveKanbanGroupBy(groupByPropertyId ?? "", properties);
+  const resolvedId =
+    allowNone && !groupByPropertyId
+      ? GROUP_BY_NONE_VALUE
+      : resolveKanbanGroupBy(groupByPropertyId ?? "", properties);
 
   const resolvedLabel = (() => {
+    if (resolvedId === GROUP_BY_NONE_VALUE) {
+      return t("common.none");
+    }
     if (resolvedId === getInternalPropertyId("kind")) {
       return t("common.kind");
     }
@@ -583,26 +617,32 @@ const KanbanGroupByControl = ({
 
   return (
     <span className="flex shrink-0 items-center gap-1 text-xs whitespace-nowrap">
-      <span className="text-muted-foreground shrink-0">
+      <span className="text-muted-foreground hidden shrink-0 sm:inline">
         {t("workspaces.views.groupBy")}
       </span>
       <Select
         onValueChange={(v) => {
-          if (v !== null) {
-            onChange(v);
+          if (v === null) {
+            return;
           }
+          onChange(v === GROUP_BY_NONE_VALUE ? "" : v);
         }}
         value={resolvedId}
       >
-        <SelectTrigger className="h-6 min-h-0 min-w-24 text-xs" size="sm">
+        <SelectTrigger
+          className="h-7 min-h-0 w-28 text-xs sm:h-6 sm:w-auto sm:min-w-24"
+          size="sm"
+        >
           <SelectValue placeholder={resolvedLabel}>{resolvedLabel}</SelectValue>
         </SelectTrigger>
         <SelectPopup>
+          {allowNone && (
+            <SelectItem value={GROUP_BY_NONE_VALUE}>
+              {t("common.none")}
+            </SelectItem>
+          )}
           <SelectItem value={getInternalPropertyId("kind")}>
             {t("common.kind")}
-          </SelectItem>
-          <SelectItem value={getInternalPropertyId("created-by")}>
-            {t("workspaces.filesystem.author")}
           </SelectItem>
           {eligible.map((prop) => (
             <SelectItem key={prop.id} value={prop.id}>
@@ -628,7 +668,6 @@ const metadataFields = [
     name: "Last updated",
     icon: ClockIcon,
   },
-  // TODO: waiting for Damian — version is hardcoded to 1
   { id: getInternalPropertyId("version"), name: "Version", icon: HashIcon },
 ] as const;
 
@@ -654,7 +693,10 @@ const PropertiesToggle = ({
 
   return (
     <Menu>
-      <MenuTrigger render={<Button size="icon-xs" variant="ghost" />}>
+      <MenuTrigger
+        aria-label={t("common.columns")}
+        render={<Button size="icon-xs" variant="ghost" />}
+      >
         <EyeIcon className="size-3.5" />
       </MenuTrigger>
       <MenuPopup>

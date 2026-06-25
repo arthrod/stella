@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useState } from "react";
 
 import type { UsageLimitExceededReason } from "@/components/usage/usage-limit-modal";
 import { APIError } from "@/lib/errors";
@@ -43,7 +43,8 @@ const INITIAL_STATE: ModalState = {
   reason: "usage_limit_exceeded",
 };
 
-const NEED_HAVE_PATTERN = /need\s+(\d+),\s+have\s+(\d+)/iu;
+const NEED_HAVE_PATTERN =
+  /need\s+(?<required>\d+),\s+have\s+(?<available>\d+)/iu;
 
 const isReason = (value: unknown): value is UsageLimitExceededReason =>
   value === "no_entitlement" ||
@@ -188,9 +189,10 @@ export const parseAmounts = (
   if (!match) {
     return { required: 0, available: 0 };
   }
+  const { required, available } = match.groups ?? {};
   return {
-    required: Number.parseInt(match[1] ?? "0", 10),
-    available: Number.parseInt(match[2] ?? "0", 10),
+    required: Number.parseInt(required ?? "0", 10),
+    available: Number.parseInt(available ?? "0", 10),
   };
 };
 
@@ -213,7 +215,7 @@ export const useUsageLimit = ({
 }): UseUsageLimitResult & { hasHostedEntitlement: boolean } => {
   const [state, setState] = useState<ModalState>(INITIAL_STATE);
 
-  const handle = useCallback((error: unknown): boolean => {
+  const handle = (error: unknown): boolean => {
     const extracted = extractFromError(error);
     if (!extracted) {
       return false;
@@ -228,12 +230,10 @@ export const useUsageLimit = ({
       available: structured.available ?? fallback.available,
     });
     return true;
-  }, []);
+  };
 
-  const onOpenChange = useCallback(
-    (open: boolean) => setState((prev) => ({ ...prev, open })),
-    [],
-  );
+  const onOpenChange = (open: boolean) =>
+    setState((prev) => ({ ...prev, open }));
 
   return {
     handle,

@@ -1,9 +1,8 @@
-import { useMemo } from "react";
-
 import { useTranslations } from "use-intl";
 
 import type { LoadedCatalogueEntry } from "@stll/catalogue";
 
+import { nativeToolLabelKey } from "@/components/catalogue/native-tool-label";
 import { StellaWordmark } from "@/components/stella-wordmark";
 import { CatalogueEntryIcon } from "@/routes/_protected.knowledge/-components/catalogue/catalogue-entry-icon";
 
@@ -53,23 +52,18 @@ export const CatalogueStackPreview = ({
 }: CatalogueStackPreviewProps) => {
   const t = useTranslations();
 
-  const pinned = useMemo(
-    () =>
-      entries.filter((entry) => entry.kind === "native-tool" && entry.pinned),
-    [entries],
+  const pinned = entries.filter(
+    (entry) => entry.kind === "native-tool" && entry.pinned,
   );
-  const pinnedSlugSet = useMemo(
-    () => new Set(pinned.map((entry) => entry.slug)),
-    [pinned],
-  );
+  const pinnedSlugSet = new Set(pinned.map((entry) => entry.slug));
 
-  const stack = useMemo(() => {
+  const stack = (() => {
     const bySlug = new Map(entries.map((entry) => [entry.slug, entry]));
     return selectedSlugs
       .filter((slug) => !pinnedSlugSet.has(slug))
       .map((slug) => bySlug.get(slug))
       .filter((entry): entry is LoadedCatalogueEntry => entry !== undefined);
-  }, [entries, selectedSlugs, pinnedSlugSet]);
+  })();
 
   const total = pinned.length + stack.length;
 
@@ -168,6 +162,7 @@ const Row = ({
 }) => {
   const t = useTranslations();
   const delay = Math.min(index, STAGGER_CAP) * STAGGER_MS;
+  const labelKey = nativeToolLabelKey({ slug: entry.slug, kind: entry.kind });
 
   const content = (
     <>
@@ -181,8 +176,8 @@ const Row = ({
         slug={entry.slug}
       />
       <div className="flex min-w-0 flex-1 flex-col">
-        <span className="text-foreground truncate text-sm">
-          {entry.displayName}
+        <span className="text-foreground truncate text-sm" dir="auto">
+          {labelKey ? t(labelKey) : entry.displayName}
         </span>
         {entry.jurisdictions.length > 0 && (
           <span className="text-muted-foreground text-[10px]">

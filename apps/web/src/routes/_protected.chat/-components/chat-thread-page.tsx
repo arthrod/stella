@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import {
   useMutation,
@@ -38,23 +38,28 @@ import {
   useChatAnonymized,
   useSetChatAnonymized,
 } from "@/lib/chat-anonymized-store";
+import { useIsChatDraftEmpty } from "@/lib/chat-draft-store";
 import type { ChatThreadRef } from "@/lib/chat-thread-ref";
 import { useChatWebSearchPreferenceStore } from "@/lib/chat-web-search-store";
 import { useDevStore } from "@/lib/dev-store";
 import { toAPIError } from "@/lib/errors";
+import { useModelSelectorStore } from "@/lib/model-selector-store";
 import type { ChatPrompt } from "@/lib/prompts/types";
 import { useSavedPrompts } from "@/lib/prompts/use-saved-prompts";
+import { matchReservedChatCommand } from "@/lib/reserved-chat-commands";
 import { toSafeId } from "@/lib/safe-id";
 import { roleOptions } from "@/routes/-queries";
 import { ChatAnonymizedToggle } from "@/routes/_protected.chat/-components/chat-anonymized-toggle";
 import { ChatThreadRecap } from "@/routes/_protected.chat/-components/chat-thread-recap";
 import { ChatWebSearchToggle } from "@/routes/_protected.chat/-components/chat-web-search-toggle";
+import { SuggestedFollowupChips } from "@/routes/_protected.chat/-components/suggested-followup-chips";
 import { ThreadsSheet } from "@/routes/_protected.chat/-components/threads-sheet";
 import { useChatSession } from "@/routes/_protected.chat/-hooks/use-chat-session";
 import { useChatUserContext } from "@/routes/_protected.chat/-hooks/use-chat-user-context";
 import { buildChatRequestMessage } from "@/routes/_protected.chat/-lib/build-chat-request-message";
 import {
   chatThreadOptions,
+  chatThreadSuggestedPromptsOptions,
   invalidateChatThreadAcrossScopes,
 } from "@/routes/_protected.chat/-queries";
 import { managementRoles } from "@/routes/_protected.organization/-consts";
@@ -136,6 +141,10 @@ export const ChatThreadPage = ({
   const {
     error,
     messages,
+    loadOlder,
+    olderCursor,
+    isLoadingOlder,
+    loadOlderError,
     resendLatestMessage,
     sendMessage,
     queuedMessages,
@@ -160,6 +169,8 @@ export const ChatThreadPage = ({
     chat,
     conversationId: threadRef.threadId,
     getSendMode,
+    initialOlderCursor: data.olderCursor,
+    threadRef,
     workspaceId,
   });
 
@@ -181,6 +192,7 @@ export const ChatThreadPage = ({
   // render (the error reference persists in useChat until the
   // user retries).
   const lastHandledErrorRef = useRef<unknown>(null);
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- open the usage-limit modal on the transition into a new error. `error` is owned by useChatSession (useChat) and has no setter here; folding this in would require threading the handler into that hook (outside this batch). Keep.
   useEffect(() => {
     if (!error) {
       lastHandledErrorRef.current = null;
@@ -193,10 +205,26 @@ export const ChatThreadPage = ({
     handleUsageLimit(error);
   }, [error, handleUsageLimit]);
 
-  const sentMessageHistoryHtml = useMemo(
-    () => getUserMessageHtmlHistory(messages),
-    [messages],
+  const sentMessageHistoryHtml = getUserMessageHtmlHistory(messages);
+
+  // Fetch suggested follow-up prompts for Tab-to-ask (editor) and chips display.
+  // Gated by draft store emptiness so the query does not fire when the
+  // user is already typing a custom follow-up.
+  const lastMessageId = messages.at(-1)?.id ?? null;
+  const lastMessageRole = messages.at(-1)?.role ?? null;
+  const editorIsEmpty = useIsChatDraftEmpty(threadRef);
+  const eligibleForSuggestions =
+    editorIsEmpty && lastMessageId !== null && lastMessageRole === "assistant";
+  const { data: suggestedPromptsData } = useQuery(
+    chatThreadSuggestedPromptsOptions({
+      activeOrganizationId,
+      enabled: !isGenerating && eligibleForSuggestions,
+      lastMessageId: lastMessageId ?? "",
+      threadRef,
+    }),
   );
+  const suggestedFollowupPrompts = suggestedPromptsData?.prompts ?? [];
+  const suggestedFollowupPrompt = suggestedFollowupPrompts.at(0) ?? undefined;
 
   // Seed brand-new (empty) threads from the persisted web-search
   // preference so the user doesn't have to flip the toggle every time
@@ -224,6 +252,7 @@ export const ChatThreadPage = ({
       }
     },
   });
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- PATCH-seed the web-search preference once a freshly-opened thread renders empty. The trigger is derived from async query data (data.webSearchAvailable/Enabled) plus store state, not a single setter or a discrete open handler in this file. Keep.
   useEffect(() => {
     if (seededWebSearchForThreadId.current === threadRef.threadId) {
       return;
@@ -249,7 +278,9 @@ export const ChatThreadPage = ({
     seedWebSearch,
   ]);
   const controller = useChatEditor({
+    reservedCommands: true,
     sentMessageHistoryHtml,
+    suggestedFollowupPrompt,
     threadRef,
   });
 
@@ -315,8 +346,8 @@ export const ChatThreadPage = ({
           handleDeny,
         }}
       >
-        <div className="flex w-full flex-1 flex-col overflow-hidden">
-          <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-2 px-4 py-2">
+        <div className="relative flex w-full flex-1 flex-col overflow-hidden">
+          <div className="bg-background absolute inset-x-0 top-0 z-10 mx-auto flex w-full max-w-5xl items-center justify-between gap-2 px-4 py-2">
             <div className="flex min-w-0 items-center gap-2">
               <NewChatButton
                 hasMessages={messages.length > 0}
@@ -353,7 +384,7 @@ export const ChatThreadPage = ({
           </div>
 
           <Conversation>
-            <ConversationContent className="mx-auto w-full max-w-5xl gap-3 px-4">
+            <ConversationContent className="mx-auto w-full max-w-5xl gap-3 px-4 pt-14 pb-36">
               {messages.length === 0 && !isGenerating && !error ? (
                 <div className="m-auto w-full max-w-md px-4">
                   <PromptSuggestions
@@ -366,8 +397,12 @@ export const ChatThreadPage = ({
                   <ChatThreadMessages
                     approvalPendingMessageId={approvalPendingMessageId}
                     error={error}
+                    hasOlderMessages={olderCursor !== null}
                     isGenerating={isGenerating}
+                    isLoadingOlder={isLoadingOlder}
+                    loadOlderError={loadOlderError}
                     messages={messages}
+                    onLoadOlder={loadOlder}
                     onAskUserEditAndRerun={handleAskUserEditAndRerun}
                     onAskUserSubmit={handleAskUserSubmit}
                     onCreateDocumentResolve={handleCreateDocumentResolve}
@@ -394,7 +429,7 @@ export const ChatThreadPage = ({
                 </>
               )}
             </ConversationContent>
-            <ConversationScrollButton />
+            <ConversationScrollButton className="bottom-28" />
           </Conversation>
 
           <ChatAnonymizationLayer
@@ -402,7 +437,42 @@ export const ChatThreadPage = ({
             enabled={anonymized}
             workspaceId={workspaceId ?? threadRef.threadId}
           />
-          <div className="mx-auto w-full max-w-5xl p-4">
+          {/* Soft fades so messages dissolve into the floating header and
+              composer instead of being clipped at a hard edge. Only when a
+              conversation exists — the centered empty-state suggestions
+              must stay crisp, not dimmed by the bottom fade. */}
+          {messages.length > 0 && (
+            <>
+              <div
+                aria-hidden="true"
+                className="from-background pointer-events-none absolute inset-x-0 top-12 mx-auto h-10 w-full max-w-5xl bg-linear-to-b to-transparent"
+              />
+              <div
+                aria-hidden="true"
+                className="from-background pointer-events-none absolute inset-x-0 bottom-0 mx-auto h-48 w-full max-w-5xl bg-linear-to-t to-transparent"
+              />
+            </>
+          )}
+          <div className="absolute inset-x-0 bottom-0 z-10 mx-auto w-full max-w-5xl px-4 pb-4">
+            <SuggestedFollowupChips
+              isGenerating={isGenerating}
+              isEmpty={
+                controller.isEmpty && controller.attachments.length === 0
+              }
+              lastMessageId={messages.at(-1)?.id ?? null}
+              lastMessageRole={messages.at(-1)?.role ?? null}
+              messageCount={messages.length}
+              prompts={suggestedFollowupPrompts}
+              onSelect={(prompt) => {
+                controller.setContent(prompt);
+                void controller.submit(async (draft) => {
+                  if (!(await ensureAIAvailable())) {
+                    return;
+                  }
+                  await sendMessage(await buildChatRequestMessage(draft));
+                });
+              }}
+            />
             <ChatInputSurface
               anonymized={anonymized}
               autoFocus
@@ -412,6 +482,33 @@ export const ChatThreadPage = ({
                 void stop();
               }}
               onSubmit={async (draft) => {
+                const reservedCommand = matchReservedChatCommand(draft.html);
+                if (reservedCommand?.id === "new") {
+                  // Abort any live stream first: `chatThreadOptions` keeps the
+                  // in-flight Chat alive in the query cache, so navigating away
+                  // would leave it streaming against the abandoned thread.
+                  void stop();
+                  controller.setContent("");
+                  if (threadRef.scope === "workspace") {
+                    void navigate({
+                      to: "/chat/workspaces/$workspaceId/new",
+                      params: { workspaceId: threadRef.workspaceId },
+                      replace: true,
+                    });
+                  } else {
+                    void navigate({
+                      to: "/chat/new",
+                      replace: true,
+                    });
+                  }
+                  return;
+                }
+                if (reservedCommand?.id === "model") {
+                  controller.setContent("");
+                  useModelSelectorStore.getState().open();
+                  return;
+                }
+
                 if (!(await ensureAIAvailable())) {
                   return;
                 }

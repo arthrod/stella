@@ -1,42 +1,20 @@
-import { useMemo } from "react";
-
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { useTranslations } from "use-intl";
 
-import { prorateHourlyCents } from "@stll/money";
 import { cn } from "@stll/ui/lib/utils";
 
+import { getFormattingLocale } from "@/i18n/i18n-store";
 import {
   formatDecimalHours,
   formatMinutes,
 } from "@/routes/_protected.workspaces/$workspaceId/-components/billing/duration-input";
-import {
-  DEFAULT_CURRENCY,
-  formatCurrencyCompact,
-} from "@/routes/_protected.workspaces/$workspaceId/-components/billing/format-currency";
+import { formatCurrencyCompact } from "@/routes/_protected.workspaces/$workspaceId/-components/billing/format-currency";
 import { useMatterNameMap } from "@/routes/_protected.workspaces/$workspaceId/-components/billing/matter-name-map";
+import {
+  summarizeBillableAmountByMatterAndCurrency,
+  summarizeBillableAmountByCurrency,
+} from "@/routes/_protected.workspaces/$workspaceId/-components/billing/timesheet-week-view.logic";
 import { timeEntriesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/time-entries";
-
-type TimesheetWeekViewProps = {
-  workspaceId: string;
-  weekStart: string;
-  weekEnd: string;
-  onDayClick: (date: string) => void;
-};
-
-const getDaysInRange = (start: string, end: string): string[] => {
-  const days: string[] = [];
-  const current = new Date(`${start}T00:00:00`);
-  const endDate = new Date(`${end}T00:00:00`);
-  while (current <= endDate) {
-    const y = current.getFullYear();
-    const m = String(current.getMonth() + 1).padStart(2, "0");
-    const day = String(current.getDate()).padStart(2, "0");
-    days.push(`${y}-${m}-${day}`);
-    current.setDate(current.getDate() + 1);
-  }
-  return days;
-};
 
 export const TimesheetWeekView = ({
   workspaceId,
@@ -55,14 +33,11 @@ export const TimesheetWeekView = ({
 
   const matterNameMap = useMatterNameMap(workspaceId);
 
-  const days = useMemo(
-    () => getDaysInRange(weekStart, weekEnd),
-    [weekStart, weekEnd],
-  );
+  const days = getDaysInRange(weekStart, weekEnd);
 
-  // Grid: matterId -> { day -> { minutes, amount } }
-  type DayData = { minutes: number; amount: number };
-  const grid = useMemo(() => {
+  // Grid: matterId -> { day -> { minutes } }
+  type DayData = { minutes: number };
+  const grid = (() => {
     const map = new Map<string, Map<string, DayData>>();
     for (const entry of entries) {
       let dayMap = map.get(entry.matterId);
@@ -72,64 +47,51 @@ export const TimesheetWeekView = ({
       }
       const current = dayMap.get(entry.dateWorked) ?? {
         minutes: 0,
-        amount: 0,
       };
       current.minutes += entry.durationMinutes;
-      if (entry.billable) {
-        current.amount += prorateHourlyCents({
-          billedMinutes: entry.billedMinutes,
-          hourlyRateCents: entry.rateAtEntry,
-        });
-      }
       dayMap.set(entry.dateWorked, current);
     }
     return map;
-  }, [entries]);
+  })();
 
-  // Find dominant currency
-  const dominantCurrency = useMemo(() => {
-    if (entries.length === 0) {
-      return DEFAULT_CURRENCY;
-    }
-    return entries.at(0)?.currency ?? DEFAULT_CURRENCY;
-  }, [entries]);
+  // There is no FX conversion, so amounts in different currencies are never
+  // summed under one symbol.
+  const matterAmountsByCurrency =
+    summarizeBillableAmountByMatterAndCurrency(entries);
+  const weekAmountsByCurrency = summarizeBillableAmountByCurrency(entries);
 
   const matterIds = [...grid.keys()];
 
-  const columnTotals = useMemo(() => {
+  const columnTotals = (() => {
     const totals = new Map<string, DayData>();
     for (const day of days) {
       let minutes = 0;
-      let amount = 0;
       for (const dayMap of grid.values()) {
         const data = dayMap.get(day);
         if (data) {
           minutes += data.minutes;
-          amount += data.amount;
         }
       }
-      totals.set(day, { minutes, amount });
+      totals.set(day, { minutes });
     }
     return totals;
-  }, [grid, days]);
+  })();
 
-  const weekTotals = useMemo(() => {
+  const weekTotals = (() => {
     let minutes = 0;
-    let amount = 0;
     for (const data of columnTotals.values()) {
       minutes += data.minutes;
-      amount += data.amount;
     }
-    return { minutes, amount };
-  }, [columnTotals]);
+    return { minutes };
+  })();
 
-  const today = useMemo(() => {
+  const today = (() => {
     const d = new Date();
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, "0");
     const day = String(d.getDate()).padStart(2, "0");
     return `${y}-${m}-${day}`;
-  }, []);
+  })();
 
   return (
     <div className="overflow-x-auto">
@@ -155,7 +117,7 @@ export const TimesheetWeekView = ({
                     type="button"
                   >
                     <div className="text-muted-foreground text-xs">
-                      {d.toLocaleDateString(undefined, {
+                      {d.toLocaleDateString(getFormattingLocale(), {
                         weekday: "short",
                       })}
                     </div>
@@ -173,14 +135,14 @@ export const TimesheetWeekView = ({
           {matterIds.map((matterId) => {
             const dayMap = grid.get(matterId);
             let rowMinutes = 0;
-            let rowAmount = 0;
             for (const day of days) {
               const data = dayMap?.get(day);
               if (data) {
                 rowMinutes += data.minutes;
-                rowAmount += data.amount;
               }
             }
+            const rowAmountsByCurrency =
+              matterAmountsByCurrency.get(matterId) ?? [];
 
             return (
               <tr className="hover:bg-muted/30 border-b" key={matterId}>
@@ -207,11 +169,14 @@ export const TimesheetWeekView = ({
                 })}
                 <td className="px-2 py-2 text-center tabular-nums">
                   <div className="font-medium">{formatMinutes(rowMinutes)}</div>
-                  {rowAmount > 0 && (
-                    <div className="text-muted-foreground text-xs">
-                      {formatCurrencyCompact(rowAmount, dominantCurrency)}
+                  {rowAmountsByCurrency.map((total) => (
+                    <div
+                      className="text-muted-foreground text-xs"
+                      key={total.currency}
+                    >
+                      {formatCurrencyCompact(total.amount, total.currency)}
                     </div>
-                  )}
+                  ))}
                 </td>
               </tr>
             );
@@ -254,11 +219,11 @@ export const TimesheetWeekView = ({
                     hours: formatDecimalHours(weekTotals.minutes),
                   })}
                 </div>
-                {weekTotals.amount > 0 && (
-                  <div className="text-xs">
-                    {formatCurrencyCompact(weekTotals.amount, dominantCurrency)}
+                {weekAmountsByCurrency.map((total) => (
+                  <div className="text-xs" key={total.currency}>
+                    {formatCurrencyCompact(total.amount, total.currency)}
                   </div>
-                )}
+                ))}
               </td>
             </tr>
           </tfoot>
@@ -266,4 +231,31 @@ export const TimesheetWeekView = ({
       </table>
     </div>
   );
+};
+
+type TimesheetWeekViewProps = {
+  workspaceId: string;
+  weekStart: string;
+  weekEnd: string;
+  onDayClick: (date: string) => void;
+};
+
+const getDaysInRange = (start: string, end: string): string[] => {
+  const days: string[] = [];
+  let current = new Date(`${start}T00:00:00`);
+  const endDate = new Date(`${end}T00:00:00`);
+  while (current <= endDate) {
+    const y = current.getFullYear();
+    const m = String(current.getMonth() + 1).padStart(2, "0");
+    const day = String(current.getDate()).padStart(2, "0");
+    days.push(`${y}-${m}-${day}`);
+    current = addDays(current, 1);
+  }
+  return days;
+};
+
+const addDays = (date: Date, days: number): Date => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
 };

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState } from "react";
+import type { ReactNode } from "react";
 
 import { formatForDisplay, useHotkey } from "@tanstack/react-hotkeys";
 import {
@@ -7,11 +8,20 @@ import {
   useNavigate,
   useRouterState,
 } from "@tanstack/react-router";
-import { CircleUserRoundIcon, PanelLeftIcon } from "lucide-react";
+import {
+  CircleUserRoundIcon,
+  MessageSquarePlusIcon,
+  PanelLeftIcon,
+  PanelRightIcon,
+} from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { Avatar, AvatarFallback } from "@stll/ui/components/avatar";
 import { Button } from "@stll/ui/components/button";
+import { Separator } from "@stll/ui/components/separator";
+import { cn } from "@stll/ui/lib/utils";
 
+import { FeedbackDialog } from "@/components/feedback-dialog";
 import {
   Sidebar,
   SidebarContent,
@@ -24,14 +34,23 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
+  SidebarTrigger,
   useSidebar,
 } from "@/components/sidebar";
+import { SidebarUserMenu } from "@/components/sidebar-user-menu";
 import { StellaWordmark } from "@/components/stella-wordmark";
+import Tooltip from "@/components/tooltip";
 import { getWorkspacePrimaryNavItems } from "@/components/workspace-primary-nav";
 import { useClientAuthStatus } from "@/hooks/use-client-auth-status";
-import { usePublicLawPreviewEnabled } from "@/hooks/use-public-law-preview";
 import { AuthenticatedUserProvider } from "@/lib/authenticated-user-context";
+import {
+  SIDE_RAIL_CONTAINER_CLASS,
+  SIDE_RAIL_ICON_BUTTON_SIZE,
+  SIDE_RAIL_WIDTH,
+  TOOLBAR_ROW_HEIGHT,
+} from "@/lib/consts";
 import { HOTKEYS } from "@/lib/hotkeys";
+import { isPublicLawRouteEnabled } from "@/lib/public-law-launch";
 
 const SignInDialog = lazy(async () => {
   const module = await import("@/components/auth/sign-in-dialog");
@@ -54,8 +73,12 @@ export function PublicLawShell() {
     <SidebarProvider>
       <PublicLawSidebar authStatus={authStatus} requestAuth={requestAuth} />
       <SidebarInset className="flex flex-col">
+        <PublicLawTopBar />
         <Outlet />
       </SidebarInset>
+      {!authStatus.isAuthenticated && (
+        <PublicInspectorRail requestAuth={requestAuth} />
+      )}
       {authRedirectTo !== null && (
         <Suspense fallback={null}>
           <SignInDialog
@@ -98,9 +121,11 @@ function PublicLawSidebar({
   const { state, toggleSidebar } = useSidebar();
   const isCollapsed = state === "collapsed";
   const [searchOpen, setSearchOpen] = useState(false);
-  const publicLawPreviewEnabled = usePublicLawPreviewEnabled();
+  // This shell is server-rendered; the localStorage-backed preview
+  // toggle is browser-only and would mismatch hydration. The host/env
+  // gate is isomorphic, and anyone rendering this shell passed it.
   const primaryNavItems = getWorkspacePrimaryNavItems({
-    includePublicLaw: publicLawPreviewEnabled,
+    includePublicLaw: isPublicLawRouteEnabled(),
   });
 
   const requestPrivateFeature = (redirectTo: string) => {
@@ -127,7 +152,11 @@ function PublicLawSidebar({
   useHotkey(HOTKEYS.SEARCH, openSearch);
 
   return (
-    <Sidebar className="border-sidebar-border/35" collapsible="icon">
+    <Sidebar
+      aria-label={t("navigation.toggleSidebar")}
+      className="border-sidebar-border/35"
+      collapsible="icon"
+    >
       <SidebarHeader className="border-sidebar-border/35 h-12 border-b p-0">
         <div
           className={
@@ -138,6 +167,7 @@ function PublicLawSidebar({
         >
           {!isCollapsed && <StellaWordmark className="h-5 w-auto" />}
           <Button
+            aria-label={t("navigation.toggleSidebar")}
             className="text-muted-foreground size-7"
             onClick={toggleSidebar}
             size="icon"
@@ -216,27 +246,168 @@ function PublicLawSidebar({
           </SidebarMenu>
         </SidebarGroup>
       </SidebarContent>
-      {authStatus.status === "anonymous" && (
-        <SidebarFooter className="group-data-[collapsible=icon]:p-0">
-          <SidebarMenu>
+      <SidebarFooter>
+        <SidebarMenu>
+          <FeedbackDialog
+            userEmail={
+              authStatus.isAuthenticated ? authStatus.user.email : undefined
+            }
+          />
+          {authStatus.status === "anonymous" && (
             <SidebarMenuItem>
               <SidebarMenuButton
                 aria-label={t("auth.signIn")}
-                onClick={() => requestAuth("/law/cases")}
+                className="h-auto gap-2 p-2"
+                onClick={() => requestAuth(currentHref)}
                 tooltip={t("auth.signIn")}
               >
-                <CircleUserRoundIcon />
+                <Avatar className="size-7 rounded-full">
+                  <AvatarFallback>
+                    <CircleUserRoundIcon className="size-4" />
+                  </AvatarFallback>
+                </Avatar>
                 <span>{t("auth.signIn")}</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarFooter>
-      )}
+          )}
+          {authStatus.isAuthenticated && (
+            <SidebarUserMenu user={authStatus.user} />
+          )}
+        </SidebarMenu>
+      </SidebarFooter>
       {authStatus.isAuthenticated && (
         <Suspense fallback={null}>
           <SearchDialog onOpenChange={setSearchOpen} open={searchOpen} />
         </Suspense>
       )}
     </Sidebar>
+  );
+}
+
+function PublicLawTopBar() {
+  const t = useTranslations();
+  const { isMobile } = useSidebar();
+  const caseNumber = useRouterState({
+    select: (state) => {
+      const loaderData = state.matches.at(-1)?.loaderData;
+      if (
+        typeof loaderData === "object" &&
+        "caseNumber" in loaderData &&
+        typeof loaderData.caseNumber === "string"
+      ) {
+        return loaderData.caseNumber;
+      }
+      return null;
+    },
+  });
+
+  return (
+    <header className="bg-sidebar flex h-12 shrink-0 items-center gap-2 overflow-hidden border-b px-4">
+      {isMobile && (
+        <>
+          <SidebarTrigger className="-ms-1" />
+          <Separator className="me-2 h-4" orientation="vertical" />
+        </>
+      )}
+      <nav
+        aria-label={t("common.caseLaw")}
+        className="flex min-w-0 items-center gap-1.5 text-sm"
+      >
+        <Link
+          className="text-muted-foreground hover:text-foreground shrink-0 transition-colors"
+          to="/law/cases"
+        >
+          {t("common.caseLaw")}
+        </Link>
+        {caseNumber !== null && (
+          <>
+            <span className="text-foreground-placeholder">/</span>
+            <span className="text-foreground truncate font-medium">
+              {caseNumber}
+            </span>
+          </>
+        )}
+      </nav>
+    </header>
+  );
+}
+
+type RailButtonOptions = {
+  icon: ReactNode;
+  label: string;
+  edgeClass: string;
+};
+
+/** Anonymous twin of the inspector side rail: same geometry and chrome
+ * as the authenticated rail, with every affordance routed to sign-in. */
+function PublicInspectorRail({
+  requestAuth,
+}: {
+  requestAuth: (redirectTo: string) => void;
+}) {
+  const t = useTranslations();
+  const currentHref = useRouterState({
+    select: (state) => state.location.href,
+  });
+
+  const railButton = ({ icon, label, edgeClass }: RailButtonOptions) => (
+    <div
+      className={cn(
+        "flex w-full shrink-0 items-center justify-center",
+        edgeClass,
+        TOOLBAR_ROW_HEIGHT,
+      )}
+    >
+      <Tooltip
+        content={label}
+        render={
+          <button
+            aria-label={label}
+            className={cn(
+              "text-muted-foreground hover:bg-accent hover:text-foreground flex items-center justify-center rounded-md transition-colors",
+              SIDE_RAIL_ICON_BUTTON_SIZE,
+            )}
+            onClick={() => requestAuth(currentHref)}
+            type="button"
+          />
+        }
+      >
+        {icon}
+      </Tooltip>
+    </div>
+  );
+
+  return (
+    <div
+      className="text-sidebar-foreground hidden md:block"
+      data-side="right"
+      data-state="collapsed"
+    >
+      <div className={cn("bg-sidebar relative", SIDE_RAIL_WIDTH)} />
+      <div
+        className={cn(
+          "fixed inset-y-0 end-0 z-10 hidden h-svh md:flex",
+          SIDE_RAIL_WIDTH,
+        )}
+      >
+        <div className="bg-sidebar flex h-full w-full flex-col">
+          <div className="bg-background flex h-full border-s shadow-lg">
+            <div className={SIDE_RAIL_CONTAINER_CLASS}>
+              {railButton({
+                icon: <PanelRightIcon className="size-4" />,
+                label: t("inspector.showPane"),
+                edgeClass: "border-b",
+              })}
+              <div className="flex-1" />
+              {railButton({
+                icon: <MessageSquarePlusIcon className="size-4" />,
+                label: t("inspector.openChat"),
+                edgeClass: "border-t",
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

@@ -9,12 +9,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { createServer, Socket } from "node:net";
-import {
-  basename,
-  dirname,
-  isAbsolute,
-  resolve as pathResolve,
-} from "node:path";
+import path from "node:path";
 
 const DEV_MODES = ["dev", "dev:web", "dev:api", "dev:desktop"] as const;
 const ENV_FILE_SPECS = [
@@ -185,7 +180,7 @@ const normalizeCommandOutput = (output: string) => {
 const resolveCommandPath = (command: string) => Bun.which(command) ?? command;
 
 const resolveMaybeRelativePath = (cwd: string, value: string) =>
-  isAbsolute(value) ? value : pathResolve(cwd, value);
+  path.isAbsolute(value) ? value : path.resolve(cwd, value);
 
 const validateOffset = (offset: number, source: string) => {
   if (!Number.isInteger(offset) || offset < 0 || offset > MAX_PORT_OFFSET) {
@@ -417,6 +412,7 @@ export const checkPortAvailabilityOnHosts = async (
   checkPort = canListenOnHost,
 ) => {
   for (const host of hosts) {
+    // oxlint-disable-next-line no-await-in-loop -- early return on first unavailable host; probes must run sequentially to short-circuit
     if (!(await checkPort(port, host))) {
       return false;
     }
@@ -553,8 +549,8 @@ export const parseForeignPortOwners = ({
     }
 
     const seen = new Set<number>();
-    for (const match of (portsField ?? "").matchAll(/:(\d+)->/gu)) {
-      const hostPort = Number.parseInt(match[1] ?? "", 10);
+    for (const match of (portsField ?? "").matchAll(/:(?<hostPort>\d+)->/gu)) {
+      const hostPort = Number.parseInt(match.groups?.["hostPort"] ?? "", 10);
       if (
         Number.isNaN(hostPort) ||
         !portSet.has(hostPort) ||
@@ -778,6 +774,7 @@ const waitForSharedDockerServices = async ({
       return;
     }
     lastFailure = failure;
+    // oxlint-disable-next-line no-await-in-loop -- sequential poll: sleep between status reads until services are ready or timeout
     await Bun.sleep(DOCKER_SERVICES_POLL_INTERVAL_MS);
   }
 
@@ -873,6 +870,7 @@ export const findFirstAvailableOffset = async ({
     offset++
   ) {
     const ports = portsForOffset(offset);
+    // oxlint-disable-next-line no-await-in-loop -- sequential offset search: must check offsets in order and return the first free one
     const availability = await Promise.all(
       requiredPortsForMode(mode, ports, { aiDevtoolsEnabled }).map(
         async (port) => await checkPortAvailability(port),
@@ -880,7 +878,9 @@ export const findFirstAvailableOffset = async ({
     );
     if (availability.every(Boolean)) {
       if (mode === "dev:web") {
+        // oxlint-disable-next-line no-await-in-loop -- only reached for the first free offset; continues the offset search if the api port is taken
         const apiPortIsFree = await checkPortAvailability(ports.api);
+        // oxlint-disable-next-line no-await-in-loop -- short-circuits to continue the sequential offset search when the api port cannot be reused
         if (!apiPortIsFree && !(await checkReusableApiPort(ports.api))) {
           continue;
         }
@@ -896,12 +896,12 @@ export const findFirstAvailableOffset = async ({
 };
 
 export const isWorktreeCheckout = (rootDir: string) => {
-  const gitPath = pathResolve(rootDir, ".git");
+  const gitPath = path.resolve(rootDir, ".git");
   return existsSync(gitPath) && lstatSync(gitPath).isFile();
 };
 
 export const resolveMainRootFromCommonDir = (commonGitDir: string) =>
-  pathResolve(commonGitDir, "..");
+  path.resolve(commonGitDir, "..");
 
 export const ensureWorktreeEnvLinks = ({
   currentRoot,
@@ -915,14 +915,14 @@ export const ensureWorktreeEnvLinks = ({
   let preparedFiles = 0;
 
   for (const spec of ENV_FILE_SPECS) {
-    const targetPath = pathResolve(currentRoot, spec.path);
+    const targetPath = path.resolve(currentRoot, spec.path);
     if (existsSync(targetPath)) {
       continue;
     }
 
-    const mainEnvPath = pathResolve(mainRoot, spec.path);
+    const mainEnvPath = path.resolve(mainRoot, spec.path);
     if (isWorktree && existsSync(mainEnvPath)) {
-      mkdirSync(dirname(targetPath), { recursive: true });
+      mkdirSync(path.dirname(targetPath), { recursive: true });
       try {
         symlinkSync(mainEnvPath, targetPath);
       } catch {
@@ -932,12 +932,12 @@ export const ensureWorktreeEnvLinks = ({
       continue;
     }
 
-    const examplePath = pathResolve(currentRoot, spec.example);
+    const examplePath = path.resolve(currentRoot, spec.example);
     if (!existsSync(examplePath)) {
       continue;
     }
 
-    mkdirSync(dirname(targetPath), { recursive: true });
+    mkdirSync(path.dirname(targetPath), { recursive: true });
     copyFileSync(examplePath, targetPath);
     preparedFiles++;
   }
@@ -1219,13 +1219,13 @@ export const expandEnvMap = (
     visiting.add(key);
     const resolved = rawVal
       .replace(
-        /(?<!\\)\$(?:\{([^}]+)\}|([a-zA-Z_][a-zA-Z0-9_]*))/gu,
-        (_, p1, p2) => {
-          const varName = p1 || p2;
+        /(?<!\\)\$(?:\{(?<braced>[^}]+)\}|(?<bare>[a-zA-Z_][a-zA-Z0-9_]*))/gu,
+        (_, braced, bare) => {
+          const varName = braced || bare;
           return resolveKey(varName);
         },
       )
-      .replace(/\\(\$)/gu, "$1");
+      .replace(/\\(?<dollar>\$)/gu, "$<dollar>");
     visiting.delete(key);
     cache[key] = resolved;
     return resolved;
@@ -1327,11 +1327,14 @@ const waitForHttpReadiness = async ({
 
   while (Date.now() - startedAt < timeoutMs) {
     try {
+      // oxlint-disable-next-line no-await-in-loop -- sequential readiness poll: probe the URL once per retry until it responds or timeout
       const response = await fetch(url, {
         method: "GET",
         signal: AbortSignal.timeout(DEFAULT_HTTP_PROBE_TIMEOUT_MS),
       });
+      // oxlint-disable-next-line no-await-in-loop -- reads the body of this poll's response before validating it
       const bodyText = await response.text();
+      // oxlint-disable-next-line no-await-in-loop -- validates this poll's response and returns early once it passes
       const validationFailure = await validate(response, bodyText);
 
       if (!validationFailure) {
@@ -1343,6 +1346,7 @@ const waitForHttpReadiness = async ({
       lastFailure = error instanceof Error ? error.message : String(error);
     }
 
+    // oxlint-disable-next-line no-await-in-loop -- sequential poll: back off between readiness probes until the service is up or timeout
     await Bun.sleep(300);
   }
 
@@ -1426,13 +1430,13 @@ export const buildPreparationSteps = ({
   if (!skipDbPush && modeIncludesApi(mode)) {
     const apiBaseEnv = stripAppEnvKeys({
       baseEnv: process.env,
-      envFilePath: pathResolve(rootDir, "apps/api/.env"),
+      envFilePath: path.resolve(rootDir, "apps/api/.env"),
     });
     steps.push({
       cmd: [resolveCommandPath("bun"), "run", "db:migrate"],
-      cwd: pathResolve(rootDir, "apps/api"),
+      cwd: path.resolve(rootDir, "apps/api"),
       env: {
-        ...expandEnvMap(loadEnvFile(pathResolve(rootDir, "apps/api/.env"))),
+        ...expandEnvMap(loadEnvFile(path.resolve(rootDir, "apps/api/.env"))),
         ...createApiEnv({
           baseEnv: apiBaseEnv,
           infraOffset,
@@ -1464,18 +1468,18 @@ const buildPersistentSteps = ({
 }): PersistentSteps => {
   const apiBaseEnv = stripAppEnvKeys({
     baseEnv: process.env,
-    envFilePath: pathResolve(rootDir, "apps/api/.env"),
+    envFilePath: path.resolve(rootDir, "apps/api/.env"),
   });
   const webBaseEnv = stripAppEnvKeys({
     baseEnv: process.env,
-    envFilePath: pathResolve(rootDir, "apps/web/.env"),
+    envFilePath: path.resolve(rootDir, "apps/web/.env"),
   });
   const desktopBaseEnv = stripAppEnvKeys({
     baseEnv: process.env,
-    envFilePath: pathResolve(rootDir, "apps/desktop/.env"),
+    envFilePath: path.resolve(rootDir, "apps/desktop/.env"),
   });
   const apiEnv = {
-    ...expandEnvMap(loadEnvFile(pathResolve(rootDir, "apps/api/.env"))),
+    ...expandEnvMap(loadEnvFile(path.resolve(rootDir, "apps/api/.env"))),
     ...createApiEnv({
       baseEnv: apiBaseEnv,
       infraOffset,
@@ -1484,7 +1488,7 @@ const buildPersistentSteps = ({
     }),
   };
   const webEnv = {
-    ...expandEnvMap(loadEnvFile(pathResolve(rootDir, "apps/web/.env"))),
+    ...expandEnvMap(loadEnvFile(path.resolve(rootDir, "apps/web/.env"))),
     ...createWebEnv({
       aiDevtoolsEnabled,
       baseEnv: webBaseEnv,
@@ -1492,7 +1496,7 @@ const buildPersistentSteps = ({
     }),
   };
   const desktopEnv = {
-    ...expandEnvMap(loadEnvFile(pathResolve(rootDir, "apps/desktop/.env"))),
+    ...expandEnvMap(loadEnvFile(path.resolve(rootDir, "apps/desktop/.env"))),
     ...createDesktopEnv({
       baseEnv: desktopBaseEnv,
       ports,
@@ -1510,7 +1514,7 @@ const buildPersistentSteps = ({
         "--watch",
         "src/index.ts",
       ],
-      cwd: pathResolve(rootDir, "apps/api"),
+      cwd: path.resolve(rootDir, "apps/api"),
       env: apiEnv,
       label: "API server",
     });
@@ -1522,7 +1526,7 @@ const buildPersistentSteps = ({
     if (aiDevtoolsEnabled) {
       secondary.push({
         cmd: [resolveCommandPath("bun"), "run", "dev:ai-tools"],
-        cwd: pathResolve(rootDir, "apps/api"),
+        cwd: path.resolve(rootDir, "apps/api"),
         env: apiEnv,
         label: "AI SDK Devtools",
       });
@@ -1542,7 +1546,7 @@ const buildPersistentSteps = ({
         "localhost",
         "--strictPort",
       ],
-      cwd: pathResolve(rootDir, "apps/web"),
+      cwd: path.resolve(rootDir, "apps/web"),
       env: webEnv,
       label: "Web server",
     });
@@ -1564,7 +1568,7 @@ const buildPersistentSteps = ({
         "-c",
         tauriConfigOverride,
       ],
-      cwd: pathResolve(rootDir, "apps/desktop"),
+      cwd: path.resolve(rootDir, "apps/desktop"),
       env: desktopEnv,
       label: "Desktop app",
     });
@@ -1813,10 +1817,10 @@ const main = async () => {
       (process.env["STELLA_PORT_OFFSET"]
         ? Number.parseInt(process.env["STELLA_PORT_OFFSET"], 10)
         : undefined),
-    worktreeName: basename(gitContext.currentRoot),
+    worktreeName: path.basename(gitContext.currentRoot),
   });
   const aiDevtoolsEnabled = readEnvFlag({
-    envFilePath: pathResolve(gitContext.currentRoot, "apps/api/.env"),
+    envFilePath: path.resolve(gitContext.currentRoot, "apps/api/.env"),
     key: "AI_DEVTOOLS_ENABLED",
     processEnv: process.env,
   });
@@ -1925,12 +1929,14 @@ const main = async () => {
     startSteps(persistentSteps.primary);
 
     for (const readinessCheck of readinessChecks.primary) {
+      // oxlint-disable-next-line no-await-in-loop -- ordered startup: each primary service must be ready before the next is awaited
       await waitForHttpReadiness(readinessCheck);
     }
 
     startSteps(persistentSteps.secondary);
 
     for (const readinessCheck of readinessChecks.secondary) {
+      // oxlint-disable-next-line no-await-in-loop -- ordered startup: each secondary service must be ready before the next is awaited
       await waitForHttpReadiness(readinessCheck);
     }
 

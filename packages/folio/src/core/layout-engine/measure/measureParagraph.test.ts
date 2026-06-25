@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import type { ParagraphBlock, Run } from "../types";
 import {
   smallCapsAwareCharWidth,
   withFakeTextMeasure,
@@ -196,6 +197,138 @@ describe("empty paragraph line-height floor", () => {
   });
 });
 
+describe("measureParagraph cross-run line breaking", () => {
+  const style = { fontFamily: "Calibri", fontSize: 11 };
+  const width = (text: string): number => measureTextWidth(text, style);
+  const paragraph = (runs: Run[]): ParagraphBlock => ({
+    kind: "paragraph",
+    id: "p1",
+    runs,
+  });
+  const lineStartsAtRun = (
+    lines: { fromRun: number; fromChar: number }[],
+    runIndex: number,
+  ): boolean =>
+    lines.some((line) => line.fromRun === runIndex && line.fromChar === 0);
+  const lineStartsAt = (
+    lines: { fromRun: number; fromChar: number }[],
+    runIndex: number,
+    charIndex: number,
+  ): boolean =>
+    lines.some(
+      (line) => line.fromRun === runIndex && line.fromChar === charIndex,
+    );
+
+  test("keeps an adjacent footnote marker glued to the preceding word", () => {
+    withFakeTextMeasure(() => {
+      const runs: Run[] = [
+        { kind: "text", text: "alpha beta." },
+        { kind: "text", text: "1", superscript: true, footnoteRefId: 1 },
+        { kind: "text", text: " gamma" },
+      ];
+      const maxWidth = width("alpha beta.") + width("1") - 0.6;
+      const { lines } = measureParagraph(paragraph(runs), maxWidth);
+
+      expect(lineStartsAtRun(lines, 1)).toBe(false);
+    }, fakeMeasure);
+  });
+
+  test("allows a normal wrap when whitespace precedes the footnote marker", () => {
+    withFakeTextMeasure(() => {
+      const runs: Run[] = [
+        { kind: "text", text: "alpha beta " },
+        { kind: "text", text: "1", superscript: true, footnoteRefId: 1 },
+        { kind: "text", text: " gamma" },
+      ];
+      const maxWidth = width("alpha beta ") + width("1") - 0.6;
+      const { lines } = measureParagraph(paragraph(runs), maxWidth);
+
+      expect(lineStartsAtRun(lines, 1)).toBe(true);
+    }, fakeMeasure);
+  });
+
+  test("keeps a split leading hyphen glued to the preceding run", () => {
+    withFakeTextMeasure(() => {
+      const runs: Run[] = [
+        { kind: "text", text: "alpha well" },
+        { kind: "text", text: "-known" },
+        { kind: "text", text: " topic" },
+      ];
+      const maxWidth = width("alpha well") + width("-") - 0.6;
+      const { lines } = measureParagraph(paragraph(runs), maxWidth);
+
+      expect(lineStartsAt(lines, 0, "alpha ".length)).toBe(true);
+      expect(lineStartsAtRun(lines, 1)).toBe(false);
+    }, fakeMeasure);
+  });
+
+  test("keeps a long format-only split glued as one cluster", () => {
+    withFakeTextMeasure(() => {
+      const wordRuns: Run[] = "well-known".split("").map((text, index) => ({
+        kind: "text",
+        text,
+        bold: index % 2 === 0,
+      }));
+      const runs: Run[] = [{ kind: "text", text: "alpha " }, ...wordRuns];
+      const maxWidth = width("alpha well-") - 0.6;
+      const { lines } = measureParagraph(paragraph(runs), maxWidth);
+
+      expect(lineStartsAtRun(lines, 1)).toBe(true);
+      for (let runIndex = 2; runIndex < runs.length; runIndex++) {
+        expect(lineStartsAtRun(lines, runIndex)).toBe(false);
+      }
+    }, fakeMeasure);
+  });
+
+  test("hard-breaks oversized glued split words by line capacity", () => {
+    withFakeTextMeasure(() => {
+      const runs: Run[] = "abcdefghijkl".split("").map((text, index) => ({
+        kind: "text",
+        text,
+        bold: index % 2 === 0,
+      }));
+      const { lines } = measureParagraph(paragraph(runs), width("abcd"));
+
+      expect(lines[0]).toMatchObject({
+        fromRun: 0,
+        fromChar: 0,
+        toRun: 3,
+        toChar: 1,
+      });
+      expect(lines[1]).toMatchObject({
+        fromRun: 4,
+        fromChar: 0,
+        toRun: 7,
+        toChar: 1,
+      });
+      expect(lines).toHaveLength(3);
+    }, fakeMeasure);
+  });
+
+  test("keeps glue when the next line can fit a cluster narrowed off the first line", () => {
+    withFakeTextMeasure(() => {
+      const runs: Run[] = [
+        { kind: "text", text: "a " },
+        { kind: "text", text: "b", bold: true },
+        { kind: "text", text: "cde" },
+      ];
+      const { lines } = measureParagraph(
+        {
+          ...paragraph(runs),
+          attrs: {
+            listMarker: "1.",
+            listMarkerSuffix: "nothing",
+          },
+        },
+        width("abcde"),
+      );
+
+      expect(lineStartsAtRun(lines, 1)).toBe(true);
+      expect(lineStartsAtRun(lines, 2)).toBe(false);
+    }, fakeMeasure);
+  });
+});
+
 describe("inline image paragraph measurement", () => {
   test("image-only line reserves descender room above and below image", () => {
     const imageHeight = 29;
@@ -364,6 +497,101 @@ describe("inline image paragraph measurement", () => {
       expect(line?.lineHeight).toBe(
         imageHeight + distTop + distBottom + descent,
       );
+    }, fakeMeasure);
+  });
+
+  // Regression (eigenpal/docx-editor#767, fixes #766): an inline image that
+  // wraps to its own line must inflate only the line it lands on. The footprint
+  // was recorded on the current line *before* the wrap check, so the preceding
+  // text line inflated to image height while the image's own line stayed
+  // text-height — and following content painted over the overflowing image.
+  test("inline image that wraps reserves its height on its own line, not the text line", () => {
+    withFakeTextMeasure(() => {
+      const imageHeight = 151;
+      const measure = measureParagraph(
+        {
+          kind: "paragraph",
+          id: "wrap-img",
+          runs: [
+            { kind: "text", text: "Some preceding text" },
+            // One px shy of the column, so any preceding text forces the image
+            // onto its own line where it still fits.
+            {
+              kind: "image",
+              src: "data:image/png;base64,",
+              width: 599,
+              height: imageHeight,
+            },
+            { kind: "text", text: "Description" },
+          ],
+        },
+        600,
+      );
+
+      expect(measure.lines.length).toBeGreaterThanOrEqual(2);
+      // The preceding text line stays text-height, not inflated to the image.
+      expect(measure.lines.at(0)?.lineHeight ?? 0).toBeLessThan(imageHeight);
+      // The image lands on the next line, which reserves its full height.
+      expect(measure.lines.at(1)?.lineHeight ?? 0).toBeGreaterThanOrEqual(
+        imageHeight,
+      );
+    }, fakeMeasure);
+  });
+
+  test("inline image that fits inline still grows its shared line to image height", () => {
+    withFakeTextMeasure(() => {
+      const imageHeight = 151;
+      const measure = measureParagraph(
+        {
+          kind: "paragraph",
+          id: "fit-img",
+          runs: [
+            { kind: "text", text: "Hi" },
+            {
+              kind: "image",
+              src: "data:image/png;base64,",
+              width: 100,
+              height: imageHeight,
+            },
+          ],
+        },
+        600,
+      );
+
+      expect(measure.lines).toHaveLength(1);
+      expect(measure.lines.at(0)?.lineHeight ?? 0).toBeGreaterThanOrEqual(
+        imageHeight,
+      );
+    }, fakeMeasure);
+  });
+
+  // An inline image that is the only run on its line stays on that line even
+  // when it is wider than the column, instead of being wrapped to a fresh blank
+  // row above it — wrapping an image that is already alone can't make it fit.
+  // The measurer reserves its intrinsic box (the painter caps the paint with
+  // CSS max-width:100%; see measureParagraph.ts). (eigenpal/docx-editor#760.)
+  test("inline image wider than the column stays on its line and reserves its full height", () => {
+    withFakeTextMeasure(() => {
+      const measure = measureParagraph(
+        {
+          kind: "paragraph",
+          id: "wide-img",
+          runs: [
+            {
+              kind: "image",
+              src: "data:image/png;base64,",
+              width: 1200,
+              height: 800,
+            },
+          ],
+        },
+        600,
+      );
+
+      // No spurious leading empty line; the image is the only line.
+      expect(measure.lines).toHaveLength(1);
+      // The intrinsic height (800) is reserved, never under-reserved.
+      expect(measure.lines.at(0)?.lineHeight ?? 0).toBeGreaterThanOrEqual(800);
     }, fakeMeasure);
   });
 
@@ -707,6 +935,23 @@ describe("all-caps paragraph measurement", () => {
     });
 
     expect(spacedHash).not.toBe(plainHash);
+  });
+
+  test("includes the East Asian font in paragraph cache keys", () => {
+    // Measurement now depends on eastAsiaFontFamily, so the cache key must too —
+    // otherwise a CJK run keeps stale measurements when only its EA face changes.
+    const minchoHash = hashParagraphBlock({
+      kind: "paragraph",
+      id: "mincho",
+      runs: [{ kind: "text", text: "日本語", eastAsiaFontFamily: "MS Mincho" }],
+    });
+    const gothicHash = hashParagraphBlock({
+      kind: "paragraph",
+      id: "gothic",
+      runs: [{ kind: "text", text: "日本語", eastAsiaFontFamily: "MS Gothic" }],
+    });
+
+    expect(minchoHash).not.toBe(gothicHash);
   });
 });
 

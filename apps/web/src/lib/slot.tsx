@@ -19,8 +19,8 @@
  * are not statically known.
  */
 
-/* eslint-disable typescript-eslint/no-unsafe-type-assertion */
-/* eslint-disable typescript/no-unsafe-type-assertion */
+/* eslint-disable typescript-eslint/no-unsafe-type-assertion -- dynamic prop/ref merge onto an unknown child element; each cast guarded by a typeof/SAFETY check below */
+/* eslint-disable typescript/no-unsafe-type-assertion -- dynamic prop/ref merge onto an unknown child element; each cast guarded by a typeof/SAFETY check below */
 
 import { Children, Fragment, cloneElement, isValidElement } from "react";
 
@@ -52,9 +52,18 @@ export const composeRefs =
           cleanups.push(() => {
             void cleanup();
           });
+        } else if (node !== null) {
+          cleanups.push(() => {
+            void ref(null);
+          });
         }
       } else if (ref !== undefined && ref !== null) {
         ref.current = node;
+        if (node !== null) {
+          cleanups.push(() => {
+            ref.current = null;
+          });
+        }
       }
     }
     if (cleanups.length > 0) {

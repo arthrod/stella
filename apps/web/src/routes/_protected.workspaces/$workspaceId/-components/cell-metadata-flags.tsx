@@ -14,8 +14,9 @@ import {
   XIcon,
 } from "lucide-react";
 import { useDebouncedCallback } from "use-debounce";
-import { useLocale, useTranslations } from "use-intl";
+import { useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import {
   MenuGroup,
   MenuGroupLabel,
@@ -26,6 +27,7 @@ import { stellaToast } from "@stll/ui/components/toast";
 
 import Tooltip from "@/components/tooltip";
 import { UserAvatar } from "@/components/user-avatar";
+import { useMountEffect } from "@/hooks/use-effect";
 import { api } from "@/lib/api";
 import { toAPIError } from "@/lib/errors";
 import { formatRelativeTime } from "@/lib/relative-time";
@@ -299,10 +301,9 @@ type CellLockBadgeProps = {
 
 const CellLockBadge = ({ provenance, onUnlock }: CellLockBadgeProps) => {
   const t = useTranslations();
-  const locale = useLocale();
   const displayName = provenance?.lockedByName ?? null;
   const relativeTime = provenance
-    ? formatRelativeTime(provenance.lockedAt, locale)
+    ? formatRelativeTime(provenance.lockedAt)
     : null;
 
   const tooltipContent = provenance ? (
@@ -317,7 +318,15 @@ const CellLockBadge = ({ provenance, onUnlock }: CellLockBadgeProps) => {
           {t("workspaces.table.lock.locked")}
         </span>
         <span className="text-muted-foreground block truncate text-xs">
-          {displayName ? `${displayName} · ${relativeTime}` : relativeTime}
+          {displayName ? (
+            <>
+              <BidiText>{displayName}</BidiText>
+              {" · "}
+              {relativeTime}
+            </>
+          ) : (
+            relativeTime
+          )}
         </span>
       </span>
     </span>
@@ -357,11 +366,8 @@ const FlagProvenanceTooltip = ({
   metadata,
 }: FlagProvenanceTooltipProps) => {
   const getFlagLabel = useFlagLabel();
-  const locale = useLocale();
   const displayName = metadata?.addedByName ?? null;
-  const relativeTime = metadata
-    ? formatRelativeTime(metadata.addedAt, locale)
-    : null;
+  const relativeTime = metadata ? formatRelativeTime(metadata.addedAt) : null;
   const label = getFlagLabel(flag.id);
 
   if (!metadata) {
@@ -378,7 +384,15 @@ const FlagProvenanceTooltip = ({
       <span className="min-w-0">
         <span className="block truncate font-medium">{label}</span>
         <span className="text-muted-foreground block truncate text-xs">
-          {displayName ? `${displayName} · ${relativeTime}` : relativeTime}
+          {displayName ? (
+            <>
+              <BidiText>{displayName}</BidiText>
+              {" · "}
+              {relativeTime}
+            </>
+          ) : (
+            relativeTime
+          )}
         </span>
       </span>
     </span>
@@ -496,6 +510,7 @@ export const useCellMetadataFlags = ({
 
   // Clear the override when the server has caught up — both
   // dimensions must match (or be unset on the override side).
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reconciles the optimistic Zustand override against the server snapshot via a store write (clearOverride, also called from onError); a store mutation can't move into render, so kept
   useEffect(() => {
     if (override === undefined) {
       return;
@@ -542,6 +557,7 @@ export const useCellMetadataFlags = ({
   // Once the server-side metadata catches up with what we last sent,
   // drop the in-flight base so the next flush diffs against the
   // server again.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- post-commit in-flight ref reset gating the next debounced flush's merge base; resetting during render could fire on a discarded concurrent render, so kept as a commit-phase effect
   useEffect(() => {
     if (
       lastSentRef.current !== null &&
@@ -669,8 +685,10 @@ export const useCellMetadataFlags = ({
   };
 
   // Safety net — if the component unmounts with a pending change,
-  // commit it instead of dropping the request.
-  useEffect(() => () => flush.flush(), [flush]);
+  // commit it instead of dropping the request. `flush` is a stable
+  // `useDebouncedCallback` reference, so a mount-scoped cleanup
+  // captures the same instance the handlers call.
+  useMountEffect(() => () => flush.flush());
 
   const lockProvenance = metadata?.lockProvenance;
 

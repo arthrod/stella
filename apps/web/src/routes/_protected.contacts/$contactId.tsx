@@ -9,12 +9,16 @@ import {
 import { ArrowLeftIcon, BuildingIcon, PlusIcon, UserIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
+import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 import { DestructiveConfirmDialog } from "@stll/ui/components/destructive-confirm-dialog";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { Skeleton } from "@stll/ui/components/skeleton";
 import { stellaToast } from "@stll/ui/components/toast";
+import { cn } from "@stll/ui/lib/utils";
 
 import { usePermissions } from "@/hooks/use-permissions";
+import { getFormattingLocale } from "@/i18n/i18n-store";
 import { ContactCommunicationEditor } from "@/routes/_protected.contacts/-components/contact-communication-editor";
 import { ContactCustomFieldsEditor } from "@/routes/_protected.contacts/-components/contact-custom-fields-editor";
 import { ContactNotesEditor } from "@/routes/_protected.contacts/-components/contact-notes-editor";
@@ -35,13 +39,57 @@ import { useCreateMatterStore } from "@/routes/_protected.workspaces/-store/crea
 
 export const Route = createFileRoute("/_protected/contacts/$contactId")({
   component: ContactDetailPage,
-  pendingComponent: () => (
-    <div className="flex flex-1 flex-col gap-4 border-t p-4">
-      <Skeleton className="h-8 w-64" />
-      <Skeleton className="h-48 w-full" />
-    </div>
-  ),
+  pendingComponent: ContactDetailPending,
 });
+
+const SECTION_ROW_KEYS = ["a", "b", "c", "d", "e", "f"];
+
+const ContactSectionSkeleton = ({
+  rows,
+  className,
+}: {
+  rows: number;
+  className?: string;
+}) => (
+  <section className={cn("rounded-lg border p-4", className)}>
+    <Skeleton className="mb-3 h-4 w-28" />
+    <div className="space-y-2.5">
+      {SECTION_ROW_KEYS.slice(0, rows).map((key) => (
+        <div className="flex items-center justify-between gap-4" key={key}>
+          <Skeleton className="h-4 w-24" />
+          <Skeleton className="h-4 w-32" />
+        </div>
+      ))}
+    </div>
+  </section>
+);
+
+// Mirrors the real detail layout: header (back/icon/title/badge/actions) above a
+// two-column grid of section cards, so the page does not jump when data lands.
+function ContactDetailPending() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto border-t p-4">
+      <div className="flex items-center gap-3">
+        <Skeleton className="size-7 rounded-md" />
+        <Skeleton className="size-5 rounded-full" />
+        <Skeleton className="h-6 w-48" />
+        <Skeleton className="h-5 w-16 rounded-md" />
+        <div className="ms-auto flex items-center gap-2">
+          <Skeleton className="h-8 w-28 rounded-md" />
+          <Skeleton className="h-8 w-24 rounded-md" />
+        </div>
+      </div>
+      <div className="grid gap-6 md:grid-cols-2">
+        <ContactSectionSkeleton rows={5} />
+        <ContactSectionSkeleton rows={4} />
+        <ContactSectionSkeleton rows={3} />
+        <ContactSectionSkeleton rows={3} />
+        <ContactSectionSkeleton className="md:col-span-2" rows={2} />
+        <ContactSectionSkeleton className="md:col-span-2" rows={3} />
+      </div>
+    </div>
+  );
+}
 
 const protectedRouteApi = getRouteApi("/_protected");
 
@@ -108,13 +156,14 @@ function ContactDetailPage() {
       {/* Header */}
       <div className="flex items-center gap-3">
         <Button
+          aria-label={t("common.back")}
           onClick={() => {
             void (async () => await navigate({ to: "/contacts" }))();
           }}
           size="icon-xs"
           variant="ghost"
         >
-          <ArrowLeftIcon className="size-4" />
+          <DirectionalIcon className="size-4" icon={ArrowLeftIcon} />
         </Button>
         <div className="flex items-center gap-2">
           {contact.type === "person" ? (
@@ -122,7 +171,9 @@ function ContactDetailPage() {
           ) : (
             <BuildingIcon className="text-muted-foreground size-5" />
           )}
-          <h1 className="text-xl font-bold">{contact.displayName}</h1>
+          <h1 className="text-xl font-bold">
+            <BidiText>{contact.displayName}</BidiText>
+          </h1>
           <span className="bg-muted text-muted-foreground rounded-md px-2 py-0.5 text-xs">
             {t(`contacts.type.${contact.type}`)}
           </span>
@@ -382,10 +433,14 @@ function ContactDetailPage() {
                     workspaceId={matter.id}
                   >
                     <MatterIcon matter={matter} />
-                    <span className="font-medium">{matter.name}</span>
+                    <BidiText as="span" className="font-medium">
+                      {matter.name}
+                    </BidiText>
                     <span className="text-muted-foreground ms-auto text-xs">
                       {t("common.createdAt", {
-                        date: new Date(matter.createdAt).toLocaleDateString(),
+                        date: new Date(matter.createdAt).toLocaleDateString(
+                          getFormattingLocale(),
+                        ),
                       })}
                     </span>
                   </MatterRefLink>

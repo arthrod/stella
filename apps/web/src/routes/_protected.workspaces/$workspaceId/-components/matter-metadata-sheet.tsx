@@ -73,6 +73,7 @@ export const MatterMetadataPanel = ({
   const canDeleteWorkspace = usePermissions({ workspace: ["delete"] });
   const updateWorkspace = useUpdateWorkspace();
 
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived state from query, seeds/resyncs form fields from workspace data gated on dirty flags + workspaceId; candidate for query-data initialization with a key prop for the reset-on-id seed
   useEffect(() => {
     if (!workspace) {
       return;
@@ -332,12 +333,11 @@ export const MatterMetadataPanel = ({
         </section>
 
         {/* InfoSoud */}
-        {/* TODO: add with proper localization support for CS-only
-                customers. The component is wired and works, but the
-                surface (CZ court IDs, sp. zn. labels, etc.) is
-                Czech-only by design — we hide it from the UX until
-                we have a locale gate that only shows it to CS users
-                or surfaces an EN explainer for non-CS users. */}
+        {/* Add with proper localization support for CS-only customers.
+                The component is wired and works, but the surface (CZ court
+                IDs, sp. zn. labels, etc.) is Czech-only by design — we hide it
+                from the UX until we have a locale gate that only shows it to CS
+                users or surfaces an EN explainer for non-CS users. */}
         {/* <InfoSoudSection active workspaceId={workspaceId} /> */}
         {/* <Separator /> */}
 

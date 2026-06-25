@@ -10,7 +10,7 @@
  */
 
 import * as cheerio from "cheerio";
-import type { AnyNode } from "domhandler";
+import { type AnyNode, isTag, isText } from "domhandler";
 
 import type {
   Block,
@@ -26,6 +26,10 @@ import {
   CZ_JUDGE_NAME_RE as SIGNATURE_RE,
   CZ_JUDGE_TITLE_RE as PREDSEDA_RE,
 } from "./cz-patterns";
+import {
+  inlinesToPlainText,
+  walkInlines as walkInlinesShared,
+} from "./shared-inlines";
 
 // ── Public API ─────────────────────────────────────────────
 
@@ -77,12 +81,14 @@ export const parseNsDecisionHtml = (
 // ── Metadata extraction ────────────────────────────────────
 
 const parseDominoDate = (raw: string): string | null => {
-  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/u.exec(raw);
+  const match = /^(?<month>\d{1,2})\/(?<day>\d{1,2})\/(?<year>\d{4})$/u.exec(
+    raw,
+  );
   if (!match) {
     return null;
   }
-  const [, month, day, year] = match;
-  // SAFETY: regex guarantees 3 capture groups
+  // SAFETY: regex guarantees the month/day/year groups
+  const { month, day, year } = match.groups ?? {};
   return `${year}-${month?.padStart(2, "0") ?? ""}-${day?.padStart(2, "0") ?? ""}`;
 };
 
@@ -222,65 +228,7 @@ type RawChunk =
 const walkInlines = (
   $: cheerio.CheerioAPI,
   el: cheerio.Cheerio<AnyNode>,
-): Inline[] => {
-  const inlines: Inline[] = [];
-
-  el.contents().each((_, node) => {
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type === "text") {
-      const text = $(node).text();
-      if (text) {
-        inlines.push({ type: "text", text });
-      }
-      return;
-    }
-
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type !== "tag") {
-      return;
-    }
-
-    const tag = node.tagName.toLowerCase();
-    const $node = $(node);
-
-    if (tag === "br") {
-      inlines.push({ type: "line-break" });
-      return;
-    }
-
-    if (tag === "b" || tag === "strong") {
-      const children = walkInlines($, $node);
-      if (children.length > 0) {
-        inlines.push({ type: "bold", children });
-      }
-      return;
-    }
-
-    if (tag === "i" || tag === "em") {
-      const children = walkInlines($, $node);
-      if (children.length > 0) {
-        inlines.push({ type: "italic", children });
-      }
-      return;
-    }
-
-    if (tag === "a") {
-      const href = sanitizeUrl($node.attr("href") ?? "");
-      const children = walkInlines($, $node);
-      if (href && children.length > 0) {
-        inlines.push({ type: "link", href, children });
-      } else if (children.length > 0) {
-        inlines.push(...children);
-      }
-      return;
-    }
-
-    // Unwrap presentational wrappers
-    inlines.push(...walkInlines($, $node));
-  });
-
-  return inlines;
-};
+): Inline[] => walkInlinesShared($, el, { sanitizeHref: sanitizeUrl });
 
 const isCentered = (el: cheerio.Cheerio<AnyNode>): boolean => {
   if (el.attr("align") === "center") {
@@ -379,8 +327,7 @@ export const extractRawChunks = ($: cheerio.CheerioAPI): RawChunk[] => {
   };
 
   const processNode = (node: AnyNode, parentCentered: boolean) => {
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type === "text") {
+    if (isText(node)) {
       const text = $(node).text();
       if (text.trim()) {
         appendToBuffer([{ type: "text", text }], parentCentered);
@@ -388,8 +335,7 @@ export const extractRawChunks = ($: cheerio.CheerioAPI): RawChunk[] => {
       return;
     }
 
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type !== "tag") {
+    if (!isTag(node)) {
       return;
     }
 
@@ -482,8 +428,7 @@ export const extractRawChunks = ($: cheerio.CheerioAPI): RawChunk[] => {
   let afterTable = false;
 
   body.contents().each((_, node) => {
-    // oxlint-disable-next-line typescript/no-unsafe-enum-comparison
-    if (node.type === "tag" && $(node).is("#box-table-a")) {
+    if (isTag(node) && $(node).is("#box-table-a")) {
       afterTable = true;
       return;
     }
@@ -503,34 +448,6 @@ export const extractRawChunks = ($: cheerio.CheerioAPI): RawChunk[] => {
 
 // ── Helpers (must precede classifyBlocks) ─────────────────
 
-const inlinesToPlainText = (inlines: readonly Inline[]): string => {
-  let text = "";
-  for (const inline of inlines) {
-    switch (inline.type) {
-      case "text": {
-        text += inline.text;
-        break;
-      }
-      case "bold":
-      case "italic": {
-        text += inlinesToPlainText(inline.children);
-        break;
-      }
-      case "link": {
-        text += inlinesToPlainText(inline.children);
-        break;
-      }
-      case "line-break": {
-        text += "\n";
-        break;
-      }
-      default:
-        break;
-    }
-  }
-  return text;
-};
-
 export const blocksToPlainText = (blocks: readonly Block[]): string =>
   blocks
     .map((block) => block.plainText)
@@ -540,7 +457,6 @@ export const blocksToPlainText = (blocks: readonly Block[]): string =>
 
 // ── Pattern constants ─────────────────────────────────────
 
-// oxlint-disable-next-line sonarjs/slow-regex -- title detection runs on one paragraph line
 const DECISION_TITLE_RE = /^[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]\s+[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ\s]+$/u;
 
 const DECISION_TYPE_WORDS = new Set([
@@ -556,7 +472,7 @@ const DECISION_TYPE_WORDS = new Set([
 const SECTION_HEADING_RE =
   /^(?:S\s*t\s*r\s*u\s*[čc]\s*n\s*[ée]\s+)?O\s*d\s*[uů]\s*v\s*o\s*d\s*n\s*[eě]\s*n\s*[ií]/iu;
 
-const RULING_ITEM_RE = /^([IVXLCDM]+\.)\s+/u;
+const RULING_ITEM_RE = /^(?:[IVXLCDM]+\.)\s+/u;
 
 const isDecisionTitle = (plainText: string): boolean => {
   const trimmed = plainText.trim();
@@ -688,15 +604,17 @@ const mergeBlocks = (
       const text = firstPara.plainText;
       // Check for embedded title
       const titleMatch =
-        // oxlint-disable-next-line sonarjs/slow-regex -- first paragraph text is bounded by parser block splitting
-        /([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]\s+[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ\s]{5,})\s*$/u.exec(text);
-      // oxlint-disable-next-line sonarjs/slow-regex -- first paragraph text is bounded by parser block splitting
-      const caseMatch = /(\d+\s+\w+\s+\d+\/\d{4}[^\s]*)/u.exec(text);
+        /(?<title>[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ]\s+[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ\s]{5,})\s*$/u.exec(
+          text,
+        );
+      const caseMatch = /(?<caseNumber>\d+\s+\w+\s+\d+\/\d{4}[^\s]*)/u.exec(
+        text,
+      );
 
       if (titleMatch && caseMatch) {
         // Replace the merged block with case-number + title
-        const caseNum = (caseMatch[1] ?? "").trim();
-        const title = (titleMatch[1] ?? "").trim();
+        const caseNum = (caseMatch.groups?.["caseNumber"] ?? "").trim();
+        const title = (titleMatch.groups?.["title"] ?? "").trim();
 
         const replacements: Block[] = [
           {
@@ -733,7 +651,6 @@ const mergeBlocks = (
   // have their own type; plain paragraphs in this zone
   // get role "holding".
   // Match "takto:", "takto :", "t a k t o :", etc.
-  // oxlint-disable-next-line sonarjs/slow-regex -- matched against individual block plainText
   const TAKTO_RE = /t\s*a\s*k\s*t\s*o\s*:?\s*$/iu;
   let inHolding = false;
 

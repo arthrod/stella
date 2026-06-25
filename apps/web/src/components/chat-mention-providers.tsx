@@ -1,12 +1,13 @@
-import { createContext, use, useMemo } from "react";
+import { createContext, use } from "react";
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 
 import type {
   ChatMentionOption,
   MentionCategory,
 } from "@/components/chat-mention-extension";
 import { buildWorkspaceMentionOptions } from "@/components/chat-mention-helpers";
+import { useChromeQuery } from "@/hooks/use-chrome-query";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { viewsOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/views";
 import { workspacesNavigationOptions } from "@/routes/_protected.workspaces/-queries";
@@ -29,12 +30,12 @@ export const ChatMentionProviders = ({
 }) => {
   const queryClient = useQueryClient();
   const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
-  const { data: workspacesData } = useQuery(
+  const { data: workspacesData } = useChromeQuery(
     workspacesNavigationOptions(activeOrganizationId),
   );
   const workspaces = workspacesData?.workspaces;
   // eslint-disable-next-line @tanstack/query/exhaustive-deps -- the query client is an app-scope dependency, not part of this query's cache identity.
-  const { data: firstViewIdsByWorkspaceId } = useQuery({
+  const { data: firstViewIdsByWorkspaceId } = useChromeQuery({
     queryKey: [
       "chat-mention-workspace-views",
       (workspaces ?? []).map((workspace) => workspace.id),
@@ -55,25 +56,22 @@ export const ChatMentionProviders = ({
     enabled: workspaces !== undefined && workspaces.length > 0,
   });
 
-  const value = useMemo<MentionProviders>(
-    () => ({
-      getItems: (categories) => {
-        const items: ChatMentionOption[] = [];
+  const value: MentionProviders = {
+    getItems: (categories) => {
+      const items: ChatMentionOption[] = [];
 
-        if (categories.includes("workspace") && workspaces) {
-          items.push(
-            ...buildWorkspaceMentionOptions({
-              firstViewIdsByWorkspaceId,
-              workspaces,
-            }),
-          );
-        }
+      if (categories.includes("workspace") && workspaces) {
+        items.push(
+          ...buildWorkspaceMentionOptions({
+            firstViewIdsByWorkspaceId,
+            workspaces,
+          }),
+        );
+      }
 
-        return items;
-      },
-    }),
-    [firstViewIdsByWorkspaceId, workspaces],
-  );
+      return items;
+    },
+  };
 
   return (
     <MentionProvidersContext value={value}>{children}</MentionProvidersContext>

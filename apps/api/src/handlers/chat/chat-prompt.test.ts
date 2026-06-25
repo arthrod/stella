@@ -7,6 +7,8 @@ import { DOCX_REVIEW_MARKUP_EXAMPLES } from "@/api/lib/docx-review-markup";
 import {
   appendAnonymizedModeHintToChatSafePrompt,
   appendActiveFilePromptIfEntityExists,
+  buildActiveSkillSection,
+  buildActiveTemplatePrompt,
   buildChatPromptCacheKey,
   buildGlobalPrompt,
   buildGlobalPromptParts,
@@ -20,6 +22,10 @@ import type {
   ChatSafePrompt,
   ChatUntrustedPromptSuffix,
 } from "./chat-prompt";
+import {
+  ACTIVE_SKILL_BODY_PROMPT_MAX_CHARS,
+  type ActiveChatSkillContext,
+} from "./skills";
 import type { ChatMessage } from "./types";
 
 const WORKSPACE_ID = toSafeId<"workspace">("ws_prompt_test");
@@ -97,7 +103,10 @@ describe("chat prompt builders", () => {
 
     expect(prompt).toContain("User registered as: Jan Kubica");
     expect(prompt).toContain("User UI language (BCP-47): cs");
-    expect(prompt).toContain("Current date/time:");
+    // Day granularity only: a minute-precise timestamp would change
+    // the prompt on every request and defeat prompt caching.
+    expect(prompt).toContain("Current date:");
+    expect(prompt).not.toMatch(/Current date:[^\n]*\d{1,2}:\d{2}/u);
   });
 
   test("keeps the cache-stable prefix independent from volatile user context", () => {
@@ -121,7 +130,7 @@ describe("chat prompt builders", () => {
     expect(first.cacheStablePrefix).toBe(second.cacheStablePrefix);
     expect(first.cacheStablePrefix).toContain("legal-interpretation");
     expect(first.cacheStablePrefix).not.toContain("First User");
-    expect(first.cacheStablePrefix).not.toContain("Current date/time");
+    expect(first.cacheStablePrefix).not.toContain("Current date");
     expect(first.fullPrompt).not.toBe(second.fullPrompt);
     expect(buildChatPromptCacheKey(first.cacheStablePrefix)).toBe(
       buildChatPromptCacheKey(second.cacheStablePrefix),
@@ -174,6 +183,7 @@ describe("chat prompt builders", () => {
       skillMetadata: [
         {
           description: "Use the Acme acquisition playbook.",
+          displayName: "Acme Acquisition Review",
           name: "acme-acquisition-review",
           source: "installed",
           version: null,
@@ -184,9 +194,60 @@ describe("chat prompt builders", () => {
 
     expect(prompt.cacheStablePrefix).not.toContain("acme-acquisition-review");
     expect(prompt.safePrompt).not.toContain("Acme acquisition");
-    expect(prompt.untrustedSuffix).toContain("acme-acquisition-review");
+    expect(prompt.untrustedSuffix).toContain(
+      "Acme Acquisition Review (skillName: acme-acquisition-review)",
+    );
     expect(prompt.untrustedSuffix).toContain("Acme acquisition");
     expect(prompt.fullPrompt).toContain("acme-acquisition-review");
+  });
+
+  test("active skill section anchors this skill and its editable files", () => {
+    const activeSkill = {
+      body: "# Skill body\nUse the active workflow.",
+      description: "Active workflow description.",
+      displayName: "Active Workflow",
+      editable: true,
+      id: toSafeId<"agentSkill">("skill_active"),
+      origin: "authored",
+      resources: [{ kind: "knowledge", path: "knowledge/checklist.md" }],
+      source: "installed",
+      toolName: "active-workflow",
+      version: "1.0",
+    } satisfies ActiveChatSkillContext;
+
+    const section = buildActiveSkillSection(activeSkill);
+
+    expect(section).toContain("The user is currently inside this stella skill");
+    expect(section).toContain("Display name: Active Workflow");
+    expect(section).toContain(
+      "Canonical skill name for load-skill/read-skill-resource: active-workflow",
+    );
+    expect(section).toContain('When the user says "this skill"');
+    expect(section).toContain("This skill is editable in this chat");
+    expect(section).toContain("- knowledge/checklist.md (knowledge)");
+    expect(section).toContain("# Skill body");
+  });
+
+  test("marks long active skill bodies as truncated", () => {
+    const hiddenTail = "tail that must not be treated as visible";
+    const activeSkill = {
+      body: `${"a".repeat(ACTIVE_SKILL_BODY_PROMPT_MAX_CHARS)}${hiddenTail}`,
+      description: "Active workflow description.",
+      displayName: "Active Workflow",
+      editable: true,
+      id: toSafeId<"agentSkill">("skill_active"),
+      origin: "authored",
+      resources: [],
+      source: "installed",
+      toolName: "active-workflow",
+      version: null,
+    } satisfies ActiveChatSkillContext;
+
+    const section = buildActiveSkillSection(activeSkill);
+
+    expect(section).toContain("Current SKILL.md body prefix");
+    expect(section).toContain("full-body replacement tool is unavailable");
+    expect(section).not.toContain(hiddenTail);
   });
 
   test("keeps the cache-stable prefix independent from workspace context", () => {
@@ -299,6 +360,44 @@ describe("chat prompt builders", () => {
       "only ids that appear in `applied` represent actual document changes",
     );
     expect(prompt).toContain("queued");
+    // Internal component names must not leak into user-facing prompt.
+    expect(prompt).not.toContain("Folio");
+  });
+
+  test("active-template prompt stays read-only until a snapshot exists", () => {
+    const prompt = buildActiveTemplatePrompt({
+      templateId: toSafeId<"template">("tpl_test"),
+      fileName: "Plna moc.docx",
+    });
+
+    expect(prompt).toContain("ACTIVE TEMPLATE");
+    expect(prompt).toContain("Plna moc.docx");
+    expect(prompt).not.toContain("apply-active-docx-edits");
+    expect(prompt).not.toContain("suggest_template_fields");
+  });
+
+  test("active-template prompt wires the suggest-fields and edit flows when a snapshot exists", () => {
+    const prompt = buildActiveTemplatePrompt({
+      templateId: toSafeId<"template">("tpl_test"),
+      fileName: "Plna moc.docx",
+      docxEditSnapshot: {
+        blocks: [
+          {
+            id: "b-1",
+            kind: "paragraph",
+            text: "Zmocnitel: Jan Novak, nar. 1.1.1990",
+          },
+        ],
+      },
+    });
+
+    expect(prompt).toContain("apply-active-docx-edits");
+    expect(prompt).toContain("suggest_template_fields");
+    expect(prompt).toContain('"blockId":"b-1"');
+    expect(prompt).toContain("Jan Novak");
+    // Only the text-replacement subset is honoured by the Studio.
+    expect(prompt).toContain("`replaceInBlock`");
+    expect(prompt).toContain("cannot honour `insertAfterBlock`");
     // Internal component names must not leak into user-facing prompt.
     expect(prompt).not.toContain("Folio");
   });

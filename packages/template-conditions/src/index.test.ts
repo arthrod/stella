@@ -59,6 +59,172 @@ describe("evaluateCondition", () => {
     expect(evaluateCondition("amount > 1000", { amount: 5000 })).toBe(true);
   });
 
+  // ── String-encoded numbers (form/JSON inputs serialize as strings) ──
+
+  test("ordering coerces a numeric-string field value", () => {
+    expect(
+      evaluateCondition("contractValue > 100000", { contractValue: "150000" }),
+    ).toBe(true);
+    expect(
+      evaluateCondition("contractValue < 100000", { contractValue: "150000" }),
+    ).toBe(false);
+    expect(
+      evaluateCondition("contractValue >= 150000", { contractValue: "150000" }),
+    ).toBe(true);
+  });
+
+  test("equality coerces a numeric-string field value", () => {
+    expect(evaluateCondition("amount == 5000", { amount: "5000" })).toBe(true);
+    expect(evaluateCondition("amount != 5000", { amount: "5000" })).toBe(false);
+  });
+
+  test("does not coerce non-numeric strings or empty strings", () => {
+    // "abc" must not become 0; "" must not become 0.
+    expect(evaluateCondition("v == 0", { v: "abc" })).toBe(false);
+    expect(evaluateCondition("v == 0", { v: "" })).toBe(false);
+    expect(evaluateCondition("v > 0", { v: "abc" })).toBe(false);
+  });
+
+  test("string-vs-string equality is unaffected by numeric coercion", () => {
+    expect(evaluateCondition('code == "5000"', { code: "5000" })).toBe(true);
+    expect(evaluateCondition('code == "UK"', { code: "UK" })).toBe(true);
+  });
+
+  // ── Date comparisons (ISO YYYY-MM-DD, lexicographic) ──
+
+  test("date >= (on or after, positive)", () => {
+    expect(
+      evaluateCondition('signed >= "2026-01-01"', { signed: "2026-06-13" }),
+    ).toBe(true);
+  });
+
+  test("date >= (on or after, boundary equal)", () => {
+    expect(
+      evaluateCondition('signed >= "2026-06-13"', { signed: "2026-06-13" }),
+    ).toBe(true);
+  });
+
+  test("date >= (negative)", () => {
+    expect(
+      evaluateCondition('signed >= "2026-06-13"', { signed: "2025-12-31" }),
+    ).toBe(false);
+  });
+
+  test("date <= (on or before, positive)", () => {
+    expect(
+      evaluateCondition('signed <= "2026-12-31"', { signed: "2026-06-13" }),
+    ).toBe(true);
+  });
+
+  test("date <= (negative)", () => {
+    expect(
+      evaluateCondition('signed <= "2026-01-01"', { signed: "2026-06-13" }),
+    ).toBe(false);
+  });
+
+  test("date > (after, positive + boundary negative)", () => {
+    expect(
+      evaluateCondition('signed > "2026-06-12"', { signed: "2026-06-13" }),
+    ).toBe(true);
+    expect(
+      evaluateCondition('signed > "2026-06-13"', { signed: "2026-06-13" }),
+    ).toBe(false);
+  });
+
+  test("date < (before, positive + boundary negative)", () => {
+    expect(
+      evaluateCondition('signed < "2026-06-14"', { signed: "2026-06-13" }),
+    ).toBe(true);
+    expect(
+      evaluateCondition('signed < "2026-06-13"', { signed: "2026-06-13" }),
+    ).toBe(false);
+  });
+
+  test("date == / != (string equality path, unchanged)", () => {
+    expect(
+      evaluateCondition('signed == "2026-06-13"', { signed: "2026-06-13" }),
+    ).toBe(true);
+    expect(
+      evaluateCondition('signed != "2026-06-13"', { signed: "2026-06-14" }),
+    ).toBe(true);
+  });
+
+  test("ordered comparison falls back to lexicographic for non-numeric operands", () => {
+    // A non-numeric ordered comparison stringifies both sides and compares
+    // lexicographically, matching the shared @stll/conditions evaluator (and the
+    // SQL filter side). ISO dates sort chronologically as a happy consequence.
+    expect(
+      evaluateCondition('signed >= "2026-06-13"', { signed: 20_260_613 }),
+    ).toBe(true); // "20260613" >= "2026-06-13"
+    expect(
+      evaluateCondition('signed >= "2026-06-13"', { signed: "13/06/2026" }),
+    ).toBe(false); // "13/06/2026" < "2026-06-13"
+    expect(evaluateCondition('signed < "2026-06-13"', { signed: "soon" })).toBe(
+      false,
+    ); // "soon" > "2026-06-13"
+  });
+
+  test("numeric ordering still works alongside date support", () => {
+    expect(evaluateCondition("amount >= 1000", { amount: 1000 })).toBe(true);
+    expect(evaluateCondition("amount < 1000", { amount: 1000 })).toBe(false);
+  });
+
+  // ── contains ──────────────────────────────────────────
+
+  test("string contains (case-insensitive, positive)", () => {
+    expect(
+      evaluateCondition('notes contains "urgent"', { notes: "VERY URGENT!" }),
+    ).toBe(true);
+  });
+
+  test("string contains (negative)", () => {
+    expect(
+      evaluateCondition('notes contains "urgent"', { notes: "all calm" }),
+    ).toBe(false);
+  });
+
+  test("array/multi-select membership (positive)", () => {
+    expect(
+      evaluateCondition('parties contains "guarantor"', {
+        parties: ["buyer", "guarantor", "seller"],
+      }),
+    ).toBe(true);
+  });
+
+  test("array/multi-select membership (negative)", () => {
+    expect(
+      evaluateCondition('parties contains "guarantor"', {
+        parties: ["buyer", "seller"],
+      }),
+    ).toBe(false);
+  });
+
+  test("array membership coerces non-string elements to string", () => {
+    expect(evaluateCondition('codes contains "2"', { codes: [1, 2, 3] })).toBe(
+      true,
+    );
+  });
+
+  test("contains substring-matches a stringified scalar left", () => {
+    expect(evaluateCondition('n contains "1"', { n: 12 })).toBe(true); // "12" ⊇ "1"
+    expect(evaluateCondition('n contains "9"', { n: 12 })).toBe(false);
+    expect(evaluateCondition('flag contains "x"', { flag: true })).toBe(false);
+    expect(evaluateCondition('missing contains "x"', {})).toBe(false);
+  });
+
+  test("contains binds tighter than and (comparison precedence)", () => {
+    // a contains "x" and b == 1 → (a contains "x") and (b == 1)
+    expect(
+      evaluateCondition('a contains "x" and b == 1', { a: "xy", b: 1 }),
+    ).toBe(true);
+    expect(
+      evaluateCondition('a contains "x" and b == 1', { a: "xy", b: 2 }),
+    ).toBe(false);
+    expect(
+      evaluateCondition('a contains "x" and b == 1', { a: "zz", b: 1 }),
+    ).toBe(false);
+  });
+
   // ── Logical operators ─────────────────────────────────
 
   test("and: both true", () => {

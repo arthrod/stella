@@ -21,6 +21,9 @@ type RangeClause = {
 };
 type CompoundQuery = QueryStringClause & Partial<RangeClause>;
 
+const escapeQueryStringPhrase = (value: string): string =>
+  value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+
 /**
  * Build the JSON-DSL query string the BOE search endpoint expects.
  * Mirrors the shape used by the upstream MCP-BOE client.
@@ -28,11 +31,18 @@ type CompoundQuery = QueryStringClause & Partial<RangeClause>;
 export const buildSearchQuery = (input: BoeSearchQuery): string => {
   const parts: string[] = [];
   if (input.text) {
-    const terms = input.text.trim();
-    parts.push(`(titulo:(${terms}) OR texto:(${terms}))`);
+    // Keep user free text literal: the query_string DSL (field clauses,
+    // AND/OR, parentheses, colons) must never be reachable from input.
+    // Mirror the corpus path (corpusFreeTextClause): keep only unicode
+    // word characters, quote each term, AND them.
+    const terms = input.text.match(/[\p{L}\p{N}]+/gu);
+    if (terms && terms.length > 0) {
+      const quoted = terms.map((term) => `"${term}"`).join(" AND ");
+      parts.push(`(titulo:(${quoted}) OR texto:(${quoted}))`);
+    }
   }
   if (input.title) {
-    parts.push(`titulo:"${input.title.replaceAll('"', '\\"')}"`);
+    parts.push(`titulo:"${escapeQueryStringPhrase(input.title)}"`);
   }
   if (input.departmentCode) {
     parts.push(`departamento@codigo:${input.departmentCode}`);

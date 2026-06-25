@@ -2,6 +2,7 @@ import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { useLocale, useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
+import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import {
   Popover,
   PopoverPopup,
@@ -39,11 +40,21 @@ export const CalendarHeader = ({
       <Button onClick={onNavigateToday} size="sm" variant="outline">
         {t("common.today")}
       </Button>
-      <Button onClick={onNavigatePrev} size="icon-sm" variant="ghost">
-        <ChevronLeftIcon />
+      <Button
+        aria-label={t("common.previous")}
+        onClick={onNavigatePrev}
+        size="icon-sm"
+        variant="ghost"
+      >
+        <DirectionalIcon icon={ChevronLeftIcon} />
       </Button>
-      <Button onClick={onNavigateNext} size="icon-sm" variant="ghost">
-        <ChevronRightIcon />
+      <Button
+        aria-label={t("common.next")}
+        onClick={onNavigateNext}
+        size="icon-sm"
+        variant="ghost"
+      >
+        <DirectionalIcon icon={ChevronRightIcon} />
       </Button>
       <Popover>
         <PopoverTrigger
@@ -62,23 +73,25 @@ export const CalendarHeader = ({
         >
           <div className="flex items-center justify-between pb-1">
             <Button
+              aria-label={t("common.previous")}
               onClick={() =>
                 onSetViewDate(new Date(Date.UTC(year - 1, month, 1)))
               }
               size="icon-xs"
               variant="ghost"
             >
-              <ChevronLeftIcon />
+              <DirectionalIcon icon={ChevronLeftIcon} />
             </Button>
             <span className="text-xs font-medium">{year}</span>
             <Button
+              aria-label={t("common.next")}
               onClick={() =>
                 onSetViewDate(new Date(Date.UTC(year + 1, month, 1)))
               }
               size="icon-xs"
               variant="ghost"
             >
-              <ChevronRightIcon />
+              <DirectionalIcon icon={ChevronRightIcon} />
             </Button>
           </div>
           <div className="grid grid-cols-3 gap-1">

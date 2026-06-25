@@ -1,6 +1,5 @@
 "use client";
 
-import { useCallback } from "react";
 import type { ComponentProps, ReactNode } from "react";
 
 import { ArrowDownIcon, DownloadIcon } from "lucide-react";
@@ -110,9 +109,16 @@ export const ConversationScrollButton = ({
     isScrollable &&
     !isAtBottom && (
       <Button
+        aria-label="Scroll to bottom"
         className={cn(
-          "bg-background hover:bg-muted shadow-sm",
-          "absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full",
+          // The outline variant is translucent in dark mode (content shows
+          // through the button) and its `::before` highlight is a rounded
+          // rectangle whose corners poke past the circle as faint "ears".
+          // Pin an opaque surface in both themes and round `::before` to
+          // the circle; isolate/z-10 keep it above the scrolled content.
+          "bg-background dark:bg-background hover:bg-muted",
+          "isolate shadow-sm before:rounded-full",
+          "absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full",
           className,
         )}
         onClick={() => scrollToBottom()}
@@ -163,7 +169,7 @@ export const ConversationDownload = ({
   children,
   ...props
 }: ConversationDownloadProps) => {
-  const handleDownload = useCallback(() => {
+  const handleDownload = () => {
     const markdown = messagesToMarkdown(messages, formatMessage);
     const blob = new Blob([markdown], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
@@ -174,7 +180,7 @@ export const ConversationDownload = ({
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-  }, [messages, filename, formatMessage]);
+  };
 
   return (
     <Button

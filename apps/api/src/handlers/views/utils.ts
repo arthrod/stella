@@ -1,8 +1,22 @@
+import type { ConditionNode } from "@stll/conditions";
+
+import { pruneStaleNode } from "@/api/lib/conditions/ast-utils";
 import type {
   ViewLayout,
   ViewLayoutBase,
   ViewLayoutType,
 } from "@/api/lib/views-schema";
+
+// A grouping points at a deleted property when it is a real (non-built-in)
+// property id no longer present in the workspace. Built-in groupings (`_kind`,
+// `_status`) are internal and always kept.
+const isStaleGroupByPropertyId = (
+  groupByPropertyId: string | undefined,
+  propertyIds: string[],
+): boolean =>
+  groupByPropertyId !== undefined &&
+  !groupByPropertyId.startsWith("_") &&
+  !propertyIds.includes(groupByPropertyId);
 
 export const cleanStalePropertyIds = (
   layout: ViewLayout,
@@ -28,13 +42,14 @@ export const cleanStalePropertyIds = (
     changed = true;
   }
 
-  const cleanedFilters = layout.filters.filter(
-    (f) =>
-      f.field === "kind" ||
-      f.field === "builtin" ||
-      propertyIds.includes(f.propertyId),
-  );
-  if (cleanedFilters.length !== layout.filters.length) {
+  const isValidPropertyId = (id: string) => propertyIds.includes(id);
+  // Prune stale leaves recursively so an advanced group keeps its valid
+  // siblings instead of being dropped whole. Compare structurally because
+  // in-group pruning may not change the top-level array length.
+  const cleanedFilters = layout.filters
+    .map((node) => pruneStaleNode(node, isValidPropertyId))
+    .filter((node): node is ConditionNode => node !== null);
+  if (JSON.stringify(cleanedFilters) !== JSON.stringify(layout.filters)) {
     layout.filters = cleanedFilters;
     changed = true;
   }
@@ -56,13 +71,19 @@ export const cleanStalePropertyIds = (
       layout.columnPinning = cleanedPinning;
       changed = true;
     }
+
+    // A grouped table persists groupByPropertyId; clear it when its property is
+    // deleted so the view falls back to flat instead of the select-property
+    // prompt.
+    if (isStaleGroupByPropertyId(layout.groupByPropertyId, propertyIds)) {
+      layout.groupByPropertyId = undefined;
+      changed = true;
+    }
   }
 
   if (
     layout.type === "kanban" &&
-    layout.groupByPropertyId &&
-    !isInternal(layout.groupByPropertyId) &&
-    !propertyIds.includes(layout.groupByPropertyId)
+    isStaleGroupByPropertyId(layout.groupByPropertyId, propertyIds)
   ) {
     layout.groupByPropertyId = undefined;
     changed = true;
@@ -97,11 +118,7 @@ export const cleanStalePropertyIds = (
       layout.endDatePropertyId = "_created-at";
       changed = true;
     }
-    if (
-      layout.groupByPropertyId &&
-      !isInternal(layout.groupByPropertyId) &&
-      !propertyIds.includes(layout.groupByPropertyId)
-    ) {
+    if (isStaleGroupByPropertyId(layout.groupByPropertyId, propertyIds)) {
       layout.groupByPropertyId = undefined;
       changed = true;
     }
@@ -123,9 +140,12 @@ export const hasDuplicateSorts = (
   return false;
 };
 
+const isKindNode = (node: ConditionNode): boolean =>
+  node.type === "predicate" && node.operand.type === "kind";
+
 export const hasMultipleKindFilters = (
-  filters: readonly { field: string }[],
-): boolean => filters.filter((f) => f.field === "kind").length > 1;
+  filters: readonly ConditionNode[],
+): boolean => filters.filter(isKindNode).length > 1;
 
 export const convertLayout = (
   source: ViewLayout,

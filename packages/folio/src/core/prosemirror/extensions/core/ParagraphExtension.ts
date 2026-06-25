@@ -10,6 +10,7 @@ import { Fragment } from "prosemirror-model";
 import type { Mark, Node as PMNode, NodeSpec, Schema } from "prosemirror-model";
 import type { Command, EditorState, Transaction } from "prosemirror-state";
 
+import type { NumberingMap } from "../../../docx/numberingParser";
 import type {
   ParagraphAlignment,
   LineSpacingRule,
@@ -23,8 +24,12 @@ import type {
 import { paragraphToStyle } from "../../../utils/formatToStyle";
 import { collectHeadings } from "../../../utils/headingCollector";
 import { expectParagraphAttrs } from "../../attrs";
+import { autospacingMatchesBase } from "../../autospacingBase";
 import type { ParagraphAttrs } from "../../schema/nodes";
-import { paragraphAttrsFromResolvedStyle } from "../../styles/resolvedStyleAttrs";
+import {
+  paragraphAttrsFromResolvedStyle,
+  listAttrsFromResolvedStyle,
+} from "../../styles/resolvedStyleAttrs";
 import { createNodeExtension } from "../create";
 import type { ExtensionContext, ExtensionRuntime } from "../types";
 
@@ -68,6 +73,22 @@ function paragraphAttrsToDOMStyle(attrs: ParagraphAttrs): string {
       : {}),
     ...(attrs.borders !== undefined ? { borders: attrs.borders } : {}),
     ...(attrs.shading !== undefined ? { shading: attrs.shading } : {}),
+    // HTML-origin auto spacing uses the PM-only import baseline, so direct and
+    // style-sourced auto flags behave the same until an edit changes spacing.
+    ...(autospacingMatchesBase(
+      attrs._autospacingBase,
+      "before",
+      attrs.spaceBefore,
+    )
+      ? { beforeAutospacing: true }
+      : {}),
+    ...(autospacingMatchesBase(
+      attrs._autospacingBase,
+      "after",
+      attrs.spaceAfter,
+    )
+      ? { afterAutospacing: true }
+      : {}),
   };
 
   const style = paragraphToStyle(formatting);
@@ -80,7 +101,7 @@ function paragraphAttrsToDOMStyle(attrs: ParagraphAttrs): string {
   }
   return Object.entries({ ...style, ...customStyle })
     .map(([key, value]) => {
-      const cssKey = key.replace(/([A-Z])/gu, "-$1").toLowerCase();
+      const cssKey = key.replace(/(?<char>[A-Z])/gu, "-$<char>").toLowerCase();
       return `${cssKey}: ${value}`;
     })
     .join("; ");
@@ -335,6 +356,7 @@ const paragraphNodeSpec: NodeSpec = {
     indentFirstLine: { default: null },
     hangingIndent: { default: false },
     numPr: { default: null },
+    numPrFromStyle: { default: null },
     listNumFmt: { default: null },
     listIsBullet: { default: null },
     listIsLegal: { default: null },
@@ -366,6 +388,7 @@ const paragraphNodeSpec: NodeSpec = {
     bookmarks: { default: null },
     _emptyHyperlinks: { default: null },
     _originalFormatting: { default: null },
+    _autospacingBase: { default: null },
     _sectionProperties: { default: null },
     _propertyChanges: { default: null },
     pPrMark: { default: null },
@@ -539,6 +562,14 @@ function setParagraphAttrsCmd(attrs: Record<string, unknown>): Command {
 export type ResolvedStyleAttrs = {
   paragraphFormatting?: ParagraphFormatting;
   runFormatting?: TextFormatting;
+  /**
+   * Numbering definitions from the document package. When the applied style
+   * carries a `w:numPr`, these resolve the numbering level into the list
+   * marker attrs (template, per-level formats, counter key) so the painter
+   * renders the style's numbering — e.g. "[Claim 1]" — instead of falling
+   * back to a plain decimal marker.
+   */
+  numbering?: NumberingMap | null;
 };
 
 // ============================================================================
@@ -717,6 +748,16 @@ function makeApplyStyle(schema: Schema) {
               newAttrs,
               paragraphAttrsFromResolvedStyle(resolvedAttrs),
             );
+            // A style with `w:numPr` attaches its numbering (numPr + marker
+            // attrs). A style without numbering leaves existing list attrs
+            // untouched — direct numbering survives a style switch in Word.
+            const listAttrs = listAttrsFromResolvedStyle(
+              resolvedAttrs,
+              resolvedAttrs.numbering,
+            );
+            if (listAttrs) {
+              Object.assign(newAttrs, listAttrs);
+            }
           }
 
           tr = tr.setNodeMarkup(pos, undefined, newAttrs);

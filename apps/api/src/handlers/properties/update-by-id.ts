@@ -6,7 +6,6 @@ import { properties, propertyDependencies } from "@/api/db/schema";
 import {
   aiModelToolSchema,
   manualInputToolSchema,
-  propertyConditionSchema,
   propertyContentSchema,
 } from "@/api/db/schema-validators";
 import type { PropertyTool } from "@/api/db/schema-validators";
@@ -15,12 +14,14 @@ import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
+import { tConditionNode } from "@/api/lib/conditions/contract";
 import {
   tDefaultVarchar,
   tSafeId,
   workspaceParams,
 } from "@/api/lib/custom-schema";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
+import { LIMITS } from "@/api/lib/limits";
 import { serializeAITool } from "@/api/lib/markdown/ai-tool";
 
 type PropertyWithDeps = {
@@ -135,7 +136,7 @@ const updatePropertyBodySchema = t.Object({
         dependencies: t.Array(
           t.Object({
             dependsOnPropertyId: tSafeId("property"),
-            condition: t.Nullable(propertyConditionSchema),
+            condition: t.Nullable(tConditionNode),
           }),
         ),
       }),
@@ -160,6 +161,20 @@ const updateProperty = createSafeHandler(
     recordAuditEvent,
   }) {
     const { name, content } = body;
+
+    if (
+      (content.type === "single-select" || content.type === "multi-select") &&
+      content.fallback !== null &&
+      !content.options.some((option) => option.value === content.fallback)
+    ) {
+      return Result.err(
+        new HandlerError({
+          status: 400,
+          message: "Fallback must match one of the supplied options",
+        }),
+      );
+    }
+
     const tool =
       body.tool.type === "ai-model" ? serializeAITool(body.tool) : body.tool;
 
@@ -213,6 +228,8 @@ const updateProperty = createSafeHandler(
           };
         }
 
+        // SAFETY: one property's dependencies; each points to another workspace property, bounded by LIMITS.propertiesCount
+        // eslint-disable-next-line require-query-limit/require-query-limit
         const oldDependencies = await tx.query.propertyDependencies.findMany({
           where: {
             propertyId: { eq: propertyId },
@@ -243,6 +260,7 @@ const updateProperty = createSafeHandler(
             ? await tx.query.properties.findMany({
                 where: { workspaceId: { eq: workspaceId } },
                 columns: { id: true },
+                limit: LIMITS.propertiesCount,
                 with: {
                   dependencies: {
                     columns: { dependsOnPropertyId: true },

@@ -4,14 +4,16 @@ import { TaggedError } from "better-result";
 
 import { env } from "@/api/env";
 import { createOrgTools } from "@/api/handlers/chat/tools/org-tools";
+import { LIMITS } from "@/api/lib/limits";
 import type { McpRequestContext } from "@/api/mcp/context";
 import { getAccessibleWorkspaceId } from "@/api/mcp/context";
 
-export const DEFAULT_LIST_LIMIT = 25;
-export const DEFAULT_SEARCH_LIMIT = 10;
-export const MAX_LIST_LIMIT = 100;
-export const MAX_SEARCH_LIMIT = 20;
-export const DEFAULT_COMPAT_SEARCH_LIMIT = 8;
+export const DEFAULT_LIST_LIMIT = LIMITS.mcpListPageSizeDefault;
+export const DEFAULT_SEARCH_LIMIT = LIMITS.mcpSearchPageSizeDefault;
+export const MAX_LIST_LIMIT = LIMITS.mcpListPageSizeMax;
+export const MAX_SEARCH_LIMIT = LIMITS.mcpSearchPageSizeMax;
+export const DEFAULT_COMPAT_SEARCH_LIMIT =
+  LIMITS.mcpCompatSearchPageSizeDefault;
 
 export const MCP_TOOL_EXECUTION_OPTIONS: ToolExecutionOptions = {
   messages: [],
@@ -172,7 +174,6 @@ export const buildDocumentUrl = ({
 const slugifyCaseNumber = (caseNumber: string) =>
   slugifyCaseLawPathSegment(caseNumber);
 
-const UNKNOWN_DATE_SEGMENT = "unknown-date";
 const UNKNOWN_COURT_SEGMENT = "unknown-court";
 const LANGUAGE_SEGMENT_REGEX = /^(?=.{2,8}$)[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/u;
 
@@ -190,7 +191,7 @@ const trimSlugHyphens = (value: string): string => {
   return value.slice(start, end);
 };
 
-const slugifyCaseLawPathSegment = (value: string): string => {
+export const slugifyCaseLawPathSegment = (value: string): string => {
   const slug = trimSlugHyphens(
     value
       .normalize("NFKD")
@@ -221,28 +222,6 @@ const normalizeCaseLawLanguageSegment = (
   }
 
   return normalized;
-};
-
-const formatDecisionDateSegment = (value: Date | string | null): string => {
-  if (value === null) {
-    return UNKNOWN_DATE_SEGMENT;
-  }
-
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime())
-      ? UNKNOWN_DATE_SEGMENT
-      : value.toISOString().slice(0, 10);
-  }
-
-  const rawDate = value.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/u.test(rawDate)) {
-    return rawDate;
-  }
-
-  const date = new Date(rawDate);
-  return Number.isNaN(date.getTime())
-    ? UNKNOWN_DATE_SEGMENT
-    : date.toISOString().slice(0, 10);
 };
 
 const isCaseLawLanguageAlternate = (
@@ -287,7 +266,6 @@ type CaseLawDecisionUrlInput = {
   caseNumber: string;
   country: string;
   court: string;
-  decisionDate: Date | string | null;
   language?: string | null | undefined;
   languageAlternateCount?: number | null | undefined;
   languageAlternates?: readonly unknown[] | null | undefined;
@@ -302,11 +280,10 @@ export const buildCaseLawDecisionAppUrl = (
 ): string | null =>
   isPublicLawAppUrlEnabled() ? buildCaseLawDecisionUrl(input) : null;
 
-const buildCaseLawDecisionUrl = ({
+export const buildCaseLawDecisionUrl = ({
   caseNumber,
   country,
   court,
-  decisionDate,
   language,
   languageAlternateCount,
   languageAlternates,
@@ -317,7 +294,7 @@ const buildCaseLawDecisionUrl = ({
     court.trim().length > 0
       ? slugifyCaseLawPathSegment(court)
       : UNKNOWN_COURT_SEGMENT;
-  const basePath = `${getAppBaseUrl()}/law/${country.toLowerCase()}/cases/${courtSegment}/${formatDecisionDateSegment(decisionDate)}`;
+  const basePath = `${getAppBaseUrl()}/law/${country.toLowerCase()}/cases/${courtSegment}`;
   const decisionSlug =
     normalizeCaseLawStoredSlug(slug) ?? slugifyCaseNumber(caseNumber);
 
