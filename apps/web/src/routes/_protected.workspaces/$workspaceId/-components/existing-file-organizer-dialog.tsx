@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffectEvent, useMemo, useRef, useState } from "react";
 
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import {
@@ -41,6 +41,7 @@ import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
 import { useI18nStore } from "@/i18n/i18n-store";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
+import { compareByLocale } from "@/lib/collation";
 import { toAPIError } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
 import { EntityKindIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/entity-kind-icon";
@@ -136,13 +137,13 @@ export const ExistingFileOrganizerDialog = ({
   const [rows, setRows] = useState<ExistingOrganizerRow[]>([]);
   const [suggestionStatus, setSuggestionStatus] =
     useState<SuggestionStatus>("idle");
-  const [retryNonce, setRetryNonce] = useState(0);
   const [deleteFolders, setDeleteFolders] = useState<
     FolderDeletionSuggestion[]
   >([]);
   const [cachedSuggestions, setCachedSuggestions] =
     useState<OrganizerCache | null>(null);
   const [showDeleteSection, setShowDeleteSection] = useState(true);
+  const suggestionRequestTokenRef = useRef(0);
 
   const isGeneratingSuggestions = suggestionStatus === "generating";
   const selectedDeleteFolders = deleteFolders.filter(
@@ -203,135 +204,60 @@ export const ExistingFileOrganizerDialog = ({
       }),
     [existingFolders, files],
   );
+  const getSuggestionRequestState = useEffectEvent(() => ({
+    open,
+    requestKey,
+  }));
+  const suggestionRequestFolders = useMemo(
+    () =>
+      existingFolders.map((folder) => ({
+        entityId: toSafeId<"entity">(folder.entityId),
+        name: folder.name,
+        path: folder.path,
+      })),
+    [existingFolders],
+  );
+  const suggestionRequestFiles = useMemo(
+    () =>
+      files.map((file) => ({
+        entityId: toSafeId<"entity">(file.entityId),
+        originalName: file.originalName,
+      })),
+    [files],
+  );
 
   // The toolbar keeps this dialog mounted and only toggles `open`, so reset the
-  // explicit-AI trigger on close. Reopening then starts from the local-first
-  // state instead of silently re-firing a prior AI request; cached AI results
-  // for the same files stay keyed by requestKey and are reshown without a call.
+  // editable rows on each open. Cached AI results for the same files are reshown
+  // without another call.
   useExternalSyncEffect(() => {
-    if (!open) {
-      setRetryNonce(0);
-    }
-  }, [open]);
-
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- data fetch + setState; migrate to TanStack Query
-  useEffect(() => {
     if (!open || files.length === 0) {
-      return undefined;
+      return;
     }
 
     if (cachedSuggestions?.key === requestKey) {
       setRows(cachedSuggestions.rows);
       setDeleteFolders(cachedSuggestions.deleteFolders);
       setSuggestionStatus("ready");
-      return undefined;
+      return;
+    }
+
+    if (suggestionStatus === "generating") {
+      return;
     }
 
     // Show the cheap, deterministic local suggestions immediately and
-    // stay actionable. The expensive AI call only runs once the user
-    // explicitly asks for it (retryNonce bumps past 0).
-    if (retryNonce === 0) {
-      setRows(initialRows);
-      setDeleteFolders([]);
-      setSuggestionStatus("ready");
-      return undefined;
-    }
-
+    // stay actionable. The expensive AI call only runs from the explicit
+    // Generate/Regenerate button handler below.
     setRows(initialRows);
     setDeleteFolders([]);
-    let cancelled = false;
-    const fetchSuggestions = async () => {
-      setSuggestionStatus("generating");
-      const { locale: requestLocale, userInstructions: trimmedInstructions } =
-        getSuggestionRequestContext();
-      const response = await api
-        .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
-        ["organize-suggestions"].post({
-          existingFolders: existingFolders.map((folder) => ({
-            entityId: toSafeId<"entity">(folder.entityId),
-            name: folder.name,
-            path: folder.path,
-          })),
-          files: files.map((file) => ({
-            entityId: toSafeId<"entity">(file.entityId),
-            originalName: file.originalName,
-          })),
-          locale: requestLocale,
-          ...(trimmedInstructions.length > 0
-            ? { userInstructions: trimmedInstructions }
-            : {}),
-        });
-
-      if (response.error) {
-        analytics.captureError(toAPIError(response.error));
-        if (!cancelled) {
-          setSuggestionStatus("failed");
-        }
-        return;
-      }
-
-      if (cancelled) {
-        return;
-      }
-
-      const aiSuggestions = new Map(
-        response.data.suggestions.map((suggestion) => [
-          suggestion.entityId,
-          suggestion,
-        ]),
-      );
-
-      const nextRows = initialRows.map((row) => {
-        const suggestion = aiSuggestions.get(row.entityId);
-        if (!suggestion) {
-          return row;
-        }
-        return {
-          ...row,
-          detectedDate: suggestion.detectedDate,
-          documentType: suggestion.documentType,
-          folderPath: suggestion.folderPath,
-          suggestedName: suggestion.suggestedName,
-        };
-      });
-
-      setRows(nextRows);
-      const nextDeleteFolders = response.data.deleteFolders.map((folder) => ({
-        entityId: folder.entityId,
-        folderPath: folder.folderPath,
-        reason: folder.reason,
-        selected: true,
-      }));
-      setDeleteFolders(nextDeleteFolders);
-      setCachedSuggestions({
-        key: requestKey,
-        rows: nextRows,
-        deleteFolders: nextDeleteFolders,
-      });
-      setRetryNonce(0);
-      setSuggestionStatus("ready");
-    };
-
-    fetchSuggestions().catch((error: unknown) => {
-      analytics.captureError(error);
-      if (!cancelled) {
-        setSuggestionStatus("failed");
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
+    setSuggestionStatus("ready");
   }, [
-    analytics,
     cachedSuggestions,
-    existingFolders,
     files,
     initialRows,
     open,
     requestKey,
-    retryNonce,
-    workspaceId,
+    suggestionStatus,
   ]);
 
   const updateRow = (
@@ -484,6 +410,7 @@ export const ExistingFileOrganizerDialog = ({
         workspaceId,
         rows: rowsSnapshot,
         existingFolders: existingFoldersSnapshot,
+        locale,
       });
 
       for (const row of rowsSnapshot) {
@@ -591,9 +518,105 @@ export const ExistingFileOrganizerDialog = ({
       });
   };
 
-  const requestAiSuggestions = () => {
+  const requestAiSuggestions = async () => {
+    const requestToken = suggestionRequestTokenRef.current + 1;
+    suggestionRequestTokenRef.current = requestToken;
     setCachedSuggestions(null);
-    setRetryNonce((current) => current + 1);
+    setRows(initialRows);
+    setDeleteFolders([]);
+    setSuggestionStatus("generating");
+
+    try {
+      const { locale: requestLocale, userInstructions: trimmedInstructions } =
+        getSuggestionRequestContext();
+      const data = await queryClient.fetchQuery({
+        queryKey: [
+          ...entitiesKeys.all(workspaceId),
+          "organize-suggestions",
+          requestKey,
+          suggestionRequestFolders,
+          suggestionRequestFiles,
+          requestLocale,
+          trimmedInstructions,
+        ],
+        queryFn: async ({ signal }) => {
+          const response = await api
+            .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
+            ["organize-suggestions"].post(
+              {
+                existingFolders: suggestionRequestFolders,
+                files: suggestionRequestFiles,
+                locale: requestLocale,
+                ...(trimmedInstructions.length > 0
+                  ? { userInstructions: trimmedInstructions }
+                  : {}),
+              },
+              { fetch: { signal } },
+            );
+
+          if (response.error) {
+            throw toAPIError(response.error);
+          }
+
+          return response.data;
+        },
+      });
+
+      const aiSuggestions = new Map(
+        data.suggestions.map((suggestion) => [suggestion.entityId, suggestion]),
+      );
+      const nextRows = initialRows.map((row) => {
+        const suggestion = aiSuggestions.get(row.entityId);
+        if (!suggestion) {
+          return row;
+        }
+        return {
+          detectedDate: suggestion.detectedDate,
+          documentType: suggestion.documentType,
+          entityId: row.entityId,
+          folderPath: suggestion.folderPath,
+          id: row.id,
+          mimeType: row.mimeType,
+          originalName: row.originalName,
+          parentId: row.parentId,
+          suggestedName: suggestion.suggestedName,
+        };
+      });
+      const nextDeleteFolders = data.deleteFolders.map((folder) => ({
+        entityId: folder.entityId,
+        folderPath: folder.folderPath,
+        reason: folder.reason,
+        selected: true,
+      }));
+      const latestRequestState = getSuggestionRequestState();
+      if (
+        suggestionRequestTokenRef.current !== requestToken ||
+        !latestRequestState.open ||
+        latestRequestState.requestKey !== requestKey
+      ) {
+        return;
+      }
+
+      setRows(nextRows);
+      setDeleteFolders(nextDeleteFolders);
+      setCachedSuggestions({
+        key: requestKey,
+        rows: nextRows,
+        deleteFolders: nextDeleteFolders,
+      });
+      setSuggestionStatus("ready");
+    } catch (error) {
+      const latestRequestState = getSuggestionRequestState();
+      if (
+        suggestionRequestTokenRef.current !== requestToken ||
+        !latestRequestState.open ||
+        latestRequestState.requestKey !== requestKey
+      ) {
+        return;
+      }
+      analytics.captureError(error);
+      setSuggestionStatus("failed");
+    }
   };
   const hasAiSuggestions = cachedSuggestions?.key === requestKey;
   const interactionsDisabled = isGeneratingSuggestions;
@@ -623,12 +646,19 @@ export const ExistingFileOrganizerDialog = ({
                 window.localStorage.setItem(userInstructionsKey, value);
               }
             }}
-            onRegenerate={requestAiSuggestions}
+            onRegenerate={() => {
+              void requestAiSuggestions();
+            }}
             onToggle={() => setShowInstructions((current) => !current)}
             value={userInstructions}
           />
           {suggestionStatus === "failed" && (
-            <FailureBanner disabled={false} onRetry={requestAiSuggestions} />
+            <FailureBanner
+              disabled={false}
+              onRetry={() => {
+                void requestAiSuggestions();
+              }}
+            />
           )}
           {isGeneratingSuggestions ? (
             <OrganizerSkeleton />
@@ -664,7 +694,9 @@ export const ExistingFileOrganizerDialog = ({
             <Button
               className="me-auto"
               disabled={isGeneratingSuggestions || rows.length === 0}
-              onClick={requestAiSuggestions}
+              onClick={() => {
+                void requestAiSuggestions();
+              }}
               type="button"
               variant="outline"
             >
@@ -812,7 +844,7 @@ const UserInstructionsSection = ({
             variant="outline"
           >
             <RotateCcwIcon className="size-3.5" />
-            {t("workspaces.importOrganizer.regenerate")}
+            {t("common.regenerate")}
           </Button>
         )}
       </div>
@@ -934,7 +966,8 @@ const OrganizerTreePreview = ({
   onRenameFolder,
 }: OrganizerTreePreviewProps) => {
   const t = useTranslations();
-  const root = useMemo(() => buildOrganizerTree(rows), [rows]);
+  const locale = useI18nStore((s) => s.loadedLang);
+  const root = useMemo(() => buildOrganizerTree(rows, locale), [rows, locale]);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isRootOver, setIsRootOver] = useState(false);
   const handleMoveFile = useEffectEvent(onMoveFile);
@@ -1278,10 +1311,14 @@ const InlineNameInput = ({
 }: InlineNameInputProps) => {
   const [draft, setDraft] = useState(value);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id: syncs external value into local draft. Rendered at two call sites (file + folder rename); a key prop would remount and drop focus mid-edit, so keep the in-place effect.
-  useEffect(() => {
+  // Sync the external value into the local draft. Adjust state during render
+  // (the React-sanctioned pattern): a key prop would remount and drop focus
+  // mid-edit, and this avoids the extra commit an effect would cost.
+  const [prevValue, setPrevValue] = useState(value);
+  if (prevValue !== value) {
+    setPrevValue(value);
     setDraft(value);
-  }, [value]);
+  }
 
   return (
     <Input
@@ -1390,6 +1427,7 @@ const countFilesInFolder = (folder: FolderPreviewNode): number => {
 
 const buildOrganizerTree = (
   rows: readonly ExistingOrganizerRow[],
+  locale: string,
 ): FolderPreviewNode => {
   const root = createFolderNode("", "");
 
@@ -1419,7 +1457,7 @@ const buildOrganizerTree = (
     current.rows.push(row);
   }
 
-  sortFolderNode(root);
+  sortFolderNode(root, locale);
   return root;
 };
 
@@ -1430,13 +1468,14 @@ const createFolderNode = (name: string, path: string): FolderPreviewNode => ({
   rows: [],
 });
 
-const sortFolderNode = (node: FolderPreviewNode): void => {
+const sortFolderNode = (node: FolderPreviewNode, locale: string): void => {
+  const compareText = compareByLocale(locale);
   node.children = new Map(
-    [...node.children.entries()].sort(([a], [b]) => a.localeCompare(b)),
+    [...node.children.entries()].sort(([a], [b]) => compareText(a, b)),
   );
-  node.rows.sort((a, b) => a.suggestedName.localeCompare(b.suggestedName));
+  node.rows.sort((a, b) => compareText(a.suggestedName, b.suggestedName));
   for (const child of node.children.values()) {
-    sortFolderNode(child);
+    sortFolderNode(child, locale);
   }
 };
 
@@ -1444,6 +1483,7 @@ type EnsureFoldersOptions = {
   workspaceId: string;
   rows: readonly FileNameSuggestion[];
   existingFolders: readonly ExistingImportFolder[];
+  locale: string;
 };
 
 // Folder paths returned from the AI and seen on the dialog rows are
@@ -1456,6 +1496,7 @@ const ensureFolders = async ({
   workspaceId,
   rows,
   existingFolders,
+  locale,
 }: EnsureFoldersOptions): Promise<Map<string, string | null>> => {
   const folderIds = new Map<string, string | null>([["", null]]);
   const knownFolders = new Map<string, string>();
@@ -1466,7 +1507,7 @@ const ensureFolders = async ({
 
   const folderPaths = [
     ...new Set(rows.map((row) => normalizeFolderPath(row.folderPath))),
-  ].sort((a, b) => a.localeCompare(b));
+  ].sort(compareByLocale(locale));
 
   for (const folderPath of folderPaths) {
     let currentParentId: string | null = null;

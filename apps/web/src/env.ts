@@ -38,21 +38,6 @@ export const env = createEnv({
       ),
       "45901",
     ),
-    VITE_AI_SDK_DEVTOOLS_PORT: v.optional(
-      v.pipe(
-        v.string(),
-        v.digits(),
-        v.transform(Number),
-        v.integer(),
-        v.minValue(1),
-        v.maxValue(65_535),
-      ),
-      "4983",
-    ),
-    VITE_AI_DEVTOOLS_ENABLED: v.optional(
-      v.pipe(v.string(), v.parseBoolean()),
-      "false",
-    ),
     VITE_AUTH_GOOGLE: v.optional(v.pipe(v.string(), v.parseBoolean()), "false"),
     VITE_AUTH_MICROSOFT: v.optional(
       v.pipe(v.string(), v.parseBoolean()),
@@ -70,11 +55,17 @@ export const env = createEnv({
     VITE_FEATURE_CASE_LAW: featureFlagSchema,
     VITE_PUBLIC_LAW_ENABLED: featureFlagSchema,
     VITE_PUBLIC_LAW_INDEXING_ENABLED: featureFlagSchema,
+    // Whether search engines are allowed to index this deployment.
+    // Off by default so deployments that should not be crawled can still
+    // serve sitemaps for verification while staying non-indexable.
+    VITE_SEO_INDEXABLE: featureFlagSchema,
+    VITE_PLAYBOOKS_ENABLED: featureFlagSchema,
     VITE_FEATURE_CONTACTS: featureFlagSchema,
     VITE_FEATURE_CALENDAR: featureFlagSchema,
     VITE_FEATURE_TODOS: featureFlagSchema,
     VITE_FEATURE_MCP: featureFlagSchema,
     VITE_FEATURE_DESKTOP_EDITING: featureFlagSchema,
+    VITE_FEATURE_TIME_BILLING: featureFlagSchema,
     VITE_FEATURE_FOLIO_COLLAB: featureFlagSchema,
     VITE_FEEDBACK_EMAIL_TO: v.optional(v.pipe(v.string(), v.email())),
     VITE_TERMS_URL: v.optional(linkUrlSchema, "/terms"),

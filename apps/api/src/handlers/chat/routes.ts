@@ -2,20 +2,33 @@ import Elysia from "elysia";
 
 import deleteThread from "@/api/handlers/chat/delete-thread";
 import getMessages from "@/api/handlers/chat/get-messages";
+import getModelOptions from "@/api/handlers/chat/get-model-options";
 import getOlderMessages from "@/api/handlers/chat/get-older-messages";
 import getSuggestedPrompts from "@/api/handlers/chat/get-suggested-prompts";
 import getThreadRecap from "@/api/handlers/chat/get-thread-recap";
+import getThreadTitle from "@/api/handlers/chat/get-thread-title";
 import getThreads from "@/api/handlers/chat/get-threads";
+import renameThread from "@/api/handlers/chat/rename-thread";
 import resolveFileThread from "@/api/handlers/chat/resolve-file-thread";
 import resolveTemplateThread from "@/api/handlers/chat/resolve-template-thread";
 import rotateTemplateThread from "@/api/handlers/chat/rotate-template-thread";
 import sendMessage from "@/api/handlers/chat/send-message";
 import updateThread from "@/api/handlers/chat/update-thread";
+import updateThreadModel from "@/api/handlers/chat/update-thread-model";
 import { permissionMacro, workspaceAccessMacro } from "@/api/lib/auth";
 
 export const chatRoute = new Elysia({ prefix: "/chat" })
   .use(workspaceAccessMacro)
   .use(permissionMacro)
+  // Kept deliberately: this guard is the type-level carrier of
+  // `validateAuth` for Elysia's context composition. `permissions` is a
+  // function-form macro (see "Known Elysia Gotchas" in AGENTS.md) that
+  // applies `validateAuth` at runtime but not in type composition, so a
+  // per-route `validateAuth: true` literal instead of this guard breaks
+  // sibling macros' schema merging (e.g. `invalidateQuery`'s body
+  // extension). The per-request memoization in `resolveValidateAuth`
+  // (lib/auth.ts) neutralizes the extra resolve this guard stacks on top
+  // of `permissions`. See tests/security/route-auth-invariants.test.ts.
   .guard({ validateAuth: true })
   .post("/", sendMessage.handler, {
     body: sendMessage.config.body,
@@ -38,6 +51,9 @@ export const chatRoute = new Elysia({ prefix: "/chat" })
     permissions: getThreads.config.permissions,
     query: getThreads.config.query,
   })
+  .get("/model-options", getModelOptions.handler, {
+    permissions: getModelOptions.config.permissions,
+  })
   .delete("/threads/:threadId", deleteThread.handler, {
     params: deleteThread.config.params,
     permissions: deleteThread.config.permissions,
@@ -48,6 +64,23 @@ export const chatRoute = new Elysia({ prefix: "/chat" })
     params: updateThread.config.params,
     permissions: updateThread.config.permissions,
     query: updateThread.config.query,
+  })
+  .patch("/threads/:threadId/model", updateThreadModel.handler, {
+    body: updateThreadModel.config.body,
+    params: updateThreadModel.config.params,
+    permissions: updateThreadModel.config.permissions,
+    query: updateThreadModel.config.query,
+  })
+  .patch("/threads/:threadId/title", renameThread.handler, {
+    body: renameThread.config.body,
+    params: renameThread.config.params,
+    permissions: renameThread.config.permissions,
+    query: renameThread.config.query,
+  })
+  .get("/threads/:threadId/title", getThreadTitle.handler, {
+    params: getThreadTitle.config.params,
+    permissions: getThreadTitle.config.permissions,
+    query: getThreadTitle.config.query,
   })
   .get("/threads/:threadId/messages", getMessages.handler, {
     params: getMessages.config.params,

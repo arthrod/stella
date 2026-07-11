@@ -1,9 +1,12 @@
 import { Result } from "better-result";
 
 import { createSafeSessionHandler } from "@/api/lib/api-handlers";
+import type { SessionHandlerConfig } from "@/api/lib/api-handlers";
 import { getPendingTasksAndMembers } from "@/api/lib/delete-account";
 
-const config = {};
+const config = {
+  mcp: { type: "internal", reason: "account_lifecycle" },
+} satisfies SessionHandlerConfig;
 
 const deleteAccountPendingTasks = createSafeSessionHandler(
   config,

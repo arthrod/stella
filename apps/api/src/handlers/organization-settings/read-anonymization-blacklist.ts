@@ -8,6 +8,7 @@ import { LIMITS } from "@/api/lib/limits";
 
 const config = {
   permissions: { organizationSettings: ["update"] },
+  mcp: { type: "capability", reason: "anonymization_admin" },
 } satisfies HandlerConfig;
 
 // Restrict to org-wide rows (workspace_id IS NULL). Workspace-scoped

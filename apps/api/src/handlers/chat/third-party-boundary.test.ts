@@ -1,5 +1,4 @@
-import { valibotSchema } from "@ai-sdk/valibot";
-import { tool } from "ai";
+import { toolDefinition } from "@tanstack/ai";
 import { Result } from "better-result";
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import * as v from "valibot";
@@ -7,6 +6,11 @@ import * as v from "valibot";
 import { CHAT_SEND_MODE } from "@stll/anonymize-chat";
 
 import { TEXT_PLAIN_MIME_TYPE } from "@/api/handlers/chat/attachment-validation";
+import {
+  createChatAttachmentPart,
+  getChatAttachmentUrl,
+  isChatAttachmentPart,
+} from "@/api/handlers/chat/chat-message-parts";
 import {
   applyChatToolPolicy,
   CHAT_TOOL_POLICY_KIND,
@@ -16,7 +20,6 @@ import { toSafeId } from "@/api/lib/branded-types";
 import { toDataUrl } from "@/api/lib/data-url";
 import { DOCX_MIME_TYPE } from "@/api/mime-types";
 import {
-  asChatPart,
   asTestExecutable,
   asTestToolSet,
 } from "@/api/tests/helpers/test-tool-set";
@@ -53,6 +56,7 @@ const anonymizeTextFieldsMock = mock(
 
 const {
   createChatThirdPartyBoundary,
+  prepareMcpToolSourceForThirdParty,
   prepareMessagesForThirdParty,
   prepareTextForThirdParty,
   prepareToolsForThirdParty,
@@ -114,7 +118,7 @@ describe("chat third-party anonymization boundary", () => {
         parts: [
           {
             type: "text",
-            text: "Does Jan Novák appear in Secret contract?",
+            content: "Does Jan Novák appear in Secret contract?",
           },
         ],
       },
@@ -132,7 +136,7 @@ describe("chat third-party anonymization boundary", () => {
 
     expect(prepared.value.at(0)?.parts.at(0)).toEqual({
       type: "text",
-      text: "Does [PERSON_1] appear in [CUSTOM_1] contract?",
+      content: "Does [PERSON_1] appear in [CUSTOM_1] contract?",
     });
   });
 
@@ -143,12 +147,11 @@ describe("chat third-party anonymization boundary", () => {
         id: "msg_1",
         role: "user",
         parts: [
-          {
-            type: "file",
+          createChatAttachmentPart({
             filename: "Jan Novák draft.docx",
-            mediaType: DOCX_MIME_TYPE,
+            mimeType: DOCX_MIME_TYPE,
             url: toDataUrl(new Uint8Array([1, 2, 3]), DOCX_MIME_TYPE),
-          },
+          }),
         ],
       },
     ];
@@ -160,7 +163,7 @@ describe("chat third-party anonymization boundary", () => {
 
     expect(Result.isError(prepared)).toBe(true);
     if (Result.isOk(prepared)) {
-      throw new Error("Expected attachment refusal");
+      throw new TypeError("Expected attachment refusal");
     }
 
     expect(prepared.error.status).toBe(422);
@@ -174,15 +177,14 @@ describe("chat third-party anonymization boundary", () => {
         id: "msg_1",
         role: "user",
         parts: [
-          {
-            type: "file",
+          createChatAttachmentPart({
             filename: "Jan Novák notes.txt",
-            mediaType: TEXT_PLAIN_MIME_TYPE,
+            mimeType: TEXT_PLAIN_MIME_TYPE,
             url: toDataUrl(
               Buffer.from("Secret notes for Jan Novák", "utf-8"),
               TEXT_PLAIN_MIME_TYPE,
             ),
-          },
+          }),
         ],
       },
     ];
@@ -200,11 +202,14 @@ describe("chat third-party anonymization boundary", () => {
     const part = prepared.value.at(0)?.parts.at(0);
 
     expect(part).toMatchObject({
-      type: "file",
-      filename: "[PERSON_1] notes.txt",
-      mediaType: TEXT_PLAIN_MIME_TYPE,
+      type: "document",
+      metadata: { filename: "[PERSON_1] notes.txt" },
+      source: { mimeType: TEXT_PLAIN_MIME_TYPE },
     });
-    expect(part?.type === "file" ? part.url : "").toContain(
+    if (!part || !isChatAttachmentPart(part)) {
+      throw new TypeError("Expected prepared attachment part");
+    }
+    expect(getChatAttachmentUrl(part)).toContain(
       Buffer.from("[CUSTOM_1] notes for [PERSON_1]", "utf-8").toString(
         "base64",
       ),
@@ -217,30 +222,22 @@ describe("chat third-party anonymization boundary", () => {
       {
         id: "msg_1",
         role: "assistant",
-        parts: [
-          {
-            type: "data-stella-anon-restorations",
-            data: {
-              pairs: [{ placeholder: "[PERSON_1]", original: "Jan Novák" }],
-            },
+        metadata: {
+          anonRestorations: {
+            pairs: [{ placeholder: "[PERSON_1]", original: "Jan Novák" }],
           },
-          {
-            type: "text",
-            text: "Visible answer.",
-          },
-        ],
+        },
+        parts: [{ type: "text", content: "Visible answer." }],
       },
       {
         id: "msg_2",
         role: "assistant",
-        parts: [
-          {
-            type: "data-stella-anon-restorations",
-            data: {
-              pairs: [{ placeholder: "[CUSTOM_1]", original: "Secret" }],
-            },
+        metadata: {
+          anonRestorations: {
+            pairs: [{ placeholder: "[CUSTOM_1]", original: "Secret" }],
           },
-        ],
+        },
+        parts: [],
       },
     ];
 
@@ -258,7 +255,7 @@ describe("chat third-party anonymization boundary", () => {
       {
         id: "msg_1",
         role: "assistant",
-        parts: [{ type: "text", text: "Visible answer." }],
+        parts: [{ type: "text", content: "Visible answer." }],
       },
     ]);
     expect(boundary.type).toBe("anonymized");
@@ -271,22 +268,22 @@ describe("chat third-party anonymization boundary", () => {
     ]);
   });
 
-  test("handles tool parts with an explicitly undefined approval", async () => {
+  test("handles tool parts without approval", async () => {
     const boundary = createBoundary();
     const messages: ChatMessage[] = [
       {
         id: "msg_1",
         role: "assistant",
         parts: [
-          asChatPart({
-            type: "dynamic-tool",
-            toolName: "read_secret",
-            toolCallId: "call_1",
-            state: "output-available",
+          {
+            type: "tool-call",
+            id: "call_1",
+            name: "mcp__test__read_secret",
+            arguments: JSON.stringify({ query: "Jan Novák" }),
+            state: "complete",
             input: { query: "Jan Novák" },
             output: { text: "Secret notes" },
-            approval: undefined,
-          }),
+          },
         ],
       },
     ];
@@ -302,24 +299,127 @@ describe("chat third-party anonymization boundary", () => {
     }
 
     expect(prepared.value.at(0)?.parts.at(0)).toMatchObject({
-      approval: undefined,
       input: { query: "[PERSON_1]" },
       output: { text: "[CUSTOM_1] notes" },
+    });
+  });
+
+  test("anonymizes JSON tool-result content before provider replay", async () => {
+    const boundary = createBoundary();
+    const messages: ChatMessage[] = [
+      {
+        id: "msg_1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-call",
+            id: "call_1",
+            name: "mcp__test__read_secret",
+            arguments: JSON.stringify({ question: "Who signed?" }),
+            state: "complete",
+            output: {
+              documentId: "doc_123",
+              text: "Secret notes for Jan Novák",
+            },
+          },
+          {
+            type: "tool-result",
+            toolCallId: "call_1",
+            content: JSON.stringify({
+              documentId: "doc_123",
+              text: "Secret notes for Jan Novák",
+            }),
+            state: "complete",
+          },
+        ],
+      },
+    ];
+
+    const prepared = await prepareMessagesForThirdParty({
+      boundary,
+      messages,
+    });
+
+    expect(Result.isOk(prepared)).toBe(true);
+    if (Result.isError(prepared)) {
+      throw prepared.error;
+    }
+
+    const resultPart = prepared.value.at(0)?.parts.at(1);
+    expect(resultPart).toMatchObject({
+      type: "tool-result",
+      toolCallId: "call_1",
+      state: "complete",
+    });
+    if (!resultPart || resultPart.type !== "tool-result") {
+      throw new TypeError("Expected prepared tool-result part");
+    }
+    if (typeof resultPart.content !== "string") {
+      throw new TypeError("Expected JSON tool-result content");
+    }
+
+    expect(JSON.parse(resultPart.content)).toEqual({
+      documentId: "doc_123",
+      text: "[CUSTOM_1] notes for [PERSON_1]",
+    });
+  });
+
+  test("anonymizes text tool-result content parts before provider replay", async () => {
+    const boundary = createBoundary();
+    const messages: ChatMessage[] = [
+      {
+        id: "msg_1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-call",
+            id: "call_1",
+            name: "mcp__test__read_secret",
+            arguments: JSON.stringify({ question: "Who signed?" }),
+            state: "complete",
+            output: "Secret notes for Jan Novák",
+          },
+          {
+            type: "tool-result",
+            toolCallId: "call_1",
+            content: [{ type: "text", content: "Secret notes for Jan Novák" }],
+            state: "complete",
+          },
+        ],
+      },
+    ];
+
+    const prepared = await prepareMessagesForThirdParty({
+      boundary,
+      messages,
+    });
+
+    expect(Result.isOk(prepared)).toBe(true);
+    if (Result.isError(prepared)) {
+      throw prepared.error;
+    }
+
+    expect(prepared.value.at(0)?.parts.at(1)).toMatchObject({
+      type: "tool-result",
+      content: [{ type: "text", content: "[CUSTOM_1] notes for [PERSON_1]" }],
+      state: "complete",
+      toolCallId: "call_1",
     });
   });
 
   test("returns anonymized live tool output values", async () => {
     const boundary = createBoundary();
     const tools = {
-      read_secret: {
-        execute: async () => ({
-          documentId: "doc_123",
-          ids: ["person_456"],
-          nationalId: "Secret-123",
-          participants: ["Jan Novák", "Secret"],
-          text: "Secret notes for Jan Novák",
-        }),
-      },
+      read_secret: toolDefinition({
+        name: "read_secret",
+        description: "Read a secret fixture.",
+      }).server(async () => ({
+        documentId: "doc_123",
+        ids: ["person_456"],
+        nationalId: "Secret-123",
+        participants: ["Jan Novák", "Secret"],
+        text: "Secret notes for Jan Novák",
+      })),
     };
     const prepared = prepareToolsForThirdParty({
       boundary,
@@ -338,14 +438,42 @@ describe("chat third-party anonymization boundary", () => {
     });
   });
 
+  test("returns anonymized external MCP source tool output values", async () => {
+    const boundary = createBoundary();
+    const sourceTool = toolDefinition({
+      name: "mcp__test__read_secret",
+      description: "Read a secret fixture.",
+    }).server(async () => ({
+      documentId: "doc_123",
+      participants: ["Jan Novák", "Secret"],
+      text: "Secret notes for Jan Novák",
+    }));
+    const source = prepareMcpToolSourceForThirdParty({
+      boundary,
+      source: {
+        close: async () => {},
+        tools: async () => [sourceTool],
+      },
+    });
+    const [preparedTool] = await source.tools();
+    const executable = asTestExecutable<unknown, unknown>(preparedTool);
+
+    expect(await executable?.execute?.(undefined)).toEqual({
+      documentId: "doc_123",
+      participants: ["[PERSON_1]", "[CUSTOM_1]"],
+      text: "[CUSTOM_1] notes for [PERSON_1]",
+    });
+  });
+
   test("allows approved external tools to inherit raw mode", async () => {
     const boundary = createRawBoundary();
     const tools = {
       external_lookup: applyChatToolPolicy(
-        tool({
-          inputSchema: valibotSchema(v.strictObject({})),
-          execute: async () => ({ text: "Secret notes for Jan Novák" }),
-        }),
+        toolDefinition({
+          name: "external_lookup",
+          description: "External lookup fixture.",
+          inputSchema: v.strictObject({}),
+        }).server(async () => ({ text: "Secret notes for Jan Novák" })),
         CHAT_TOOL_POLICY_KIND.external,
       ),
     };
@@ -358,7 +486,7 @@ describe("chat third-party anonymization boundary", () => {
     );
 
     if (!executable?.execute) {
-      throw new Error("Expected external tool execute function");
+      throw new TypeError("Expected external tool execute function");
     }
 
     const output = await executable.execute(undefined);
@@ -371,10 +499,11 @@ describe("chat third-party anonymization boundary", () => {
     const boundary = createRawBoundary();
     const tools = {
       official_lookup: applyChatToolPolicy(
-        tool({
-          inputSchema: valibotSchema(v.strictObject({ ico: v.string() })),
-          execute: async ({ ico }) => ({ ico, name: "Alza.cz a.s." }),
-        }),
+        toolDefinition({
+          name: "official_lookup",
+          description: "Official lookup fixture.",
+          inputSchema: v.strictObject({ ico: v.string() }),
+        }).server(async ({ ico }) => ({ ico, name: "Alza.cz a.s." })),
         CHAT_TOOL_POLICY_KIND.publicOfficial,
       ),
     };
@@ -396,10 +525,11 @@ describe("chat third-party anonymization boundary", () => {
     const boundary = createRawBoundary();
     const tools = {
       unofficial_lookup: applyChatToolPolicy(
-        tool({
-          inputSchema: valibotSchema(v.strictObject({ query: v.string() })),
-          execute: async ({ query }) => ({ query }),
-        }),
+        toolDefinition({
+          name: "unofficial_lookup",
+          description: "Unofficial lookup fixture.",
+          inputSchema: v.strictObject({ query: v.string() }),
+        }).server(async ({ query }) => ({ query })),
         CHAT_TOOL_POLICY_KIND.publicUnofficial,
       ),
     };
@@ -412,7 +542,7 @@ describe("chat third-party anonymization boundary", () => {
     );
 
     if (!executable?.execute) {
-      throw new Error("Expected unofficial lookup execute function");
+      throw new TypeError("Expected unofficial lookup execute function");
     }
 
     const output = await executable.execute({ query: "Jan Novák" });
@@ -434,7 +564,7 @@ describe("chat third-party anonymization boundary", () => {
     expect(Result.isOk(inbound)).toBe(true);
 
     if (boundary.type !== "anonymized") {
-      throw new Error("Expected anonymized boundary");
+      throw new TypeError("Expected anonymized boundary");
     }
     expect(boundary.redactionMap.get("[PERSON_1]")).toBe("Jan Novák");
     expect(boundary.redactionMap.get("[CUSTOM_1]")).toBe("Secret");
@@ -455,6 +585,126 @@ describe("chat third-party anonymization boundary", () => {
       signed: ["Jan Novák", "[UNKNOWN_99]"],
       nested: { note: "Audit on Secret still pending." },
     });
+  });
+
+  test("renumbers sequential anonymization batches before merging", async () => {
+    const anonymizePeople = mock(async ({ fields }: { fields: string[] }) => {
+      const redactionMap = new Map<string, string>();
+      const anonymized = fields.map((field) => {
+        let next = field;
+        let nextIndex = 1;
+        for (const original of ["Alice", "Bob"]) {
+          if (next.includes(original)) {
+            const placeholder = `[PERSON_${nextIndex}]`;
+            next = next.replaceAll(original, placeholder);
+            redactionMap.set(placeholder, original);
+            nextIndex += 1;
+          }
+        }
+        return next;
+      });
+      return {
+        entityCount: redactionMap.size,
+        fields: anonymized,
+        redactionMap,
+      };
+    });
+    const { scopedDb } = createScopedDbMock({});
+    const boundary = createChatThirdPartyBoundary({
+      anonymizeFields: anonymizePeople,
+      anonymizationScopeId: "workspace-A",
+      organizationId: toSafeId<"organization">(
+        "11111111-1111-4111-8111-111111111111",
+      ),
+      scopedDb,
+      sendMode: CHAT_SEND_MODE.anonymized,
+    });
+
+    const first = await prepareTextForThirdParty({
+      boundary,
+      text: "Alice prepared the memo.",
+    });
+    const second = await prepareTextForThirdParty({
+      boundary,
+      text: "Alice briefed Bob.",
+    });
+
+    expect(Result.isOk(first)).toBe(true);
+    expect(Result.isOk(second)).toBe(true);
+    if (Result.isError(first) || Result.isError(second)) {
+      throw new TypeError("Expected anonymization to succeed");
+    }
+    expect(first.value).toBe("[PERSON_1] prepared the memo.");
+    expect(second.value).toBe("[PERSON_1] briefed [PERSON_2].");
+    if (boundary.type !== "anonymized") {
+      throw new TypeError("Expected anonymized boundary");
+    }
+    expect(boundary.redactionMap).toEqual(
+      new Map([
+        ["[PERSON_1]", "Alice"],
+        ["[PERSON_2]", "Bob"],
+      ]),
+    );
+  });
+
+  test("preserves echoed placeholders while renumbering new redactions", async () => {
+    const anonymizePeople = mock(async ({ fields }: { fields: string[] }) => {
+      const redactionMap = new Map<string, string>();
+      const anonymized = fields.map((field) => {
+        let next = field;
+        let nextIndex = 1;
+        for (const original of ["Bob", "Alice"]) {
+          if (next.includes(original)) {
+            const placeholder = `[PERSON_${nextIndex}]`;
+            next = next.replaceAll(original, placeholder);
+            redactionMap.set(placeholder, original);
+            nextIndex += 1;
+          }
+        }
+        return next;
+      });
+      return {
+        entityCount: redactionMap.size,
+        fields: anonymized,
+        redactionMap,
+      };
+    });
+    const { scopedDb } = createScopedDbMock({});
+    const boundary = createChatThirdPartyBoundary({
+      anonymizeFields: anonymizePeople,
+      anonymizationScopeId: "workspace-A",
+      organizationId: toSafeId<"organization">(
+        "11111111-1111-4111-8111-111111111111",
+      ),
+      scopedDb,
+      sendMode: CHAT_SEND_MODE.anonymized,
+    });
+
+    const first = await prepareTextForThirdParty({
+      boundary,
+      text: "Bob prepared the memo.",
+    });
+    const second = await prepareTextForThirdParty({
+      boundary,
+      text: "Results for [PERSON_1]: Alice",
+    });
+
+    expect(Result.isOk(first)).toBe(true);
+    expect(Result.isOk(second)).toBe(true);
+    if (Result.isError(first) || Result.isError(second)) {
+      throw new TypeError("Expected anonymization to succeed");
+    }
+    expect(first.value).toBe("[PERSON_1] prepared the memo.");
+    expect(second.value).toBe("Results for [PERSON_1]: [PERSON_2]");
+    if (boundary.type !== "anonymized") {
+      throw new TypeError("Expected anonymized boundary");
+    }
+    expect(boundary.redactionMap).toEqual(
+      new Map([
+        ["[PERSON_1]", "Bob"],
+        ["[PERSON_2]", "Alice"],
+      ]),
+    );
   });
 
   test("round-trip helpers are no-ops on raw boundaries", async () => {
@@ -478,12 +728,14 @@ describe("chat third-party anonymization boundary", () => {
 
     const seenInputs: unknown[] = [];
     const tools = {
-      list_contacts: {
-        execute: async (input: { query: string }) => {
-          seenInputs.push(input);
-          return { items: [{ name: input.query, id: "c1" }] };
-        },
-      },
+      list_contacts: toolDefinition({
+        name: "list_contacts",
+        description: "List contacts fixture.",
+        inputSchema: v.strictObject({ query: v.string() }),
+      }).server(async (input) => {
+        seenInputs.push(input);
+        return { items: [{ name: input.query, id: "c1" }] };
+      }),
     };
     const prepared = prepareToolsForThirdParty({
       boundary,
@@ -515,12 +767,14 @@ describe("chat third-party anonymization boundary", () => {
 
     const seenInputs: unknown[] = [];
     const tools = {
-      run_query: {
-        execute: async (input: { code: string }) => {
-          seenInputs.push(input);
-          return { value: { items: [] } };
-        },
-      },
+      run_query: toolDefinition({
+        name: "run_query",
+        description: "Run query fixture.",
+        inputSchema: v.strictObject({ code: v.string() }),
+      }).server(async (input) => {
+        seenInputs.push(input);
+        return { value: { items: [] } };
+      }),
     };
     const prepared = prepareToolsForThirdParty({
       boundary,
@@ -550,12 +804,13 @@ describe("chat third-party anonymization boundary", () => {
 
     const seenInputs: unknown[] = [];
     const externalTool = applyChatToolPolicy(
-      tool({
-        inputSchema: valibotSchema(v.strictObject({ query: v.string() })),
-        execute: async (input: { query: string }) => {
-          seenInputs.push(input);
-          return { hits: [] };
-        },
+      toolDefinition({
+        name: "external_search",
+        description: "External search fixture.",
+        inputSchema: v.strictObject({ query: v.string() }),
+      }).server(async (input) => {
+        seenInputs.push(input);
+        return { hits: [] };
       }),
       CHAT_TOOL_POLICY_KIND.external,
     );

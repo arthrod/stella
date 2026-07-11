@@ -32,6 +32,7 @@ const createSkillBodySchema = t.Object({
 
 const config = {
   permissions: { agentSkill: ["create"] },
+  mcp: { type: "capability", reason: "agent_tool_authoring" },
   body: createSkillBodySchema,
 } satisfies HandlerConfig;
 

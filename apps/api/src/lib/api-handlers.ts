@@ -8,17 +8,13 @@ import type {
 } from "elysia";
 import { status } from "elysia";
 
-import type { PermissionInput } from "@stll/permissions";
-import { roles } from "@stll/permissions";
+import type { ModelRole } from "@stll/ai-catalog";
+import type { PermissionInput, roles } from "@stll/permissions";
 
 import type { SafeDb, ScopedDb } from "@/api/db";
 import type { UsageActionType, UsageServiceTier } from "@/api/db/schema";
 import { env } from "@/api/env";
-import {
-  getModelInfoForRole,
-  resolveEffectiveServiceTierForProvider,
-} from "@/api/lib/ai-models";
-import type { ModelRole, OrgAIConfig } from "@/api/lib/ai-models";
+import type { OrgAIConfig } from "@/api/lib/ai-config";
 import { captureRequestError } from "@/api/lib/analytics";
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import type { AccessibleWorkspace } from "@/api/lib/auth";
@@ -32,11 +28,172 @@ import type {
   HandlerErrorCode,
   HandlerErrorStatusCode,
 } from "@/api/lib/errors/tagged-errors";
-import { errorTag } from "@/api/lib/errors/utils";
+import {
+  errorFingerprint,
+  errorTag,
+  safeErrorCause,
+  unredactedErrorFields,
+} from "@/api/lib/errors/utils";
 import { logger } from "@/api/lib/observability/logger";
 import { getRequestContext } from "@/api/lib/observability/request-context";
+import { hasMemberPermission } from "@/api/lib/permission-authorization";
+import {
+  getTanStackTextModelInfoForRole,
+  resolveEffectiveServiceTierForProvider,
+} from "@/api/lib/tanstack-ai-models";
 import { assertUsageAvailable } from "@/api/lib/usage";
 import { computeUsageUnitCost } from "@/api/lib/usage/action-weights";
+// Type-only: derive the closed tool-name union from the single MCP registry
+// so `mcp: { type: "tool", name }` typechecks against the real tools. The
+// import is erased at build time and never creates a runtime import cycle
+// (api-handlers must stay importable without pulling in the MCP graph).
+import type { MCP_STATIC_TOOL_NAMES } from "@/api/mcp/static-tool-definitions";
+
+/**
+ * The closed set of curated static MCP tool names. Every `type: "tool"` and
+ * `type: "covered"` disposition references one of these; the coverage guard
+ * (`apps/api/scripts/mcp-coverage-guard.ts`) cross-checks the runtime registry.
+ */
+export type McpToolName = (typeof MCP_STATIC_TOOL_NAMES)[number];
+
+/**
+ * Reasons an endpoint is a real end-to-end capability a user or their agent
+ * would legitimately automate (CRUD on their data/config, triggering/retrying
+ * processing, exports) but is deliberately *not* a curated static MCP tool: the
+ * curated tool list is capped for the agent context budget, so the long tail is
+ * reached through the generic capability path instead. A `capability`
+ * disposition still lands in the exported capability catalog; only `internal`
+ * (below) is fully waived. Closed union (no freetext): a new capability
+ * category is a deliberate, reviewed addition here.
+ *
+ * - `template_authoring_ui`: Template Studio authoring endpoints (create/save/
+ *   version templates, categories, clause slots) beyond the curated template
+ *   tools.
+ * - `workspace_schema`: table/view/property/document-type configuration and
+ *   metadata operations that shape a workspace.
+ * - `knowledge_library_admin`: clause/playbook authoring, versioning, import/
+ *   export, and review operations beyond the curated knowledge tools.
+ * - `agent_tool_authoring`: skill/catalogue CRUD used to author tools; enabled
+ *   skills are also exposed through the dynamic MCP gateway.
+ * - `anonymization_admin`: anonymization term/allowlist configuration.
+ * - `legal_corpus_admin`: corpus ingestion, linking, and analysis operations
+ *   beyond the public legal-search tool contract.
+ * - `workflow_orchestration`: workflow queue/run/progress operations.
+ * - `reporting_export`: report and table export generation/readback.
+ * - `contact_directory`: organization contact directory list/search.
+ * - `billing_admin`: billing/invoice/expense/rate-card/time-entry CRUD and
+ *   invoice generation (checkout and payment-provider plumbing stays
+ *   `internal` under `hosted_billing`).
+ * - `document_processing`: document upload/download/version/translate/duplicate/
+ *   restore/compare and processing triggers. UI-only viewer/facet/grouping
+ *   reads and bounding-box generation stay `internal` under the same reason.
+ * - `assistant_chat`: chat thread CRUD (list/read/update/delete threads and
+ *   their messages). Chat generation/streaming runtime and per-surface thread
+ *   plumbing stay `internal` under the same reason.
+ * - `chat_thread_ui`: chat-thread rename. Breadcrumb title lookup stays
+ *   `internal` under the same reason.
+ */
+export type McpCapabilityReason =
+  | "template_authoring_ui"
+  | "workspace_schema"
+  | "knowledge_library_admin"
+  | "agent_tool_authoring"
+  | "anonymization_admin"
+  | "legal_corpus_admin"
+  | "workflow_orchestration"
+  | "reporting_export"
+  | "contact_directory"
+  | "billing_admin"
+  | "document_processing"
+  | "assistant_chat"
+  | "chat_thread_ui";
+
+/**
+ * Approved, permanent reasons an endpoint is intentionally never reachable from
+ * an agent surface at all: transport/plumbing/UI mechanics and the approved
+ * permanent exclusions. Unlike `McpCapabilityReason`, these stay out of the
+ * capability catalog entirely. Closed union (no freetext): a new waiver category
+ * is a deliberate, reviewed addition here.
+ *
+ * - `auth_plumbing`: better-auth / sign-in / verification / session routes.
+ * - `upload_mechanics`: presign / finalize / abort / preflight upload steps.
+ * - `realtime_stream`: SSE / event-stream endpoints.
+ * - `session_token_exchange`: folio-collab and desktop-edit token/session
+ *   exchange handlers that authorize themselves from a body/param token.
+ * - `webhook`: inbound webhooks from external providers.
+ * - `dev_only`: routes mounted only in development.
+ * - `account_lifecycle`: account deletion / lifecycle flows.
+ * - `hosted_billing`: hosted-billing checkout / setup / management plumbing.
+ * - `mcp_transport`: the MCP transport / connector routes themselves.
+ * - `health_infra`: health and smoke endpoints.
+ * - `chat_thread_ui`: chat-thread UI chrome reads (breadcrumb title lookup);
+ *   the rename operation is a `capability` under the same reason.
+ * - `provider_secret`: writes/probes of provider API keys and secrets (AI
+ *   provider config, DeepL key, web-search key, provider validation). Secret
+ *   material must never transit an agent surface; these stay dashboard-only.
+ * - `deploy_mechanics`: deployment/availability mechanics for native tools
+ *   (which backends can be deployed), an operator concern, not an agent action.
+ * - `ui_navigation_state`: per-user UI navigation state (active workspace,
+ *   navigation tree) that only makes sense for the interactive web client.
+ * - `assistant_chat`: chat generation/streaming runtime and per-surface thread
+ *   plumbing (suggested prompts, recaps, template/file thread resolution). The
+ *   thread-CRUD operations are `capability` under the same reason.
+ * - `url_preview`: server-side external-URL unfurl/preview mechanics.
+ * - `public_indexing`: public listing, facet, and sitemap endpoints used for
+ *   SEO/UI discovery; agents use the curated public search/read tools instead.
+ * - `search_ui`: search refinement/facet/summary affordances for the web UI and
+ *   in-app chat; MCP clients use `search` / `search_across_matters`.
+ * - `document_processing`: UI-only viewer/facet/grouping reads and bounding-box
+ *   generation; the real document operations are `capability` under the same
+ *   reason.
+ * - `native_tool_ui`: native-tool helper endpoints whose agent surface is a
+ *   chat/native integration rather than the static MCP registry.
+ */
+export type McpInternalReason =
+  | "auth_plumbing"
+  | "upload_mechanics"
+  | "realtime_stream"
+  | "session_token_exchange"
+  | "webhook"
+  | "dev_only"
+  | "account_lifecycle"
+  | "hosted_billing"
+  | "mcp_transport"
+  | "health_infra"
+  | "chat_thread_ui"
+  | "provider_secret"
+  | "deploy_mechanics"
+  | "ui_navigation_state"
+  | "assistant_chat"
+  | "url_preview"
+  | "public_indexing"
+  | "search_ui"
+  | "document_processing"
+  | "native_tool_ui";
+
+/**
+ * Required per-handler MCP disposition. Making this a field on every handler
+ * config (like `permissions`) means a new backend capability cannot be added
+ * without a typecheck-enforced decision about how agents reach it via MCP.
+ *
+ * - `tool`: this endpoint is the backing implementation of tool `name`.
+ * - `covered`: the capability is reachable through tool `by`, via a different
+ *   code path (e.g. a shared handler the tool re-uses).
+ * - `capability`: a real end-to-end operation a user or their agent legitimately
+ *   automates (CRUD on their data/config, triggering/retrying processing,
+ *   exports), deliberately not a curated static MCP tool because the tool list
+ *   is capped for the agent context budget. Reached through the generic
+ *   capability path and included in the exported capability catalog; `reason` is
+ *   an approved, closed-union category.
+ * - `internal`: intentionally never reachable from an agent surface; `reason` is
+ *   an approved, closed-union permanent waiver (transport/plumbing/UI mechanics
+ *   and the approved permanent exclusions).
+ */
+export type McpExposure =
+  | { type: "tool"; name: McpToolName }
+  | { type: "covered"; by: McpToolName }
+  | { type: "capability"; reason: McpCapabilityReason }
+  | { type: "internal"; reason: McpInternalReason };
 
 /**
  * Per-handler usage metering opt-in. When set, the framework:
@@ -45,7 +202,7 @@ import { computeUsageUnitCost } from "@/api/lib/usage/action-weights";
  *    otherwise the check is a no-op so observation-mode runs
  *    always pass through).
  *
- * Post-flight ledger writes happen from AI SDK step callbacks,
+ * Post-flight ledger writes happen from model step callbacks,
  * where the actual model usage is available. Keeping writes out
  * of the generic handler layer prevents fixed-estimate rows and
  * usage-based rows from double-counting the same action.
@@ -60,7 +217,7 @@ export type UsageMeteringConfig = {
   /**
    * Logical model role recorded on the consumption ledger row.
    * Defaults to `"chat"`. Set to the role the handler will pass
-   * to `getModelForRole(...)` so cross-cutting analytics match
+   * to the model resolver so cross-cutting analytics match
    * the actual model.
    */
   modelRole?: ModelRole;
@@ -69,16 +226,19 @@ export type UsageMeteringConfig = {
 export type HandlerConfig = InputSchema & {
   permissions: PermissionInput;
   requiresUsage?: UsageMeteringConfig;
+  mcp: McpExposure;
 };
 
-export type SessionHandlerConfig = InputSchema;
+export type SessionHandlerConfig = InputSchema & {
+  mcp: McpExposure;
+};
 
 type ConfigRouteSchema<TConfig extends HandlerConfig> = UnwrapRoute<
-  Omit<TConfig, "permissions">
+  Omit<TConfig, "permissions" | "mcp">
 >;
 
 type SessionConfigRouteSchema<TConfig extends SessionHandlerConfig> =
-  UnwrapRoute<TConfig>;
+  UnwrapRoute<Omit<TConfig, "mcp">>;
 
 type SessionHandlerContext<
   TConfig extends SessionHandlerConfig = SessionHandlerConfig,
@@ -111,8 +271,8 @@ type BaseHandlerContext<TConfig extends HandlerConfig = HandlerConfig> =
     orgAIConfig: OrgAIConfig | null;
     /**
      * Whether stella may annotate AI requests for this org with
-     * prompt-cache markers. Threaded through to `getModelForRole`
-     * and `getModelById`; the SDK middleware strips any markers when
+     * prompt-cache markers. Threaded through to the model resolver;
+     * provider adapters strip any markers when
      * `false` regardless of what call sites set.
      */
     promptCachingEnabled: boolean;
@@ -221,6 +381,13 @@ const hasWorkspaceId = <TContext extends object>(
 ): ctx is TContext & { workspaceId: SafeId<"workspace"> } =>
   "workspaceId" in ctx;
 
+const API_ERROR_CODE = {
+  accessDenied: "access_denied",
+  forbidden: "forbidden",
+  internalServerError: "internal_server_error",
+  usageLimitExceeded: "usage_limit_exceeded",
+} as const satisfies Record<string, HandlerErrorCode>;
+
 // This needs function overloads. A generic arrow returning `status(statusCode)`
 // widens too much, and the casted version trips oxlint's unsafe assertion rule.
 function toSafeStatusResponse<TStatusCode extends HandlerErrorStatusCode>(
@@ -279,6 +446,7 @@ const runSafeHandler = async <
       });
 
       return toSafeStatusResponse(500, {
+        code: API_ERROR_CODE.internalServerError,
         message: "Internal server error",
       });
     }
@@ -291,7 +459,10 @@ const runSafeHandler = async <
         statusCode: 400,
       });
 
-      return toSafeStatusResponse(400, { message: "Access denied" });
+      return toSafeStatusResponse(400, {
+        code: API_ERROR_CODE.accessDenied,
+        message: "Access denied",
+      });
     }
 
     logAndCaptureSafeError({
@@ -301,7 +472,10 @@ const runSafeHandler = async <
       statusCode: 500,
     });
 
-    return toSafeStatusResponse(500, { message: "Internal server error" });
+    return toSafeStatusResponse(500, {
+      code: API_ERROR_CODE.internalServerError,
+      message: "Internal server error",
+    });
   } catch (error) {
     // A typed HandlerError thrown synchronously (or escaping the
     // Result.gen pipeline) must still surface as its own status,
@@ -329,7 +503,10 @@ const runSafeHandler = async <
       statusCode: 500,
     });
 
-    return toSafeStatusResponse(500, { message: "Internal server error" });
+    return toSafeStatusResponse(500, {
+      code: API_ERROR_CODE.internalServerError,
+      message: "Internal server error",
+    });
   }
 };
 
@@ -343,12 +520,11 @@ const createSafeScopedHandler = <
 ): SafeHandlerDefinition<TConfig, TContext, TResult> => ({
   config,
   handler: async (ctx): Promise<SafeHandlerResult<TResult>> => {
-    const hasPermission = roles[ctx.memberRole.role].authorize(
-      config.permissions,
-    );
-
-    if (!hasPermission.success) {
-      return toSafeStatusResponse(403, { message: "Forbidden" });
+    if (!hasMemberPermission(ctx.memberRole, config.permissions)) {
+      return toSafeStatusResponse(403, {
+        code: API_ERROR_CODE.forbidden,
+        message: "Forbidden",
+      });
     }
 
     // Resolve the metering context only when enforcement is on. It reads
@@ -397,7 +573,9 @@ export const resolveMeteringContext = ({
   userId: SafeId<"user">;
 }): ResolvedMeteringContext => {
   const modelRole = metering.modelRole ?? "chat";
-  const modelInfo = getModelInfoForRole(modelRole, orgAIConfig);
+  const modelInfo = getTanStackTextModelInfoForRole(modelRole, orgAIConfig, {
+    organizationId,
+  });
   const isByok = modelInfo.keySource === "byok";
   const serviceTier = resolveEffectiveServiceTierForProvider({
     provider: modelInfo.provider,
@@ -453,13 +631,17 @@ const runUsagePreflight = async ({
       error: checkResult.error,
       statusCode: 500,
     });
-    return toSafeStatusResponse(500, { message: "Internal server error" });
+    return toSafeStatusResponse(500, {
+      code: API_ERROR_CODE.internalServerError,
+      message: "Internal server error",
+    });
   }
   const check = checkResult.value;
   if (check.ok) {
     return null;
   }
   return toSafeStatusResponse(402, {
+    code: API_ERROR_CODE.usageLimitExceeded,
     message: check.error.message,
     reason: check.error.reason,
     required: check.error.required,
@@ -525,6 +707,7 @@ export const assertUsageAvailableForHandler = async ({
     // and captures it) so the user retries; we don't let an infrastructure
     // failure look like an over-limit situation.
     return new HandlerError({
+      code: API_ERROR_CODE.internalServerError,
       status: 500,
       message: "Internal server error",
       cause: checkResult.error,
@@ -535,6 +718,7 @@ export const assertUsageAvailableForHandler = async ({
     return null;
   }
   return new HandlerError({
+    code: API_ERROR_CODE.usageLimitExceeded,
     status: 402,
     message: check.error.message,
     usage: {
@@ -599,11 +783,13 @@ export const createSafeSessionHandler = <
 ): SafeHandlerDefinition<TConfig, SessionHandlerContext<TConfig>, TResult> =>
   createSafeDirectHandler(config, handler);
 
-export type TokenHandlerConfig = InputSchema;
+export type TokenHandlerConfig = InputSchema & {
+  mcp: McpExposure;
+};
 
 type TokenHandlerContext<
   TConfig extends TokenHandlerConfig = TokenHandlerConfig,
-> = Context<UnwrapRoute<TConfig>>;
+> = Context<UnwrapRoute<Omit<TConfig, "mcp">>>;
 
 /**
  * Like `createSafeSessionHandler`, but the framework does not
@@ -622,11 +808,13 @@ export const createSafeTokenHandler = <
 ): SafeHandlerDefinition<TConfig, TokenHandlerContext<TConfig>, TResult> =>
   createSafeDirectHandler(config, handler);
 
-export type PublicHandlerConfig = InputSchema;
+export type PublicHandlerConfig = InputSchema & {
+  mcp: McpExposure;
+};
 
 type PublicHandlerContext<
   TConfig extends PublicHandlerConfig = PublicHandlerConfig,
-> = Context<UnwrapRoute<TConfig>>;
+> = Context<UnwrapRoute<Omit<TConfig, "mcp">>>;
 
 /**
  * For unauthenticated routes that intentionally expose public data.
@@ -650,12 +838,22 @@ type LogAndCaptureSafeErrorProps = {
 };
 
 const getErrorStatusCode = (error: Error): number | undefined => {
-  if ("statusCode" in error && typeof error.statusCode === "number") {
-    return error.statusCode;
-  }
+  try {
+    if ("statusCode" in error) {
+      const statusCode: unknown = Reflect.get(error, "statusCode");
+      if (typeof statusCode === "number") {
+        return statusCode;
+      }
+    }
 
-  if ("status" in error && typeof error.status === "number") {
-    return error.status;
+    if ("status" in error) {
+      const statusValue: unknown = Reflect.get(error, "status");
+      if (typeof statusValue === "number") {
+        return statusValue;
+      }
+    }
+  } catch {
+    return undefined;
   }
 
   return undefined;
@@ -684,19 +882,35 @@ const logAndCaptureSafeError = ({
     if (errorStatusCode !== undefined) {
       attributes["error.status_code"] = errorStatusCode;
     }
-    // Walk up to three levels of `.cause` so nested wrappers
-    // (generator-result re-throws, AI SDK over fetch errors,
-    // etc.) don't hide the underlying failure type.
+    // Walk up to three levels of `.cause` so nested wrappers do not
+    // hide the underlying failure type.
     const seen = new WeakSet<object>([error]);
-    let cause: unknown = (error as { cause?: unknown }).cause;
+    let cause = safeErrorCause(error);
     let depth = 1;
     while (cause instanceof Error && depth <= 3 && !seen.has(cause)) {
       seen.add(cause);
       const prefix = depth === 1 ? "error.cause" : `error.cause${depth}`;
       attributes[`${prefix}.type`] = errorTag(cause);
-      cause = (cause as { cause?: unknown }).cause;
+      cause = safeErrorCause(cause);
       depth++;
     }
+  }
+
+  // 5xx are the un-diagnosable class: the message and stack are
+  // redacted from every sink, leaving only `error.type`. Attach a
+  // non-PII structural fingerprint (class, stable code, top
+  // `file:line:col` frames) under keys that survive the logger's PII
+  // redaction so a panic always carries a code location.
+  if (statusCode >= 500) {
+    Object.assign(attributes, errorFingerprint(error));
+
+    if (env.DEBUG_UNREDACTED_ERRORS) {
+      Object.assign(attributes, unredactedErrorFields(error));
+    }
+  }
+
+  if (reqCtx?.requestId) {
+    attributes["request.id"] = reqCtx.requestId;
   }
 
   if (reqCtx?.posthogDistinctId) {

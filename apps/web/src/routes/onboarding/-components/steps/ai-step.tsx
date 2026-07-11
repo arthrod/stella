@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
+import { Form } from "@stll/ui/components/form";
 import { stellaToast } from "@stll/ui/components/toast";
 
 import { AIConfigProvidersEditor } from "@/components/ai-config-providers-editor";
@@ -49,10 +50,7 @@ const fingerprintDraft = (draft: ProviderCredentialDraft): string | null => {
     return null;
   }
   const keyFingerprint = fingerprintKey(apiKey);
-  if (draft.provider !== "azure_foundry" && draft.provider !== "huggingface") {
-    return keyFingerprint;
-  }
-  return `${keyFingerprint}:${draft.endpoint.trim()}`;
+  return keyFingerprint;
 };
 
 type RowState = {
@@ -68,11 +66,10 @@ type RowStateMap = Record<ProviderValue, RowState>;
 const INITIAL_ROW_STATES: RowStateMap = {
   google: { status: "idle" },
   anthropic: { status: "idle" },
-  mistral: { status: "idle" },
   openai: { status: "idle" },
-  azure_foundry: { status: "idle" },
   openrouter: { status: "idle" },
-  huggingface: { status: "idle" },
+  mistral: { status: "idle" },
+  bedrock: { status: "idle" },
 };
 
 export const AIStep = ({
@@ -131,6 +128,7 @@ export const AIStep = ({
   // that row to idle so the user must save again.
   // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- `rowStates` is not pure derived state: it is also written by saveRow and updateProviders, so it cannot be deleted and computed in render. This effect reconciles validation status against the latest key fingerprints.
   useEffect(() => {
+    // eslint-disable-next-line react/react-compiler -- reconciles row validation status against the latest key fingerprints; rowStates is also written by saveRow/updateProviders, so it is not pure-derivable in render
     setRowStates((prev) => {
       let changed = false;
       const next: RowStateMap = { ...prev };
@@ -178,15 +176,6 @@ export const AIStep = ({
     const response = await api["ai-config"]["validate-provider"].post({
       provider: draft.provider,
       apiKey,
-      ...(draft.provider === "azure_foundry"
-        ? {
-            endpoint: draft.endpoint.trim(),
-            ...(draft.apiVersion ? { apiVersion: draft.apiVersion } : {}),
-          }
-        : {}),
-      ...(draft.provider === "huggingface"
-        ? { endpoint: draft.endpoint.trim() }
-        : {}),
       ...(draft.provider === "google" ? { region: draft.region } : {}),
     });
 
@@ -280,17 +269,12 @@ export const AIStep = ({
       anthropic: stillPresent.has("anthropic")
         ? prev.anthropic
         : { status: "idle" },
-      mistral: stillPresent.has("mistral") ? prev.mistral : { status: "idle" },
       openai: stillPresent.has("openai") ? prev.openai : { status: "idle" },
-      azure_foundry: stillPresent.has("azure_foundry")
-        ? prev.azure_foundry
-        : { status: "idle" },
       openrouter: stillPresent.has("openrouter")
         ? prev.openrouter
         : { status: "idle" },
-      huggingface: stillPresent.has("huggingface")
-        ? prev.huggingface
-        : { status: "idle" },
+      mistral: stillPresent.has("mistral") ? prev.mistral : { status: "idle" },
+      bedrock: stillPresent.has("bedrock") ? prev.bedrock : { status: "idle" },
     }));
   };
 
@@ -314,65 +298,81 @@ export const AIStep = ({
         {t("onboarding.aiSubtitle")}
       </p>
 
-      <div className="mt-8 flex flex-col gap-3">
-        {phase === "providers" ? (
-          <AIConfigProvidersEditor
-            compact
-            onProvidersChange={updateProviders}
-            onSaveRow={(index) => {
-              void saveRow(index);
-            }}
-            providers={providers}
-            rowStatuses={rowStatusList}
-          />
-        ) : (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex flex-col gap-0.5">
-                <h2 className="text-foreground text-sm font-semibold">
-                  {tOrganization("aiConfig.chooseModelsTitle")}
-                </h2>
-                <p className="text-muted-foreground text-xs">
-                  {tOrganization("aiConfig.chooseModelsSubtitle")}
-                </p>
-              </div>
-              <Button
-                onClick={() => onPhaseChange("providers")}
-                size="sm"
-                type="button"
-                variant="ghost"
-              >
-                {tOrganization("aiConfig.editProviders")}
-              </Button>
-            </div>
-            <AIConfigRoleModelPicker
+      {/* display:contents keeps the existing flex layout; the form only
+          exists so Enter advances the active phase when it is valid.
+          The provider editor's own buttons are type="button", so a
+          key/save keypress never triggers this submit. */}
+      <Form
+        className="contents"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (phase === "providers") {
+            if (canEnterModelsPhase) {
+              onPhaseChange("models");
+            }
+            return;
+          }
+          if (canContinue) {
+            onNext();
+          }
+        }}
+      >
+        <div className="mt-8 flex flex-col gap-3">
+          {phase === "providers" ? (
+            <AIConfigProvidersEditor
               compact
-              onModelChange={setRoleModel}
-              providers={providerValues}
-              roleModels={roleModels}
+              onProvidersChange={updateProviders}
+              onSaveRow={(index) => {
+                void saveRow(index);
+              }}
+              providers={providers}
+              rowStatuses={rowStatusList}
             />
-          </div>
-        )}
-      </div>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-col gap-0.5">
+                  <h2 className="text-foreground text-sm font-semibold">
+                    {tOrganization("aiConfig.chooseModelsTitle")}
+                  </h2>
+                  <p className="text-muted-foreground text-xs">
+                    {tOrganization("aiConfig.chooseModelsSubtitle")}
+                  </p>
+                </div>
+                <Button
+                  onClick={() => onPhaseChange("providers")}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  {tOrganization("aiConfig.editProviders")}
+                </Button>
+              </div>
+              <AIConfigRoleModelPicker
+                compact
+                onModelChange={setRoleModel}
+                providers={providerValues}
+                roleModels={roleModels}
+              />
+            </div>
+          )}
+        </div>
 
-      <div className="mt-auto flex items-center justify-between gap-3 pt-6">
-        <Button onClick={onSkip} type="button" variant="ghost">
-          {t("onboarding.skipStep")}
-        </Button>
-        {phase === "providers" ? (
-          <Button
-            disabled={!canEnterModelsPhase}
-            onClick={() => onPhaseChange("models")}
-            type="button"
-          >
-            {t("common.next")}
+        <div className="mt-auto flex items-center justify-between gap-3 pt-6">
+          <Button onClick={onSkip} type="button" variant="ghost">
+            {t("onboarding.skipStep")}
           </Button>
-        ) : (
-          <Button disabled={!canContinue} onClick={onNext} type="button">
-            {t("common.next")}
-          </Button>
-        )}
-      </div>
+          {phase === "providers" ? (
+            <Button disabled={!canEnterModelsPhase} type="submit">
+              {t("common.next")}
+            </Button>
+          ) : (
+            <Button disabled={!canContinue} type="submit">
+              {t("common.next")}
+            </Button>
+          )}
+        </div>
+      </Form>
     </>
   );
 };

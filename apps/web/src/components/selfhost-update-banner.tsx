@@ -9,11 +9,11 @@ import { useChromeQuery } from "@/hooks/use-chrome-query";
 import { logDevError } from "@/lib/errors/utils";
 import { sanitizeHref } from "@/lib/sanitize-href";
 import { compareSemver } from "@/lib/semver-compare";
+import { DAY_IN_MS } from "@/lib/time";
 
 const RELEASES_API_URL =
   "https://api.github.com/repos/stella/stella/releases/latest";
 const DISMISSED_KEY_PREFIX = "stella:selfhost-update-dismissed:";
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 const releaseSchema = v.object({
   tag_name: v.string(),
@@ -37,14 +37,14 @@ export const SelfhostUpdateBanner = () => {
   const { data: release } = useChromeQuery({
     queryKey: ["selfhost-update-check"],
     enabled,
-    staleTime: ONE_DAY_MS,
-    refetchInterval: ONE_DAY_MS,
+    staleTime: DAY_IN_MS,
+    refetchInterval: DAY_IN_MS,
     retry: false,
-    queryFn: async (): Promise<Release | null> => {
+    queryFn: async ({ signal }): Promise<Release | null> => {
       try {
         const response = await fetch(RELEASES_API_URL, {
           headers: { Accept: "application/vnd.github+json" },
-          signal: AbortSignal.timeout(8000),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(8000)]),
         });
         if (!response.ok) {
           return null;

@@ -7,6 +7,7 @@ import type {
   OptionColor,
   ViewLayout,
   ViewLayoutType,
+  SafeId,
 } from "@stll/api/types";
 
 import { PDF_MIME_TYPE } from "@/consts";
@@ -25,6 +26,12 @@ export type {
 
 export type RouterToPath = FileRouteTypes["to"];
 export type RouterFullPath = FileRouteTypes["fullPaths"];
+
+export type WorkspaceId = SafeId<"workspace">;
+export type EntityId = SafeId<"entity">;
+export type FieldId = SafeId<"field">;
+export type JustificationId = SafeId<"justification">;
+export type PropertyId = SafeId<"property">;
 
 export const isFileDisplayable = (file: {
   mimeType: string;
@@ -57,13 +64,14 @@ export const isFileDisplayable = (file: {
 };
 
 export type PropertyDependency = {
-  dependsOnPropertyId: string;
+  dependsOnPropertyId: PropertyId;
   condition: ConditionNode | null;
 };
 
 type ManualInputTool = {
   version: 1;
   type: "manual-input";
+  dependencies?: PropertyDependency[];
 };
 
 type AIModelTool = {
@@ -73,11 +81,25 @@ type AIModelTool = {
   dependencies: PropertyDependency[];
 };
 
+// A system-computed playbook verdict column. The value is a single-select tier
+// (compliant / fallback / deviation / missing) written by the verdict engine;
+// the cell is read-only on the client. `askPropertyId` is the ASK property this
+// verdict grades: the table pairs the two back together into one
+// compliance-matrix cell (extracted value + verdict badge) instead of rendering
+// two disjoint columns. The rest of the grading inputs (rule/standard/severity)
+// live server-side and the client never reads them.
+type PlaybookVerdictTool = {
+  version: 1;
+  type: "playbook-verdict";
+  askPropertyId: PropertyId;
+  dependencies: PropertyDependency[];
+};
+
 export type WorkspaceProperty = {
-  id: string;
+  id: PropertyId;
   name: string;
   createdAt: Date;
-  workspaceId: string;
+  workspaceId: WorkspaceId;
   status: "stale" | "fresh";
   content:
     | {
@@ -106,7 +128,12 @@ export type WorkspaceProperty = {
         version: 1;
         type: "int";
       };
-  tool: ManualInputTool | AIModelTool;
+  tool: ManualInputTool | AIModelTool | PlaybookVerdictTool;
+  // Structural role: identifies the document-type classifier by identity
+  // rather than by the literal name "Document Type" (mirrors the server
+  // `properties.role` column). Optional because not every property source
+  // carries it; absent/null means an ordinary property.
+  role?: "document-type-classifier" | null;
 };
 
 export type WorkspaceToolType = WorkspaceProperty["tool"]["type"];
@@ -177,8 +204,9 @@ export type WorkspaceFieldContent =
     };
 
 export type WorkspaceField = {
-  entityId: string;
-  id: string;
+  entityId: EntityId;
+  id: FieldId;
+  propertyId: PropertyId;
   content: WorkspaceFieldContent;
 };
 
@@ -205,16 +233,16 @@ export type WorkspaceCellMetadata = {
 };
 
 export type EntityField = {
-  id: string;
-  propertyId: string;
+  id: FieldId;
+  propertyId: PropertyId;
   content: WorkspaceFieldContent;
 };
 
 export type WorkspaceEntity = {
-  entityId: string;
+  entityId: EntityId;
   kind: EntityKind;
   name: string | null;
-  parentId: string | null;
+  parentId: EntityId | null;
   createdAt: string;
   createdBy: string | null;
   createdByImage: string | null;
@@ -246,8 +274,8 @@ export type WorkspaceEntity = {
   readOnly: boolean;
   sortOrder: string | null;
   activeEditBy: { name: string; image: string | null; isMe: boolean } | null;
-  fields: Record<string, WorkspaceField>;
-  cellMetadata: Record<string, WorkspaceCellMetadata>;
+  fields: Partial<Record<PropertyId, WorkspaceField>>;
+  cellMetadata: Partial<Record<PropertyId, WorkspaceCellMetadata>>;
 };
 
 export type WorkspaceView<T extends ViewLayoutType = ViewLayoutType> = {
@@ -306,9 +334,25 @@ export type DocxFolioJustificationBlock = {
   }[];
 };
 
+// A playbook verdict's provenance. Unlike the document-citation blocks above it
+// carries no file/page/block reference: a verdict grades the already-extracted
+// ASK value against the position's tiers, so the provenance is the model's
+// rationale plus, when the tier decision hinged on specific authored language,
+// the matched fallback option or violated red-line rule.
+export type VerdictMatchedRef =
+  | { kind: "fallback"; label?: string; text: string }
+  | { kind: "redLine"; ruleId: string; text: string };
+
+export type VerdictRationaleJustificationBlock = {
+  kind: "playbook-verdict";
+  rationale: string;
+  matchedRef?: VerdictMatchedRef;
+};
+
 export type JustificationBlock =
   | PdfBatesJustificationBlock
-  | DocxFolioJustificationBlock;
+  | DocxFolioJustificationBlock
+  | VerdictRationaleJustificationBlock;
 
 export type JustificationContent = {
   version: 1;
@@ -316,9 +360,9 @@ export type JustificationContent = {
 };
 
 export type WorkspaceJustification = {
-  id: string;
-  fieldId: string;
+  id: JustificationId;
+  fieldId: FieldId;
   content: JustificationContent;
   boundingBoxes: { version: number; boxes: BoundingBox[] } | null;
-  fileFieldIds: string[];
+  fileFieldIds: FieldId[];
 };

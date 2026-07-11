@@ -33,6 +33,7 @@ const updateExpenseBodySchema = t.Object({
 
 const config = {
   permissions: { expense: ["update"] },
+  mcp: { type: "capability", reason: "billing_admin" },
   body: updateExpenseBodySchema,
 } satisfies HandlerConfig;
 

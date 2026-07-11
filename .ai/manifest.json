@@ -6,6 +6,7 @@
       "stella-public-repo",
       "engineering",
       "scalability",
+      "performance",
       "frontend-react",
       "typescript",
       "backend-elysia",
@@ -16,5 +17,14 @@
       "linting"
     ],
     "local": ".ai/local/agents.md"
+  },
+  "coderabbit": {
+    "pathFilters": [
+      "!apps/web/src/routeTree.gen.ts",
+      "!**/drizzle/**/snapshot.json"
+    ],
+    "codeGuidelineFilePatterns": [
+      "**/.cursorrules"
+    ]
   }
 }

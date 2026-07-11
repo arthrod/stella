@@ -9,7 +9,7 @@ import type {
 } from "@/api/db/schema";
 import type { FieldContent } from "@/api/db/schema-validators";
 import { createFileKey } from "@/api/handlers/files/utils";
-import type { OrgAIConfig } from "@/api/lib/ai-models";
+import type { OrgAIConfig } from "@/api/lib/ai-config";
 import type { SafeId } from "@/api/lib/branded-types";
 import type { WorkflowIntegrationError } from "@/api/lib/errors/tagged-errors";
 import { getS3 } from "@/api/lib/s3";
@@ -71,6 +71,11 @@ export const extractJustificationContent = (
     // `kind` as `pdf-bates` so historical PDF justifications still
     // produce bounding boxes.
     if (isDocxFolioBlock(block)) {
+      continue;
+    }
+    // Playbook verdict rationales carry no document citations or page numbers,
+    // so they never produce bounding boxes.
+    if (block.kind === "playbook-verdict") {
       continue;
     }
     for (const statement of block.statements) {

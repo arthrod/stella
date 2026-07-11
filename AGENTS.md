@@ -51,8 +51,15 @@ details unless they are already public in the repository.
 - If TypeScript can make a class of bug structurally impossible (branded types,
   discriminated unions, exhaustive checks), prefer that over runtime validation or
   manual discipline
+- Avoid boolean fields for states that may grow. Use a named discriminator or
+  domain type for values that answer "which kind/status/mode/type?" rather than
+  a permanent yes/no question; a two-value union, enum, or equivalent domain type
+  now is usually cheaper than migrating an `isX` flag later.
 - Conventional Commits: `feat:`, `chore:`, `fix:`, `docs:`
 - Rebase feature branches onto main (linear history)
+- Enable `git rerere` (`git config --global rerere.enabled true`, plus
+  `rerere.autoupdate true` to auto-stage what it resolves) so conflict
+  resolutions are recorded and auto-replayed across repeated or long rebases
 - Fail fast: validate at boundaries, return/throw early
 - Minimize brace nesting: invert conditions, early returns
 - Use named constants, not string literals for domain values
@@ -60,6 +67,12 @@ details unless they are already public in the repository.
 - Avoid spread in loop accumulators (use `.push()`)
 - If you encounter a pre-existing bug or lint error while working on something else,
   fix it (separate commit)
+- Orchestrate across model tiers when your harness supports subagents and model
+  selection: delegate well-scoped, mechanical, or independently verifiable subtasks
+  (edits, searches, refactors, test runs) to a subagent on the cheapest model that
+  does them correctly; keep planning, cross-cutting design, security-sensitive work,
+  and final review on the primary model. If your tooling has no subagents or model
+  selection, ignore this.
 
 ## Design Principles
 
@@ -83,6 +96,28 @@ List endpoints should use cursor pagination and return the standard `Page<T>` en
 from `apps/api/src/lib/pagination.ts`:
 `{ items, nextCursor, limit }`. Offset pagination, `totalCount`, and unbounded lists
 require explicit justification.
+
+## Performance
+
+Performance regressions are guarded by committed baselines: a regression surfaces as
+a CI failure or a reviewable diff, never silently. The guards:
+
+- Per-route network baseline (`apps/web/e2e/network-baseline.json`): API request
+  manifest, waterfall depth, and per-endpoint DB query budgets, checked by the
+  route-smoke e2e suite.
+- Bundle-size budgets (`scripts/bundle-baseline.json`), enforced after the web build.
+- `require-loader-prefetch` oxlint rule: route suspense queries must start in the
+  route loader, not on component mount.
+- `x-db-queries` response header (dev/CI only): per-request DB query counter that
+  feeds the network baseline's query budgets.
+
+Fix the regression first. Reseeding a baseline (the route-smoke e2e suite run with
+`E2E_NETWORK_BASELINE=write` set, or `bun scripts/bundle-baseline.ts
+--write-baseline`) is a product decision that must
+be justified in the PR description; it is not a mechanical way to make CI green.
+Start route data in loaders (`ensureRouteQueryData`), batch DB work instead of
+growing a query budget, and tighten baselines after a perf fix. Full guidelines,
+failure playbook, and the current hotspot burn-down list in `/conventions-perf`.
 
 ## UX & Brand
 
@@ -129,6 +164,8 @@ Full brand deck, micro-interaction guidelines, and visual noise rules in
 - Prefer `useRouteContext` for data already provided by parent route loaders
   (`beforeLoad`) over firing a separate query. Extend the route context if needed
   rather than adding a query.
+- When a route loader only primes a TanStack Query cache, return `void` from it so its
+  return type stays out of the route tree and does not inflate type-inference cost.
 - Use `useSuspenseQuery` only in route/page content where the query is preloaded or
   wrapped by an explicit local `Suspense` boundary. In shared chrome (breadcrumbs,
   headers, toolbars, sidebar shell), prefer `useQuery` so a cache miss cannot suspend
@@ -136,6 +173,10 @@ Full brand deck, micro-interaction guidelines, and visual noise rules in
 - Always use `select` with `useParams`, `useSearch`, and `useRouteContext` to subscribe
   only to the fields the component needs. Without `select`, the component rerenders on
   any param/search/context change.
+- Pass `from` to `useParams`/`useSearch`/`Link` (or `strict: false` to `useParams`/
+  `useSearch` in shared chrome that spans routes) so types narrow from the full route
+  union to a single route. The unnarrowed union is both imprecise and expensive to
+  typecheck.
 - Use `useDebouncedCallback` from `use-debounce` instead of hand-rolling debounce with
   `useRef<setTimeout>` + manual `clearTimeout`. The library handles cleanup
   automatically.
@@ -172,6 +213,13 @@ Full brand deck, micro-interaction guidelines, and visual noise rules in
 - When a type mismatch appears, trace it to the source (e.g., the handler or query
   that produces the wrong type) rather than casting at the consumer. Check git to
   verify you did not introduce the mismatch yourself before blaming the framework.
+- Never annotate or cast a value the compiler already infers, and never pass explicit
+  type arguments to inference-driven hooks (`useLoaderData<T>()`, `useQuery<T>()`, Eden
+  calls). Every annotation or explicit generic masks real errors and breaks the
+  inference chain; let inference flow and narrow at the boundary instead.
+- Validate object literals against a large union type (route, link, query options) with
+  `as const satisfies T`, not a `: T` annotation. `satisfies` checks the value without
+  widening it or paying the annotation's instantiation cost.
 - Use `.at(0)` when the element may not exist (signals possible absence). Use `[0]`
   only when existence is already established (length check, or a `// SAFETY:` comment).
 - Prefer arrow functions over function expressions
@@ -196,6 +244,9 @@ Full brand deck, micro-interaction guidelines, and visual noise rules in
 - If a return type is noisy enough to hurt readability, hoist it into a nearby alias
   such as `SomethingResult` and use it in the signature (e.g., `SomethingResult` or
   `Promise<SomethingResult>`). If the return type is simple, keep it inline.
+- Watch type-instantiation cost in hot generic paths (route trees, query options, Eden
+  surfaces): prefer narrowing (`satisfies`, route `from`, query `select`) over
+  annotation, and keep large unused types out of inferred return positions.
 
 ### Module Side Effects
 
@@ -363,3 +414,34 @@ The `stella-docs` MCP server provides on-demand access to library documentation 
 `WebSearch` directly.
 
 **Setup:** run `bun run setup:mcp` once after cloning.
+
+## Cursor Cloud specific instructions
+
+The base VM already has Bun (`~/.bun/bin`, on `PATH` via `~/.bashrc`) and Docker
+installed; the startup update script runs `bun install`. Standard commands live in
+`README.md`, `CONTRIBUTING.md`, and root `package.json` scripts; the notes below are
+only the non-obvious caveats for this environment.
+
+- **Start the Docker daemon first.** There is no systemd auto-start here, so `docker`
+  commands fail until the daemon runs. Start it once per session in the background
+  (e.g. `sudo dockerd` in a tmux session) and confirm with `docker ps`. The daemon is
+  configured with the `fuse-overlayfs` storage driver and iptables-legacy for
+  docker-in-docker.
+- **Run everything with `bun run dev --no-browser`.** The dev-runner
+  (`packages/scripts/src/dev-runner.ts`) brings up the Docker infra (Postgres 5432,
+  Valkey 6379, MinIO 9000/9001, Gotenberg 3003), copies `apps/{api,web}/.env` from
+  `.env.example`, applies DB migrations, and starts the API (3001) and web (3000). It
+  exits if any child dies, so a single background process covers the whole stack. Use
+  `bun run dev:api` or `bun run dev:web` for a focused loop.
+- **Auth is passwordless email OTP; no SMTP catcher runs.** `EMAIL_PROVIDER=smtp`
+  points at `localhost:1025`, which is not running, so verification emails are not
+  delivered. In dev the OTP is printed to the API log as
+  `[DEV] OTP for <email>: <code>` and is also fetchable via
+  `GET http://localhost:3001/dev-public/last-otp?email=<email>` (dev-only, 404 in
+  prod). Use the log line to complete sign-in/sign-up when testing.
+- **Mock AI is on by default** (`USE_MOCK_AI="true"` in `apps/api/.env.example`), so no
+  AI provider key is needed for local runs.
+- **`bun run verify` / `sync-ai:check` need the `.ai/shared` submodule.** It is not part
+  of the base checkout; run `git submodule update --init .ai/shared` first, otherwise
+  the "AI skill sync" step errors out.
+- Optional demo data: `bun --filter @stll/api db:seed-test-user` and `db:seed-dev`.

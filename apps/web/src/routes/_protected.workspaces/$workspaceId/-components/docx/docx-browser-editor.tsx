@@ -5,7 +5,7 @@
 
 import {
   useCallback,
-  useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -26,17 +26,17 @@ import type { EditorView } from "prosemirror-view";
 import { useTranslations } from "use-intl";
 
 import {
-  DocxEditor,
+  FolioUIProvider,
   FormattingBar,
   setAnonymizationTermsMeta,
-} from "@stll/folio";
+} from "@stll/folio-react";
 import type {
   AnonymizationTerm,
   DocxCompatibility,
   DocxEditorCollaboration,
   DocxEditorRef,
   EditorMode,
-} from "@stll/folio";
+} from "@stll/folio-react";
 import { Button } from "@stll/ui/components/button";
 import {
   Select as StSelect,
@@ -49,30 +49,32 @@ import { stellaToast } from "@stll/ui/components/toast";
 
 import { useActiveDocxStore } from "@/components/ai-suggestions/active-docx-store";
 import type { ActiveDocxRegistrationToken } from "@/components/ai-suggestions/active-docx-store";
-import "@stll/folio/editor.css";
-
 import { FileViewerWithAI } from "@/components/ai-suggestions/file-viewer-with-ai";
+import "@stll/folio-react/editor.css";
+
 import { useAutocompleteStream } from "@/components/autocomplete/use-autocomplete-stream";
 import {
   useDocxFitZoom,
   useDocxWheelZoom,
 } from "@/components/docx-preview-zoom";
+import { DocxEditor } from "@/components/docx/app-docx-editor";
+import type { DocxComments } from "@/components/docx/app-docx-editor";
 import { QuerySuspenseBoundary } from "@/components/query-suspense-boundary";
 import { StatusMessage } from "@/components/route-components";
 import Tooltip from "@/components/tooltip";
 import { env } from "@/env";
 import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
 import { anonymizeChatTextInWorker } from "@/lib/anonymize/anonymize-chat-worker-client";
+import { folioUIComponents } from "@/lib/folio-ui-components";
 import { composeRefs } from "@/lib/slot";
 import { DocxLoadingShell } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-loading-shell";
 import { useDocxBlockScroll } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/use-docx-block-scroll";
 import { useFolioCollaborationSession } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/use-folio-collaboration-session";
 import { fileOptions } from "@/routes/_protected.workspaces/$workspaceId/-components/files/queries";
-import { useIsAnonymizationActive } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/anonymization-active-store";
-import { useAnonymizationMatchesStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/anonymization-matches-store";
-import { useAnonymizationSelectionStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/anonymization-selection-store";
-import { useDocumentTextSelectionStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/document-text-selection-store";
-import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
+import {
+  useInspectorStore,
+  useIsAnonymizationActive,
+} from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
 import { anonymizationAllowlistOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/anonymization-allowlist";
 import { anonymizationTermsOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/anonymization-terms";
 import "@/routes/_protected.workspaces/$workspaceId/-components/peek/peek-docx.css";
@@ -254,8 +256,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
   // the allowlist changes, instead of waiting for the next 2s
   // heartbeat tick.
   const runDetectionRef = useRef<(() => void) | null>(null);
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- timer/wasm-pipeline subscription that also drives React + store state (setDetectedAnonymizationTerms, markPipelineStarted); candidate for useExternalSyncEffect after the state writes are factored out
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     const view = editorViewForAnonymization;
     if (!view || !isAnonymizationActive) {
       // Facet not on screen: skip the wasm pipeline entirely and
@@ -269,11 +270,11 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     // inspector facet shows "Detecting entities…" right
     // away instead of flashing "0 entities" during the
     // 300ms gap before the first `run()` fires (and
-    // before that run can call `markPipelineStarted`
+    // before that run can call `markAnonymizationPipelineStarted`
     // itself). The first `run()` also calls it again
     // (idempotent set-add); subsequent runs flip it on
     // around each worker call.
-    useAnonymizationMatchesStore.getState().markPipelineStarted(fieldId);
+    useInspectorStore.getState().markAnonymizationPipelineStarted(fieldId);
     // Track the text+exclusions we received *results* for (not
     // just dispatched). The worker can occasionally drop a
     // request across dev HMR (the singleton's pending map loses
@@ -292,7 +293,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     let inFlightUntil = 0;
     const IN_FLIGHT_TIMEOUT_MS = 10_000;
     const markRan = () =>
-      useAnonymizationMatchesStore.getState().markPipelineRan(fieldId);
+      useInspectorStore.getState().markAnonymizationPipelineRan(fieldId);
     const run = () => {
       if (cancelled) {
         return;
@@ -340,8 +341,8 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
       inFlightUntil = Date.now() + IN_FLIGHT_TIMEOUT_MS;
       // (Re-)mark started: handles reruns triggered by
       // edits or allowlist changes after the first run
-      // already called `markPipelineRan`.
-      useAnonymizationMatchesStore.getState().markPipelineStarted(fieldId);
+      // already called `markAnonymizationPipelineRan`.
+      useInspectorStore.getState().markAnonymizationPipelineStarted(fieldId);
       anonymizeChatTextInWorker({
         text,
         workspaceId,
@@ -407,8 +408,8 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
   // sees fresh exclusions without re-installing its heartbeat on
   // every keystroke / mutation.
   const excludedCanonicalsRef = useRef<readonly string[]>([]);
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived state synced into a ref plus an event-relay poke of runDetectionRef; compute in render / move into the allowlist mutation handler
-  useEffect(() => {
+  useExternalSyncEffect(() => {
+    // eslint-disable-next-line react/react-compiler -- not a state mutation: assigns a freshly-spread copy to a latest-ref mirror the polling effect reads; the compiler's immutability heuristic misfires on ref writes inside effects
     excludedCanonicalsRef.current = [...excludedCanonicalsSet];
     // Kick the detection right away so worker-found terms that
     // the user just added to the allowlist disappear without
@@ -465,21 +466,24 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
   // workspace terms" list stay in sync.
   const handleAnonymizationMatchesChange = useCallback(
     (matches: readonly { canonical: string; label: string }[]) => {
-      const { publish } = useAnonymizationMatchesStore.getState();
+      const { publishAnonymizationMatches } = useInspectorStore.getState();
       if (!isAnonymizationActive) {
         return;
       }
-      publish(fieldId, aggregateAnonymizationMatches(matches));
+      publishAnonymizationMatches(
+        fieldId,
+        aggregateAnonymizationMatches(matches),
+      );
     },
     [fieldId, isAnonymizationActive],
   );
   useExternalSyncEffect(() => {
-    const { clear } = useAnonymizationMatchesStore.getState();
+    const { clearAnonymizationMatches } = useInspectorStore.getState();
     if (!isAnonymizationActive) {
-      clear(fieldId);
+      clearAnonymizationMatches(fieldId);
     }
     return () => {
-      clear(fieldId);
+      clearAnonymizationMatches(fieldId);
     };
   }, [fieldId, isAnonymizationActive]);
 
@@ -498,13 +502,15 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
       if (single.length < 2 || single.length > 200) {
         return;
       }
-      useDocumentTextSelectionStore.getState().publish(fieldId, single);
+      useInspectorStore
+        .getState()
+        .publishDocumentTextSelection(fieldId, single);
     },
     [fieldId],
   );
   useExternalSyncEffect(
     () => () => {
-      useDocumentTextSelectionStore.getState().clear(fieldId);
+      useInspectorStore.getState().clearDocumentTextSelection(fieldId);
     },
     [fieldId],
   );
@@ -521,17 +527,23 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
   //   that would re-scroll on its own click.
   const handleAnonymizationTermClick = useCallback(
     (canonical: string, label: string) => {
-      useAnonymizationSelectionStore
+      useInspectorStore
         .getState()
-        .select(canonical, label, "doc", fieldId);
+        .selectAnonymizationTerm(canonical, label, "doc", fieldId);
     },
     [fieldId],
   );
-  const sidebarSelectedCanonical = useAnonymizationSelectionStore((s) =>
-    s.source === "sidebar" && s.fieldId === fieldId ? s.canonical : null,
+  const sidebarSelectedCanonical = useInspectorStore((s) =>
+    s.anonymizationSelection.source === "sidebar" &&
+    s.anonymizationSelection.fieldId === fieldId
+      ? s.anonymizationSelection.canonical
+      : null,
   );
-  const sidebarSelectionSeq = useAnonymizationSelectionStore((s) =>
-    s.source === "sidebar" && s.fieldId === fieldId ? s.seq : 0,
+  const sidebarSelectionSeq = useInspectorStore((s) =>
+    s.anonymizationSelection.source === "sidebar" &&
+    s.anonymizationSelection.fieldId === fieldId
+      ? s.anonymizationSelection.seq
+      : 0,
   );
   const didOpenRef = useRef(false);
   const pendingEditRequestRef = useRef(false);
@@ -562,6 +574,20 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
       : null;
   const [autosaveStatus, setAutosaveStatus] =
     useState<AutosaveStatus>("synced");
+  // Controlled `DocxEditor` comment state, round-tripped back through
+  // `onCommentsChange`. Feeds the file-chat overlay's folio-agents comment
+  // tools (read/add/reply/resolve) via `FileViewerWithAI`, and lets those
+  // mutations (reply / resolve) flow back into the editor. Reset when the
+  // loaded document changes (see `docxCommentsDocId` below) so a new file
+  // never briefly renders the previous file's comments.
+  const [docxComments, setDocxComments] = useState<DocxComments>([]);
+  const [docxCommentsDocId, setDocxCommentsDocId] = useState<string | null>(
+    null,
+  );
+  const [
+    pendingInitialDocxCommentsSyncDocId,
+    setPendingInitialDocxCommentsSyncDocId,
+  ] = useState<string | null>(null);
   const { containerRef: fitZoomRef, fitZoom: targetZoom } = useDocxFitZoom({
     scaleOffset,
     maxAutoZoom: 0.85,
@@ -573,16 +599,17 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     [fitZoomRef],
   );
   const t = useTranslations();
-  const previewPlaceholder =
-    optimisticPreviewRef.current?.fieldId === fieldId
-      ? optimisticPreviewRef.current.file
-      : undefined;
+  /* eslint-disable react/react-compiler -- optimistic preview carried across the finalize→refetch window in a mutable ref; reading it during render to seed this render's query placeholder is intentional editor glue (converting to state would add finalize-time re-renders) */
+  const optimisticPreview = optimisticPreviewRef.current;
+  const previewPlaceholderData =
+    optimisticPreview?.fieldId === fieldId
+      ? optimisticPreview.file
+      : keepPreviousData;
   const previewFileQuery = useQuery({
     ...fileOptions({ workspaceId, fieldId, purpose: "native-display" }),
-    ...(previewPlaceholder !== undefined
-      ? { placeholderData: previewPlaceholder }
-      : { placeholderData: keepPreviousData }),
+    placeholderData: previewPlaceholderData,
   });
+  /* eslint-enable react/react-compiler */
   const canAutoRequestCollaboration =
     isEditing &&
     !previewFileQuery.isPlaceholderData &&
@@ -610,13 +637,15 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     throw previewFileQuery.error;
   }
 
+  /* eslint-disable react/react-compiler -- optimisticPreview holds a mutable ref value read during render (see above); passing it to selectPreviewFile to pick this render's preview is intentional editor glue */
   const previewFile = previewFileQuery.data
     ? selectPreviewFile({
         file: previewFileQuery.data,
-        optimisticPreview: optimisticPreviewRef.current,
+        optimisticPreview,
         fieldId,
       })
     : null;
+  /* eslint-enable react/react-compiler */
 
   const {
     state,
@@ -690,8 +719,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     t,
   ]);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id, clears refs + setCompatibilityState when the edit target changes; lift to a key prop
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (optimisticPreviewRef.current?.fieldId === fieldId) {
       return;
     }
@@ -768,8 +796,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     state.status,
   ]);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay, fires the queued requestEditMode once compatibility/state resolve; move into the resolution callback
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (!pendingEditRequestRef.current) {
       return;
     }
@@ -787,8 +814,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
 
   // Auto-open when this component is used as a direct editor, or when the
   // preview is explicitly unlocked from the shell toolbar.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay, opens the edit session when preconditions resolve; move into the resolution/unlock callbacks
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (!isEditing || previewFile === null || didOpenRef.current) {
       return;
     }
@@ -820,8 +846,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     state.status,
   ]);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived ref bookkeeping from the isEditing prop; compute in render / handler
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (!isEditing) {
       didOpenRef.current = false;
     }
@@ -833,8 +858,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
   useDocxWheelZoom(containerRef, editorRef);
   useDocxBlockScroll({ editorRef, fieldId });
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay, surfaces an error toast + onClose/resetError on error state; move into the failure path
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (
       state.status !== "error" ||
       (state.source !== "open" && state.source !== "download") ||
@@ -856,8 +880,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
   const isUnlocked = isCollaborativeEditing || state.status === "editing";
   const wasUnlockedRef = useRef(false);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay, notifies the parent onUnlockedChange callback when isUnlocked changes; lift state to the parent or move into the lock/unlock handlers
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     onUnlockedChange?.(isUnlocked);
   }, [isUnlocked, onUnlockedChange]);
 
@@ -875,31 +898,34 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
   // tear down + re-create the registration on every toggle,
   // invalidating the token contract documented above.
   useExternalSyncEffect(() => {
-    const token = useActiveDocxStore.getState().registerEditor(entityId, {
-      editorRef,
-      requestEditMode,
-      editable: isUnlocked,
-    });
+    const token = useActiveDocxStore
+      .getState()
+      .registerEditor(entityId, fieldId, {
+        editorRef,
+        requestEditMode,
+        editable: isUnlocked,
+      });
     tokenRef.current = token;
     return () => {
-      useActiveDocxStore.getState().unregisterEditor(entityId, token);
+      useActiveDocxStore.getState().unregisterEditor(entityId, fieldId, token);
       if (tokenRef.current === token) {
         tokenRef.current = null;
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `isUnlocked` deliberately excluded; see block comment above.
-  }, [entityId, requestEditMode]);
+  }, [entityId, fieldId, requestEditMode]);
 
   useExternalSyncEffect(() => {
     const token = tokenRef.current;
     if (token === null) {
       return;
     }
-    useActiveDocxStore.getState().updateEditable(entityId, isUnlocked, token);
-  }, [entityId, isUnlocked]);
+    useActiveDocxStore
+      .getState()
+      .updateEditable(entityId, fieldId, isUnlocked, token);
+  }, [entityId, fieldId, isUnlocked]);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- mixes a DOM focus/rAF imperative with setAutosaveStatus + ref bookkeeping on first unlock; candidate for useExternalSyncEffect once the state write is factored out
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (!isUnlocked) {
       wasUnlockedRef.current = false;
       setAutosaveStatus("synced");
@@ -948,7 +974,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
         }),
       );
     })();
-  }, [saveActiveCheckpoint]);
+  }, [saveActiveCheckpoint, setAutosaveStatus]);
 
   // Awaitable variant of `saveChangeCheckpoint` for callers that
   // need to wait for the round-trip before navigating (e.g. the
@@ -969,7 +995,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
         checkpointSaved,
       }),
     );
-  }, [clearQueuedChangeCheckpoint, saveActiveCheckpoint]);
+  }, [clearQueuedChangeCheckpoint, saveActiveCheckpoint, setAutosaveStatus]);
 
   // Cmd+S / Ctrl+S checkpoints only while the document is actively editable.
   useExternalSyncEffect(() => {
@@ -1039,7 +1065,28 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     isUnlocked,
     markDirty,
     scheduleChangeCheckpointSave,
+    setAutosaveStatus,
   ]);
+
+  const handleAiDocxCommentsChange = (comments: DocxComments) => {
+    setPendingInitialDocxCommentsSyncDocId(null);
+    setDocxComments(comments);
+    handleChange();
+  };
+
+  const handleEditorDocxCommentsChange = (comments: DocxComments) => {
+    const isInitialEditorSync = pendingInitialDocxCommentsSyncDocId !== null;
+    setPendingInitialDocxCommentsSyncDocId(null);
+    const commentsChanged =
+      JSON.stringify(docxComments) !== JSON.stringify(comments);
+    setDocxComments(comments);
+    if (isInitialEditorSync) {
+      return;
+    }
+    if (commentsChanged) {
+      handleChange();
+    }
+  };
 
   const handleFinalize = useCallback(async () => {
     // Save the final version before finalizing
@@ -1161,8 +1208,10 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     isDirty,
     onClose,
     onSaved,
+    optimisticPreviewRef,
     previewFile,
     saveActiveCheckpoint,
+    setAutosaveStatus,
     t,
   ]);
 
@@ -1235,10 +1284,42 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     void handleFinalize();
   }, [handleFinalize, handleUnlock, isUnlocked]);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- wires imperative action handles into parent-provided refs/map (a registry relay), not external-system sync; consider an imperative handle / ref callback
-  useEffect(() => {
-    const actionsMap = actionsMapRef?.current;
-    const actions: DocxBrowserEditorActions = {
+  // Registers this render's action handles into the parent-provided ref
+  // and/or keyed map. Wrapped in useCallback (stable unless actionsKey /
+  // actionsMapRef / actionsRef change) so useImperativeHandle only
+  // re-attaches for those changes or for its own dep list below.
+  const registerActions = useCallback(
+    (actions: DocxBrowserEditorActions | null) => {
+      if (!actions) {
+        return undefined;
+      }
+      const actionsMap = actionsMapRef?.current;
+      if (actionsRef) {
+        actionsRef.current = actions;
+      }
+      if (actionsMap && actionsKey) {
+        actionsMap.set(actionsKey, actions);
+      }
+
+      return () => {
+        if (actionsRef?.current === actions) {
+          actionsRef.current = null;
+        }
+        if (
+          actionsMap &&
+          actionsKey &&
+          actionsMap.get(actionsKey) === actions
+        ) {
+          actionsMap.delete(actionsKey);
+        }
+      };
+    },
+    [actionsKey, actionsMapRef, actionsRef],
+  );
+
+  useImperativeHandle(
+    registerActions,
+    () => ({
       cancel: handleCancel,
       finalize: () => {
         if (isCollaborativeEditing || state.status === "editing") {
@@ -1252,50 +1333,35 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
       unlock: () => {
         void requestEditMode();
       },
-    };
-
-    if (actionsRef) {
-      actionsRef.current = actions;
-    }
-    if (actionsMap && actionsKey) {
-      actionsMap.set(actionsKey, actions);
-    }
-
-    return () => {
-      if (actionsRef?.current === actions) {
-        actionsRef.current = null;
-      }
-      if (actionsMap && actionsKey && actionsMap.get(actionsKey) === actions) {
-        actionsMap.delete(actionsKey);
-      }
-    };
-  }, [
-    actionsKey,
-    actionsMapRef,
-    actionsRef,
-    flushPendingChanges,
-    handleCancel,
-    handleFinalize,
-    isCollaborativeEditing,
-    requestEditMode,
-    state.status,
-  ]);
+    }),
+    [
+      flushPendingChanges,
+      handleCancel,
+      handleFinalize,
+      isCollaborativeEditing,
+      requestEditMode,
+      state.status,
+    ],
+  );
 
   // Hold the last editing buffer so the editor doesn't swap to the
   // preview buffer during the save transition (`state` becomes
   // "saving" with no buffer of its own). Without this we'd reload the
   // editor against `previewFile.buffer` for the few hundred ms before
   // the parent unmounts us — and the Stella fallback would flash.
+  /* eslint-disable react/react-compiler -- buffers preserved across the save transition in refs (so the editor doesn't swap to the preview buffer mid-save); reading their current values to pick this render's editor buffer, then latching this render's buffer for the next render, is intentional editor glue that must happen during render */
+  const preservedLoadedBufferSnapshot = preservedLoadedBufferRef.current;
   const preservedLoadedBuffer =
-    preservedLoadedBufferRef.current?.fieldId === fieldId
-      ? preservedLoadedBufferRef.current.buffer
+    preservedLoadedBufferSnapshot?.fieldId === fieldId
+      ? preservedLoadedBufferSnapshot.buffer
       : null;
+  const lastEditingBuffer = lastEditingBufferRef.current;
   const collaborationSeedBuffer =
     collaborationSession?.seedDocumentBuffer ?? null;
   const editorBuffer = selectDocxBrowserEditorBuffer({
     collaborationSeedBuffer,
     isCollaborativeEditing,
-    lastEditingBuffer: lastEditingBufferRef.current,
+    lastEditingBuffer,
     preservedLoadedBuffer,
     previewBuffer: previewFile?.buffer,
     state,
@@ -1307,6 +1373,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     lastEditingBufferRef.current = editorBuffer;
     preservedLoadedBufferRef.current = null;
   }
+  /* eslint-enable react/react-compiler */
 
   const finishEditingLabel = t("folio.finishEditing");
 
@@ -1346,8 +1413,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     return undefined;
   })();
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived state, resets editorMode from the isUnlocked flag; compute in render
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (!isUnlocked) {
       setEditorMode("editing");
     }
@@ -1355,7 +1421,7 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
 
   useLayoutEffect(() => {
     const styleLabelElement = containerRef.current?.querySelector<HTMLElement>(
-      '[data-folio-style-picker] [data-slot="select-value"]',
+      '.folio-style-picker [data-slot="select-value"]',
     );
     if (!styleLabelElement) {
       return;
@@ -1427,14 +1493,19 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     );
   }
 
+  // eslint-disable-next-line react/react-compiler -- last style-picker label kept in a ref so the loading fallback shows the previous label instead of flashing empty; reading it during render is intentional
+  const lastStyleLabel = lastStyleLabelRef.current;
+  // eslint-disable-next-line react/react-compiler -- last style-picker label style kept in a ref for the same anti-flash reason; reading it during render is intentional
+  const lastStyleLabelStyle = lastStyleLabelStyleRef.current;
+
   if (previewFile === null || editorBuffer === undefined) {
     return (
       <DocxEditorLoadingFallback
         label={t("folio.loadingDocument")}
         scaleOffset={scaleOffset}
         showActionBar={showActionBar}
-        stylePickerLabel={lastStyleLabelRef.current}
-        stylePickerLabelStyle={lastStyleLabelStyleRef.current}
+        stylePickerLabel={lastStyleLabel}
+        stylePickerLabelStyle={lastStyleLabelStyle}
         toolbarExtra={toolbarExtra}
         zoom={targetZoom}
       />
@@ -1443,6 +1514,16 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
 
   const previewIdentity = previewFile.fileId;
   const collaborationIdentity = collaborationSession?.sessionId ?? "local";
+
+  // Reset the controlled comment state when the loaded document changes.
+  // Adjust-state-during-render (not an effect) so the freshly-keyed DocxEditor
+  // never mounts with the previous file's comments; the new editor re-emits its
+  // own parsed comments through `onCommentsChange` on mount.
+  if (docxCommentsDocId !== previewIdentity) {
+    setDocxCommentsDocId(previewIdentity);
+    setDocxComments([]);
+    setPendingInitialDocxCommentsSyncDocId(previewIdentity);
+  }
 
   return (
     <div
@@ -1470,8 +1551,10 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
             fileFieldId: fieldId,
             fileName: previewFile.fileName,
           }}
+          docxComments={docxComments}
           docxEditable={isUnlocked}
           docxEditorRef={editorRef}
+          onDocxCommentsChange={handleAiDocxCommentsChange}
           requestDocxEditMode={requestEditMode}
           workspaceId={workspaceId}
         >
@@ -1480,7 +1563,10 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
             ref={editorRef}
             autoOpenReviewSidebar={false}
             className="folio-docx-preview folio-peek h-full"
+            comments={docxComments}
+            onCommentsChange={handleEditorDocxCommentsChange}
             documentBuffer={editorBuffer}
+            documentKey={previewIdentity}
             initialZoom={targetZoom}
             mode={isUnlocked ? editorMode : "viewing"}
             onModeChange={(mode) => {
@@ -1519,8 +1605,8 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
                 label={t("folio.loadingDocument")}
                 scaleOffset={scaleOffset}
                 showActionBar={showActionBar}
-                stylePickerLabel={lastStyleLabelRef.current}
-                stylePickerLabelStyle={lastStyleLabelStyleRef.current}
+                stylePickerLabel={lastStyleLabel}
+                stylePickerLabelStyle={lastStyleLabelStyle}
                 toolbarExtra={toolbarExtra}
                 zoom={targetZoom}
               />
@@ -1587,8 +1673,7 @@ const useDocxBrowserCollaboration = ({
     },
     workspaceId,
   });
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived/reset state, resyncs requestState from props (initiallyRequested, targetKey); compute in render / lift to a key prop
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     setRequestState({ requested: initiallyRequested, targetKey });
   }, [initiallyRequested, targetKey]);
   const collaborationSession =
@@ -1714,19 +1799,21 @@ const DocxLoadingToolbar = ({
 
   return (
     <div className="pointer-events-none z-50 flex shrink-0 flex-col gap-0 bg-[var(--doc-page)] [&_[data-slot=select-trigger]:focus-visible]:ring-0 [&_[data-slot=select-trigger]:hover]:!bg-transparent [&_[data-slot=select-trigger][data-pressed]]:!bg-transparent [&_button:active]:!bg-transparent [&_button:focus-visible]:ring-0 [&_button:hover]:!bg-transparent [&_button[data-pressed]]:!bg-transparent [&_button[data-pressed]]:shadow-none">
-      <FormattingBar
-        canRedo={false}
-        canUndo={false}
-        currentFormatting={{}}
-        onFormat={noop}
-        onRedo={noop}
-        onUndo={noop}
-        priorityExtra={<DocxLoadingPriorityExtra />}
-        stylePickerLabel={stylePickerLabel}
-        stylePickerLabelStyle={stylePickerLabelStyle}
-      >
-        {toolbarExtra}
-      </FormattingBar>
+      <FolioUIProvider components={folioUIComponents}>
+        <FormattingBar
+          canRedo={false}
+          canUndo={false}
+          currentFormatting={{}}
+          onFormat={noop}
+          onRedo={noop}
+          onUndo={noop}
+          priorityExtra={<DocxLoadingPriorityExtra />}
+          stylePickerLabel={stylePickerLabel}
+          stylePickerLabelStyle={stylePickerLabelStyle}
+        >
+          {toolbarExtra}
+        </FormattingBar>
+      </FolioUIProvider>
     </div>
   );
 };

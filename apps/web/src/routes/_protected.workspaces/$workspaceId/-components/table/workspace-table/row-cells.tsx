@@ -3,7 +3,7 @@ import type React from "react";
 
 import { draggable } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
 import { setCustomNativeDragPreview } from "@atlaskit/pragmatic-drag-and-drop/element/set-custom-native-drag-preview";
-import { flexRender } from "@tanstack/react-table";
+import { flexRender, type RowSelectionState } from "@tanstack/react-table";
 import {
   row_getIsExpanded,
   row_getIsSelected,
@@ -20,6 +20,8 @@ import { cn } from "@stll/ui/lib/utils";
 import { renderDragPreview } from "@/components/drag-preview";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
+import { toSafeId } from "@/lib/safe-id";
+import type { PropertyId } from "@/lib/types";
 import { ENTITY_DRAG_TYPE } from "@/routes/_protected.workspaces/$workspaceId/-components/drag-constants";
 import { InlineEdit } from "@/routes/_protected.workspaces/$workspaceId/-components/inline-edit";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
@@ -73,16 +75,15 @@ const shouldIgnoreRowExpansionClick = (target: EventTarget) => {
   );
 };
 
-const getContextPropertyId = (target: EventTarget) => {
+const getContextPropertyId = (target: EventTarget): PropertyId | null => {
   if (!(target instanceof HTMLElement)) {
     return null;
   }
 
-  return (
-    target.closest<HTMLElement>("[data-table-property-id]")?.dataset[
-      "tablePropertyId"
-    ] ?? null
-  );
+  const propertyId = target.closest<HTMLElement>("[data-table-property-id]")
+    ?.dataset["tablePropertyId"];
+
+  return propertyId ? toSafeId<"property">(propertyId) : null;
 };
 
 type ActiveCellFlashInput = {
@@ -213,12 +214,14 @@ export const DraggableRow = ({
     },
     [measureElement],
   );
-  const bulkEntitiesRef = useRef<TableTreeNode[] | undefined>(undefined);
+  const [bulkEntities, setBulkEntities] = useState<TableTreeNode[] | undefined>(
+    undefined,
+  );
   const [contextOpen, setContextOpen] = useState(false);
   const [contextAnchor, setContextAnchor] = useState<VirtualAnchor | null>(
     null,
   );
-  const [contextPropertyId, setContextPropertyId] = useState<string | null>(
+  const [contextPropertyId, setContextPropertyId] = useState<PropertyId | null>(
     null,
   );
   const entity = row.original;
@@ -271,7 +274,7 @@ export const DraggableRow = ({
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    bulkEntitiesRef.current = getBulkSelectedEntities();
+    setBulkEntities(getBulkSelectedEntities());
     setContextPropertyId(getContextPropertyId(e.target));
     setContextAnchor({
       getBoundingClientRect: () => new DOMRect(e.clientX, e.clientY, 0, 0),
@@ -333,18 +336,18 @@ export const DraggableRow = ({
       entity={entity}
       onOpenChange={(open) => {
         if (open) {
-          bulkEntitiesRef.current = getBulkSelectedEntities();
+          setBulkEntities(getBulkSelectedEntities());
         }
         setContextOpen(open);
         if (!open) {
           setContextAnchor(null);
           setContextPropertyId(null);
-          bulkEntitiesRef.current = undefined;
+          setBulkEntities(undefined);
         }
       }}
       onRename={isFolder ? () => onStartEditing(entity.entityId) : undefined}
       open={contextOpen}
-      selectedEntities={contextOpen ? bulkEntitiesRef.current : undefined}
+      selectedEntities={contextOpen ? bulkEntities : undefined}
       cellMetadataTarget={
         contextPropertyId
           ? {
@@ -450,6 +453,7 @@ export const DraggableRow = ({
         data-index={virtualIndex}
         data-state={row_getIsSelected(row) ? "selected" : undefined}
         key={row.id}
+        // eslint-disable-next-line react/react-compiler -- containedHandler house pattern; rowRef is handed to the helper, not read for rendered output
         onClick={containedHandler(rowRef, handleRowClick)}
         onContextMenu={handleContextMenu}
         ref={setRowRef}
@@ -629,7 +633,12 @@ const DataRowCells = ({
     const canExpandCell = !isSelectCell && !isAddPropertyCell;
     const canFlagCell = canExpandCell && !cell.column.id.startsWith("_");
     const isExpandedCell = expandedCellId === cell.column.id;
-    const fieldContent = cell.row.original.fields[cell.column.id]?.content;
+    const propertyId = canFlagCell
+      ? toSafeId<"property">(cell.column.id)
+      : null;
+    const fieldContent = propertyId
+      ? cell.row.original.fields[propertyId]?.content
+      : undefined;
     const isExpandedTextCell = isExpandedCell && fieldContent?.type === "text";
 
     return (
@@ -712,7 +721,7 @@ const SelectRowContent = ({
       const start = Math.min(lastSelectedIndex.current, index);
       const end = Math.max(lastSelectedIndex.current, index);
       const rows = table.getRowModel().rows;
-      const patch: Record<string, boolean> = {};
+      const patch: RowSelectionState = {};
       for (let i = start; i <= end; i++) {
         const r = rows[i];
         if (r) {
@@ -726,6 +735,7 @@ const SelectRowContent = ({
     } else {
       row.toggleSelected();
     }
+    // eslint-disable-next-line react/react-compiler -- lastSelectedIndex is a RefObject prop; writing `.current` is the intended ref write (shared with the parent), not a prop mutation
     lastSelectedIndex.current = index;
   };
 

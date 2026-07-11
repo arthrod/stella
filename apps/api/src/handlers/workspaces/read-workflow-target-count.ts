@@ -9,6 +9,7 @@ import { countWorkflowTargetEntities } from "@/api/lib/workflow-target-queries";
 
 const config = {
   permissions: { workspace: ["update"] },
+  mcp: { type: "capability", reason: "workflow_orchestration" },
   body: t.Object({
     entityIds: t.Optional(t.Array(tSafeId("entity"))),
   }),

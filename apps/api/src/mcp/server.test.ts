@@ -1,9 +1,12 @@
 import type {
   CallToolResult,
   Tool as McpTool,
+  ReadResourceResult,
+  Resource,
 } from "@modelcontextprotocol/sdk/types.js";
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 
+import { STELLA_CLI_LATEST_VERSION } from "@/api/mcp/constants";
 import {
   McpAuthenticationError,
   McpOrganizationAccessError,
@@ -21,6 +24,8 @@ const getMcpToolScopeHintMock = mock(
 );
 const handleMcpToolCallMock = mock();
 const listMcpToolsMock = mock(async (): Promise<McpTool[]> => []);
+const listMcpResourcesMock = mock((): Resource[] => []);
+const readMcpResourceMock = mock((): ReadResourceResult => ({ contents: [] }));
 
 const handleMcpHttpRequest = createMcpHttpRequestHandler({
   authenticateMcpRequest: authenticateMcpRequestMock,
@@ -30,7 +35,9 @@ const handleMcpHttpRequest = createMcpHttpRequestHandler({
   getMcpToolDefinition: getMcpToolDefinitionMock,
   getMcpToolScopeHint: getMcpToolScopeHintMock,
   handleMcpToolCall: handleMcpToolCallMock,
+  listMcpResources: listMcpResourcesMock,
   listMcpTools: listMcpToolsMock,
+  readMcpResource: readMcpResourceMock,
   resolveMcpSessionContext: resolveMcpSessionContextMock,
 });
 
@@ -44,6 +51,35 @@ const createMcpRequest = (body: unknown) =>
     },
     method: "POST",
   });
+
+type UnknownToolErrorEnvelope = {
+  error: {
+    code: string;
+    hint: string;
+  };
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const parseUnknownToolErrorEnvelope = (
+  text: string,
+): UnknownToolErrorEnvelope | undefined => {
+  const payload: unknown = JSON.parse(text);
+  if (!isRecord(payload)) {
+    return undefined;
+  }
+  const error = payload["error"];
+  if (!isRecord(error)) {
+    return undefined;
+  }
+  const code = error["code"];
+  const hint = error["hint"];
+  if (typeof code !== "string" || typeof hint !== "string") {
+    return undefined;
+  }
+  return { error: { code, hint } };
+};
 
 type McpJsonResponse<TResult> = {
   id: number;
@@ -63,6 +99,10 @@ describe("handleMcpHttpRequest", () => {
     handleMcpToolCallMock.mockReset();
     listMcpToolsMock.mockReset();
     listMcpToolsMock.mockImplementation(async () => []);
+    listMcpResourcesMock.mockReset();
+    listMcpResourcesMock.mockImplementation(() => []);
+    readMcpResourceMock.mockReset();
+    readMcpResourceMock.mockImplementation(() => ({ contents: [] }));
     resolveMcpSessionContextMock.mockReset();
   });
 
@@ -180,6 +220,10 @@ describe("handleMcpHttpRequest", () => {
     expect(body.result.tools.map((tool) => tool.name)).toEqual([
       "list_matters",
     ]);
+    // The response carries the CLI update-nudge header (spec 051 addendum).
+    expect(response.headers.get("x-stella-cli-latest")).toBe(
+      STELLA_CLI_LATEST_VERSION,
+    );
   });
 
   test("rejects tool calls missing the required scope before dynamic resolution", async () => {
@@ -215,11 +259,178 @@ describe("handleMcpHttpRequest", () => {
     expect(body.result).toEqual({
       content: [
         {
-          text: "Insufficient permissions. Required scope: stella:skills",
           type: "text",
+          text: JSON.stringify({
+            error: {
+              code: "missing_scope",
+              message:
+                "Insufficient permissions. Required scope: stella:skills",
+              hint: "Grant the 'stella:skills' scope by re-running OAuth consent (CLI: 'stella auth login --scopes stella:skills'), then retry.",
+            },
+          }),
         },
       ],
       isError: true,
     });
+  });
+
+  test("returns an unknown_tool envelope with closest-name hints", async () => {
+    const context = { type: "mcp-context" };
+    authenticateMcpRequestMock.mockResolvedValue({
+      organizationId: "org_1",
+      scopes: ["stella:read"],
+      userId: "user_1",
+    });
+    resolveMcpSessionContextMock.mockResolvedValue(context);
+    // No scope hint and no resolved definition: the tool name is unknown. The
+    // closest visible name (scope-filtered list) is suggested.
+    getMcpToolScopeHintMock.mockReturnValue(undefined);
+    getMcpToolDefinitionMock.mockResolvedValue(undefined);
+    listMcpToolsMock.mockResolvedValue([
+      {
+        description: "List matters",
+        inputSchema: { type: "object", properties: {} },
+        name: "list_matters",
+      },
+    ]);
+
+    const response = await handleMcpHttpRequest(
+      createMcpRequest({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: {}, name: "list_matter" },
+      }),
+    );
+    const body = await readTestJson<McpJsonResponse<CallToolResult>>(response);
+
+    expect(handleMcpToolCallMock).not.toHaveBeenCalled();
+    const item = body.result.content.at(0);
+    expect(item?.type).toBe("text");
+    const parsed =
+      item?.type === "text"
+        ? parseUnknownToolErrorEnvelope(item.text)
+        : undefined;
+    expect(parsed?.error.code).toBe("unknown_tool");
+    expect(parsed?.error.hint).toContain("list_matters");
+    expect(body.result.isError).toBe(true);
+  });
+
+  test("does not fuzzy match unusually long unknown tool names", async () => {
+    const context = { type: "mcp-context" };
+    authenticateMcpRequestMock.mockResolvedValue({
+      organizationId: "org_1",
+      scopes: ["stella:read"],
+      userId: "user_1",
+    });
+    resolveMcpSessionContextMock.mockResolvedValue(context);
+    getMcpToolScopeHintMock.mockReturnValue(undefined);
+    getMcpToolDefinitionMock.mockResolvedValue(undefined);
+    listMcpToolsMock.mockResolvedValue([
+      {
+        description: "List matters",
+        inputSchema: { type: "object", properties: {} },
+        name: "list_matters",
+      },
+    ]);
+
+    const response = await handleMcpHttpRequest(
+      createMcpRequest({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { arguments: {}, name: "x".repeat(5000) },
+      }),
+    );
+    const body = await readTestJson<McpJsonResponse<CallToolResult>>(response);
+
+    expect(handleMcpToolCallMock).not.toHaveBeenCalled();
+    expect(listMcpToolsMock).not.toHaveBeenCalled();
+    const item = body.result.content.at(0);
+    expect(item?.type).toBe("text");
+    const parsed =
+      item?.type === "text"
+        ? parseUnknownToolErrorEnvelope(item.text)
+        : undefined;
+    expect(parsed?.error.code).toBe("unknown_tool");
+    expect(parsed?.error.hint).not.toContain("list_matters");
+    expect(body.result.isError).toBe(true);
+  });
+
+  test("lists static resources for the request mode", async () => {
+    const context = { type: "mcp-context" };
+    authenticateMcpRequestMock.mockResolvedValue({
+      organizationId: "org_1",
+      scopes: ["stella:read"],
+      userId: "user_1",
+    });
+    resolveMcpSessionContextMock.mockResolvedValue(context);
+    listMcpResourcesMock.mockReturnValue([
+      {
+        uri: "stella://reference/template-markers",
+        name: "template-markers",
+        description: "Template marker grammar",
+        mimeType: "text/markdown",
+      },
+    ]);
+
+    const response = await handleMcpHttpRequest(
+      createMcpRequest({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "resources/list",
+      }),
+    );
+    const body =
+      await readTestJson<McpJsonResponse<{ resources: Resource[] }>>(response);
+
+    expect(response.status).toBe(200);
+    expect(listMcpResourcesMock).toHaveBeenCalledWith("default");
+    expect(body.result.resources.map((resource) => resource.uri)).toEqual([
+      "stella://reference/template-markers",
+    ]);
+  });
+
+  test("reads a resource by uri for the request mode", async () => {
+    const context = { type: "mcp-context" };
+    authenticateMcpRequestMock.mockResolvedValue({
+      organizationId: "org_1",
+      scopes: ["stella:read"],
+      userId: "user_1",
+    });
+    resolveMcpSessionContextMock.mockResolvedValue(context);
+    readMcpResourceMock.mockReturnValue({
+      contents: [
+        {
+          uri: "stella://reference/template-markers",
+          mimeType: "text/markdown",
+          text: "marker grammar body",
+        },
+      ],
+    });
+
+    const response = await handleMcpHttpRequest(
+      createMcpRequest({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "resources/read",
+        params: { uri: "stella://reference/template-markers" },
+      }),
+    );
+    const body =
+      await readTestJson<McpJsonResponse<ReadResourceResult>>(response);
+
+    expect(response.status).toBe(200);
+    expect(readMcpResourceMock).toHaveBeenCalledWith(
+      "stella://reference/template-markers",
+      "default",
+    );
+    expect(body.result.contents).toEqual([
+      {
+        uri: "stella://reference/template-markers",
+        mimeType: "text/markdown",
+        text: "marker grammar body",
+      },
+    ]);
   });
 });

@@ -72,6 +72,12 @@ Hosted stella preview is available at [my.stll.app](https://my.stll.app).
 
 ### Self-hosting
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/stella?referralCode=2WofM4&utm_medium=integration&utm_source=button&utm_campaign=stella)
+
+Deploy the full stack (web, API, Postgres, Redis, Gotenberg, file storage) to
+[Railway](https://railway.com/deploy/stella?referralCode=2WofM4&utm_medium=integration&utm_source=button&utm_campaign=stella)
+in one click; no email provider or AI key is needed for the first login.
+
 Run stella on your own infrastructure: see the
 [self-hosting guide](docs/self-hosting.md). The
 self-host Compose file runs the API and Gotenberg only; configure Postgres,
@@ -79,6 +85,8 @@ Redis or Valkey, S3-compatible storage, `GOTENBERG_URL`, and Gotenberg
 credentials in `apps/api/.env`. The frontend is a TanStack Start SSR app:
 build and run `apps/web/Dockerfile`, or run `bun --filter @stll/web build`
 followed by `HOST=0.0.0.0 PORT=3002 bun apps/web/start-runtime.js`.
+Railway-specific service configuration is documented in
+[docs/railway.md](docs/railway.md).
 
 ### Prerequisites
 

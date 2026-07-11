@@ -19,15 +19,20 @@ describe("custom oxlint guardrails", () => {
     expect(pluginSource).toContain('return "process.env[...]"');
   });
 
-  test("JSX literal rule remains scoped to files using translation markers", () => {
+  test("JSX literal rule is not scoped to files using translation markers", () => {
     const pluginSource = readRootFixture(
       ".oxlint-plugins/no-untranslated-jsx-literal.ts",
     );
+    const oxlintConfig = readRootFixture("oxlint.config.ts");
 
     expect(pluginSource).toContain("options.requireTranslationUsage === true");
     expect(pluginSource).toContain("sourceText.includes(marker)");
     expect(pluginSource).toContain("useTranslations");
     expect(pluginSource).toContain("TranslationKey");
+    expect(oxlintConfig).toContain(
+      '"no-untranslated-jsx-literal/no-untranslated-jsx-literal": [',
+    );
+    expect(oxlintConfig).not.toContain("requireTranslationUsage: true");
   });
 
   test("require-contained-handler excludes onBlur and resolves non-identifier refs", () => {
@@ -364,8 +369,16 @@ describe("custom oxlint guardrails", () => {
   });
 
   test("protected shell chrome queries stay non-critical and route-fresh", () => {
+    const authSource = readRootFixture("apps/api/src/lib/auth.ts");
+    const limitsSource = readRootFixture("apps/api/src/lib/limits.ts");
+    const organizationConstsSource = readRootFixture(
+      "apps/web/src/routes/_protected.organization/-consts.ts",
+    );
     const protectedRouteSource = readRootFixture(
       "apps/web/src/routes/_protected.tsx",
+    );
+    const sidebarUserMenuSource = readRootFixture(
+      "apps/web/src/components/sidebar-user-menu.tsx",
     );
     const aiConfigQuerySource = readRootFixture(
       "apps/web/src/routes/_protected.organization/-ai-config-queries.ts",
@@ -386,12 +399,24 @@ describe("custom oxlint guardrails", () => {
     expect(protectedRouteSource).toContain("AIAvailabilityProvider");
     expect(protectedRouteSource).toContain("AppSidebar");
     expect(protectedRouteSource).toContain("ChatMentionProviders");
+    expect(sidebarUserMenuSource).not.toContain("organizationOptions");
+    expect(sidebarUserMenuSource).toContain("organizationSummaryOptions");
     expect(aiConfigQuerySource).toContain("ROUTE_QUERY_STALE_TIME_MS");
     expect(aiConfigQuerySource).toContain(
       "staleTime: ROUTE_QUERY_STALE_TIME_MS",
     );
     expect(organizationQuerySource).toContain(
       "staleTime: ROUTE_QUERY_STALE_TIME_MS",
+    );
+    expect(limitsSource).toContain("organizationMembersCount: 500");
+    expect(authSource).toContain(
+      "membershipLimit: LIMITS.organizationMembersCount",
+    );
+    expect(organizationConstsSource).toContain(
+      "ORGANIZATION_MEMBERS_LIMIT = 500",
+    );
+    expect(organizationQuerySource).toContain(
+      "membersLimit: ORGANIZATION_MEMBERS_LIMIT",
     );
     expect(workspacesQuerySource).toContain("workspacesNavigationOptions");
     expect(workspacesQuerySource).toContain(
@@ -551,25 +576,24 @@ describe("custom oxlint guardrails", () => {
     expect(tableSource).not.toContain("composeRefs(tableWrapperRef");
   });
 
-  test("redirect-only route lint forbids render components", () => {
+  test("route lint forbids redirecting from beforeLoad/loader", () => {
     const pluginSource = readRootFixture(
-      ".oxlint-plugins/no-component-on-redirect-route.ts",
+      ".oxlint-plugins/no-beforeload-redirect.ts",
     );
     const configSource = readRootFixture("oxlint.config.ts");
 
-    expect(pluginSource).toContain("throw redirect");
-    expect(pluginSource).toContain("component");
-    expect(pluginSource).toContain("pendingComponent");
-    expect(pluginSource).toContain("abandoned before mount");
+    expect(pluginSource).toContain("beforeLoad");
+    expect(pluginSource).toContain("loader");
+    expect(pluginSource).toContain("redirect");
 
     expect(configSource).toContain(
-      "./.oxlint-plugins/no-component-on-redirect-route.ts",
+      "./.oxlint-plugins/no-beforeload-redirect.ts",
     );
     expect(configSource).toContain(
-      "no-component-on-redirect-route/no-component-on-redirect-route",
+      "no-beforeload-redirect/no-beforeload-redirect",
     );
     expect(configSource).toContain(
-      ".oxlint-plugins/__fixtures__/no-component-on-redirect-route.fixture.tsx",
+      ".oxlint-plugins/__fixtures__/no-beforeload-redirect.fixture.tsx",
     );
   });
 });

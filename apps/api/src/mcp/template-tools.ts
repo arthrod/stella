@@ -1,46 +1,63 @@
-import { Result } from "better-result";
+import { panic, Result } from "better-result";
+import { and, desc, eq, sql } from "drizzle-orm";
 import * as v from "valibot";
 
 import { roles } from "@stll/permissions";
 
+import { templates } from "@/api/db/schema";
 import {
   buildAiConditionDecider,
   buildAiFieldGenerator,
   buildAiOccurrenceAdapter,
 } from "@/api/handlers/docx/ai-field-generator";
-import type { FieldMeta } from "@/api/handlers/docx/types";
+import type { FieldMeta, FieldPart } from "@/api/handlers/docx/types";
 import { INPUT_TYPES, isFieldMeta } from "@/api/handlers/docx/types";
 import { validateDocxBuffer } from "@/api/handlers/entities/validate-docx-buffer";
 import { configureTemplateFields } from "@/api/handlers/templates/configure-template-fields-service";
 import { createStoredTemplate } from "@/api/handlers/templates/create-template-service";
 import { recordTemplateFill } from "@/api/handlers/templates/record-use";
+import type { DescribeTemplateResult } from "@/api/handlers/templates/template-fill-service";
 import {
   describeStoredTemplate,
   fillStoredTemplateWithText,
 } from "@/api/handlers/templates/template-fill-service";
 import { loadOrgAIConfig } from "@/api/lib/ai-config-loader";
-import { hasInstanceProvider } from "@/api/lib/ai-models";
 import { captureError } from "@/api/lib/analytics";
-import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
+import { createTanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
 import { assertUsageAvailableForHandler } from "@/api/lib/api-handlers";
 import { FILE_SIZE_LIMIT_BYTES, LIMITS } from "@/api/lib/limits";
+import {
+  createCursorPage,
+  decodePaginationCursor,
+  encodePaginationCursor,
+  isUuidPaginationCursorPart,
+} from "@/api/lib/pagination";
 import { brandPersistedTemplateId } from "@/api/lib/safe-id-boundaries";
-import { buildMarkerReference } from "@/api/mcp/template-marker-reference";
-import type { McpToolDefinition, McpToolHandler } from "@/api/mcp/tool-types";
+import { hasTanStackInstanceProvider } from "@/api/lib/tanstack-ai-models";
+import type { McpRequestContext } from "@/api/mcp/context";
+import {
+  defineTextFieldSpec,
+  deriveTextFieldPaths,
+  runTextFieldSpecs,
+} from "@/api/mcp/text-field-spec";
+import type {
+  McpTextFieldSpec,
+  McpToolDefinition,
+  McpToolHandler,
+} from "@/api/mcp/tool-types";
+import { defineMcpToolSet } from "@/api/mcp/tool-types";
 import {
   enumProp,
   errorResult,
+  isToolErrorResult,
+  parseOptionalCursor,
   stringProp,
+  structuredErrorResult,
   textResult,
+  validationErrorResult,
 } from "@/api/mcp/tool-utils";
 
-type TemplateToolName =
-  | "list_templates"
-  | "describe_template"
-  | "fill_template"
-  | "create_template"
-  | "configure_template_fields"
-  | "template_marker_reference";
+type TemplateToolName = "list_templates" | "fill_template" | "save_template";
 
 /** Max assembled-text length returned inline; full bytes ride along as base64. */
 const TEMPLATE_FILL_TEXT_MAX_CHARS = 16_000;
@@ -146,50 +163,236 @@ const fieldsOverlayProp = {
   items: fieldConfigItemSchema,
 } as const;
 
+// --- Text-field specs (plan 049, Option B) --------------------------------
+//
+// Both anonymize-mode branches of list_templates are org-scoped: templates
+// have no owning workspace, so `organizationId` is the anonymization scope
+// for every field below. `organizationId` is not part of either served
+// payload, so (unlike a per-item workspace id already sitting in the
+// payload) it must be threaded in as a builder argument rather than read off
+// an item. `TEMPLATE_TOOL_DEFINITIONS` below calls these same builders with a
+// placeholder id purely to derive the documented `textFields` path list:
+// `deriveTextFieldPaths` only reads each spec's static `path`, never `scope`,
+// so the placeholder never affects the declaration.
+
+type TemplateListItem = {
+  name: string;
+  tags: string[] | null;
+  whenNotToUse: string | null;
+  whenToUse: string | null;
+};
+
+type TemplateListPayload = { templates: readonly TemplateListItem[] };
+
+/** Every tag on every listed template, paired with its own index into the
+ * owning `tags` array so `apply` writes back through that same array
+ * reference rather than a detached copy. */
+const templateTagItems = (
+  payload: TemplateListPayload,
+): readonly { index: number; tags: string[] }[] =>
+  payload.templates.flatMap((template) => {
+    const tags = template.tags;
+    return tags ? tags.map((_tag, index) => ({ index, tags })) : [];
+  });
+
+const buildTemplateListTextFieldSpecs = (
+  organizationId: string,
+): readonly McpTextFieldSpec<TemplateListPayload>[] => [
+  defineTextFieldSpec({
+    path: "templates[].name",
+    items: (payload: TemplateListPayload) => payload.templates,
+    scope: () => organizationId,
+    read: (template: TemplateListItem) => template.name,
+    apply: (template: TemplateListItem, value) => {
+      template.name = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "templates[].whenToUse",
+    items: (payload: TemplateListPayload) => payload.templates,
+    scope: () => organizationId,
+    read: (template: TemplateListItem) => template.whenToUse,
+    apply: (template: TemplateListItem, value) => {
+      template.whenToUse = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "templates[].whenNotToUse",
+    items: (payload: TemplateListPayload) => payload.templates,
+    scope: () => organizationId,
+    read: (template: TemplateListItem) => template.whenNotToUse,
+    apply: (template: TemplateListItem, value) => {
+      template.whenNotToUse = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "templates[].tags[]",
+    items: templateTagItems,
+    scope: () => organizationId,
+    read: (item: { index: number; tags: string[] }) => item.tags[item.index],
+    apply: (item: { index: number; tags: string[] }, value) => {
+      item.tags[item.index] = value;
+    },
+  }),
+];
+
+// Detail-mode payload: the success variant of `describeStoredTemplate`'s
+// result (the error variant is handled and returned before a spec ever runs).
+type TemplateDetailSuccess = Extract<
+  DescribeTemplateResult,
+  { fields: unknown[] }
+>;
+type TemplateDetailField = TemplateDetailSuccess["fields"][number];
+
+const templateFieldOptionItems = (
+  payload: TemplateDetailSuccess,
+): readonly { index: number; options: string[] }[] =>
+  payload.fields.flatMap((field) => {
+    const options = field.options;
+    return options ? options.map((_option, index) => ({ index, options })) : [];
+  });
+
+const templateFieldPartItems = (
+  payload: TemplateDetailSuccess,
+): readonly FieldPart[] => payload.fields.flatMap((field) => field.parts ?? []);
+
+const templateFieldPartOptionItems = (
+  payload: TemplateDetailSuccess,
+): readonly { index: number; options: string[] }[] =>
+  templateFieldPartItems(payload).flatMap((part) => {
+    const options = part.options;
+    return options ? options.map((_option, index) => ({ index, options })) : [];
+  });
+
+const templateFieldFormatItems = (
+  payload: TemplateDetailSuccess,
+): readonly { key: string; template: string }[] =>
+  payload.fields.flatMap((field) => field.formats ?? []);
+
+const buildTemplateDetailTextFieldSpecs = (
+  organizationId: string,
+): readonly McpTextFieldSpec<TemplateDetailSuccess>[] => [
+  defineTextFieldSpec({
+    path: "name",
+    items: (payload: TemplateDetailSuccess) => [payload],
+    scope: () => organizationId,
+    read: (payload: TemplateDetailSuccess) => payload.name,
+    apply: (payload: TemplateDetailSuccess, value) => {
+      payload.name = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "fields[].label",
+    items: (payload: TemplateDetailSuccess) => payload.fields,
+    scope: () => organizationId,
+    read: (field: TemplateDetailField) => field.label,
+    apply: (field: TemplateDetailField, value) => {
+      field.label = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "fields[].hint",
+    items: (payload: TemplateDetailSuccess) => payload.fields,
+    scope: () => organizationId,
+    read: (field: TemplateDetailField) => field.hint,
+    apply: (field: TemplateDetailField, value) => {
+      field.hint = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "fields[].aiPrompt",
+    items: (payload: TemplateDetailSuccess) => payload.fields,
+    scope: () => organizationId,
+    read: (field: TemplateDetailField) => field.aiPrompt,
+    apply: (field: TemplateDetailField, value) => {
+      field.aiPrompt = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "fields[].options[]",
+    items: templateFieldOptionItems,
+    scope: () => organizationId,
+    read: (item: { index: number; options: string[] }) =>
+      item.options[item.index],
+    apply: (item: { index: number; options: string[] }, value) => {
+      item.options[item.index] = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "fields[].parts[].label",
+    items: templateFieldPartItems,
+    scope: () => organizationId,
+    read: (part: FieldPart) => part.label,
+    apply: (part: FieldPart, value) => {
+      part.label = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "fields[].parts[].options[]",
+    items: templateFieldPartOptionItems,
+    scope: () => organizationId,
+    read: (item: { index: number; options: string[] }) =>
+      item.options[item.index],
+    apply: (item: { index: number; options: string[] }, value) => {
+      item.options[item.index] = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "fields[].formats[].template",
+    items: templateFieldFormatItems,
+    scope: () => organizationId,
+    read: (format: { key: string; template: string }) => format.template,
+    apply: (format: { key: string; template: string }, value) => {
+      format.template = value;
+    },
+  }),
+];
+
 export const TEMPLATE_TOOL_DEFINITIONS = [
   {
     annotations: { readOnlyHint: true },
     description:
       "List the document templates in this organization (NDAs, powers of " +
-      "attorney, leases, and so on). Returns each template's id, name, number " +
-      "of fillable fields, tags, and usage guidance (whenToUse / whenNotToUse). " +
-      "Call this first to learn which templates exist and their ids before " +
-      "describing or filling one. Prefer a template whose whenToUse matches the " +
-      "request and skip any whose whenNotToUse applies.",
+      "attorney, leases), or describe one template's fillable fields. Omit " +
+      "template_id to list templates: each template's id, name, field count, " +
+      "tags, and usage guidance (whenToUse / whenNotToUse); prefer a template " +
+      "whose whenToUse matches the request and skip any whose whenNotToUse " +
+      "applies. Pass template_id to return that template's full field " +
+      "configuration (path, label, inputType, required, hint, options, " +
+      "optionsFrom, aiPrompt / aiAdapt, date format, composite parts, " +
+      "registry-lookup formats) plus its named conditions and formula fields; " +
+      "feed the same shape to save_template to update it.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        template_id: stringProp(
+          "Template id to describe its fields in detail; omit to list templates",
+        ),
+        cursor: stringProp(
+          "Opaque cursor from a previous list_templates call to fetch the next page",
+          { maxLength: 512 },
+        ),
+      },
+    },
+    access: "read",
+    anonymized: {
+      exposure: "anonymize",
+      // Placeholder org id: derivation only ever reads `.path`, see the
+      // builders' doc comment above.
+      textFields: [
+        ...deriveTextFieldPaths(buildTemplateListTextFieldSpecs("")),
+        ...deriveTextFieldPaths(buildTemplateDetailTextFieldSpecs("")),
+      ],
     },
     name: "list_templates",
     scope: "stella:templates",
   },
   {
-    annotations: { readOnlyHint: true },
-    description:
-      "Describe a template's fillable fields so you know what to provide before " +
-      "filling it. Returns each field's full configuration: path, label, " +
-      "inputType, required, hint, select options, optionsFrom (dependent " +
-      "select), aiPrompt / aiAdapt (who-fills), date format, composite parts + " +
-      "format, and (for registry-lookup fields) the named output formats. Also " +
-      "returns named conditions and computed (formula) fields. The result is a " +
-      "complete round-trip: feed the same shape to configure_template_fields. " +
-      "Pass the template id from list_templates.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        template_id: stringProp("Template id, as returned by list_templates"),
-      },
-      required: ["template_id"],
-    },
-    name: "describe_template",
-    scope: "stella:templates",
-  },
-  {
     description:
       "Fill a template with values and return the assembled document text plus " +
-      "the filled DOCX as base64. Call describe_template first to learn the " +
-      "field paths. 'values' maps each field path to its value, e.g. " +
-      '{"tenant.name": "ACME Sp. z o.o.", "signing_date": "2026-06-08"}. ' +
+      "the filled DOCX as base64. Call list_templates with a template_id first " +
+      "to learn the field paths. 'values' maps each field path to its value, " +
+      'e.g. {"tenant.name": "ACME Sp. z o.o.", "signing_date": "2026-06-08"}. ' +
       "Registry lookups, composite fields, formula fields, and AI-fillable " +
       "fields are resolved automatically; AI-fillable fields are drafted when " +
       "you omit them. Returns the rendered text and any placeholders left " +
@@ -206,75 +409,60 @@ export const TEMPLATE_TOOL_DEFINITIONS = [
       },
       required: ["template_id", "values"],
     },
+    access: "write",
+    anonymized: { exposure: "excluded", reason: "write" },
     name: "fill_template",
     scope: "stella:templates",
   },
   {
-    annotations: { readOnlyHint: true },
     description:
-      "Return stella's `{{...}}` template marker grammar: how to write " +
-      "fillable values, conditional and repeating blocks, clause slots, and " +
-      "numbering inside a DOCX. Takes no arguments. Call this before " +
-      "create_template whenever you are unsure of the marker syntax.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-    },
-    name: "template_marker_reference",
-    scope: "stella:templates",
-  },
-  {
-    description:
-      "Create a document template from a DOCX file containing {{markers}}. " +
-      "'docx_base64' is the base64-encoded bytes of a .docx (Office Open XML) " +
-      "file; the {{field}} markers in it become the template's fillable fields. " +
-      "If you are unsure how to write the markers, call " +
-      "template_marker_reference first. Optionally pass 'fields' to configure " +
-      "the discovered fields in the same call: input type, select options, who " +
-      "fills each field (a person, AI via aiPrompt, Person+AI via aiAdapt, a " +
-      "formula, or a company-register lookup), date format, composite parts, " +
-      "dependent options, hint, and required. You can also configure fields " +
-      "later with configure_template_fields. " +
-      "Max ~10 MB decoded. Returns the new template id and the number of " +
-      "discovered fields. Use describe_template afterwards to inspect the fields.",
+      "Create a document template from a DOCX, or configure an existing " +
+      "template's fields. To create, pass docx_base64 (base64-encoded .docx / " +
+      "Office Open XML bytes, max ~10 MB decoded) and a name; the {{field}} " +
+      "markers in the file become the template's fillable fields, and you can " +
+      "pass fields to configure them in the same call. To configure an existing " +
+      "template, pass template_id with fields and no docx_base64; only the " +
+      "manifest changes, the document's {{markers}} stay untouched. Each fields " +
+      "entry's path must match a {{marker}} in the template. Read the marker " +
+      "grammar from the template-markers reference resource when unsure. " +
+      "Returns the template id and field count when creating, or the updated " +
+      "field list when configuring.",
     inputSchema: {
       type: "object",
       properties: {
-        name: stringProp("Template display name", { maxLength: 256 }),
+        template_id: stringProp(
+          "Existing template id to configure its fields; omit (with docx_base64) to create a new template",
+        ),
+        name: stringProp("Template display name; required when creating", {
+          maxLength: 256,
+        }),
         docx_base64: stringProp(
-          "Base64-encoded DOCX file bytes (Office Open XML, max ~10 MB decoded)",
+          "Base64-encoded DOCX file bytes (Office Open XML, max ~10 MB decoded); required when creating, omit when configuring",
         ),
         fields: fieldsOverlayProp,
       },
-      required: ["name", "docx_base64"],
     },
-    name: "create_template",
-    scope: "stella:templates",
-  },
-  {
-    description:
-      "Configure the fields of an EXISTING template: set input type, select " +
-      "options, who fills each field (a person, AI via aiPrompt, Person+AI via " +
-      "aiAdapt, a formula, or a company-register lookup with registry + named " +
-      "output formats), date format, composite parts, dependent options, hint, " +
-      "and required. Only the manifest is updated; the document's {{markers}} " +
-      "are left untouched. Each 'fields' entry's 'path' must be a field that " +
-      "exists in the template (call describe_template to list them). Returns the " +
-      "updated field list (same shape as describe_template).",
-    inputSchema: {
-      type: "object",
-      properties: {
-        template_id: stringProp("Template id, as returned by list_templates"),
-        fields: fieldsOverlayProp,
-      },
-      required: ["template_id", "fields"],
-    },
-    name: "configure_template_fields",
+    access: "write",
+    anonymized: { exposure: "excluded", reason: "write" },
+    name: "save_template",
     scope: "stella:templates",
   },
 ] as const satisfies readonly McpToolDefinition[];
 
-const listTemplatesArgsSchema = v.strictObject({});
+const listTemplatesArgsSchema = v.strictObject({
+  cursor: v.optional(v.pipe(v.string(), v.maxLength(512))),
+});
+
+// The list_templates cursor is the boundary template id alone; the query
+// resolves its (createdAt, id) in-DB.
+const decodeTemplatePageCursor = (cursor: string): string | null => {
+  const parts = decodePaginationCursor(cursor);
+  if (!parts || parts.length !== 1) {
+    return null;
+  }
+  const [rawId] = parts;
+  return isUuidPaginationCursorPart(rawId) ? rawId : null;
+};
 
 const handleListTemplatesTool: McpToolHandler = async ({ args, context }) => {
   const hasPermission = roles[context.memberRole].authorize({
@@ -284,61 +472,114 @@ const handleListTemplatesTool: McpToolHandler = async ({ args, context }) => {
     return errorResult("Forbidden");
   }
 
+  // Detail mode: template_id returns one template's field configuration. The
+  // list-only cursor does not apply, so reject the mixed request up front.
+  if (args["template_id"] !== undefined) {
+    if (args["cursor"] !== undefined) {
+      return structuredErrorResult({
+        code: "validation_error",
+        message:
+          "cursor applies when listing templates; omit template_id to list",
+        issues: [
+          {
+            path: "cursor",
+            message:
+              "cursor applies when listing templates; omit template_id to list",
+          },
+        ],
+        hint: "Omit 'template_id' to list templates with 'cursor', or omit 'cursor' when requesting a single template_id.",
+      });
+    }
+    return await describeTemplateDetail({ args, context });
+  }
+
   const parsed = v.safeParse(listTemplatesArgsSchema, args);
   if (!parsed.success) {
-    return errorResult("Invalid input: list_templates takes no parameters");
+    return validationErrorResult({
+      issues: parsed.issues,
+      message: "Invalid input: list_templates accepts template_id or cursor",
+    });
   }
 
+  const cursor = parseOptionalCursor({ args, key: "cursor" });
+  if (isToolErrorResult(cursor)) {
+    return cursor;
+  }
+  let boundaryId: string | undefined;
+  if (cursor !== undefined) {
+    const decoded = decodeTemplatePageCursor(cursor);
+    if (decoded === null) {
+      return structuredErrorResult({
+        code: "validation_error",
+        message: "Invalid cursor",
+        issues: [{ path: "cursor", message: "Invalid cursor" }],
+        hint: "Pass the 'cursor' verbatim as returned by a previous call, or omit it for the first page.",
+      });
+    }
+    boundaryId = decoded;
+  }
+
+  const limit = LIMITS.templatesCount;
   const rows = await context.scopedDb((tx) =>
-    tx.query.templates.findMany({
-      columns: {
-        id: true,
-        name: true,
-        fieldCount: true,
-        tags: true,
-        whenToUse: true,
-        whenNotToUse: true,
-      },
-      orderBy: { createdAt: "desc" },
-      limit: LIMITS.templatesCount,
-    }),
+    tx
+      .select({
+        id: templates.id,
+        name: templates.name,
+        fieldCount: templates.fieldCount,
+        tags: templates.tags,
+        whenToUse: templates.whenToUse,
+        whenNotToUse: templates.whenNotToUse,
+      })
+      .from(templates)
+      .where(
+        and(
+          eq(templates.organizationId, context.organizationId),
+          // Resolve the full-precision (createdAt, id) boundary in-DB by id
+          // so the cursor never round-trips createdAt through a millisecond
+          // JS Date. The boundary lookup is org-scoped (defense in depth
+          // beyond RLS) so a cursor carrying a foreign template id cannot
+          // shift this org's page boundary.
+          boundaryId === undefined
+            ? undefined
+            : sql`(${templates.createdAt}, ${templates.id}) < (select b.created_at, b.id from templates b where b.id = ${boundaryId} and b.organization_id = ${context.organizationId})`,
+        ),
+      )
+      .orderBy(desc(templates.createdAt), desc(templates.id))
+      .limit(limit + 1),
   );
 
-  return textResult({ templates: rows });
-};
+  const page = createCursorPage({
+    rows,
+    limit,
+    cursorForItem: (item) => encodePaginationCursor([item.id]),
+  });
 
-const markerReferenceArgsSchema = v.strictObject({});
+  // Templates are organization-scoped, so the org id is the anonymization
+  // scope. Only the org-authored free text (name, usage guidance, tags) is
+  // redacted; ids and field counts pass through.
+  const payload = { templates: page.items, nextCursor: page.nextCursor };
+  const textFields = runTextFieldSpecs(
+    buildTemplateListTextFieldSpecs(context.organizationId),
+    payload,
+  );
 
-// eslint-disable-next-line require-await -- McpToolHandler is async; this handler has no I/O to await
-const handleMarkerReferenceTool: McpToolHandler = async ({ args }) => {
-  const parsed = v.safeParse(markerReferenceArgsSchema, args);
-  if (!parsed.success) {
-    return errorResult(
-      "Invalid input: template_marker_reference takes no parameters",
-    );
-  }
-
-  return textResult({ reference: buildMarkerReference() });
+  return { egress: "structured", payload, textFields };
 };
 
 const describeTemplateArgsSchema = v.strictObject({
   template_id: v.pipe(v.string(), v.minLength(1)),
 });
 
-const handleDescribeTemplateTool: McpToolHandler = async ({
-  args,
-  context,
-}) => {
-  const hasPermission = roles[context.memberRole].authorize({
-    workspace: ["read"],
-  });
-  if (!hasPermission.success) {
-    return errorResult("Forbidden");
-  }
-
+// Detail branch of list_templates: one template's field configuration. Reused
+// verbatim from the former describe_template tool, which list_templates
+// absorbed. The caller (list_templates) already checked the read permission.
+const describeTemplateDetail: McpToolHandler = async ({ args, context }) => {
   const parsed = v.safeParse(describeTemplateArgsSchema, args);
   if (!parsed.success) {
-    return errorResult("Invalid input: expected { template_id: string }");
+    return validationErrorResult({
+      issues: parsed.issues,
+      message: "Invalid input: expected { template_id: string }",
+    });
   }
 
   const result = await describeStoredTemplate({
@@ -349,7 +590,15 @@ const handleDescribeTemplateTool: McpToolHandler = async ({
     return errorResult(result.error);
   }
 
-  return textResult(result);
+  // Redact the org-authored template name and each field's label/hint/aiPrompt;
+  // field paths, input types, options, and condition/formula expressions are
+  // structural and pass through. Template = org scope.
+  const textFields = runTextFieldSpecs(
+    buildTemplateDetailTextFieldSpecs(context.organizationId),
+    result,
+  );
+
+  return { egress: "structured", payload: result, textFields };
 };
 
 const fillTemplateArgsSchema = v.strictObject({
@@ -359,7 +608,7 @@ const fillTemplateArgsSchema = v.strictObject({
 
 const handleFillTemplateTool: McpToolHandler = async ({ args, context }) => {
   const hasPermission = roles[context.memberRole].authorize({
-    template: ["create"],
+    template: ["use"],
   });
   if (!hasPermission.success) {
     return errorResult("Forbidden");
@@ -367,16 +616,18 @@ const handleFillTemplateTool: McpToolHandler = async ({ args, context }) => {
 
   const parsed = v.safeParse(fillTemplateArgsSchema, args);
   if (!parsed.success) {
-    return errorResult(
-      "Invalid input: expected { template_id: string, values: object }",
-    );
+    return validationErrorResult({
+      issues: parsed.issues,
+      message:
+        "Invalid input: expected { template_id: string, values: object }",
+    });
   }
 
   // Load the org's AI config so AI-fillable / aiAdapt fields behave exactly as
   // they do in the chat tools and web fill routes; a missing config simply
   // leaves those fields unfilled rather than erroring.
   const orgAIConfig = await loadOrgAIConfig(context.organizationId);
-  const aiAnalytics = createAIAnalyticsCallbacks({
+  const aiAnalytics = createTanStackAIAnalyticsCallbacks({
     usageMetering: {
       actionType: "chat",
       organizationId: context.organizationId,
@@ -414,7 +665,7 @@ const handleFillTemplateTool: McpToolHandler = async ({ args, context }) => {
   // fast model in either case; a null org config flows through to the metering
   // layer (instance-provider rate).
   const assertUsageAvailable =
-    orgAIConfig || hasInstanceProvider()
+    orgAIConfig || hasTanStackInstanceProvider()
       ? async () =>
           await assertUsageAvailableForHandler({
             metering: { actionType: "chat", modelRole: "fast" },
@@ -483,17 +734,67 @@ const handleFillTemplateTool: McpToolHandler = async ({ args, context }) => {
 const MAX_DOCX_BASE64_LENGTH =
   Math.ceil(FILE_SIZE_LIMIT_BYTES.document / 3) * 4;
 
-const createTemplateArgsSchema = v.strictObject({
-  name: v.pipe(v.string(), v.minLength(1), v.maxLength(256)),
-  docx_base64: v.pipe(
-    v.string(),
-    v.minLength(1),
-    v.maxLength(MAX_DOCX_BASE64_LENGTH),
+/**
+ * Prefer a cross-field (`partial_check`) validation message when present,
+ * falling back to the hand-written shape hint for structural failures.
+ */
+const crossFieldOrGeneric = (
+  issues: readonly v.BaseIssue<unknown>[],
+  genericMessage: string,
+): string =>
+  issues.find((issue) => issue.type === "partial_check")?.message ??
+  genericMessage;
+
+const saveTemplateArgsSchema = v.pipe(
+  v.strictObject({
+    template_id: v.optional(v.pipe(v.string(), v.minLength(1))),
+    name: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(256))),
+    docx_base64: v.optional(
+      v.pipe(v.string(), v.minLength(1), v.maxLength(MAX_DOCX_BASE64_LENGTH)),
+    ),
+    // Validated structurally below with isFieldMeta — the same validator the
+    // REST manifest overlay uses — so the JSON-schema-level shape stays loose.
+    fields: v.optional(v.array(v.unknown())),
+  }),
+  // Exactly one mode: create (docx_base64, no template_id) or configure
+  // (template_id, no docx_base64). Both absent or both present is rejected.
+  v.partialCheck(
+    [["template_id"], ["docx_base64"]],
+    ({ template_id, docx_base64 }) =>
+      (template_id === undefined) !== (docx_base64 === undefined),
+    "Provide docx_base64 to create a template, or template_id to configure an existing template's fields",
   ),
-  // Validated structurally below with isFieldMeta — the same validator the REST
-  // manifest overlay uses — so the JSON-schema-level shape stays loose here.
-  fields: v.optional(v.array(v.unknown())),
-});
+  // Creating (docx_base64) requires a name.
+  v.forward(
+    v.partialCheck(
+      [["docx_base64"], ["name"]],
+      ({ docx_base64, name }) =>
+        docx_base64 === undefined || name !== undefined,
+      "name is required to create a template",
+    ),
+    ["name"],
+  ),
+  // name applies only to creation; a configure call must not send it.
+  v.forward(
+    v.partialCheck(
+      [["template_id"], ["name"]],
+      ({ template_id, name }) =>
+        template_id === undefined || name === undefined,
+      "name applies only when creating a template; omit it when configuring",
+    ),
+    ["name"],
+  ),
+  // Configuring (template_id) requires a fields overlay to apply.
+  v.forward(
+    v.partialCheck(
+      [["template_id"], ["fields"]],
+      ({ template_id, fields }) =>
+        template_id === undefined || fields !== undefined,
+      "fields is required to configure a template",
+    ),
+    ["fields"],
+  ),
+);
 
 /**
  * Validate a raw `fields` overlay with the SAME `isFieldMeta` validator the
@@ -519,7 +820,20 @@ const validateFieldsOverlay = (
   return { ok: true, fields: validated };
 };
 
-const handleCreateTemplateTool: McpToolHandler = async ({ args, context }) => {
+// Create branch of save_template: a new template from an uploaded DOCX, with an
+// optional field-configuration overlay. Reused from the former create_template
+// tool.
+const createTemplateFromDocx = async ({
+  context,
+  docxBase64,
+  fields,
+  name,
+}: {
+  context: McpRequestContext;
+  docxBase64: string;
+  fields: readonly unknown[] | undefined;
+  name: string;
+}): Promise<ReturnType<typeof textResult>> => {
   const hasPermission = roles[context.memberRole].authorize({
     template: ["create"],
   });
@@ -527,34 +841,52 @@ const handleCreateTemplateTool: McpToolHandler = async ({ args, context }) => {
     return errorResult("Forbidden");
   }
 
-  const parsed = v.safeParse(createTemplateArgsSchema, args);
-  if (!parsed.success) {
-    return errorResult(
-      "Invalid input: expected { name: string, docx_base64: string, fields?: array }",
-    );
-  }
-
   let clientManifest: { fields: FieldMeta[] } | null = null;
-  if (parsed.output.fields !== undefined) {
-    const overlay = validateFieldsOverlay(parsed.output.fields);
+  if (fields !== undefined) {
+    const overlay = validateFieldsOverlay(fields);
     if (!overlay.ok) {
-      return errorResult(
-        `Invalid field config at fields[${overlay.index}]: not a valid ` +
+      return structuredErrorResult({
+        code: "validation_error",
+        message:
+          `Invalid field config at fields[${overlay.index}]: not a valid ` +
           "field configuration (check input type, lookup, and that formula is " +
           "not combined with aiPrompt/aiAdapt/lookup/parts).",
-      );
+        issues: [
+          {
+            path: `fields.${overlay.index}`,
+            message: "Not a valid field configuration",
+          },
+        ],
+      });
     }
     clientManifest = { fields: overlay.fields };
   }
 
-  const buffer = Buffer.from(parsed.output.docx_base64, "base64");
+  const buffer = Buffer.from(docxBase64, "base64");
   // base64 silently drops invalid characters; an empty decode means the input
   // was not valid base64 at all.
   if (buffer.byteLength === 0) {
-    return errorResult("Invalid input: docx_base64 is not valid base64");
+    return structuredErrorResult({
+      code: "validation_error",
+      message: "Invalid input: docx_base64 is not valid base64",
+      issues: [
+        { path: "docx_base64", message: "docx_base64 is not valid base64" },
+      ],
+      hint: "Base64-encode the raw DOCX bytes and pass the result as 'docx_base64'.",
+    });
   }
   if (buffer.byteLength > FILE_SIZE_LIMIT_BYTES.document) {
-    return errorResult("DOCX exceeds the maximum allowed size");
+    return structuredErrorResult({
+      code: "validation_error",
+      message: "DOCX exceeds the maximum allowed size",
+      issues: [
+        {
+          path: "docx_base64",
+          message: "DOCX exceeds the maximum allowed size",
+        },
+      ],
+      hint: `Upload a DOCX no larger than ${FILE_SIZE_LIMIT_BYTES.document} bytes.`,
+    });
   }
 
   const validation = await validateDocxBuffer(
@@ -564,7 +896,12 @@ const handleCreateTemplateTool: McpToolHandler = async ({ args, context }) => {
     ),
   );
   if (!validation.valid) {
-    return errorResult(`Invalid DOCX file: ${validation.error}`);
+    return structuredErrorResult({
+      code: "validation_error",
+      message: `Invalid DOCX file: ${validation.error}`,
+      issues: [{ path: "docx_base64", message: validation.error }],
+      hint: "Ensure 'docx_base64' decodes to a valid, uncorrupted .docx file.",
+    });
   }
 
   const created = await Result.gen(() =>
@@ -573,8 +910,8 @@ const handleCreateTemplateTool: McpToolHandler = async ({ args, context }) => {
       organizationId: context.organizationId,
       userId: context.userId,
       buffer,
-      name: parsed.output.name,
-      fileName: `${parsed.output.name}.docx`,
+      name,
+      fileName: `${name}.docx`,
       clientManifest,
       recordAuditEvent: context.recordAuditEvent,
     }),
@@ -590,15 +927,17 @@ const handleCreateTemplateTool: McpToolHandler = async ({ args, context }) => {
   });
 };
 
-const configureTemplateFieldsArgsSchema = v.strictObject({
-  template_id: v.pipe(v.string(), v.minLength(1)),
-  fields: v.array(v.unknown()),
-});
-
-const handleConfigureTemplateFieldsTool: McpToolHandler = async ({
-  args,
+// Configure branch of save_template: overlay field configuration onto an
+// existing template. Reused from the former configure_template_fields tool.
+const configureExistingTemplate = async ({
   context,
-}) => {
+  fields,
+  templateId: rawTemplateId,
+}: {
+  context: McpRequestContext;
+  fields: readonly unknown[];
+  templateId: string;
+}): Promise<ReturnType<typeof textResult>> => {
   const hasPermission = roles[context.memberRole].authorize({
     template: ["update"],
   });
@@ -606,23 +945,24 @@ const handleConfigureTemplateFieldsTool: McpToolHandler = async ({
     return errorResult("Forbidden");
   }
 
-  const parsed = v.safeParse(configureTemplateFieldsArgsSchema, args);
-  if (!parsed.success) {
-    return errorResult(
-      "Invalid input: expected { template_id: string, fields: array }",
-    );
-  }
-
-  const overlay = validateFieldsOverlay(parsed.output.fields);
+  const overlay = validateFieldsOverlay(fields);
   if (!overlay.ok) {
-    return errorResult(
-      `Invalid field config at fields[${overlay.index}]: not a valid field ` +
+    return structuredErrorResult({
+      code: "validation_error",
+      message:
+        `Invalid field config at fields[${overlay.index}]: not a valid field ` +
         "configuration (check input type, lookup, and that formula is not " +
         "combined with aiPrompt/aiAdapt/lookup/parts).",
-    );
+      issues: [
+        {
+          path: `fields.${overlay.index}`,
+          message: "Not a valid field configuration",
+        },
+      ],
+    });
   }
 
-  const templateId = brandPersistedTemplateId(parsed.output.template_id);
+  const templateId = brandPersistedTemplateId(rawTemplateId);
 
   const configured = await Result.gen(() =>
     configureTemplateFields({
@@ -637,8 +977,9 @@ const handleConfigureTemplateFieldsTool: McpToolHandler = async ({
     return errorResult(configured.error.message);
   }
 
-  // Echo the updated field list in the same shape describe_template returns, so
-  // the agent sees exactly what is now configured (a complete round-trip).
+  // Echo the updated field list in the same shape the list_templates detail
+  // mode returns, so the agent sees exactly what is now configured (a complete
+  // round-trip).
   const described = await describeStoredTemplate({
     templateId,
     scopedDb: context.scopedDb,
@@ -650,11 +991,52 @@ const handleConfigureTemplateFieldsTool: McpToolHandler = async ({
   return textResult(described);
 };
 
+const handleSaveTemplateTool: McpToolHandler = async ({ args, context }) => {
+  const parsed = v.safeParse(saveTemplateArgsSchema, args);
+  if (!parsed.success) {
+    return validationErrorResult({
+      issues: parsed.issues,
+      message: crossFieldOrGeneric(
+        parsed.issues,
+        "Invalid input: expected { docx_base64: string, name: string, fields?: array } to create, or { template_id: string, fields: array } to configure",
+      ),
+    });
+  }
+  const input = parsed.output;
+
+  // Configure branch: template_id (no docx_base64) overlays field config onto an
+  // existing template. The schema guarantees fields is present here.
+  if (input.template_id !== undefined) {
+    return await configureExistingTemplate({
+      context,
+      fields:
+        input.fields ??
+        panic(
+          "save_template configure branch reached without a fields overlay",
+        ),
+      templateId: input.template_id,
+    });
+  }
+
+  // Create branch: docx_base64 and name are guaranteed present by the schema.
+  return await createTemplateFromDocx({
+    context,
+    docxBase64:
+      input.docx_base64 ??
+      panic("save_template create branch reached without docx_base64"),
+    fields: input.fields,
+    name:
+      input.name ?? panic("save_template create branch reached without name"),
+  });
+};
+
 export const TEMPLATE_TOOL_HANDLERS = {
-  configure_template_fields: handleConfigureTemplateFieldsTool,
-  create_template: handleCreateTemplateTool,
-  describe_template: handleDescribeTemplateTool,
   fill_template: handleFillTemplateTool,
   list_templates: handleListTemplatesTool,
-  template_marker_reference: handleMarkerReferenceTool,
+  save_template: handleSaveTemplateTool,
 } satisfies Record<TemplateToolName, McpToolHandler>;
+
+export const TEMPLATE_TOOL_SET = defineMcpToolSet(
+  TEMPLATE_TOOL_DEFINITIONS,
+  TEMPLATE_TOOL_HANDLERS,
+);

@@ -50,7 +50,14 @@ export const extractIncomingMessageWorkspaceIds = ({
 
 export const extractMessageWorkspaceIds = (
   message: ChatMessage,
-): SafeId<"workspace">[] => collectPartsWorkspaceIds(message.parts);
+): SafeId<"workspace">[] => {
+  const ids = new Set<SafeId<"workspace">>();
+  for (const id of collectPartsWorkspaceIds(message.parts)) {
+    ids.add(id);
+  }
+  collectStructuralWorkspaceIds(message.metadata?.sourceDocuments, ids);
+  return Array.from(ids);
+};
 
 export const extractThreadDataWorkspaceIds = (
   messages: readonly ChatMessage[],
@@ -69,11 +76,10 @@ export const extractThreadDataWorkspaceIds = (
 //
 //   1. **Structural fields** — any property at any depth named
 //      `workspaceId` or `matterRef` whose value is a UUID string.
-//      Covers `data-stella-source-document` parts
-//      (`data.workspaceId`), tool output parts that include
-//      `matterRef` / `workspaceId` (search hits, file lookups,
-//      property/entity records), and any future part shape that
-//      reuses these conventional field names.
+//      Covers tool output parts that include `matterRef` /
+//      `workspaceId` (search hits, file lookups, property/entity
+//      records), persisted source-document metadata, and any future
+//      part shape that reuses these conventional field names.
 //   2. **Resolved text refs** — `#stella-workspace=<uuid>` and
 //      `#stella-entity=<workspace>:<entity>` produced by
 //      `resolveAssistantTextRefs` after the stream finishes.
@@ -149,15 +155,63 @@ const collectTextRefWorkspaceIds = (
   if (!("type" in part) || part.type !== "text") {
     return;
   }
-  if (!("text" in part) || typeof part.text !== "string") {
+  if (!("content" in part) || typeof part.content !== "string") {
     return;
   }
-  for (const match of part.text.matchAll(STELLA_TEXT_REF_WORKSPACE_REGEX)) {
+  for (const match of part.content.matchAll(STELLA_TEXT_REF_WORKSPACE_REGEX)) {
     const captured = match.groups?.["workspaceId"];
     if (captured) {
       ids.add(brandPersistedWorkspaceId(captured));
     }
   }
+};
+
+type ComputeAssistantTurnWorkspaceIdsInput = {
+  // The just-finished assistant message's parts (structural
+  // `workspaceId`/`matterRef` fields plus resolved `#stella-*` text refs).
+  responseParts: readonly unknown[];
+  // Every workspace id the shared ref registry had already registered
+  // before this turn's stream started (prompt-time pins, prior-turn
+  // history refs). Excluded from the delta below so those don't fold
+  // into scope on every later turn.
+  workspaceIdsBeforeStream: ReadonlySet<SafeId<"workspace">>;
+  // The registry's current registered-workspace snapshot, taken after the
+  // stream finished.
+  registeredWorkspaceIdsAfterStream: readonly SafeId<"workspace">[];
+  // Only ids the caller can currently access widen scope — guards against
+  // a hallucinated or stale UUID (from the model, or a workspace the
+  // caller lost access to mid-turn) ever landing in `data_workspace_ids`.
+  accessibleWorkspaceIds: ReadonlySet<string>;
+};
+
+// Computes the workspace ids to fold into `chat_threads.data_workspace_ids`
+// once an assistant turn finishes. Two complementary sources feed it:
+//
+//   1. Structural/text-ref ids embedded in the assistant's own response
+//      parts (`extractAssistantWorkspaceIds`).
+//   2. The ref-registry delta: matter/entity refs resolved DURING the
+//      stream (by a tool, or by a subagent's nested tool loop) that were
+//      not already registered before the stream started. A subagent can
+//      read workspace-scoped content and only return a free-form text
+//      summary — the structural scan in (1) never sees that read, but the
+//      shared registry (passed into the subagent's own toolset) still
+//      holds the resolved ref, so the delta here catches it.
+//
+// Both are intersected with `accessibleWorkspaceIds` so an out-of-set id
+// never reaches the thread row (see `expandThreadDataScope`'s caller).
+export const computeAssistantTurnWorkspaceIds = ({
+  responseParts,
+  workspaceIdsBeforeStream,
+  registeredWorkspaceIdsAfterStream,
+  accessibleWorkspaceIds,
+}: ComputeAssistantTurnWorkspaceIdsInput): SafeId<"workspace">[] => {
+  const candidateIds = [
+    ...extractAssistantWorkspaceIds(responseParts),
+    ...registeredWorkspaceIdsAfterStream.filter(
+      (id) => !workspaceIdsBeforeStream.has(id),
+    ),
+  ];
+  return candidateIds.filter((id) => accessibleWorkspaceIds.has(id));
 };
 
 type ExpandThreadDataScopeInput = {

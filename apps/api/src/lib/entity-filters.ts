@@ -16,6 +16,7 @@ import {
 import { user } from "@/api/db/auth-schema";
 import { entities, entityVersions, fields, properties } from "@/api/db/schema";
 import type { EntityKind, FieldContent } from "@/api/db/schema-validators";
+import { compareByLocale } from "@/api/lib/collation";
 import { typedPgArray } from "@/api/lib/search/sql";
 
 // -- Types --
@@ -139,6 +140,10 @@ const buildResolver =
       case "builtin":
         return PASS_THROUGH;
       case "path":
+        return PASS_THROUGH;
+      // `formula` operands only evaluate in the JS template domain; they are
+      // stripped before reaching view filters, so this is a defensive no-match.
+      case "formula":
         return PASS_THROUGH;
       default:
         return PASS_THROUGH;
@@ -274,10 +279,18 @@ export const applyFilters = <T extends FilterableEntity>(
 export const applySorts = <T extends FilterableEntity>(
   items: T[],
   sorts: ViewSort[],
+  // Property values are user-entered text (as opposed to e.g. an id), so
+  // sorting them needs the viewer's locale, not codepoint order. Callers must
+  // pass the request locale (extractLangFromRequest) explicitly; there is no
+  // implicit default, since an implicit locale is the bug this module guards
+  // against.
+  locale: string,
 ): T[] => {
   if (sorts.length === 0) {
     return items;
   }
+
+  const compareText = compareByLocale(locale);
 
   return [...items].toSorted((a, b) => {
     for (const sort of sorts) {
@@ -287,9 +300,9 @@ export const applySorts = <T extends FilterableEntity>(
 
       // Numeric ordering whenever the property is numeric on at least one
       // side. Comparing only when BOTH sides are int dropped to a string
-      // localeCompare the moment a row was missing the field or held a
-      // legacy non-int value, so 10 sorted before 9. Rows without a numeric
-      // value bucket to the end, independent of sort direction.
+      // compare the moment a row was missing the field or held a legacy
+      // non-int value, so 10 sorted before 9. Rows without a numeric value
+      // bucket to the end, independent of sort direction.
       if (fieldA?.content.type === "int" || fieldB?.content.type === "int") {
         const numA = numericContentValue(fieldA?.content);
         const numB = numericContentValue(fieldB?.content);
@@ -311,7 +324,7 @@ export const applySorts = <T extends FilterableEntity>(
 
       const valueA = getFieldValue(fieldA?.content);
       const valueB = getFieldValue(fieldB?.content);
-      const cmp = valueA.localeCompare(valueB) * dir;
+      const cmp = compareText(valueA, valueB) * dir;
 
       if (cmp !== 0) {
         return cmp;
@@ -456,6 +469,12 @@ const compileBuiltinCompare = (
 };
 
 const compileCompare = (node: CompareNode): SQL | null => {
+  // `formula` operands have no SQL transpilation; skip the leaf rather than
+  // coerce it. They are stripped at the persistence boundary, so this is a
+  // belt-and-suspenders guard against a hand-crafted filter.
+  if (node.left.type === "formula" || node.right.type === "formula") {
+    return null;
+  }
   // The filter UI always compares a ref operand against a literal.
   const value = literalString(node.right);
   if (value === null) {

@@ -21,6 +21,7 @@ import { authMacro, permissionMacro } from "@/api/lib/auth";
 const searchEndpoint = createSafeRootHandler(
   {
     permissions: { workspace: ["read"] },
+    mcp: { type: "tool", name: "search" },
     body: searchBodySchema,
   } satisfies HandlerConfig,
   async function* ({ activeWorkspaceIds, body, scopedDb, session, user }) {
@@ -44,6 +45,7 @@ const searchEndpoint = createSafeRootHandler(
 const searchFacetsEndpoint = createSafeRootHandler(
   {
     permissions: { workspace: ["read"] },
+    mcp: { type: "internal", reason: "search_ui" },
     body: searchFacetsBodySchema,
   } satisfies HandlerConfig,
   async function* ({ activeWorkspaceIds, body, scopedDb, session }) {
@@ -66,6 +68,7 @@ const searchFacetsEndpoint = createSafeRootHandler(
 const refineSearchEndpoint = createSafeRootHandler(
   {
     permissions: { workspace: ["read"] },
+    mcp: { type: "internal", reason: "search_ui" },
     body: refineSearchBodySchema,
     requiresUsage: { actionType: "chat", modelRole: "fast" },
   } satisfies HandlerConfig,
@@ -99,7 +102,8 @@ const refineSearchEndpoint = createSafeRootHandler(
 
 const summarizeSearchEndpoint = createSafeRootHandler(
   {
-    permissions: { workspace: ["read"] },
+    permissions: { chat: ["create"], workspace: ["read"] },
+    mcp: { type: "internal", reason: "search_ui" },
     body: summarizeSearchBodySchema,
     requiresUsage: { actionType: "chat", modelRole: "fast" },
   } satisfies HandlerConfig,
@@ -136,6 +140,7 @@ const summarizeSearchEndpoint = createSafeRootHandler(
 const searchSummaryChatEndpoint = createSafeRootHandler(
   {
     permissions: { chat: ["create"] },
+    mcp: { type: "internal", reason: "search_ui" },
     body: searchSummaryChatBodySchema,
   } satisfies HandlerConfig,
   async function* ({

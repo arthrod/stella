@@ -75,7 +75,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout resolved commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ steps.release.outputs.sha }}
           fetch-depth: 0
@@ -133,7 +133,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.resolve.outputs.release_sha }}
           persist-credentials: false
@@ -248,7 +248,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.resolve.outputs.release_sha }}
           persist-credentials: false
@@ -271,8 +271,6 @@ jobs:
           file: apps/api/Dockerfile
           platforms: linux/arm64
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-arm64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-arm64,mode=max
           build-args: |
             STELLA_VERSION=${{ needs.resolve.outputs.version }}
             STELLA_COMMIT_SHA=${{ needs.resolve.outputs.release_sha }}
@@ -300,7 +298,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.resolve.outputs.release_sha }}
           persist-credentials: false
@@ -323,8 +321,6 @@ jobs:
           file: apps/api/Dockerfile
           platforms: linux/amd64
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-amd64
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-amd64,mode=max
           build-args: |
             STELLA_VERSION=${{ needs.resolve.outputs.version }}
             STELLA_COMMIT_SHA=${{ needs.resolve.outputs.release_sha }}
@@ -349,7 +345,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ needs.resolve.outputs.release_sha }}
           fetch-depth: 0
@@ -374,9 +370,15 @@ jobs:
           AMD64_DIGEST: ${{ needs.build-amd64.outputs.digest }}
           SHA: ${{ needs.resolve.outputs.release_sha }}
         run: |
-          docker buildx imagetools create \
-            -t "${IMAGE}:${RELEASE_REF}" \
-            -t "${IMAGE}:sha-${SHA:0:7}" \
+          tags=(-t "${IMAGE}:${RELEASE_REF}" -t "${IMAGE}:sha-${SHA:0:7}")
+          # Advance the convenience `:latest` tag only for stable releases, so
+          # self-host `docker compose pull` resolves to the newest stable image.
+          # Prereleases (e.g. v1.2.3-rc1, which contain a hyphen) must not move it.
+          case "${RELEASE_REF}" in
+            *-*) ;;
+            *) tags+=(-t "${IMAGE}:latest") ;;
+          esac
+          docker buildx imagetools create "${tags[@]}" \
             "${IMAGE}@${ARM64_DIGEST}" \
             "${IMAGE}@${AMD64_DIGEST}"
 
@@ -448,8 +450,18 @@ jobs:
           RELEASE_REF: ${{ needs.resolve.outputs.release_ref }}
         run: |
           manual_notes="docs/changelog/${RELEASE_REF}.md"
-          if [[ ! -f "$manual_notes" ]]; then
+          if [[ -L "$manual_notes" ]]; then
+            echo "Manual release description must be a regular file: ${manual_notes}" >&2
+            exit 1
+          fi
+
+          if [[ ! -e "$manual_notes" ]]; then
             exit 0
+          fi
+
+          if [[ ! -f "$manual_notes" ]]; then
+            echo "Manual release description must be a regular file: ${manual_notes}" >&2
+            exit 1
           fi
 
           {

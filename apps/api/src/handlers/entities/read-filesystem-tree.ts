@@ -1,7 +1,10 @@
 import { Result } from "better-result";
+import { and, eq } from "drizzle-orm";
 import { t } from "elysia";
 
+import { entities } from "@/api/db/schema";
 import { queryEntities } from "@/api/handlers/entities/query-entities";
+import { collectMissingAncestorIds } from "@/api/handlers/entities/read-filesystem-tree.logic";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { tConditionNode } from "@/api/lib/conditions/contract";
@@ -23,6 +26,7 @@ const readFilesystemTreeBodySchema = t.Object({
 
 const config = {
   permissions: { workspace: ["read"] },
+  mcp: { type: "covered", by: "list_documents" },
   body: readFilesystemTreeBodySchema,
 } satisfies HandlerConfig;
 
@@ -54,13 +58,48 @@ export const createReadFilesystemTreeHandler = (
           fieldIds: body.fieldIds ?? [],
           excludedKinds: ["task"],
           previewableForAi: false,
-          includeTotalCount: false,
         }),
       );
 
-      return Result.ok({
-        entities: result.entities,
-      });
+      const isFiltered =
+        (body.filters?.length ?? 0) > 0 ||
+        (body.search?.trim().length ?? 0) > 0;
+
+      // An unfiltered query already returns the whole subtree, so ancestor
+      // backfill only matters when a filter or search can hide intermediates.
+      if (!isFiltered || result.entities.length === 0) {
+        return Result.ok({ entities: result.entities, ancestorLinks: [] });
+      }
+
+      const folderSkeleton = yield* Result.await(
+        safeDb((tx) =>
+          tx
+            .select({ entityId: entities.id, parentId: entities.parentId })
+            .from(entities)
+            .where(
+              and(
+                eq(entities.workspaceId, workspaceId),
+                eq(entities.kind, "folder"),
+              ),
+            ),
+        ),
+      );
+      const parentById = new Map(
+        folderSkeleton.map((folder) => [folder.entityId, folder.parentId]),
+      );
+      const missingIds = new Set(
+        collectMissingAncestorIds(result.entities, parentById),
+      );
+
+      // Just the parent links of the folders the filter/search hid, so the
+      // client can resolve a matched row's full ancestor chain (for
+      // cross-matter copy/move dedup) without these folders ever entering the
+      // rendered or selectable tree.
+      const ancestorLinks = folderSkeleton.filter((folder) =>
+        missingIds.has(folder.entityId),
+      );
+
+      return Result.ok({ entities: result.entities, ancestorLinks });
     },
   );
 

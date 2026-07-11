@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef } from "react";
+import { Fragment, useRef } from "react";
 import type { ReactNode } from "react";
 
 import { useTranslations } from "use-intl";
@@ -479,6 +479,7 @@ const BlockRenderer = ({
     >
       <tbody>
         {block.rows.map((row, rowIndex) => (
+          // eslint-disable-next-line react/no-array-index-key -- read-only case-law document table parsed once from source text; rows are positionally fixed (rowIndex feeds getTableCellPieceId's identity below) and never reordered/inserted by the reader UI.
           <tr key={rowIndex}>
             {row.map((cell, columnIndex) => {
               const pieceId = getTableCellPieceId({
@@ -729,8 +730,7 @@ export const DecisionText = ({
     query: searchQuery,
   });
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reports derived match count to a parent callback prop; lift the count to the parent
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     onMatchCountChange?.(searchResults.matchCount);
   }, [onMatchCountChange, searchResults.matchCount]);
 

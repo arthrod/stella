@@ -92,6 +92,9 @@ const createContext = (
   return {
     accessibleWorkspaceIds: [],
     accessibleWorkspaceIdSet: new Set(),
+    accessibleWorkspaceStatusById: new Map(),
+    accessibleWorkspaces: [],
+    grantedScopes: [],
     memberRole: "owner",
     organizationId: toSafeId<"organization">("org_1"),
     recordAuditEvent: asTestRaw<AuditRecorder>(async () => undefined),

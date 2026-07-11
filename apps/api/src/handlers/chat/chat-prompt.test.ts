@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { createChatAttachmentPart } from "@/api/handlers/chat/chat-message-parts";
 import { createChatRefRegistry } from "@/api/handlers/chat/tools/execute/ref-registry";
 import { toSafeId } from "@/api/lib/branded-types";
 import { DOCX_REVIEW_MARKUP_EXAMPLES } from "@/api/lib/docx-review-markup";
@@ -20,20 +21,31 @@ import {
 import type {
   ChatCacheStablePrefix,
   ChatSafePrompt,
+  ChatToolAvailability,
   ChatUntrustedPromptSuffix,
 } from "./chat-prompt";
 import {
   ACTIVE_SKILL_BODY_PROMPT_MAX_CHARS,
   type ActiveChatSkillContext,
 } from "./skills";
+import {
+  FETCH_URL_TOOL_NAME,
+  WEB_SEARCH_TOOL_NAME,
+} from "./tools/web-search-tools";
 import type { ChatMessage } from "./types";
 
 const WORKSPACE_ID = toSafeId<"workspace">("ws_prompt_test");
+const FULL_TOOL_AVAILABILITY = {
+  templateAuthoring: true,
+  webResearch: true,
+  folioAgentDocTools: true,
+  subagents: false,
+} as const satisfies ChatToolAvailability;
 const SKILL_METADATA = [
   {
-    name: "legal-interpretation",
-    description: "Analyze legal texts using an interpretation framework.",
-    version: "3.0",
+    name: "custom-research-skill",
+    description: "Apply a user-authored research workflow.",
+    version: "1.0",
   },
 ] as const;
 
@@ -57,7 +69,7 @@ describe("chat prompt builders", () => {
     expect(prompt).not.toContain("Status");
   });
 
-  test("system prompts include a compact stella API catalog", () => {
+  test("system prompts include the code-mode read surface", () => {
     const refRegistry = createChatRefRegistry();
     const workspacePrompt = buildWorkspacePromptText({
       entityCount: 1,
@@ -76,21 +88,23 @@ describe("chat prompt builders", () => {
       expect(prompt).toContain(
         "Never use it to request tool-call permission or consent",
       );
-      expect(prompt).toContain("For stella data reads, use the stella API");
-      expect(prompt).toContain("describe-stella-api");
-      expect(prompt).toContain("run-stella-query");
-      expect(prompt).toContain("result.items");
-      expect(prompt).toContain("Available stella read functions");
-      expect(prompt).toContain("read.listContacts({");
-      expect(prompt).toContain("read.getMatterEntityContents({");
+      // Code-mode surface: the sandbox runner and its discovery companion.
+      expect(prompt).toContain("execute_typescript");
+      expect(prompt).toContain("discover_tools");
+      // Only the entry-point read is documented eagerly; the rest are held
+      // out of the eager catalog and reached via discover_tools, keeping the
+      // injected section in the same size class as the old compact hint.
+      expect(prompt).toContain("declare function external_list_matters");
+      expect(prompt).toContain("### Discoverable APIs");
+      expect(prompt).toContain("external_search_across_matters");
+      expect(prompt).not.toContain("declare function external_list_invoices");
       expect(prompt).toContain("DOCX REVIEW TAGS");
       expect(prompt).toContain(DOCX_REVIEW_MARKUP_EXAMPLES.insertion);
       expect(prompt).toContain(DOCX_REVIEW_MARKUP_EXAMPLES.deletion);
       expect(prompt).toContain(DOCX_REVIEW_MARKUP_EXAMPLES.comment);
-      // Full declarations and JSON schemas stay out of the prompt;
-      // `describe-stella-api({name})` remains the detailed fallback.
-      expect(prompt).not.toContain("namespace read {");
-      expect(prompt).not.toContain("declare global {");
+      // The retired hand-written catalog and its tools are gone.
+      expect(prompt).not.toContain("For stella data reads, use the stella API");
+      expect(prompt).not.toContain("run-stella-query");
     }
   });
 
@@ -128,7 +142,7 @@ describe("chat prompt builders", () => {
     });
 
     expect(first.cacheStablePrefix).toBe(second.cacheStablePrefix);
-    expect(first.cacheStablePrefix).toContain("legal-interpretation");
+    expect(first.cacheStablePrefix).toContain("custom-research-skill");
     expect(first.cacheStablePrefix).not.toContain("First User");
     expect(first.cacheStablePrefix).not.toContain("Current date");
     expect(first.fullPrompt).not.toBe(second.fullPrompt);
@@ -362,13 +376,51 @@ describe("chat prompt builders", () => {
     expect(prompt).toContain("queued");
     // Internal component names must not leak into user-facing prompt.
     expect(prompt).not.toContain("Folio");
+    // Guidance for the folio-agents doc tools (registered by default via
+    // `hasActiveDocxFileClient`/DEFAULT_CHAT_TOOL_AVAILABILITY here).
+    expect(prompt).toContain("`read_document`");
+    expect(prompt).toContain("`find_text`");
+    expect(prompt).toContain("truncation notice above");
+  });
+
+  test("omits the folio-agents doc-tool guidance when those tools are not registered for this turn", () => {
+    const basePrompt = "Base prompt";
+    const refRegistry = createChatRefRegistry();
+
+    const prompt = appendActiveFilePromptIfEntityExists({
+      activeFile: {
+        docxEditSnapshot: {
+          blocks: [{ id: "b-1", kind: "paragraph", text: "Some clause text" }],
+        },
+        entityId: toSafeId<"entity">("entity_docx"),
+        fileName: "Kupni smlouva.docx",
+        supportsDocxEdits: true,
+      },
+      entityExists: true,
+      prompt: basePrompt,
+      refRegistry,
+      toolAvailability: {
+        ...FULL_TOOL_AVAILABILITY,
+        folioAgentDocTools: false,
+      },
+      workspaceId: WORKSPACE_ID,
+    });
+
+    // `apply-active-docx-edits` guidance is unaffected: it rides on the
+    // combined `hasActiveDocxEditClient` flag, not this narrower one.
+    expect(prompt).toContain("apply-active-docx-edits");
+    expect(prompt).not.toContain("read_document");
+    expect(prompt).not.toContain("find_text");
   });
 
   test("active-template prompt stays read-only until a snapshot exists", () => {
-    const prompt = buildActiveTemplatePrompt({
-      templateId: toSafeId<"template">("tpl_test"),
-      fileName: "Plna moc.docx",
-    });
+    const prompt = buildActiveTemplatePrompt(
+      {
+        templateId: toSafeId<"template">("tpl_test"),
+        fileName: "Plna moc.docx",
+      },
+      FULL_TOOL_AVAILABILITY,
+    );
 
     expect(prompt).toContain("ACTIVE TEMPLATE");
     expect(prompt).toContain("Plna moc.docx");
@@ -377,19 +429,22 @@ describe("chat prompt builders", () => {
   });
 
   test("active-template prompt wires the suggest-fields and edit flows when a snapshot exists", () => {
-    const prompt = buildActiveTemplatePrompt({
-      templateId: toSafeId<"template">("tpl_test"),
-      fileName: "Plna moc.docx",
-      docxEditSnapshot: {
-        blocks: [
-          {
-            id: "b-1",
-            kind: "paragraph",
-            text: "Zmocnitel: Jan Novak, nar. 1.1.1990",
-          },
-        ],
+    const prompt = buildActiveTemplatePrompt(
+      {
+        templateId: toSafeId<"template">("tpl_test"),
+        fileName: "Plna moc.docx",
+        docxEditSnapshot: {
+          blocks: [
+            {
+              id: "b-1",
+              kind: "paragraph",
+              text: "Zmocnitel: Jan Novak, nar. 1.1.1990",
+            },
+          ],
+        },
       },
-    });
+      FULL_TOOL_AVAILABILITY,
+    );
 
     expect(prompt).toContain("apply-active-docx-edits");
     expect(prompt).toContain("suggest_template_fields");
@@ -401,17 +456,244 @@ describe("chat prompt builders", () => {
     // Internal component names must not leak into user-facing prompt.
     expect(prompt).not.toContain("Folio");
   });
+
+  test("active-template prompt drops the suggest-fields tool for roles without template authoring", () => {
+    const prompt = buildActiveTemplatePrompt(
+      {
+        templateId: toSafeId<"template">("tpl_test"),
+        fileName: "Plna moc.docx",
+        docxEditSnapshot: {
+          blocks: [
+            {
+              id: "b-1",
+              kind: "paragraph",
+              text: "Zmocnitel: Jan Novak, nar. 1.1.1990",
+            },
+          ],
+        },
+      },
+      {
+        templateAuthoring: false,
+        webResearch: true,
+        folioAgentDocTools: true,
+        subagents: false,
+      },
+    );
+
+    // A `template: ["use"]`-only role (e.g. intern) never has
+    // `suggest_template_fields` registered; the prompt must not steer
+    // the model to it, but the field-marker workflow via
+    // `apply-active-docx-edits` stays available.
+    expect(prompt).not.toContain("suggest_template_fields");
+    expect(prompt).toContain("FIELD SUGGESTIONS");
+    expect(prompt).toContain("apply-active-docx-edits");
+    expect(prompt).toContain("`{{fieldPath}}` marker verbatim");
+  });
+});
+
+// Class guard: the assembled system prompt must never instruct the
+// model to call a tool that is not registered for that configuration.
+// We build the prompt across an availability matrix, extract every
+// backtick-quoted tool-name-shaped token, and assert each is either a
+// tool that IS registered for that config or an explicit non-tool
+// code span. A future edit that names an unregistered tool (e.g.
+// re-adds a `web_search` pointer to the web-off prompt) fails here.
+describe("system prompt tool-reference guard", () => {
+  // Tools always registered by getChatTools regardless of config, and
+  // referenced by name in the prompt scaffold. `create-document` and
+  // (given an active-template snapshot, which implies
+  // hasActiveDocxEditClient) `apply-active-docx-edits` are always in
+  // the map for the configurations swept here.
+  const ALWAYS_REGISTERED_TOOL_NAMES = new Set([
+    "ask-user",
+    "execute_typescript",
+    "discover_tools",
+    "load-skill",
+    "read-skill-resource",
+    "create-document",
+    "apply-active-docx-edits",
+  ]);
+  // Web research tools: registered only when `webResearch` is true.
+  const WEB_RESEARCH_TOOL_NAMES = new Set([
+    WEB_SEARCH_TOOL_NAME,
+    FETCH_URL_TOOL_NAME,
+  ]);
+  const TEMPLATE_AUTHORING_TOOL_NAME = "suggest_template_fields";
+  // Backtick spans that look like a tool name but are not one (schema
+  // fields / plain nouns). Keep this list tight — everything not here
+  // must resolve to a registered tool.
+  const NON_TOOL_CODE_SPANS = new Set([
+    "resources",
+    "mention",
+    // Active-template section: operation fields and result keys.
+    "applied",
+    "find",
+    "replace",
+    "instructions",
+    "severity",
+    "area",
+    // Code-mode system prompt: JS keyword, not a tool.
+    "await",
+  ]);
+  // A backtick span is "tool-name-shaped" when it is a bare lowercase
+  // identifier with `-`/`_` separators: excludes `read.*` (dot),
+  // `describe-stella-api({name})` (parens), `[1]` (brackets), and
+  // anything with whitespace or uppercase.
+  const TOOL_NAME_SHAPE = /^[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*$/u;
+
+  const extractToolNameTokens = (prompt: string): string[] => {
+    const tokens: string[] = [];
+    for (const match of prompt.matchAll(/`(?<span>[^`]+)`/gu)) {
+      const span = match.groups?.["span"];
+      if (span !== undefined && TOOL_NAME_SHAPE.test(span)) {
+        tokens.push(span);
+      }
+    }
+    return tokens;
+  };
+
+  // Mirrors how buildChatSystemPromptParts appends the active-template
+  // section to the scaffold: core prompt + template appendix in one
+  // assembled string, so the guard sees the same text the model does.
+  const buildAssembledPrompts = (
+    toolAvailability: ChatToolAvailability,
+  ): string[] => {
+    const refRegistry = createChatRefRegistry();
+    const activeTemplateSection = buildActiveTemplatePrompt(
+      {
+        templateId: toSafeId<"template">("tpl_guard"),
+        fileName: "Guard template.docx",
+        docxEditSnapshot: {
+          blocks: [{ id: "b-1", kind: "paragraph", text: "Guard block" }],
+        },
+      },
+      toolAvailability,
+    );
+    return [
+      buildGlobalPrompt({
+        skillMetadata: SKILL_METADATA,
+        toolAvailability,
+        userContext: null,
+      }),
+      buildGlobalPrompt({
+        skillMetadata: [],
+        toolAvailability,
+        userContext: null,
+      }),
+      `${buildWorkspacePromptText({
+        entityCount: 3,
+        refRegistry,
+        skillMetadata: SKILL_METADATA,
+        toolAvailability,
+        userContext: null,
+        workspaceId: WORKSPACE_ID,
+        workspaceName: "Matter Alpha",
+      })}\n\n${activeTemplateSection}`,
+    ];
+  };
+
+  const AVAILABILITY_MATRIX: readonly ChatToolAvailability[] = [
+    {
+      templateAuthoring: true,
+      webResearch: true,
+      folioAgentDocTools: true,
+      subagents: false,
+    },
+    {
+      templateAuthoring: true,
+      webResearch: false,
+      folioAgentDocTools: true,
+      subagents: false,
+    },
+    {
+      templateAuthoring: false,
+      webResearch: true,
+      folioAgentDocTools: true,
+      subagents: false,
+    },
+    {
+      templateAuthoring: false,
+      webResearch: false,
+      folioAgentDocTools: true,
+      subagents: false,
+    },
+  ];
+
+  test("every tool named in the prompt is registered for that config", () => {
+    for (const availability of AVAILABILITY_MATRIX) {
+      const registered = new Set(ALWAYS_REGISTERED_TOOL_NAMES);
+      if (availability.webResearch) {
+        for (const name of WEB_RESEARCH_TOOL_NAMES) {
+          registered.add(name);
+        }
+      }
+      if (availability.templateAuthoring) {
+        registered.add(TEMPLATE_AUTHORING_TOOL_NAME);
+      }
+
+      for (const prompt of buildAssembledPrompts(availability)) {
+        for (const token of extractToolNameTokens(prompt)) {
+          const allowed =
+            registered.has(token) || NON_TOOL_CODE_SPANS.has(token);
+          if (!allowed) {
+            throw new Error(
+              `Prompt names \`${token}\` but it is not registered for ` +
+                `${JSON.stringify(availability)} and is not an ` +
+                `allowlisted non-tool span`,
+            );
+          }
+        }
+      }
+    }
+  });
+
+  test("web research tools are named iff they are registered", () => {
+    for (const prompt of buildAssembledPrompts(FULL_TOOL_AVAILABILITY)) {
+      expect(prompt).toContain(`\`${WEB_SEARCH_TOOL_NAME}\``);
+      expect(prompt).toContain(`\`${FETCH_URL_TOOL_NAME}\``);
+    }
+    for (const prompt of buildAssembledPrompts({
+      templateAuthoring: true,
+      webResearch: false,
+      folioAgentDocTools: true,
+      subagents: false,
+    })) {
+      expect(prompt).not.toContain(WEB_SEARCH_TOOL_NAME);
+      expect(prompt).not.toContain(FETCH_URL_TOOL_NAME);
+      // The skill-grounding guidance and the run-stella-query warning
+      // must survive when web research is off.
+      expect(prompt).toContain("EXTERNAL-FACT SOURCING");
+      expect(prompt).toContain("no external source was available");
+    }
+  });
+
+  test("suggest_template_fields is named iff it is registered", () => {
+    const withAuthoring = buildAssembledPrompts(FULL_TOOL_AVAILABILITY);
+    expect(
+      withAuthoring.some((prompt) =>
+        prompt.includes(`\`${TEMPLATE_AUTHORING_TOOL_NAME}\``),
+      ),
+    ).toBe(true);
+    for (const prompt of buildAssembledPrompts({
+      templateAuthoring: false,
+      webResearch: true,
+      folioAgentDocTools: true,
+      subagents: false,
+    })) {
+      expect(prompt).not.toContain(TEMPLATE_AUTHORING_TOOL_NAME);
+    }
+  });
 });
 
 describe("extractTitle", () => {
   test("falls back for empty titles and truncates long text", () => {
     const emptyParts = [
-      { text: "   ", type: "text" },
+      { type: "text", content: "   " },
     ] satisfies ChatMessage["parts"];
     const longParts = [
       {
-        text: "A".repeat(81),
         type: "text",
+        content: "A".repeat(81),
       },
     ] satisfies ChatMessage["parts"];
 
@@ -421,15 +703,14 @@ describe("extractTitle", () => {
 
   test("ignores non-text parts when building the title", () => {
     const parts = [
-      {
+      createChatAttachmentPart({
         filename: "attachment.pdf",
-        mediaType: "application/pdf",
-        type: "file",
+        mimeType: "application/pdf",
         url: "https://example.com/attachment.pdf",
-      },
+      }),
       {
-        text: "Useful title",
         type: "text",
+        content: "Useful title",
       },
     ] satisfies ChatMessage["parts"];
 
@@ -439,8 +720,8 @@ describe("extractTitle", () => {
   test("strips html markup before returning the title", () => {
     const parts = [
       {
-        text: "<p>hello <strong>world</strong></p>",
         type: "text",
+        content: "<p>hello <strong>world</strong></p>",
       },
     ] satisfies ChatMessage["parts"];
 

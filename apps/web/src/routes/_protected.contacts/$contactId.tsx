@@ -17,18 +17,17 @@ import { Skeleton } from "@stll/ui/components/skeleton";
 import { stellaToast } from "@stll/ui/components/toast";
 import { cn } from "@stll/ui/lib/utils";
 
+import { MatterIcon } from "@/components/matter-icon";
 import { usePermissions } from "@/hooks/use-permissions";
 import { getFormattingLocale } from "@/i18n/i18n-store";
+import { ensureRouteQueryData } from "@/lib/react-query";
 import { ContactCommunicationEditor } from "@/routes/_protected.contacts/-components/contact-communication-editor";
 import { ContactCustomFieldsEditor } from "@/routes/_protected.contacts/-components/contact-custom-fields-editor";
 import { ContactNotesEditor } from "@/routes/_protected.contacts/-components/contact-notes-editor";
 import { ContactOwnersEditor } from "@/routes/_protected.contacts/-components/contact-owners-editor";
 import { EditableRow } from "@/routes/_protected.contacts/-components/editable-row";
 import { InfoRow } from "@/routes/_protected.contacts/-components/info-row";
-import {
-  MatterIcon,
-  PartyMatterRow,
-} from "@/routes/_protected.contacts/-components/party-matter-row";
+import { PartyMatterRow } from "@/routes/_protected.contacts/-components/party-matter-row";
 import { useDeleteContact } from "@/routes/_protected.contacts/-mutations";
 import {
   contactOptions,
@@ -40,6 +39,14 @@ import { useCreateMatterStore } from "@/routes/_protected.workspaces/-store/crea
 export const Route = createFileRoute("/_protected/contacts/$contactId")({
   component: ContactDetailPage,
   pendingComponent: ContactDetailPending,
+  loader: async ({ context, params }) => {
+    // Prime the contact query the page suspends on so the fetch starts during
+    // navigation instead of after the component mounts and suspends.
+    await ensureRouteQueryData(
+      context.queryClient,
+      contactOptions(context.user.activeOrganizationId, params.contactId),
+    );
+  },
 });
 
 const SECTION_ROW_KEYS = ["a", "b", "c", "d", "e", "f"];
@@ -192,7 +199,7 @@ function ContactDetailPage() {
               variant="outline"
             >
               <PlusIcon className="size-4" />
-              {t("workspaces.newMatter")}
+              {t("common.newMatter")}
             </Button>
           )}
           {canDeleteContact && (
@@ -432,7 +439,7 @@ function ContactDetailPage() {
                     className="hover:bg-muted flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors"
                     workspaceId={matter.id}
                   >
-                    <MatterIcon matter={matter} />
+                    <MatterIcon className="size-4 shrink-0" matter={matter} />
                     <BidiText as="span" className="font-medium">
                       {matter.name}
                     </BidiText>

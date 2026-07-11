@@ -1,5 +1,6 @@
 import { getFormatter, getFormattingLocale } from "@/i18n/i18n-store";
 import { startOfWeek } from "@/i18n/week";
+import { DAY_IN_MS } from "@/lib/time";
 import type {
   WorkspaceEntity,
   WorkspaceField,
@@ -80,7 +81,9 @@ export const getEntityName = (entity: WorkspaceEntity): string => {
     return entity.name;
   }
 
-  const fields = Object.values(entity.fields);
+  const fields = Object.values(entity.fields).filter(
+    (field): field is WorkspaceField => field !== undefined,
+  );
   const fileField = fields.find((f) => f.content.type === "file");
 
   if (fileField?.content.type === "file" && fileField.content.fileName) {
@@ -105,11 +108,15 @@ export const getEntityName = (entity: WorkspaceEntity): string => {
 };
 
 export const getFirstFile = (entity: WorkspaceEntity) => {
-  for (const [propertyId, field] of Object.entries(entity.fields)) {
+  for (const field of Object.values(entity.fields)) {
+    if (!field) {
+      continue;
+    }
+
     if (field.content.type === "file") {
       return {
         fieldId: field.id,
-        propertyId,
+        propertyId: field.propertyId,
         entityId: field.entityId,
         fileName: field.content.fileName,
         mimeType: field.content.mimeType,
@@ -124,7 +131,7 @@ export const getFirstFile = (entity: WorkspaceEntity) => {
 
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
-const DAY = 86_400_000;
+const DAY = DAY_IN_MS;
 
 export const formatRelativeTime = (
   isoString: string | null | undefined,

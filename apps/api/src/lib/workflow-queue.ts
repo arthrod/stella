@@ -14,11 +14,16 @@ import {
   properties,
 } from "@/api/db/schema";
 import type { FieldContent } from "@/api/db/schema-validators";
+import { resolveDocTypeClassifier } from "@/api/handlers/playbooks/materialize-run";
+import {
+  classifierParticipatedInPlan,
+  routeClassifiedDocuments,
+} from "@/api/handlers/playbooks/route-playbooks";
+import type { AIRequestServiceTier } from "@/api/lib/ai-config";
 import {
   loadOrgAIConfig,
   loadPromptCachingPreference,
 } from "@/api/lib/ai-config-loader";
-import type { AIRequestServiceTier } from "@/api/lib/ai-models";
 import { captureError } from "@/api/lib/analytics";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
@@ -51,8 +56,15 @@ import {
 import { resolveWorkflowTargetEntityIds } from "@/api/lib/workflow-targets";
 import { getBatchGenerator } from "@/api/lib/workflow/generate-batch-provider";
 import type {
+  AIJustification,
+  AIResult,
+} from "@/api/lib/workflow/generate-batch-shared";
+import type {
+  AIBatchProperty,
+  BatchProperty,
   ExecutionLevel,
   PropertyBatch,
+  VerdictBatchProperty,
 } from "@/api/lib/workflow/get-execution-plan";
 import {
   getExecutionPlanData,
@@ -76,6 +88,7 @@ import {
 import { parseStoredWorkflowServiceTier } from "@/api/lib/workflow/service-tier-state";
 import type { PartialAnswerUpdate } from "@/api/lib/workflow/streaming-answer";
 import { prepareBatch } from "@/api/lib/workflow/utils";
+import { computeVerdictBatch } from "@/api/lib/workflow/verdict-engine";
 
 // ── Redis keys ─────────────────────────────────────────
 const WORKFLOW_KEY_PREFIX = "workflow";
@@ -1023,8 +1036,8 @@ export const initWorkflowWorker = () => {
       // job "active" indefinitely and block follow-up workflow runs.
       //
       // We pipe an AbortSignal through `processEntityJob` so the
-      // timeout actually CANCELS the in-flight work (the AI SDK call
-      // honours the signal). Without that, a `Promise.race`-style
+      // timeout actually CANCELS the in-flight work (the TanStack AI
+      // request honours the signal). Without that, a `Promise.race`-style
       // wrapper would only reject the wrapper while the original
       // attempt kept running — racing the BullMQ retry and double-
       // incrementing the workflow completion counter.
@@ -1281,7 +1294,7 @@ const processEntityJob = async (data: EntityJobData, signal: AbortSignal) => {
 
     // Process all batches at this level in parallel
     // (same level = independent dependencies)
-    // oxlint-disable-next-line no-await-in-loop -- levels run in dependency order; a level must finish before the next starts
+    // oxlint-disable-next-line no-await-in-loop, no-db-await-in-loop/no-db-await-in-loop -- levels run in dependency order; a level must finish before the next starts. Same-level batches process a single entity's properties in parallel, so the fan-out width is bounded by the workspace's configured property count, not tenant row volume
     await Promise.all(
       batches.map(
         async (batch) =>
@@ -1522,78 +1535,126 @@ const processOneBatch = async ({
     ]);
     const generateFn = getBatchGenerator();
 
-    // generateBatch returns a Result<T, E> directly. The combined
-    // signal aborts when EITHER the per-batch AI timeout fires OR the
-    // worker-level per-job timeout does, so the AI SDK actually cancels
-    // the in-flight request.
-    const batchResult = await runWorkflowBatchGenerationWithRetry({
-      generate: async () =>
-        await generateFn({
-          abortSignal: AbortSignal.any([
-            AbortSignal.timeout(getWorkflowBatchAITimeoutMs(serviceTier)),
-            signal,
-          ]),
-          batch,
-          entityVersionId,
-          organizationId,
-          workspaceId,
-          scopedDb,
-          orgAIConfig,
-          promptCachingEnabled,
-          serviceTier,
-          usageMetering: {
-            actionType: "background",
+    // Dispatch on tool type: ai-model columns run the LLM extraction; verdict
+    // columns are graded by the verdict engine from their ASK property's
+    // already-written value. A level rarely mixes both (their dependency
+    // signatures differ), but split defensively so each path only sees the
+    // properties it can process.
+    const aiModelProperties = batch.properties.filter(
+      (property): property is AIBatchProperty =>
+        property.tool.type === "ai-model",
+    );
+    const verdictProperties = batch.properties.filter(
+      (property): property is VerdictBatchProperty =>
+        property.tool.type === "playbook-verdict",
+    );
+
+    const aiResults: AIResult[] = [];
+    const aiJustifications: AIJustification[] = [];
+    const skippedPropertyIds: SafeId<"property">[] = [];
+    const unsupportedPropertyIds: SafeId<"property">[] = [];
+    const erroredProperties: BatchProperty[] = [];
+    const usageMetering = {
+      actionType: "background" as const,
+      organizationId,
+      safeDb,
+      serviceTier,
+      userId,
+      workspaceId,
+    };
+
+    if (aiModelProperties.length > 0) {
+      const aiBatch: PropertyBatch = {
+        ...batch,
+        properties: aiModelProperties,
+      };
+      // generateBatch returns a Result<T, E> directly. The combined
+      // signal aborts when EITHER the per-batch AI timeout fires OR the
+      // worker-level per-job timeout does, so TanStack AI actually cancels
+      // the in-flight request.
+      const batchResult = await runWorkflowBatchGenerationWithRetry({
+        generate: async () =>
+          await generateFn({
+            abortSignal: AbortSignal.any([
+              AbortSignal.timeout(getWorkflowBatchAITimeoutMs(serviceTier)),
+              signal,
+            ]),
+            batch: aiBatch,
+            entityVersionId,
             organizationId,
-            safeDb,
-            serviceTier,
-            userId,
             workspaceId,
-          },
-          onPartialAnswer: previewPublisher.publish,
-        }),
-      onRetryError: (error, attempt) => {
-        captureError(error, {
+            scopedDb,
+            orgAIConfig,
+            promptCachingEnabled,
+            serviceTier,
+            usageMetering,
+            onPartialAnswer: previewPublisher.publish,
+          }),
+        onRetryError: (error, attempt) => {
+          captureError(error, {
+            workspaceId,
+            entityId,
+            batchId: batch.id,
+            level: String(level),
+            requestId,
+            attempt: String(attempt),
+            retry: "true",
+          });
+        },
+        sleep,
+        throwIfAborted: () => signal.throwIfAborted(),
+      });
+
+      if (Result.isError(batchResult)) {
+        captureError(batchResult.error, {
           workspaceId,
           entityId,
           batchId: batch.id,
           level: String(level),
           requestId,
-          attempt: String(attempt),
-          retry: "true",
         });
-      },
-      sleep,
-      throwIfAborted: () => signal.throwIfAborted(),
-    });
-
-    if (Result.isError(batchResult)) {
-      captureError(batchResult.error, {
-        workspaceId,
-        entityId,
-        batchId: batch.id,
-        level: String(level),
-        requestId,
-      });
-
-      const isStillCurrentRequest = await isCurrentWorkflowRequest({
-        requestId,
-        workspaceId,
-      });
-      if (!isStillCurrentRequest) {
-        return;
+        erroredProperties.push(...aiModelProperties);
+      } else {
+        aiResults.push(...batchResult.value.aiResults);
+        aiJustifications.push(...batchResult.value.aiJustifications);
+        skippedPropertyIds.push(...batchResult.value.skippedPropertyIds);
+        unsupportedPropertyIds.push(
+          ...batchResult.value.unsupportedPropertyIds,
+        );
       }
-
-      await setFieldsStatus({
-        workspaceId,
-        entityVersionId,
-        batch,
-        contentType: "error",
-        scopedDb,
-      });
-      return;
     }
 
-    const processedFields = batchResult.value;
+    if (verdictProperties.length > 0) {
+      signal.throwIfAborted();
+      const verdictOutput = await computeVerdictBatch({
+        abortSignal: AbortSignal.any([
+          AbortSignal.timeout(getWorkflowBatchAITimeoutMs(serviceTier)),
+          signal,
+        ]),
+        organizationId,
+        workspaceId,
+        scopedDb,
+        entityVersionId,
+        verdictProperties,
+        inputPropertyIds: batch.inputs,
+        orgAIConfig,
+        promptCachingEnabled,
+        serviceTier,
+        usageMetering,
+      });
+      aiResults.push(...verdictOutput.aiResults);
+      aiJustifications.push(...verdictOutput.aiJustifications);
+      skippedPropertyIds.push(...verdictOutput.skippedPropertyIds);
+      const erroredVerdictIds = new Set<string>(
+        verdictOutput.erroredPropertyIds,
+      );
+      for (const property of verdictProperties) {
+        if (erroredVerdictIds.has(property.id)) {
+          erroredProperties.push(property);
+        }
+      }
+    }
+
     const isStillCurrentRequest = await isCurrentWorkflowRequest({
       requestId,
       workspaceId,
@@ -1601,6 +1662,23 @@ const processOneBatch = async ({
     if (!isStillCurrentRequest) {
       return;
     }
+
+    if (erroredProperties.length > 0) {
+      await setFieldsStatus({
+        workspaceId,
+        entityVersionId,
+        batch: { ...batch, properties: erroredProperties },
+        contentType: "error",
+        scopedDb,
+      });
+    }
+
+    const processedFields = {
+      aiResults,
+      aiJustifications,
+      skippedPropertyIds,
+      unsupportedPropertyIds,
+    };
 
     // Write AI results to DB
     const candidatePropertyIds = [
@@ -1757,6 +1835,82 @@ const onEntityCompleted = async (
   ]);
 };
 
+// Read the plan-properties snapshot recorded at workflow start. Returns [] when
+// absent (pre-snapshot workflows) or unparseable; the caller treats [] as "freshen
+// everything" for backwards-compat and as "classifier did not run" for routing.
+const readPlanPropertyIds = async (
+  redis: RedisClient,
+  workspaceId: SafeId<"workspace">,
+): Promise<SafeId<"property">[]> => {
+  try {
+    const planRaw = await redis.get(
+      workflowKey(workspaceId, "plan-properties"),
+    );
+    if (planRaw === null) {
+      return [];
+    }
+    const parsed: unknown = JSON.parse(planRaw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => brandPersistedPropertyId(value));
+  } catch (error: unknown) {
+    captureError(error, { workspaceId });
+    return [];
+  }
+};
+
+type MaybeRouteClassifiedDocumentsArgs = {
+  workspaceId: SafeId<"workspace">;
+  organizationId: SafeId<"organization">;
+  userId: SafeId<"user">;
+  scopedDb: ScopedDb;
+  planPropertyIds: readonly SafeId<"property">[];
+};
+
+// Route classified documents into `onClassified` playbooks, but only when the
+// just-finished workflow actually computed the workspace's Document Type
+// classifier (its id is in the plan). This is the recursion guard: a playbook
+// run materializes ASK/verdict columns whose later completion must not re-route,
+// and none of those columns is the classifier, so its id is absent from their
+// plan and this short-circuits.
+const maybeRouteClassifiedDocuments = async ({
+  workspaceId,
+  organizationId,
+  userId,
+  scopedDb,
+  planPropertyIds,
+}: MaybeRouteClassifiedDocumentsArgs): Promise<void> => {
+  if (planPropertyIds.length === 0) {
+    return;
+  }
+  const classifier = await scopedDb(
+    async (tx) => await resolveDocTypeClassifier(tx, workspaceId),
+  );
+  if (
+    !classifier ||
+    !classifierParticipatedInPlan({
+      classifierPropertyId: classifier.id,
+      planPropertyIds,
+    })
+  ) {
+    return;
+  }
+
+  await routeClassifiedDocuments({
+    workspaceId,
+    organizationId,
+    userId,
+    scopedDb,
+    startWorkflow,
+    // Reuse the classifier already resolved above rather than having
+    // resolveApplicablePlaybooks look it up a second time.
+    classifier,
+  });
+};
+
 const finishWorkflow = async (
   workspaceId: SafeId<"workspace">,
   organizationId: SafeId<"organization">,
@@ -1789,25 +1943,17 @@ const finishWorkflow = async (
     await redis.get(workflowKey(workspaceId, "service-tier")),
   );
 
+  // Snapshot the plan's property ids before clearing run state; used both to
+  // freshen exactly the processed properties and to gate classification-driven
+  // routing on whether the Document Type classifier actually ran this pass.
+  const planPropertyIds = await readPlanPropertyIds(redis, workspaceId);
+
   if (!wasScopedRun) {
     // Freshen only the properties that were part of this workflow's
     // plan. Properties created mid-workflow are not in the snapshot —
     // they stay stale and trigger an automatic follow-up run below.
-    let processedIds: SafeId<"property">[] = [];
     try {
-      const planRaw = await redis.get(
-        workflowKey(workspaceId, "plan-properties"),
-      );
-      if (planRaw !== null) {
-        const parsed: unknown = JSON.parse(planRaw);
-        if (Array.isArray(parsed)) {
-          processedIds = parsed
-            .filter((value): value is string => typeof value === "string")
-            .map((value) => brandPersistedPropertyId(value));
-        }
-      }
-
-      if (processedIds.length > 0) {
+      if (planPropertyIds.length > 0) {
         await scopedDb((tx) =>
           tx
             .update(properties)
@@ -1815,7 +1961,7 @@ const finishWorkflow = async (
             .where(
               and(
                 eq(properties.workspaceId, workspaceId),
-                inArray(properties.id, processedIds),
+                inArray(properties.id, planPropertyIds),
               ),
             ),
         );
@@ -1840,6 +1986,20 @@ const finishWorkflow = async (
   // Broadcast completion
   broadcastWorkflowStatus(workspaceId, false);
   broadcastInvalidation(workspaceId, ["properties", workspaceId]);
+
+  // Classification-driven routing. If this workflow (re)computed the Document
+  // Type classifier, materialize + run any `onClassified` org playbooks now that
+  // the run lock is released. Fire-and-forget with structured capture: a routing
+  // failure must never fail (or block) the classification workflow. The
+  // recursion guard inside — a playbook run's materialized columns are never the
+  // classifier, so they cannot re-trigger routing — keeps this from looping.
+  void maybeRouteClassifiedDocuments({
+    workspaceId,
+    organizationId,
+    userId,
+    scopedDb,
+    planPropertyIds,
+  }).catch((error: unknown) => captureError(error, { workspaceId }));
 
   if (wasScopedRun) {
     return;

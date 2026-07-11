@@ -18,13 +18,16 @@ import Paragraph from "@tiptap/extension-paragraph";
 import Placeholder from "@tiptap/extension-placeholder";
 import Text from "@tiptap/extension-text";
 import type { EditorState, Plugin, PluginKey } from "@tiptap/pm/state";
-import type { Editor } from "@tiptap/react";
+import type { Editor, JSONContent } from "@tiptap/react";
 import { useEditor } from "@tiptap/react";
 import { panic, Result } from "better-result";
 import { useDebouncedCallback } from "use-debounce";
 import { useTranslations } from "use-intl";
 
-import { buildChatSlashItems } from "@/components/chat-editor-slash-items";
+import {
+  buildChatSlashItems,
+  commandShortcutRowsFromSkillPages,
+} from "@/components/chat-editor-slash-items";
 import {
   ChatMention,
   createChatSuggestion,
@@ -35,6 +38,7 @@ import {
   CHAT_MENTION_ENTITY_RESULT_LIMIT,
   CHAT_MENTION_SEARCH_DEBOUNCE_MS,
   getMentionViewScope,
+  insertChatMention,
 } from "@/components/chat-mention-helpers";
 import { shouldChipPaste } from "@/components/chat-pasted-text";
 import {
@@ -47,7 +51,7 @@ import {
   type SlashItem,
 } from "@/components/chat/prompt-slash-extension";
 import { createPromptEditorDocument } from "@/components/prompt-editor";
-import { useChromeQuery, useHasMounted } from "@/hooks/use-chrome-query";
+import { useHasMounted } from "@/hooks/use-chrome-query";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
@@ -56,15 +60,13 @@ import {
   createChatDraftState,
   createEmptyChatDraftDoc,
   nextDraftForEditorUpdate,
+  shouldApplyStoredDraftToEditor,
   useChatDraftStore,
 } from "@/lib/chat-draft-store";
 import type { ChatThreadRef } from "@/lib/chat-thread-ref";
 import { getChatThreadKey } from "@/lib/chat-thread-ref";
 import type { WorkspaceEntity } from "@/lib/types";
-import {
-  skillCommandsOptions,
-  skillsOptions,
-} from "@/routes/_protected.knowledge/-queries";
+import { skillsOptions } from "@/routes/_protected.knowledge/-queries";
 import { entitiesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
 import { viewsOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/views";
 
@@ -125,7 +127,7 @@ export type ChatInputDraft = {
 
 export type ChatInputMentionSource = {
   id: string;
-  getItems: () => ChatMentionOption[];
+  getItems: () => ChatMentionOption[] | Promise<ChatMentionOption[]>;
   searchItems?: ((query: string) => Promise<ChatMentionOption[]>) | undefined;
 };
 
@@ -190,11 +192,17 @@ export type ChatEditorController = {
   ) => Promise<void>;
 };
 
+// The stable manager API: every field is a `useCallback`, so the whole value
+// keeps one identity for the provider's lifetime. `extensionVersion` — the one
+// value that changes as registrations come and go — deliberately lives in a
+// SEPARATE context (`ChatEditorExtensionVersionContext`) rather than here.
+// Folding it in would rebuild this value on every register/unregister and
+// re-render every consumer of the API (including the mention-registration
+// hooks, whose effects would then re-register and bump the version again — an
+// update loop that trips React's max-update-depth guard under load).
 type ChatEditorManagerContextValue = {
-  activeThreadKey: string | null;
-  extensionVersion: number;
   focusThread: (threadRef: ChatThreadRef) => void;
-  getMentionItems: () => ChatMentionOption[];
+  getMentionItems: () => Promise<ChatMentionOption[]>;
   getPluginRegistrations: () => ChatInputPluginRegistration[];
   searchMentionItems: (query: string) => Promise<ChatMentionOption[]>;
   insertMentionIntoThread: (
@@ -210,6 +218,12 @@ type ChatEditorManagerContextValue = {
 
 const ChatEditorManagerContext =
   createContext<ChatEditorManagerContextValue | null>(null);
+
+// Carries only the registration version counter. Bumped on every
+// register/unregister and consumed solely by the editor's plugin-sync effect
+// (via `useChatEditorExtensionVersion`), so a bump re-renders that one
+// subscriber instead of every holder of the manager API.
+const ChatEditorExtensionVersionContext = createContext<number>(0);
 
 const isSuggestionPluginState = (
   value: unknown,
@@ -241,19 +255,25 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
   const registrationsRef = useRef(new Map<string, RegisteredExtension>());
   const activeEditorRef = useRef<ActiveChatEditorHandle | null>(null);
   const [extensionVersion, setExtensionVersion] = useState(0);
-  const [activeThreadKey, setActiveThreadKey] = useState<string | null>(null);
 
-  const getMentionItems = useCallback(() => {
+  const getMentionItems = useCallback(async () => {
     const items: ChatMentionOption[] = [];
+    const sources = Array.from(registrationsRef.current.values()).flatMap(
+      ({ registration }) => registration.mentionSources ?? [],
+    );
+    const results = await Promise.all(
+      sources.map(
+        async (source) =>
+          await Result.tryPromise(async () => await source.getItems()),
+      ),
+    );
 
-    for (const { registration } of registrationsRef.current.values()) {
-      if (!registration.mentionSources) {
+    for (const result of results) {
+      if (Result.isError(result)) {
+        getAnalytics().captureError(result.error);
         continue;
       }
-
-      for (const source of registration.mentionSources) {
-        items.push(...source.getItems());
-      }
+      items.push(...result.value);
     }
 
     return items;
@@ -327,7 +347,6 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
 
   const registerActiveEditor = useCallback((handle: ActiveChatEditorHandle) => {
     activeEditorRef.current = handle;
-    setActiveThreadKey(handle.threadKey);
 
     return () => {
       if (activeEditorRef.current?.threadKey !== handle.threadKey) {
@@ -335,9 +354,6 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
       }
 
       activeEditorRef.current = null;
-      setActiveThreadKey((current) =>
-        current === handle.threadKey ? null : current,
-      );
     };
   }, []);
 
@@ -369,8 +385,6 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
 
   const contextValue = useMemo<ChatEditorManagerContextValue>(
     () => ({
-      activeThreadKey,
-      extensionVersion,
       focusThread,
       getMentionItems,
       getPluginRegistrations,
@@ -380,8 +394,6 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
       searchMentionItems,
     }),
     [
-      activeThreadKey,
-      extensionVersion,
       focusThread,
       getMentionItems,
       getPluginRegistrations,
@@ -394,7 +406,9 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
 
   return (
     <ChatEditorManagerContext value={contextValue}>
-      {children}
+      <ChatEditorExtensionVersionContext value={extensionVersion}>
+        {children}
+      </ChatEditorExtensionVersionContext>
     </ChatEditorManagerContext>
   );
 };
@@ -421,10 +435,17 @@ export const useChatEditorManager = () => {
   return context;
 };
 
+// Subscribes only to the registration version, so the editor's plugin-sync
+// effect re-runs when extensions change without dragging the whole manager API
+// into the volatile-value subscription (see `ChatEditorExtensionVersionContext`).
+const useChatEditorExtensionVersion = () =>
+  use(ChatEditorExtensionVersionContext);
+
 type UseChatComposerWiringOptions = {
   controller: ChatEditorController;
   inputDisabled: boolean;
   onSubmit: (draft: ChatInputDraft) => Promise<void> | void;
+  onSubmitError?: ((error: unknown) => void) | undefined;
   /**
    * Pre-submit gate. Return `false` to abort the submit (e.g. when a
    * file-aware caller wants to block until a DOCX snapshot is ready).
@@ -448,6 +469,7 @@ export const useChatComposerWiring = ({
   controller,
   inputDisabled,
   onSubmit,
+  onSubmitError,
   onSubmitGuard,
   submitDisabled,
 }: UseChatComposerWiringOptions) => {
@@ -460,10 +482,14 @@ export const useChatComposerWiring = ({
     if (onSubmitGuard && onSubmitGuard() === false) {
       return;
     }
-    await submit(async (draft) => {
-      await onSubmit(draft);
-    });
-  }, [onSubmit, onSubmitGuard, submit, submitDisabled]);
+    try {
+      await submit(async (draft) => {
+        await onSubmit(draft);
+      });
+    } catch (error) {
+      onSubmitError?.(error);
+    }
+  }, [onSubmit, onSubmitError, onSubmitGuard, submit, submitDisabled]);
 
   useExternalSyncEffect(() => {
     setSubmitHandler(submitDraft);
@@ -483,6 +509,7 @@ export const useChatComposerWiring = ({
 };
 
 export const useChatEditor = ({
+  disableSlashSuggestion = false,
   onDraftStart,
   placeholder,
   reservedCommands = false,
@@ -490,6 +517,13 @@ export const useChatEditor = ({
   threadRef,
   suggestedFollowupPrompt,
 }: {
+  /**
+   * Suppress the `/`-triggered `PromptSlash` popover only for an empty
+   * composer. Chat surfaces with a Skills submenu route that blank-composer
+   * shortcut to the (+) menu instead, while still keeping slash suggestions
+   * after existing text.
+   */
+  disableSlashSuggestion?: boolean | undefined;
   onDraftStart?: (() => void) | undefined;
   placeholder?: string | undefined;
   /**
@@ -510,8 +544,10 @@ export const useChatEditor = ({
     : undefined;
   const resolvedPlaceholder = tabToAskText ?? placeholder ?? defaultPlaceholder;
   const placeholderRef = useRef(resolvedPlaceholder);
+  // eslint-disable-next-line react/react-compiler -- latest-ref mirror: the imperative editor's Placeholder plugin reads placeholderRef.current out-of-render, so it must hold this render's value
   placeholderRef.current = resolvedPlaceholder;
   const suggestedFollowupPromptRef = useRef(suggestedFollowupPrompt);
+  // eslint-disable-next-line react/react-compiler -- latest-ref mirror: consumed by out-of-render editor handlers, must reflect this render's prop
   suggestedFollowupPromptRef.current = suggestedFollowupPrompt;
   const queryClient = useQueryClient();
   const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
@@ -521,20 +557,34 @@ export const useChatEditor = ({
   const activePluginKeysRef = useRef<(string | PluginKey)[]>([]);
   const editorRef = useRef<Editor | null>(null);
   const isApplyingStoredDraftRef = useRef(false);
+  // Every `doc` object this editor's own `onUpdate` persists to the draft
+  // store is recorded here by identity. The draft-apply effect consults it to
+  // avoid ever pushing editor-authored content back into the editor (see
+  // `shouldApplyStoredDraftToEditor`). A WeakSet lets superseded draft docs be
+  // collected once the store drops them, and identity membership survives even
+  // when the store has already advanced past a given snapshot, which is what a
+  // lagging passive effect closes over during fast typing.
+  //
+  // Marks are per-thread: one mounted editor serves many threads, so a thread
+  // switch resets this set (see the reset effect below). The stored draft for
+  // the incoming thread was authored under the previous thread's set, so it
+  // counts as external and gets restored into the editor.
+  const editorAuthoredDocsRef = useRef(new WeakSet<JSONContent>());
   const isNavigatingHistoryRef = useRef(false);
   const draftStartedThreadKeyRef = useRef<string | null>(null);
   const sentMessageHistoryHtmlRef = useRef<readonly string[]>([]);
   const messageHistoryIndexRef = useRef<number | null>(null);
   const markDraftStartedRef = useRef<(() => void) | null>(null);
+  // eslint-disable-next-line react/react-compiler -- latest-ref mirror: the message-history key handler reads this out-of-render, must reflect this render's prop
   sentMessageHistoryHtmlRef.current = sentMessageHistoryHtml ?? [];
   const threadKey = getChatThreadKey(threadRef);
   const {
-    extensionVersion,
     getMentionItems,
     getPluginRegistrations,
     registerActiveEditor,
     searchMentionItems,
   } = useChatEditorManager();
+  const extensionVersion = useChatEditorExtensionVersion();
   const draft = useChatDraftStore(
     (state) => state.draftsByThreadKey[threadKey] ?? null,
   );
@@ -546,6 +596,7 @@ export const useChatEditor = ({
     areDraftDocsEqual(draftDoc, EMPTY_CHAT_DRAFT_DOC),
   );
   const attachmentsRef = useRef(attachments);
+  // eslint-disable-next-line react/react-compiler -- latest-ref mirror: read at submit time out-of-render, must hold this render's attachments
   attachmentsRef.current = attachments;
   const pendingWorkspaceEntitySearchRef = useRef<{
     queryKey: QueryKey | null;
@@ -560,12 +611,27 @@ export const useChatEditor = ({
     draftStartedThreadKeyRef.current = threadKey;
     onDraftStart?.();
   }, [onDraftStart, threadKey]);
+  // eslint-disable-next-line react/react-compiler -- latest-ref mirror: editor plugins invoke markDraftStartedRef.current out-of-render, must point at this render's callback
   markDraftStartedRef.current = markDraftStarted;
 
   // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- ref reset on id change, not external-system sync
   useEffect(() => {
     messageHistoryIndexRef.current = null;
   }, [sentMessageHistoryHtml, threadKey]);
+
+  // Authored marks are per-thread; one mounted editor serves many threads, so a
+  // thread switch must forget the outgoing thread's docs. Reset the set here so
+  // the incoming thread's stored draft counts as external and is restored.
+  // Keyed on `threadKey` alone and declared before the draft-apply effect: it
+  // runs first in the same commit, so the reset lands before that effect reads
+  // membership. Deliberately not folded into the `messageHistoryIndexRef` reset
+  // above (which also fires on `sentMessageHistoryHtml`): clearing marks
+  // mid-thread right after a send could let the lagging draft-apply effect
+  // revert an in-flight keystroke, the exact loop this set prevents.
+  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- ref reset on id change, not external-system sync
+  useEffect(() => {
+    editorAuthoredDocsRef.current = new WeakSet();
+  }, [threadKey]);
 
   const fetchWorkspaceEntities = useCallback(
     async (workspace: ChatMentionOption, query: string) => {
@@ -590,7 +656,6 @@ export const useChatEditor = ({
         filters,
         sorts,
         ...(search && { search }),
-        page: 1,
         pageSize: CHAT_MENTION_ENTITY_RESULT_LIMIT,
       });
       if (pendingWorkspaceEntitySearchRef.current) {
@@ -673,7 +738,6 @@ export const useChatEditor = ({
         filters,
         sorts,
         ...(search && { search }),
-        page: 1,
         pageSize: CHAT_MENTION_ENTITY_RESULT_LIMIT,
       });
       const cachedData = queryClient.getQueryData<EntityMentionPage>(
@@ -734,6 +798,10 @@ export const useChatEditor = ({
       messageHistoryIndexRef.current = null;
     }
 
+    // Mark this doc as editor-authored so the (lagging) draft-apply effect
+    // never reverts the editor to it. `nextDraft.doc` is the exact object the
+    // store will hand back as `draftDoc`, so identity membership is reliable.
+    editorAuthoredDocsRef.current.add(nextDraft.doc);
     setDraft(threadKey, nextDraft);
 
     if (!nextEditor.isEmpty) {
@@ -741,14 +809,6 @@ export const useChatEditor = ({
     }
   });
 
-  // Slash-command skills (formerly "prompt shortcuts") feed the chat
-  // composer's slash menu. After the prompts→skills consolidation
-  // they live in `agent_skills` and the dedicated commands endpoint
-  // returns only the command-bearing subset, so the slash menu
-  // doesn't pay for resource-heavy fields it doesn't render.
-  const { data: commandSkills = [] } = useChromeQuery(
-    skillCommandsOptions(activeOrganizationId),
-  );
   // useInfiniteQuery has no chrome wrapper; gate its cold-cache fetch on mount
   // by hand so it can't resolve on a not-yet-mounted fiber (same rationale as
   // useChromeQuery).
@@ -775,26 +835,9 @@ export const useChatEditor = ({
   }, [fetchNextSkillPage, hasNextSkillPage, isFetchingNextSkillPage]);
 
   const skillPageRows = skillPages?.pages;
-  // Adapt the unified commands-endpoint shape to the legacy
-  // `SlashShortcutRow` contract `buildChatSlashItems` consumes.
-  // `body` (the prompt text) now lives on the skill row, where
-  // shortcuts called it `prompt`.
   const slashShortcutRows = useMemo(
-    () =>
-      commandSkills.flatMap((row) =>
-        row.command === null
-          ? []
-          : [
-              {
-                id: row.id,
-                scope: row.scope,
-                name: row.name,
-                command: row.command,
-                prompt: row.body,
-              },
-            ],
-      ),
-    [commandSkills],
+    () => commandShortcutRowsFromSkillPages(skillPageRows),
+    [skillPageRows],
   );
   const slashItems = useMemo<SlashItem[]>(
     () =>
@@ -806,6 +849,7 @@ export const useChatEditor = ({
     [slashShortcutRows, skillPageRows, reservedCommands],
   );
   const slashItemsRef = useRef(slashItems);
+  // eslint-disable-next-line react/react-compiler -- latest-ref mirror: the PromptSlash suggestion reads slashItemsRef.current out-of-render, must hold this render's items
   slashItemsRef.current = slashItems;
 
   const handleMessageHistoryKeyDown = useCallback(
@@ -880,6 +924,13 @@ export const useChatEditor = ({
     [],
   );
 
+  const promptSlashExtension = PromptSlash.configure({
+    // eslint-disable-next-line react/react-compiler -- ref read deferred into the slash-suggestion callback (invoked out-of-render), not read during render
+    suggestion: createPromptSlashSuggestion(() => slashItemsRef.current, {
+      suppressEmptyTrigger: disableSlashSuggestion,
+    }),
+  });
+
   const editor = useEditor({
     autofocus: false,
     content: draftDoc,
@@ -903,6 +954,7 @@ export const useChatEditor = ({
           };
         },
       }),
+      // eslint-disable-next-line react/react-compiler -- ref read deferred into the plugin's placeholder callback (invoked out-of-render), not read during render
       Placeholder.configure({
         placeholder: () => placeholderRef.current,
       }),
@@ -911,13 +963,12 @@ export const useChatEditor = ({
         suggestion: createChatSuggestion(
           getMentionItems,
           searchMentionItems,
+          // eslint-disable-next-line react/react-compiler -- editor-suggestion glue: loader closes over refs read out-of-render by the mention plugin, not during render
           loadWorkspaceEntities,
         ),
         deleteTriggerWithBackspace: true,
       }),
-      PromptSlash.configure({
-        suggestion: createPromptSlashSuggestion(() => slashItemsRef.current),
-      }),
+      promptSlashExtension,
       PastedText,
     ],
     onCreate: ({ editor: nextEditor }) => {
@@ -1029,6 +1080,7 @@ export const useChatEditor = ({
     },
   });
 
+  // eslint-disable-next-line react/react-compiler -- latest-ref mirror: holds the live editor instance for imperative access from out-of-render handlers and plugins
   editorRef.current = editor;
 
   const syncEditorPlugins = useCallback(
@@ -1069,7 +1121,22 @@ export const useChatEditor = ({
     if (!isUsableEditor(editor)) {
       return undefined;
     }
-    if (areDraftDocsEqual(editor.getJSON(), draftDoc)) {
+
+    // This effect is passive (post-paint), so during fast typing it lags the
+    // live editor: `editor.getJSON()` can be ahead of the `draftDoc` snapshot
+    // this run closed over. Re-applying an editor-authored draft here would
+    // `setContent` the editor back to stale content and drop in-flight
+    // keystrokes, looping until React throws "Maximum update depth exceeded".
+    // Only apply genuinely external drafts (thread switch, restore, mention
+    // inserted while inactive); `isApplyingStoredDraftRef` still suppresses the
+    // resulting `onUpdate`.
+    if (
+      !shouldApplyStoredDraftToEditor({
+        draftDoc,
+        editorAuthoredDraft: editorAuthoredDocsRef.current.has(draftDoc),
+        editorDoc: editor.getJSON(),
+      })
+    ) {
       setIsEmpty(editor.isEmpty);
       return undefined;
     }
@@ -1122,22 +1189,7 @@ export const useChatEditor = ({
       }
 
       markDraftStarted();
-      editor
-        .chain()
-        .focus()
-        .insertContent({
-          type: "mention",
-          attrs: {
-            id: mention.id,
-            label: mention.label,
-            category: mention.category,
-            kind: mention.kind,
-            mimeType: mention.mimeType,
-            sourceWorkspaceId: mention.sourceWorkspaceId,
-          },
-        })
-        .insertContent(" ")
-        .run();
+      insertChatMention(editor, mention);
     },
     [editor, markDraftStarted],
   );
@@ -1205,74 +1257,64 @@ export const useChatEditor = ({
     [updateAttachments],
   );
 
-  const removeFile = useCallback(
-    (id: string) => {
-      updateAttachments(
-        attachmentsRef.current.filter((attachment) => attachment.id !== id),
-      );
-    },
-    [updateAttachments],
-  );
+  const removeFile = (id: string) => {
+    updateAttachments(
+      attachmentsRef.current.filter((attachment) => attachment.id !== id),
+    );
+  };
 
-  const handleDrop = useCallback(
-    (event: React.DragEvent) => {
-      event.preventDefault();
-      if (event.dataTransfer.files.length === 0) {
-        return;
-      }
-
-      addFiles(event.dataTransfer.files);
-    },
-    [addFiles],
-  );
-
-  const handleDragOver = useCallback((event: React.DragEvent) => {
+  const handleDrop = (event: React.DragEvent) => {
     event.preventDefault();
-  }, []);
+    if (event.dataTransfer.files.length === 0) {
+      return;
+    }
 
-  const handlePaste = useCallback(
-    (event: React.ClipboardEvent) => {
-      const files: File[] = [];
+    addFiles(event.dataTransfer.files);
+  };
 
-      for (const item of event.clipboardData.items) {
-        if (item.kind !== "file") {
-          continue;
-        }
+  const handleDragOver = (event: React.DragEvent) => {
+    event.preventDefault();
+  };
 
-        const file = item.getAsFile();
-        if (file !== null) {
-          files.push(file);
-        }
+  const handlePaste = (event: React.ClipboardEvent) => {
+    const files: File[] = [];
+
+    for (const item of event.clipboardData.items) {
+      if (item.kind !== "file") {
+        continue;
       }
 
-      if (files.length === 0) {
-        // Plain-text paste collapsing happens earlier inside
-        // ProseMirror via `editorProps.handlePaste`; nothing to do
-        // at the React layer here.
-        return;
+      const file = item.getAsFile();
+      if (file !== null) {
+        files.push(file);
       }
+    }
 
-      event.preventDefault();
+    if (files.length === 0) {
+      // Plain-text paste collapsing happens earlier inside
+      // ProseMirror via `editorProps.handlePaste`; nothing to do
+      // at the React layer here.
+      return;
+    }
+
+    event.preventDefault();
+    addFiles(files);
+  };
+
+  const handleFileInputChange = (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const { files } = event.target;
+    if (files !== null && files.length > 0) {
       addFiles(files);
-    },
-    [addFiles],
-  );
+    }
 
-  const handleFileInputChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      const { files } = event.target;
-      if (files !== null && files.length > 0) {
-        addFiles(files);
-      }
+    event.target.value = "";
+  };
 
-      event.target.value = "";
-    },
-    [addFiles],
-  );
-
-  const openFilePicker = useCallback(() => {
+  const openFilePicker = () => {
     fileInputRef.current?.click();
-  }, []);
+  };
 
   const submit = useCallback(
     async (send: (draft: ChatInputDraft) => Promise<void> | void) => {
@@ -1315,7 +1357,7 @@ export const useChatEditor = ({
         throw error;
       }
     },
-    [clearDraft, editor, setDraft, threadKey],
+    [clearDraft, editor, setDraft, setIsEmpty, threadKey],
   );
 
   const canSubmit = !isEmpty || attachments.length > 0;

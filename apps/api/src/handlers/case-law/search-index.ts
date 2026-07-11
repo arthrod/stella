@@ -10,6 +10,7 @@ import { resolveFtsConfig } from "@/api/handlers/case-law/fts-config";
 import { redistributableCaseLawSource } from "@/api/handlers/case-law/redistribution";
 import { captureError } from "@/api/lib/analytics";
 import type { SafeId } from "@/api/lib/branded-types";
+import { setCorpusBackfillStatementTimeout } from "@/api/lib/legal-search/backfill-statement-timeout";
 import { logger } from "@/api/lib/observability/logger";
 import { brandPersistedCaseLawDecisionId } from "@/api/lib/safe-id-boundaries";
 
@@ -81,17 +82,17 @@ export const indexDecision = async (
   const fts = await resolveFtsConfig(decision.language);
 
   const textExpr = fts.useUnaccent
-    ? sql`unaccent(coalesce(${title}, '') || ' ' || coalesce(${searchableText}, ''))`
-    : sql`coalesce(${title}, '') || ' ' || coalesce(${searchableText}, '')`;
+    ? sql`unaccent(arabic_normalize(coalesce(${title}, '') || ' ' || coalesce(${searchableText}, '')))`
+    : sql`arabic_normalize(coalesce(${title}, '') || ' ' || coalesce(${searchableText}, ''))`;
 
   const tsvExpr = sql`to_tsvector(${fts.regconfig}, ${textExpr})`;
 
   await scopedDb(async (tx) => {
     // Raise statement timeout for the tsvector upsert.
     // to_tsvector + unaccent on very long court decisions is
-    // CPU-intensive. SET LOCAL scopes this to the current
-    // transaction only; user-facing queries keep the default.
-    await tx.execute(sql`SET LOCAL statement_timeout = '15min'`);
+    // CPU-intensive. The helper scopes the higher timeout to
+    // this transaction only; user-facing queries keep the default.
+    await setCorpusBackfillStatementTimeout(tx);
     await tx.execute(sql`
     INSERT INTO case_law_search_documents (
       decision_id, title, searchable_text,
@@ -215,7 +216,7 @@ export const backfillSearchIndex = async (
   let indexed = 0;
   for (let i = 0; i < rows.length; i += SEARCH_INDEX_CONCURRENCY) {
     const chunk = rows.slice(i, i + SEARCH_INDEX_CONCURRENCY);
-    // oxlint-disable-next-line no-await-in-loop -- bounded concurrency: each SEARCH_INDEX_CONCURRENCY chunk drains before the next so tsvector upserts don't overwhelm Postgres
+    // oxlint-disable-next-line no-await-in-loop, no-db-await-in-loop/no-db-await-in-loop -- bounded concurrency: each SEARCH_INDEX_CONCURRENCY chunk drains before the next so tsvector upserts don't overwhelm Postgres
     const results = await Promise.all(chunk.map(indexRow));
     for (const result of results) {
       indexed += result;

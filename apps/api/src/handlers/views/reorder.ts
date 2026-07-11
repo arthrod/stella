@@ -13,6 +13,7 @@ import { broadcast } from "@/api/lib/sse";
 
 const config = {
   permissions: { view: ["update"] },
+  mcp: { type: "capability", reason: "workspace_schema" },
   body: t.Object({
     viewIds: t.Array(tSafeId("workspaceView"), { minItems: 1 }),
   }),
@@ -68,8 +69,11 @@ const reorderViews = createSafeHandler(
     }
 
     // Build a single CASE expression to update all positions at once.
+    // The THEN branch needs an explicit cast: without it, Postgres can't
+    // resolve the untyped bound parameter against the CASE's overall type
+    // and rejects the assignment to the integer `position` column.
     const cases = viewIds.map(
-      (id, i) => sql`when ${workspaceViews.id} = ${id} then ${i}`,
+      (id, i) => sql`when ${workspaceViews.id} = ${id} then ${i}::integer`,
     );
 
     const oldPositionById = new Map(existing.map((v) => [v.id, v.position]));

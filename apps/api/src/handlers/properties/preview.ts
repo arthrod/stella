@@ -48,6 +48,7 @@ const previewBodySchema = t.Object({
 
 const config = {
   permissions: { property: ["create"] },
+  mcp: { type: "capability", reason: "workspace_schema" },
   body: previewBodySchema,
 } satisfies HandlerConfig;
 

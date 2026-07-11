@@ -38,7 +38,6 @@ import {
   mcpOAuthState,
   mcpUserConnections,
   pendingUploads,
-  promptShortcuts,
   rateEntries,
   taskAssignees,
   userFiles,
@@ -338,6 +337,12 @@ export const getPendingTasksAndMembers = async (
 /**
  * Verifies the OTP and deletes the user from the database.
  */
+export const ACCOUNT_DELETION_ERROR_CODE = {
+  otpExpired: "account_deletion_otp_expired",
+  otpInvalid: "account_deletion_otp_invalid",
+  soleOwner: "account_deletion_sole_owner",
+} as const;
+
 export const verifyAndDeleteUser = async (
   currentUserId: string,
   email: string,
@@ -371,6 +376,7 @@ export const verifyAndDeleteUser = async (
 
         if (!verificationRow) {
           throw new HandlerError({
+            code: ACCOUNT_DELETION_ERROR_CODE.otpInvalid,
             status: 400,
             message: "Invalid verification code",
           });
@@ -383,6 +389,7 @@ export const verifyAndDeleteUser = async (
             .where(eq(verification.identifier, identifier));
 
           throw new HandlerError({
+            code: ACCOUNT_DELETION_ERROR_CODE.otpInvalid,
             status: 400,
             message: "Invalid verification code",
           });
@@ -394,6 +401,7 @@ export const verifyAndDeleteUser = async (
             .where(eq(verification.identifier, identifier));
 
           throw new HandlerError({
+            code: ACCOUNT_DELETION_ERROR_CODE.otpExpired,
             status: 400,
             message: "Verification code has expired",
           });
@@ -434,6 +442,7 @@ export const verifyAndDeleteUser = async (
         );
         if (soleOwnedOrg) {
           throw new HandlerError({
+            code: ACCOUNT_DELETION_ERROR_CODE.soleOwner,
             status: 400,
             message: `Cannot delete account because you are the sole owner of organization "${soleOwnedOrg.orgName}". Please transfer ownership or delete the organization first.`,
           });
@@ -546,6 +555,7 @@ export const verifyAndDeleteUser = async (
           LIMITS.accountDeletionTaskAssignmentsMax
         ) {
           throw new HandlerError({
+            code: "account_deletion_task_reassignment_limit_exceeded",
             status: 400,
             message:
               "Too many active task assignments to reassign during account deletion.",
@@ -673,6 +683,11 @@ export const verifyAndDeleteUser = async (
             ]),
           );
 
+          // SAFETY: one deleted user's active task reassignments, bounded by
+          // the enforced LIMITS.accountDeletionTaskAssignmentsMax check above
+          // (throws before reaching here if exceeded), not unbounded tenant
+          // data.
+          // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop
           await Promise.all(
             updates.map((item) =>
               tx
@@ -880,13 +895,10 @@ export const verifyAndDeleteUser = async (
           .delete(chatThreads)
           .where(eq(chatThreads.userId, currentUserId));
 
-        // 11. Personal workspace view templates, prompt shortcuts, agent skills
+        // 11. Personal workspace view templates and agent skills
         await tx
           .delete(workspaceViewTemplates)
           .where(eq(workspaceViewTemplates.userId, currentUserId));
-        await tx
-          .delete(promptShortcuts)
-          .where(eq(promptShortcuts.userId, currentUserId));
         await tx
           .delete(agentSkills)
           .where(eq(agentSkills.userId, currentUserId));

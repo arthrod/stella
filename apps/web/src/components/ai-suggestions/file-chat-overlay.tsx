@@ -15,7 +15,6 @@
 
 import {
   Suspense,
-  useEffect,
   useEffectEvent,
   useLayoutEffect,
   useMemo,
@@ -30,16 +29,19 @@ import { LoaderCircleIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 import { v7 as uuidv7 } from "uuid";
 
+import {
+  createEditorRefBridge,
+  executeFolioToolCall,
+} from "@stll/folio-agents";
 import type {
   DocxEditorRef,
   FolioAIEditOperation,
   FolioAIEditSeverity,
   FolioAIEditSnapshot,
-} from "@stll/folio";
+} from "@stll/folio-react";
 import { BidiText } from "@stll/ui/components/bidi-text";
-import { cn } from "@stll/ui/lib/utils";
 
-import { PromptBar } from "@/components/ai-suggestions/host";
+import { ChatThreadCard, PromptBar } from "@/components/ai-suggestions/host";
 import { isNoopReviewOperation } from "@/components/ai-suggestions/review-operation-utils";
 import {
   REVIEW_UNSPECIFIED_AREA,
@@ -50,22 +52,41 @@ import type {
   ReviewSuggestionPreview,
 } from "@/components/ai-suggestions/review-store";
 import { useChatEditor } from "@/components/chat-editor-provider";
+import type { ChatDraftAttachment } from "@/components/chat-editor-provider";
 import { ChatApprovalContext } from "@/components/chat/chat-approval-context";
+import { ChatComposerDock } from "@/components/chat/chat-composer-dock";
+import { ChatMatterPicker } from "@/components/chat/chat-matter-picker";
 import { ChatMattersContext } from "@/components/chat/chat-matters-context";
 import { ChatThreadMessages } from "@/components/chat/chat-thread-messages";
-import { getActiveDocxEditApprovalPart } from "@/components/chat/chat-ui-tools";
-import type { ApprovalToolName } from "@/components/chat/chat-ui-tools";
+import {
+  getActiveDocxEditApprovalPart,
+  isApprovalPart,
+  parseCompletedToolCallArguments,
+  selectUnresolvedFolioAgentDocToolCallParts,
+} from "@/components/chat/chat-ui-tools";
+import type {
+  ApprovalToolName,
+  ApprovalToolPart,
+  UnresolvedFolioAgentDocToolCallPart,
+} from "@/components/chat/chat-ui-tools";
+import type { DocxComments } from "@/components/docx/app-docx-editor";
 import { useAIKeyGate } from "@/components/require-ai-key";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { getAnalytics } from "@/lib/analytics/provider";
 import { ChatAnonymizationLayer } from "@/lib/anonymize/use-chat-anonymization-layer";
+import {
+  getChatSendMode,
+  useChatAnonymized,
+} from "@/lib/chat-anonymized-store";
 import { useIsChatDraftEmpty } from "@/lib/chat-draft-store";
 import type { ChatThreadId, ChatThreadRef } from "@/lib/chat-thread-ref";
-import { useDevStore } from "@/lib/dev-store";
 import { useModelSelectorStore } from "@/lib/model-selector-store";
 import { matchReservedChatCommand } from "@/lib/reserved-chat-commands";
 import { SuggestedFollowupChips } from "@/routes/_protected.chat/-components/suggested-followup-chips";
 import { useChatSession } from "@/routes/_protected.chat/-hooks/use-chat-session";
+import { useChatThreadRuntime } from "@/routes/_protected.chat/-hooks/use-chat-thread-runtime";
 import { useChatUserContext } from "@/routes/_protected.chat/-hooks/use-chat-user-context";
+import { buildChatRequestMessage } from "@/routes/_protected.chat/-lib/build-chat-request-message";
 import type {
   ApplyActiveDocxEditsInput,
   ApplyActiveDocxEditsOutput,
@@ -98,6 +119,10 @@ type ActiveExternal = {
   text?: string | undefined;
   title: string;
   url: string;
+};
+
+const capturePromptSubmitError = (error: unknown): void => {
+  getAnalytics().captureError(error);
 };
 
 type ToolInputOperation = ApplyActiveDocxEditsInput["operations"][number];
@@ -386,14 +411,12 @@ const prepareOperations = (
 // requiring `severity`/`area`, so old stored approvals can still
 // reach this code with the fields missing. Type narrowing says
 // they're always present; the runtime check is for legacy data.
-/* oxlint-disable typescript/no-unnecessary-condition -- legacy stored approvals predate the severity/area schema; runtime fallback for old data */
-const inputOperationSeverity = (
-  operation: ToolInputOperation,
-): FolioAIEditSeverity | "unspecified" => operation.severity ?? "unspecified";
+const inputOperationSeverity = (operation: {
+  severity?: FolioAIEditSeverity | undefined;
+}): FolioAIEditSeverity | "unspecified" => operation.severity ?? "unspecified";
 
-const inputOperationArea = (operation: ToolInputOperation): string =>
+const inputOperationArea = (operation: { area?: string | undefined }): string =>
   operation.area ?? REVIEW_UNSPECIFIED_AREA;
-/* oxlint-enable typescript/no-unnecessary-condition */
 
 type SnapshotBlock = {
   id: string;
@@ -620,6 +643,24 @@ const queueReviewSuggestions = ({
 // the legitimate "create a new document from this chat" flow.
 const ACTIVE_FILE_BLOCKED_APPROVAL_TOOLS = new Set<ApprovalToolName>();
 
+// The folio-agents comment MUTATION tools: client-executed against the live
+// editor bridge, but behind approval (unlike the auto-run read tools). After
+// the user approves, the overlay executes them via `executeFolioToolCall`, the
+// same shape as `apply-active-docx-edits`. Names mirror the server-side
+// registration in `folio-agent-tools.ts`; kept as local literals like the
+// other tool names this surface matches on.
+const FOLIO_AGENT_COMMENT_MUTATION_TOOL_NAMES = new Set<string>([
+  "add_comment",
+  "reply_comment",
+  "resolve_comment",
+]);
+
+// Stable empty context returned by `getContextMatterIds` before the picker
+// has seeded (its state is `string[] | null`). A named constant, not a `?? []`
+// literal: an unseeded thread has no selected matters, which is a real state,
+// not a structural invariant to panic on.
+const UNSEEDED_CONTEXT_MATTER_IDS: string[] = [];
+
 type FileChatOverlayProps = {
   /** Workspace this viewer belongs to. Scopes the thread + mention sources. */
   workspaceId?: string | undefined;
@@ -637,6 +678,16 @@ type FileChatOverlayProps = {
   docxEditable?: boolean | undefined;
   requestDocxEditMode?: (() => boolean | Promise<boolean>) | undefined;
   /**
+   * The host's controlled `DocxEditor` `comments` state. The folio-agents
+   * comment tools (`read_comments`, `add_comment`, `reply_comment`,
+   * `resolve_comment`) drive the editor bridge, whose `getComments` reads this
+   * and whose `setComments` calls {@link onDocxCommentsChange}. Undefined on
+   * surfaces that do not wire the round-trip (the comment tools then read/write
+   * an empty list, matching a document with no host comment state).
+   */
+  docxComments?: DocxComments | undefined;
+  onDocxCommentsChange?: ((comments: DocxComments) => void) | undefined;
+  /**
    * Invoked when the user explicitly starts a new thread from the
    * overlay UI. Owners should swap the `chatThreadId` they pass in
    * for a fresh value.
@@ -653,6 +704,8 @@ export const FileChatOverlay = ({
   activeExternal,
   docxEditable,
   docxEditorRef,
+  docxComments,
+  onDocxCommentsChange,
   onNewThread,
   requestDocxEditMode,
 }: FileChatOverlayProps) => {
@@ -679,8 +732,10 @@ export const FileChatOverlay = ({
       <Suspense fallback={fallback}>
         <ResolvedFileChatOverlay
           activeFile={{ ...activeFile, fileFieldId }}
+          docxComments={docxComments}
           docxEditable={docxEditable}
           docxEditorRef={docxEditorRef}
+          onDocxCommentsChange={onDocxCommentsChange}
           onNewThread={onNewThread}
           requestDocxEditMode={requestDocxEditMode}
           workspaceId={workspaceId}
@@ -695,8 +750,10 @@ export const FileChatOverlay = ({
         activeExternal={activeExternal}
         activeFile={activeFile}
         chatThreadId={chatThreadId}
+        docxComments={docxComments}
         docxEditable={docxEditable}
         docxEditorRef={docxEditorRef}
+        onDocxCommentsChange={onDocxCommentsChange}
         onNewThread={onNewThread}
         requestDocxEditMode={requestDocxEditMode}
         workspaceId={workspaceId}
@@ -715,8 +772,10 @@ type ResolvedFileChatOverlayProps = Omit<
 
 const ResolvedFileChatOverlay = ({
   activeFile,
+  docxComments,
   docxEditable,
   docxEditorRef,
+  onDocxCommentsChange,
   onNewThread,
   requestDocxEditMode,
   workspaceId,
@@ -732,6 +791,11 @@ const ResolvedFileChatOverlay = ({
         fieldId: activeFile.fileFieldId,
         workspaceId,
       },
+      // Must match FileChatOverlayInner's own `hasDocxEditSurface` below
+      // (same `docxEditorRef` prop, and `activeFile` is always defined
+      // here) so the cache entry this query seeds lands under the same
+      // key that overlay's chatThreadOptions lookup will use.
+      hasDocxEditSurface: docxEditorRef !== undefined,
     }),
   );
 
@@ -739,8 +803,10 @@ const ResolvedFileChatOverlay = ({
     <FileChatOverlayInner
       activeFile={activeFile}
       chatThreadId={chatThreadId}
+      docxComments={docxComments}
       docxEditable={docxEditable}
       docxEditorRef={docxEditorRef}
+      onDocxCommentsChange={onDocxCommentsChange}
       onNewThread={onNewThread}
       requestDocxEditMode={requestDocxEditMode}
       workspaceId={workspaceId}
@@ -759,6 +825,8 @@ const FileChatOverlayInner = ({
   activeExternal,
   docxEditable,
   docxEditorRef,
+  docxComments,
+  onDocxCommentsChange,
   onNewThread,
 }: FileChatOverlayInnerProps) => {
   const t = useTranslations();
@@ -767,7 +835,47 @@ const FileChatOverlayInner = ({
   });
   const userContext = useChatUserContext();
   const getUserContext = useEffectEvent(() => userContext);
+  const threadRef = useMemo<ChatThreadRef>(
+    () =>
+      workspaceId === undefined
+        ? {
+            scope: "global",
+            threadId: chatThreadId,
+          }
+        : {
+            scope: "workspace",
+            threadId: chatThreadId,
+            workspaceId,
+          },
+    [chatThreadId, workspaceId],
+  );
+  // Per-send anonymization now reads the shared per-thread store keyed by
+  // `threadRef`, same as every other chat surface: the dock's shield
+  // shows `useChatAnonymized(threadRef)`, the transport reads
+  // `getChatSendMode(threadRef)`, and `ChatAnonymizationLayer` drives the
+  // in-editor highlight cue — one source, so display and send agree.
+  const anonymized = useChatAnonymized(threadRef);
+  const getSendMode = useEffectEvent(() => getChatSendMode(threadRef));
+  // Context matters this file chat draws on. Same plumbing as the main
+  // chat and inspector: local state is seeded from the server's persisted
+  // set (or, for a fresh thread, the file's own matter), the picker mutates
+  // it directly, and the transport pulls the latest value via
+  // `getContextMatterIds` on every send — so the displayed selection and
+  // the sent context are provably one source. Null until seeded below.
+  const [contextMatterIds, setContextMatterIds] = useState<string[] | null>(
+    null,
+  );
+  const [seededContextForThreadId, setSeededContextForThreadId] = useState<
+    string | null
+  >(null);
+  const getContextMatterIds = useEffectEvent(
+    () => contextMatterIds ?? UNSEEDED_CONTEXT_MATTER_IDS,
+  );
   const lastSentDocxEditSnapshotRef = useRef<FolioAIEditSnapshot | null>(null);
+  const latestDocxCommentsRef = useRef<DocxComments>(docxComments ?? []);
+  useLayoutEffect(() => {
+    latestDocxCommentsRef.current = docxComments ?? [];
+  }, [docxComments]);
   const hasDocxEditSurface =
     activeFile !== undefined && docxEditorRef !== undefined;
   // Folio's PM view exists almost immediately after DocxBrowserEditor
@@ -782,9 +890,32 @@ const FileChatOverlayInner = ({
   // Suspense swap unmounts + remounts this subtree with fresh state,
   // and the poller racing with a second rerender can leave the gate
   // stuck closed even though the underlying view is live).
+  // eslint-disable-next-line react/react-compiler -- mount-time seed of readiness from the imperative Folio editor instance so a transition-induced remount of an already-ready editor starts ready; the ref read runs once in the useState initializer
   const [editorReady, setEditorReady] = useState(() =>
     Boolean(docxEditorRef?.current?.createAIEditSnapshot()),
   );
+  // Reset readiness when the active file changes (the new doc has its
+  // own mount cycle). Done during render rather than in an effect: the
+  // editor now creates its hidden view synchronously inside
+  // `ensureEditorView`, so the probe below flips `editorReady` true in
+  // the same commit. A separate reset effect runs after that probe and
+  // would clobber it back to false (the `false -> true -> false` batch
+  // nets to the committed value, so React bails and the probe never
+  // re-runs), leaving the bar stuck on "loading" with no fallback armed.
+  // Key readiness to the specific document, not just the entity: one entity can
+  // hold several file fields, so an entity-only key would keep `editorReady`
+  // true when switching to another file/version on the same entity and skip the
+  // snapshot poll for the newly mounted editor.
+  const activeDocumentKey =
+    activeFile === undefined
+      ? undefined
+      : `${activeFile.entityId}:${activeFile.fileFieldId ?? ""}`;
+  const [readyForDocumentKey, setReadyForDocumentKey] =
+    useState(activeDocumentKey);
+  if (activeDocumentKey !== readyForDocumentKey) {
+    setReadyForDocumentKey(activeDocumentKey);
+    setEditorReady(false);
+  }
   useExternalSyncEffect(() => {
     if (editorReady || !hasDocxEditSurface) {
       return undefined;
@@ -827,12 +958,6 @@ const FileChatOverlayInner = ({
       window.clearTimeout(fallback);
     };
   }, [editorReady, hasDocxEditSurface, docxEditorRef]);
-  // Reset readiness when the active file changes — the new doc has
-  // its own mount cycle.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id derived state, lift to key prop
-  useEffect(() => {
-    setEditorReady(false);
-  }, [activeFile?.entityId]);
 
   // Subscribe to the inspector chip's pulse channel so the bar
   // glows when the user clicks the AI-suggestions facet.
@@ -908,48 +1033,57 @@ const FileChatOverlayInner = ({
       };
     },
   );
-  const showToolCallDetails = useDevStore((s) => s.showToolCallDetails);
   const blockedApprovalTools = activeFile
     ? ACTIVE_FILE_BLOCKED_APPROVAL_TOOLS
     : undefined;
 
-  const threadRef = useMemo<ChatThreadRef>(
-    () =>
-      workspaceId === undefined
-        ? {
-            scope: "global",
-            threadId: chatThreadId,
-          }
-        : {
-            scope: "workspace",
-            threadId: chatThreadId,
-            workspaceId,
-          },
-    [chatThreadId, workspaceId],
-  );
-
+  const chatThreadContext = {
+    allowMissingThread: true,
+    getContextMatterIds,
+    getSendMode,
+    getUserContext,
+    ...(activeExternal ? { getActiveExternal: () => getActiveExternal() } : {}),
+    ...(activeFile ? { getActiveFile: () => getActiveFile() } : {}),
+    ...(hasDocxEditSurface
+      ? {
+          handleActiveDocxEditToolCall: (input: ApplyActiveDocxEditsInput) =>
+            handleActiveDocxEditToolCall(input),
+        }
+      : {}),
+  };
   const { data } = useSuspenseQuery(
     chatThreadOptions({
       activeOrganizationId,
       key: threadRef,
-      context: {
-        allowMissingThread: true,
-        getUserContext,
-        ...(activeExternal
-          ? { getActiveExternal: () => getActiveExternal() }
-          : {}),
-        ...(activeFile ? { getActiveFile: () => getActiveFile() } : {}),
-        ...(hasDocxEditSurface
-          ? {
-              handleActiveDocxEditToolCall: (
-                input: ApplyActiveDocxEditsInput,
-              ) => handleActiveDocxEditToolCall(input),
-            }
-          : {}),
-      },
+      context: chatThreadContext,
     }),
   );
-  const { chat } = data;
+  const chat = useChatThreadRuntime({
+    activeOrganizationId,
+    context: chatThreadContext,
+    data,
+    key: threadRef,
+  });
+  // Seed the picker once per thread. Prefer the server's persisted set;
+  // for a brand-new file thread (empty set) fall back to the file's own
+  // matter so "the matter this file lives in" is the default context. A
+  // global file preview (no workspace) seeds empty and lets the user add
+  // context matters explicitly.
+  useExternalSyncEffect(() => {
+    if (seededContextForThreadId === chatThreadId) {
+      return;
+    }
+    setSeededContextForThreadId(chatThreadId);
+    const ownMatter = workspaceId !== undefined ? [workspaceId] : [];
+    setContextMatterIds(
+      data.contextMatterIds.length > 0 ? data.contextMatterIds : ownMatter,
+    );
+  }, [
+    chatThreadId,
+    data.contextMatterIds,
+    seededContextForThreadId,
+    workspaceId,
+  ]);
 
   const {
     error,
@@ -976,20 +1110,46 @@ const FileChatOverlayInner = ({
     handleOpenCreatedDocument,
     createDocumentMatters,
     isLoadingCreateDocumentMatters,
-    addToolOutput,
+    addToolResult,
     streamdownComponents,
     approvalPendingMessageId,
   } = useChatSession({
     chat,
     conversationId: threadRef.threadId,
+    getSendMode,
     initialOlderCursor: data.olderCursor,
     threadRef,
     workspaceId,
   });
   const { ensureAIAvailable, openIfAIUnavailable } = useAIKeyGate();
+  const [panelOpen, setPanelOpen] = useState(false);
+  const handlePromptSubmit = useEffectEvent(
+    async ({
+      prompt,
+      files,
+    }: {
+      prompt: string;
+      files: ChatDraftAttachment[];
+    }) => {
+      try {
+        if (!(await ensureAIAvailable())) {
+          return;
+        }
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (open AI-key gate on mount/dep change), move into handler
-  useEffect(() => {
+        // Always pop the thread open on send, even if the user
+        // minimised it earlier — they're sending a new prompt
+        // and want to see the response stream in.
+        setPanelOpen(true);
+        await sendMessage(
+          await buildChatRequestMessage({ files, html: prompt }),
+        );
+      } catch (submitError) {
+        capturePromptSubmitError(submitError);
+      }
+    },
+  );
+
+  useExternalSyncEffect(() => {
     openIfAIUnavailable();
   }, [openIfAIUnavailable]);
 
@@ -1098,6 +1258,104 @@ const FileChatOverlayInner = ({
     return false;
   });
 
+  // Build a folio-agents bridge over the live editor ref plus the host's
+  // controlled `comments` state. Both the read-tool auto-run watcher and the
+  // comment-mutation approval handler drive the same bridge, so `read_comments`
+  // sees the same threads `add_comment` / `reply_comment` / `resolve_comment`
+  // write. Returns null before the editor view mounts. The comments ref is
+  // updated synchronously on writes so back-to-back approved mutations compose
+  // before React commits the parent controlled-state update.
+  const createFolioAgentBridge = useEffectEvent(() => {
+    const ref = docxEditorRef?.current;
+    if (!ref) {
+      return null;
+    }
+    return createEditorRefBridge({
+      ref,
+      author: userContext.wordEditAuthorName,
+      getComments: () => latestDocxCommentsRef.current,
+      setComments: (comments) => {
+        latestDocxCommentsRef.current = comments;
+        onDocxCommentsChange?.(comments);
+      },
+    });
+  });
+
+  // Latest approval-requested/responded tool-call part matching the given
+  // approval id and tool name (newest message first). Used to recover the
+  // streamed input of a client-executed approval tool once the user approves.
+  const findFolioAgentApprovalPart = (
+    approvalId: string,
+    toolName: string,
+  ): ApprovalToolPart | null => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages.at(index);
+      if (!message || message.role !== "assistant") {
+        continue;
+      }
+      for (const part of message.parts) {
+        if (
+          isApprovalPart(part) &&
+          part.name === toolName &&
+          part.approval.id === approvalId
+        ) {
+          return part;
+        }
+      }
+    }
+    return null;
+  };
+
+  const runFolioAgentCommentMutationTool = async (part: ApprovalToolPart) => {
+    try {
+      const bridge = createFolioAgentBridge();
+      const args = parseCompletedToolCallArguments(part) ?? {};
+      const output = bridge
+        ? await Promise.resolve(executeFolioToolCall(part.name, args, bridge))
+        : { ok: false, error: "No document is open." };
+      await addToolResult({ output, tool: part.name, toolCallId: part.id });
+    } catch (toolCallError) {
+      getAnalytics().captureError(toolCallError);
+      try {
+        await addToolResult({
+          output: {
+            ok: false,
+            error:
+              toolCallError instanceof Error
+                ? toolCallError.message
+                : String(toolCallError),
+          },
+          tool: part.name,
+          toolCallId: part.id,
+        });
+      } catch (reportError) {
+        getAnalytics().captureError(reportError);
+      }
+    }
+  };
+
+  const approveAndRunFolioAgentCommentMutation = async ({
+    approvalId,
+    approve,
+    toolName,
+  }: {
+    approvalId: string;
+    approve: () => Promise<void>;
+    toolName: ApprovalToolName;
+  }) => {
+    if (!FOLIO_AGENT_COMMENT_MUTATION_TOOL_NAMES.has(toolName)) {
+      await approve();
+      return;
+    }
+
+    const part = findFolioAgentApprovalPart(approvalId, toolName);
+    await approve();
+    if (!part) {
+      return;
+    }
+    await runFolioAgentCommentMutationTool(part);
+  };
+
   const handleApproveWithDocxUnlock = async (
     approvalId: string,
     toolName: ApprovalToolName,
@@ -1105,7 +1363,7 @@ const FileChatOverlayInner = ({
     if (toolName === "apply-active-docx-edits") {
       const part = getActiveDocxEditApprovalPart(messages, approvalId);
       if (!part) {
-        handleApprove(approvalId, toolName);
+        await handleApprove(approvalId, toolName);
         return;
       }
 
@@ -1115,32 +1373,173 @@ const FileChatOverlayInner = ({
       // surface the queued ids back to the LLM. The actual apply
       // (including the unlock prompt) happens when the user clicks
       // Accept on a suggestion in the panel.
-      handleApprove(approvalId, toolName);
+      await handleApprove(approvalId, toolName);
       const output = handleActiveDocxEditToolCall(part.input);
-      await addToolOutput({
+      await addToolResult({
         output,
         tool: "apply-active-docx-edits",
-        toolCallId: part.toolCallId,
+        toolCallId: part.id,
       });
       return;
     }
 
-    handleApprove(approvalId, toolName);
+    // folio-agents comment mutations are client-executed behind approval: once
+    // the user approves, run the operation against the live editor bridge and
+    // answer the tool call with its result (same shape as apply-active-docx-
+    // edits). The read tools never reach here — they are auto-run, no approval.
+    if (FOLIO_AGENT_COMMENT_MUTATION_TOOL_NAMES.has(toolName)) {
+      await approveAndRunFolioAgentCommentMutation({
+        approvalId,
+        approve: async () => await handleApprove(approvalId, toolName),
+        toolName,
+      });
+      return;
+    }
+
+    await handleApprove(approvalId, toolName);
   };
 
-  const [panelOpen, setPanelOpen] = useState(false);
+  const handleAllowInConversationWithFolioAgentCommentExecution = async (
+    approvalId: string,
+    toolName: ApprovalToolName,
+  ) => {
+    await approveAndRunFolioAgentCommentMutation({
+      approvalId,
+      approve: async () =>
+        await handleAllowInConversation(approvalId, toolName),
+      toolName,
+    });
+  };
+
+  const handleAlwaysAllowWithFolioAgentCommentExecution = async (
+    approvalId: string,
+    toolName: ApprovalToolName,
+  ) => {
+    await approveAndRunFolioAgentCommentMutation({
+      approvalId,
+      approve: async () => await handleAlwaysAllow(approvalId, toolName),
+      toolName,
+    });
+  };
+
+  // Auto-run watcher for the client-executed, no-approval folio-agents read
+  // tools (`read_document` / `find_text` / `read_changes` / `read_comments`).
+  // Nothing else in the runtime resolves these — there is no approval click to
+  // gate re-entrancy the way `handleApproveWithDocxUnlock` is, so this effect
+  // tracks which `toolCallId`s it has already dispatched itself. The comment
+  // MUTATION tools are approval-gated and never flow through here (they are
+  // excluded from `selectUnresolvedFolioAgentDocToolCallParts`).
+  const executedFolioAgentDocToolCallIdsRef = useRef<Set<string>>(new Set());
+  const runFolioAgentDocToolCall = useEffectEvent(
+    async (part: UnresolvedFolioAgentDocToolCallPart) => {
+      try {
+        // Read the ref fresh on every call rather than capturing it in a
+        // memo: `docxEditorRef.current` can change identity (remount,
+        // editor swap) between when this effect schedules the call and
+        // when it actually runs. `read_comments` reads the host's controlled
+        // comment state through the same bridge the mutation tools write.
+        const bridge = createFolioAgentBridge();
+        if (!bridge) {
+          await addToolResult({
+            tool: part.name,
+            toolCallId: part.id,
+            output: { ok: false, error: "No document is open." },
+          });
+          return;
+        }
+
+        const args = parseCompletedToolCallArguments(part) ?? {};
+        const result = await Promise.resolve(
+          executeFolioToolCall(part.name, args, bridge),
+        );
+        await addToolResult({
+          tool: part.name,
+          toolCallId: part.id,
+          output: result,
+        });
+      } catch (toolCallError) {
+        // Allow a retry: a later render of the same unresolved part should
+        // be dispatched again instead of hanging forever.
+        executedFolioAgentDocToolCallIdsRef.current.delete(part.id);
+        getAnalytics().captureError(toolCallError);
+        try {
+          await addToolResult({
+            tool: part.name,
+            toolCallId: part.id,
+            output: {
+              ok: false,
+              error:
+                toolCallError instanceof Error
+                  ? toolCallError.message
+                  : String(toolCallError),
+            },
+          });
+        } catch (reportError) {
+          getAnalytics().captureError(reportError);
+        }
+      }
+    },
+  );
+  useExternalSyncEffect(() => {
+    const message = messages.at(-1);
+    if (!message || message.role !== "assistant") {
+      return;
+    }
+
+    const partsToRun = selectUnresolvedFolioAgentDocToolCallParts(
+      message.parts,
+      executedFolioAgentDocToolCallIdsRef.current,
+    );
+    for (const part of partsToRun) {
+      executedFolioAgentDocToolCallIdsRef.current.add(part.id);
+      void runFolioAgentDocToolCall(part);
+    }
+  }, [messages]);
+
   const threadScrollRef = useRef<HTMLDivElement>(null);
   const hasMessages = messages.length > 0;
   const hasThreadContent = hasMessages || error !== undefined;
-  // Auto-open the thread panel as soon as the first message
-  // lands so users see streaming without having to click the
-  // chevron themselves.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived state (panel openness follows thread content), compute in render
-  useEffect(() => {
+  // Auto-open the thread panel as soon as the first message lands so users see
+  // streaming without having to click the chevron. Adjust-state-during-render on
+  // the hasThreadContent transition (not every render) so the user can still
+  // minimise the panel afterwards while content is present.
+  // Seeded false (not hasThreadContent) so mounting with an already-hydrated
+  // thread counts as a transition and auto-opens, matching the former effect.
+  const [prevHasThreadContent, setPrevHasThreadContent] = useState(false);
+  if (hasThreadContent !== prevHasThreadContent) {
+    setPrevHasThreadContent(hasThreadContent);
     if (hasThreadContent) {
       setPanelOpen(true);
     }
-  }, [hasThreadContent]);
+  }
+  // Escape collapses the open thread card (typically pressed while the
+  // composer is focused). Window-level listener gated on `panelOpen`,
+  // same idiom as the AI-suggestions surface's panel; the card reopens
+  // automatically on the next send.
+  useExternalSyncEffect(() => {
+    if (!panelOpen) {
+      return undefined;
+    }
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPanelOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => {
+      window.removeEventListener("keydown", handler);
+    };
+  }, [panelOpen]);
+  // One handler for every new-thread entry point (dock icon and the
+  // `/new` reserved command): abort any live stream first — the
+  // rotation remount only swaps the surface, while the old Chat
+  // instance would keep streaming inside the query cache.
+  const startNewThread = () => {
+    stop();
+    shouldFocusComposerAfterNewThreadRef.current = true;
+    setPanelOpen(false);
+    onNewThread();
+  };
   useLayoutEffect(() => {
     const scrollElement = threadScrollRef.current;
     if (!scrollElement) {
@@ -1165,111 +1564,85 @@ const FileChatOverlayInner = ({
           activeOrganizationId,
           alwaysApprovedTools,
           conversationApprovedTools,
-          handleAllowInConversation,
-          handleAlwaysAllow,
+          handleAllowInConversation:
+            handleAllowInConversationWithFolioAgentCommentExecution,
+          handleAlwaysAllow: handleAlwaysAllowWithFolioAgentCommentExecution,
           handleApprove: handleApproveWithDocxUnlock,
           handleDeny,
           blockedApprovalTools,
         }}
       >
         {panelOpen && hasThreadContent && (
-          <div
-            aria-label={t("chat.aiThread")}
-            className={cn(
-              // Sizing rules: grows with content but caps at ~45dvh
-              // / 380px so the panel doesn't dominate the file
-              // viewer. No min-height — short threads stay short.
-              "absolute start-1/2 bottom-[88px] z-40 flex max-h-[min(45dvh,380px)] min-h-0 w-[min(560px,calc(100%-2rem))] -translate-x-1/2 flex-col overflow-hidden rounded-2xl border",
-              "bg-popover/90 border-border text-popover-foreground",
-              "[backdrop-filter:blur(18px)_saturate(160%)] [-webkit-backdrop-filter:blur(18px)_saturate(160%)]",
-              "before:bg-foreground/[0.06] before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px",
-              "hover:bg-popover focus-within:bg-popover",
-              "transition-[background-color,border-color] duration-200 ease-out",
-              "shadow-[0_1px_2px_rgb(0_0_0/0.06),0_20px_64px_rgb(0_0_0/0.18)]",
-              "animate-in fade-in-0 zoom-in-95 slide-in-from-bottom-1",
-            )}
-            role="dialog"
+          <ChatThreadCard
+            onCollapse={() => setPanelOpen(false)}
+            scrollRef={threadScrollRef}
           >
-            {/* Plain scroll container — bypasses the legacy
-                Conversation's `size-full` chain, which only resolves
-                correctly when the parent has an explicit height
-                (this overlay uses `max-h` only, so flex-1 children
-                don't get a definite size to base `size-full` on). */}
-            <div
-              ref={threadScrollRef}
-              className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3"
-              style={{ scrollbarGutter: "stable" }}
-            >
-              <ChatThreadMessages
-                approvalPendingMessageId={approvalPendingMessageId}
-                error={error}
-                hasOlderMessages={olderCursor !== null}
-                isGenerating={isGenerating}
-                isLoadingOlder={isLoadingOlder}
-                loadOlderError={loadOlderError}
-                messages={messages}
-                onAskUserEditAndRerun={handleAskUserEditAndRerun}
-                onAskUserSubmit={handleAskUserSubmit}
-                onCreateDocumentResolve={handleCreateDocumentResolve}
-                onLoadOlder={loadOlder}
-                onOpenCreatedDocument={handleOpenCreatedDocument}
-                onRemoveQueuedMessage={removeQueuedMessage}
-                onResend={resendLatestMessage}
-                queuedMessages={queuedMessages}
-                scrollContainerRef={threadScrollRef}
-                showThinkingIndicator
-                showToolCallDetails={showToolCallDetails}
-                streamdownComponents={streamdownComponents}
-                workspaceId={workspaceId}
-              />
-            </div>
-          </div>
+            <ChatThreadMessages
+              approvalPendingMessageId={approvalPendingMessageId}
+              error={error}
+              hasOlderMessages={olderCursor !== null}
+              isGenerating={isGenerating}
+              isLoadingOlder={isLoadingOlder}
+              loadOlderError={loadOlderError}
+              messages={messages}
+              onAskUserEditAndRerun={handleAskUserEditAndRerun}
+              onAskUserSubmit={handleAskUserSubmit}
+              onCreateDocumentResolve={handleCreateDocumentResolve}
+              onLoadOlder={loadOlder}
+              onOpenCreatedDocument={handleOpenCreatedDocument}
+              onRemoveQueuedMessage={removeQueuedMessage}
+              onResend={resendLatestMessage}
+              queuedMessages={queuedMessages}
+              scrollContainerRef={threadScrollRef}
+              showThinkingIndicator
+              streamdownComponents={streamdownComponents}
+              workspaceId={workspaceId}
+            />
+          </ChatThreadCard>
         )}
 
         <ChatAnonymizationLayer
           editor={editorController.editor}
-          enabled={false}
+          enabled={anonymized}
           workspaceId={workspaceId ?? threadRef.threadId}
         />
-        {/* Float the chips above the floating composer (matching the bar's
-            centered width) instead of leaving them in normal flow after the
-            full-height viewer; z below the thread panel so the panel wins. */}
-        <div className="absolute start-1/2 bottom-[88px] z-30 flex w-[min(560px,calc(100%-2rem))] -translate-x-1/2 px-1">
-          <SuggestedFollowupChips
-            isGenerating={isGenerating}
-            isEmpty={
-              editorController.isEmpty &&
-              editorController.attachments.length === 0
-            }
-            lastMessageId={messages.at(-1)?.id ?? null}
-            lastMessageRole={messages.at(-1)?.role ?? null}
-            messageCount={messages.length}
-            prompts={suggestedPrompts}
-            onSelect={(prompt) => {
-              // Mirror the PromptBar send guard: when an editable DOCX's edit
-              // snapshot isn't ready, block the chip send too so the model
-              // never sees a follow-up without current edit context.
-              if (!canSubmitWithCurrentDocxSnapshot()) {
-                return;
-              }
-              editorController.setContent(prompt);
-              void editorController.submit(async (draft) => {
-                if (!(await ensureAIAvailable())) {
-                  return;
-                }
-                // Pop the thread open on send (mirrors the PromptBar submit
-                // path) so a chip sent while the thread is collapsed still
-                // streams the reply into view.
-                setPanelOpen(true);
-                await sendMessage({ text: draft.html });
-              });
-            }}
-          />
-        </div>
         <PromptBar
+          attachmentsEnabled
           attentionPulseSeq={attentionPulseSeq}
           canSubmitNow={canSubmitWithCurrentDocxSnapshot}
           editorController={editorController}
+          followupChips={
+            <SuggestedFollowupChips
+              isGenerating={isGenerating}
+              isEmpty={
+                editorController.isEmpty &&
+                editorController.attachments.length === 0
+              }
+              lastMessageId={messages.at(-1)?.id ?? null}
+              lastMessageRole={messages.at(-1)?.role ?? null}
+              messageCount={messages.length}
+              prompts={suggestedPrompts}
+              onSelect={(prompt) => {
+                // Mirror the PromptBar send guard: when an editable DOCX's edit
+                // snapshot isn't ready, block the chip send too so the model
+                // never sees a follow-up without current edit context.
+                if (!canSubmitWithCurrentDocxSnapshot()) {
+                  return;
+                }
+                editorController.setContent(prompt);
+                void editorController.submit(async (draft) => {
+                  if (!(await ensureAIAvailable())) {
+                    return;
+                  }
+                  // Pop the thread open on send (mirrors the PromptBar submit
+                  // path) so a chip sent while the thread is collapsed still
+                  // streams the reply into view.
+                  setPanelOpen(true);
+                  await sendMessage(await buildChatRequestMessage(draft));
+                });
+              }}
+            />
+          }
           emptyPlaceholder={
             (activeFile || activeExternal) && filePlaceholderAction ? (
               <span className="text-foreground-ghost flex min-w-0 items-center gap-1.5 text-[13px] leading-5">
@@ -1284,28 +1657,13 @@ const FileChatOverlayInner = ({
             ) : undefined
           }
           layout="floating"
-          newThreadLabel={t("chat.newChat")}
-          onNewThread={() => {
-            // Abort any live stream first: the rotation remount only
-            // swaps the surface, while the old Chat instance would
-            // keep streaming inside the query cache.
-            void stop();
-            shouldFocusComposerAfterNewThreadRef.current = true;
-            setPanelOpen(false);
-            onNewThread();
-          }}
           onStop={() => {
-            void stop();
+            stop();
           }}
-          onSubmit={({ prompt }) => {
+          onSubmit={({ prompt, files }) => {
             const reservedCommand = matchReservedChatCommand(prompt);
             if (reservedCommand?.id === "new") {
-              // Mirror the New Chat button: abort any live stream before
-              // rotating, or the old Chat keeps streaming in the query cache.
-              void stop();
-              shouldFocusComposerAfterNewThreadRef.current = true;
-              setPanelOpen(false);
-              onNewThread();
+              startNewThread();
               editorController.setContent("");
               return;
             }
@@ -1315,20 +1673,8 @@ const FileChatOverlayInner = ({
               return;
             }
 
-            void ensureAIAvailable().then((available) => {
-              if (!available) {
-                return;
-              }
-              // Always pop the thread open on send, even if the user
-              // minimised it earlier — they're sending a new prompt
-              // and want to see the response stream in.
-              setPanelOpen(true);
-              void sendMessage({ text: prompt });
-              return;
-            });
+            void handlePromptSubmit({ prompt, files });
           }}
-          onTogglePanel={() => setPanelOpen((v) => !v)}
-          panelOpen={panelOpen}
           pendingCount={0}
           queueWhileGenerating
           sendDisabledReason={
@@ -1336,8 +1682,28 @@ const FileChatOverlayInner = ({
               ? "editor-loading"
               : undefined
           }
-          showThreadToggle={hasThreadContent}
           status={isGenerating ? "generating" : "idle"}
+          dock={
+            <ChatComposerDock
+              data={data}
+              onNewThread={hasMessages ? startNewThread : null}
+              leadingContext={
+                // The matter control is a real picker on every surface, so
+                // the user can widen or narrow the file chat's context just
+                // like the main chat and inspector. Seeded (below) with the
+                // file's own matter by default. Legibility over the document
+                // comes from the veil behind the docked composer stack (see
+                // `DockedComposer`), not from per-control chrome.
+                contextMatterIds !== null ? (
+                  <ChatMatterPicker
+                    matterIds={contextMatterIds}
+                    onChange={setContextMatterIds}
+                  />
+                ) : undefined
+              }
+              threadRef={threadRef}
+            />
+          }
         />
       </ChatApprovalContext>
     </ChatMattersContext>

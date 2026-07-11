@@ -1,3 +1,4 @@
+import { Result } from "better-result";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { status, t } from "elysia";
@@ -6,10 +7,13 @@ import type { Static } from "elysia";
 import type { ScopedDb } from "@/api/db";
 import { legislationDocuments, legislationSources } from "@/api/db/schema";
 import { envBase } from "@/api/env-base";
+import { loadFtsSearchConfigs } from "@/api/handlers/case-law/fts-config";
 import { redistributableLegislationSource } from "@/api/handlers/legislation/redistribution";
+import { createSafeRootHandler } from "@/api/lib/api-handlers";
+import type { HandlerConfig } from "@/api/lib/api-handlers";
 // eslint-disable-next-line no-restricted-imports -- search boundary: brands document ids returned by the corpus index before re-hydrating from Postgres
 import { toSafeId } from "@/api/lib/branded-types";
-import { isUuid, tSafeId } from "@/api/lib/custom-schema";
+import { isUuid, tPaginationLimit, tSafeId } from "@/api/lib/custom-schema";
 import { corpusGeneration } from "@/api/lib/legal-search/corpus-family";
 import { readCorpusIndexSearchPage } from "@/api/lib/legal-search/corpus-index-pagination";
 import {
@@ -21,6 +25,7 @@ import {
   corpusIndexPattern,
   isCorpusIndexJurisdiction,
 } from "@/api/lib/legal-search/index-naming";
+import { buildPgFtsSearchSql } from "@/api/lib/legal-search/pg-fts-query";
 import {
   blendStableCitationAuthority,
   stableBlendUpperBound,
@@ -40,9 +45,7 @@ import {
 
 export const searchLegislationBodySchema = t.Object({
   query: t.String({ minLength: 1, maxLength: LIMITS.searchQueryMaxLength }),
-  limit: t.Optional(
-    t.Number({ minimum: 1, maximum: LIMITS.caseLawSearchPageSizeMax }),
-  ),
+  limit: t.Optional(tPaginationLimit(LIMITS.caseLawSearchPageSizeMax)),
   cursor: t.Optional(t.String()),
   jurisdiction: t.Optional(t.String({ maxLength: 3 })),
   documentType: t.Optional(t.String({ maxLength: 128 })),
@@ -99,7 +102,15 @@ const pgSearch = async (
   scopedDb: ScopedDb,
 ): Promise<{ hits: LegislationHit[]; nextCursor: string | null }> => {
   const limit = body.limit ?? LIMITS.caseLawSearchPageSizeDefault;
-  const tsQuery = sql`plainto_tsquery('simple', unaccent(${body.query}))`;
+  const ftsSearch = buildPgFtsSearchSql({
+    configs: await loadFtsSearchConfigs(),
+    query: body.query,
+    refs: {
+      language: sql`sd.language`,
+      regconfig: sql`sd.regconfig`,
+      vector: sql`sd.tsv`,
+    },
+  });
 
   const filters = sql`
     ${body.jurisdiction ? sql`AND d.country = ${body.jurisdiction}` : sql``}
@@ -111,7 +122,7 @@ const pgSearch = async (
     ${body.dateTo ? sql`AND d.effective_date <= ${body.dateTo}` : sql``}
   `;
 
-  const scoreExpr = sql`(ts_rank(sd.tsv, ${tsQuery})::float8 + 0.3 * d.citation_authority)`;
+  const scoreExpr = sql`(${ftsSearch.rank} + 0.3 * d.citation_authority)`;
   const cursorFilter = parsedCursor
     ? sql`AND (${scoreExpr}, sd.document_id) < (${parsedCursor.score}::float8, ${parsedCursor.id})`
     : sql``;
@@ -131,7 +142,7 @@ const pgSearch = async (
       ts_headline(
         ${headlineRegconfig},
         coalesce(nullif(d.fulltext, ''), sd.searchable_text),
-        ${tsQuery},
+        ${ftsSearch.headlineQuery},
         ${TS_HEADLINE_CONFIG}
       ) AS headline,
       ${scoreExpr} AS score
@@ -140,7 +151,7 @@ const pgSearch = async (
     JOIN legislation_sources
       ON legislation_sources.id = d.source_id
      AND ${redistributableLegislationSource}
-    WHERE sd.tsv @@ ${tsQuery}
+    WHERE ${ftsSearch.predicate}
       ${filters}
       ${cursorFilter}
     ORDER BY score DESC, sd.document_id DESC
@@ -414,3 +425,23 @@ export const searchLegislationHandler = async (
 
   return { hits, nextCursor, totalCount: null };
 };
+
+const config = {
+  permissions: { workspace: ["read"] },
+  mcp: { type: "capability", reason: "legal_corpus_admin" },
+  body: searchLegislationBodySchema,
+} satisfies HandlerConfig;
+
+const searchLegislation = createSafeRootHandler(
+  config,
+  async function* ({ body, scopedDb }) {
+    const response = yield* Result.await(
+      Result.tryPromise(
+        async () => await searchLegislationHandler(body, scopedDb),
+      ),
+    );
+    return Result.ok(response);
+  },
+);
+
+export default searchLegislation;

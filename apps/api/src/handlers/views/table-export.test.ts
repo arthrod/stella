@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test";
 import fc from "fast-check";
 import JSZip from "jszip";
 
+import { propertyConfig } from "@stll/property-testing";
+
+import type { JustificationContent } from "@/api/db/schema";
+import type { PropertyTool } from "@/api/db/schema-validators";
 import type { QueryEntityResult } from "@/api/handlers/entities/query-entities";
 import {
   buildCsvExport,
@@ -14,7 +18,25 @@ import {
   sanitizeWorksheetName,
   SPREADSHEET_EXPORT_LIMITS,
 } from "@/api/handlers/views/table-export";
+import { toSafeId } from "@/api/lib/branded-types";
 import type { ViewLayout } from "@/api/lib/views-schema";
+
+const manualTool: PropertyTool = { version: 1, type: "manual-input" };
+const aiTool: PropertyTool = {
+  version: 1,
+  type: "ai-model",
+  prompt: "Extract",
+};
+
+const exportLink = {
+  baseUrl: "https://app.example.test",
+  workspaceId: "ws-1",
+  viewId: "view-1",
+};
+
+const exportOptions = (
+  justificationByFieldId = new Map<string, JustificationContent>(),
+) => ({ link: exportLink, justificationByFieldId });
 
 const flagStyleIds = {
   "needs-review": 3,
@@ -135,9 +157,9 @@ describe("table export", () => {
         columnOrder: ["_version", "p2", "missing", "p1"],
       }),
       [
-        { id: "p1", name: "A" },
-        { id: "p2", name: "B" },
-        { id: "p3", name: "C" },
+        { id: "p1", name: "A", tool: manualTool },
+        { id: "p2", name: "B", tool: manualTool },
+        { id: "p3", name: "C", tool: manualTool },
       ],
     );
 
@@ -195,7 +217,7 @@ describe("table export", () => {
 
   test("csv escapes delimiters and neutralizes spreadsheet formulas", () => {
     const columns = buildExportColumns(tableLayout(), [
-      { id: "p1", name: "Matter, name" },
+      { id: "p1", name: "Matter, name", tool: manualTool },
     ]);
     const table = buildExportTable(
       columns,
@@ -214,6 +236,7 @@ describe("table export", () => {
         ]),
       ],
       "en",
+      exportOptions(),
     );
 
     expect(buildCsvExport(table)).toBe(
@@ -259,7 +282,7 @@ describe("table export", () => {
 
   test("xlsx stores integer currency fields as numeric cells", async () => {
     const columns = buildExportColumns(tableLayout(), [
-      { id: "p1", name: "Claim value" },
+      { id: "p1", name: "Claim value", tool: manualTool },
     ]);
     const table = buildExportTable(
       columns,
@@ -279,6 +302,7 @@ describe("table export", () => {
         ]),
       ],
       "en",
+      exportOptions(),
     );
 
     const bytes = await buildXlsxExport(table);
@@ -336,7 +360,7 @@ describe("table export", () => {
 
   test("xlsx styles headers, widths, freeze pane and flagged cells", async () => {
     const columns = buildExportColumns(tableLayout(), [
-      { id: "p1", name: "Risk assessment" },
+      { id: "p1", name: "Risk assessment", tool: manualTool },
     ]);
     const table = buildExportTable(
       columns,
@@ -368,6 +392,7 @@ describe("table export", () => {
         ),
       ],
       "en",
+      exportOptions(),
     );
 
     const bytes = await buildXlsxExport(table);
@@ -423,7 +448,7 @@ describe("table export", () => {
     await fc.assert(
       fc.asyncProperty(fc.constantFrom(...cellFlagIds), async (flagId) => {
         const columns = buildExportColumns(tableLayout(), [
-          { id: "p1", name: "AI status" },
+          { id: "p1", name: "AI status", tool: manualTool },
         ]);
         const table = buildExportTable(
           columns,
@@ -455,6 +480,7 @@ describe("table export", () => {
             ),
           ],
           "en",
+          exportOptions(),
         );
 
         const bytes = await buildXlsxExport(table);
@@ -467,7 +493,7 @@ describe("table export", () => {
         );
         expect(styles).toContain(`fgColor rgb="${flagFillColors[flagId]}"`);
       }),
-      { numRuns: cellFlagIds.length },
+      propertyConfig({ numRuns: cellFlagIds.length }),
     );
   });
 
@@ -514,9 +540,11 @@ describe("table export", () => {
           );
         },
       ),
-      { numRuns: 50 },
+      propertyConfig({ numRuns: 50 }),
     );
-  });
+    // 50 zip builds + parses brush the default 5s timeout on loaded CI
+    // runners; the explicit timeout keeps the property run deterministic.
+  }, 20_000);
 
   test("xlsx property: long arbitrary values are capped before XML output", async () => {
     await fc.assert(
@@ -547,9 +575,9 @@ describe("table export", () => {
           expect(sheet).not.toContain(value);
         },
       ),
-      { numRuns: 20 },
+      propertyConfig({ numRuns: 20 }),
     );
-  });
+  }, 20_000);
 
   test("xlsx property: generated column widths stay readable and bounded", async () => {
     await fc.assert(
@@ -590,7 +618,141 @@ describe("table export", () => {
           }
         },
       ),
-      { numRuns: 50 },
+      propertyConfig({ numRuns: 50 }),
     );
+    // 50 zip builds + parses can exceed Bun's default 5s timeout on loaded
+    // CI runners; keep the invariant broad while making runtime deterministic.
+  }, 20_000);
+
+  test("merges a graded position into one column with its verdict tier and rationale", () => {
+    const verdictTool: PropertyTool = {
+      version: 1,
+      type: "playbook-verdict",
+      askPropertyId: "ask",
+      rule: { kind: "positionMatch" },
+      severity: "high",
+      tiers: {
+        fallbacks: [],
+        acceptableRules: [],
+        notAcceptableRules: [],
+      },
+    };
+    const columns = buildExportColumns(tableLayout(), [
+      { id: "ask", name: "Payment terms", tool: aiTool },
+      { id: "verdict", name: "Payment terms verdict", tool: verdictTool },
+    ]);
+
+    // The standalone verdict property never gets its own column.
+    expect(
+      columns
+        .filter((column) => column.type === "property")
+        .map((c) => c.header),
+    ).toEqual(["Payment terms"]);
+
+    const justifications = new Map<string, JustificationContent>([
+      [
+        "verdict-field",
+        {
+          version: 1,
+          blocks: [
+            {
+              kind: "playbook-verdict",
+              rationale: "Net 30 exceeds the Net 15 standard.",
+            },
+          ],
+        },
+      ],
+    ]);
+    const table = buildExportTable(
+      columns,
+      [
+        entity([
+          {
+            id: "ask-field",
+            entityId: "entity-1",
+            propertyId: "ask",
+            content: { version: 1, type: "text", value: "Net 30" },
+          },
+          {
+            id: "verdict-field",
+            entityId: "entity-1",
+            propertyId: "verdict",
+            content: { version: 1, type: "single-select", value: "deviation" },
+          },
+        ]),
+      ],
+      "en",
+      exportOptions(justifications),
+    );
+
+    expect(table.rows[0]?.[0]).toEqual({
+      type: "text",
+      value: "Net 30 (deviation)",
+      style: "default",
+      comment: "Net 30 exceeds the Net 15 standard.",
+    });
+  });
+
+  test("links a document cell to its folio deep link and notes the extraction rationale", async () => {
+    const columns = buildExportColumns(tableLayout(), [
+      { id: "p1", name: "Contract", tool: aiTool },
+    ]);
+    const justifications = new Map<string, JustificationContent>([
+      [
+        "file-field",
+        {
+          version: 1,
+          blocks: [
+            {
+              kind: "docx-folio",
+              fileFieldId: toSafeId<"field">("file-field"),
+              statements: [
+                { text: "Liability is capped at fees paid.", citations: [] },
+              ],
+            },
+          ],
+        },
+      ],
+    ]);
+    const table = buildExportTable(
+      columns,
+      [
+        entity([
+          {
+            id: "file-field",
+            entityId: "entity-1",
+            propertyId: "p1",
+            content: {
+              version: 1,
+              type: "file",
+              id: "11111111-1111-1111-1111-111111111111",
+              fileName: "contract.pdf",
+              mimeType: "application/pdf",
+              sizeBytes: 2048,
+              encrypted: false,
+              sha256Hex: "a".repeat(64),
+              pdfFileId: null,
+            },
+          },
+        ]),
+      ],
+      "en",
+      exportOptions(justifications),
+    );
+
+    const bytes = await buildXlsxExport(table);
+    const zip = await JSZip.loadAsync(bytes);
+    const sheet = await zip.file("xl/worksheets/sheet1.xml")?.async("text");
+    const sheetRels = await zip
+      .file("xl/worksheets/_rels/sheet1.xml.rels")
+      ?.async("text");
+    const comments = await zip.file("xl/comments1.xml")?.async("text");
+
+    expect(sheet).toContain('<hyperlink ref="A2" r:id="rId1"/>');
+    expect(sheetRels).toContain('TargetMode="External"');
+    expect(sheetRels).toContain(
+      "https://app.example.test/workspaces/ws-1/view-1/document?entity=entity-1&amp;field=file-field",
+    );
+    expect(comments).toContain("Liability is capped at fees paid.");
   });
 });

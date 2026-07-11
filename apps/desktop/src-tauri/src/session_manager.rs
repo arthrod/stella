@@ -1,9 +1,11 @@
+use futures_util::{StreamExt, future::join_all};
 use notify::{
   Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event::AccessKind,
 };
+use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::io::ErrorKind;
+use std::io::{Cursor, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +19,7 @@ use crate::config;
 pub use crate::config::normalize_api_base_url;
 use crate::session_store::{self, PersistedDesktopSession, StoreLoadIssue};
 use crate::types::*;
+use zip::ZipArchive;
 
 /// Per-dialog response senders, keyed by dialog label to avoid race conditions
 /// when multiple takeover requests arrive for different sessions.
@@ -65,6 +68,13 @@ const LIBRE_OFFICE_LOCK_SUFFIX: &str = "#";
 const WORD_LOCK_PREFIX: &str = "~$";
 const SUPPORT_EMAIL: &str = "hello@stll.app";
 const DESKTOP_HTTP_USER_AGENT: &str = "stella-desktop";
+const DOCX_EXTENSION: &str = ".docx";
+const DOCX_CONTENT_TYPES_ENTRY: &str = "[Content_Types].xml";
+const DOCX_DOCUMENT_ENTRY: &str = "word/document.xml";
+const MAX_DOCX_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
+const ZIP_LOCAL_FILE_HEADER_MAGIC: &[u8] = b"PK\x03\x04";
+const GENERIC_DOCX_DOWNLOAD_MIME_TYPES: &[&str] =
+  &["application/octet-stream", "binary/octet-stream"];
 
 // Internal session with runtime-only fields
 struct DesktopSession {
@@ -154,9 +164,11 @@ impl DesktopSession {
 pub struct SessionManager {
   sessions: HashMap<String, DesktopSession>,
   session_ids_by_key: HashMap<String, String>,
+  unconfirmed_sessions: HashMap<String, PersistedDesktopSession>,
   cleanup_paths: HashSet<String>,
   linked_account: Option<LinkedAccountSnapshot>,
   notification_preferences: DesktopNotificationPreferences,
+  trusted_self_host_connections: Vec<TrustedSelfHostConnection>,
   update: DesktopUpdateSnapshot,
   running_since: String,
   bridge_port: u16,
@@ -179,6 +191,13 @@ fn build_http_client() -> reqwest::Client {
     .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+fn has_docx_extension(name: &str) -> bool {
+  Path::new(name)
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .is_some_and(|extension| extension.eq_ignore_ascii_case("docx"))
+}
+
 fn sanitize_file_name(name: &str) -> String {
   let base = Path::new(name)
     .file_name()
@@ -196,10 +215,144 @@ fn sanitize_file_name(name: &str) -> String {
 
   let trimmed = sanitized.trim_matches('.');
   if trimmed.is_empty() {
-    "document.docx".to_string()
-  } else {
-    trimmed.to_string()
+    return "document.docx".to_string();
   }
+
+  if has_docx_extension(trimmed) {
+    trimmed.to_string()
+  } else {
+    format!("{trimmed}{DOCX_EXTENSION}")
+  }
+}
+
+fn oversized_docx_download_error() -> String {
+  "stella desktop refused an oversized DOCX download.".to_string()
+}
+
+fn non_docx_download_body_error() -> String {
+  "stella desktop refused a non-DOCX download body.".to_string()
+}
+
+fn is_allowed_docx_download_content_type(content_type: &str) -> bool {
+  let media_type = content_type.split(';').next().unwrap_or_default().trim();
+
+  media_type.eq_ignore_ascii_case(DOCX_MIME_TYPE)
+    || GENERIC_DOCX_DOWNLOAD_MIME_TYPES
+      .iter()
+      .any(|generic| media_type.eq_ignore_ascii_case(generic))
+}
+
+fn validate_docx_download_response(response: &reqwest::Response) -> Result<(), String> {
+  if let Some(content_length) = response.headers().get(CONTENT_LENGTH) {
+    let size = content_length
+      .to_str()
+      .ok()
+      .and_then(|value| value.parse::<u64>().ok())
+      .ok_or_else(|| {
+        "stella desktop received an invalid DOCX download size.".to_string()
+      })?;
+
+    if size > MAX_DOCX_DOWNLOAD_BYTES {
+      return Err(oversized_docx_download_error());
+    }
+  }
+
+  let Some(content_type) = response.headers().get(CONTENT_TYPE) else {
+    return Ok(());
+  };
+
+  let content_type = content_type
+    .to_str()
+    .map_err(|_| "stella desktop received an invalid DOCX content type.".to_string())?;
+
+  if is_allowed_docx_download_content_type(content_type) {
+    return Ok(());
+  }
+
+  Err("stella desktop refused a non-DOCX download response.".to_string())
+}
+
+async fn read_docx_download_bytes(
+  response: reqwest::Response,
+) -> Result<Vec<u8>, String> {
+  let mut bytes = Vec::new();
+  let mut stream = response.bytes_stream();
+
+  while let Some(chunk) = stream.next().await {
+    let chunk = chunk
+      .map_err(|e| format!("stella desktop could not read the DOCX download: {e}"))?;
+    let current_size =
+      u64::try_from(bytes.len()).map_err(|_| oversized_docx_download_error())?;
+    let chunk_size =
+      u64::try_from(chunk.len()).map_err(|_| oversized_docx_download_error())?;
+    let next_size = current_size
+      .checked_add(chunk_size)
+      .ok_or_else(oversized_docx_download_error)?;
+
+    if next_size > MAX_DOCX_DOWNLOAD_BYTES {
+      return Err(oversized_docx_download_error());
+    }
+
+    bytes.extend_from_slice(&chunk);
+  }
+
+  Ok(bytes)
+}
+
+fn validate_docx_download_bytes(bytes: &[u8]) -> Result<(), String> {
+  let size = u64::try_from(bytes.len()).map_err(|_| oversized_docx_download_error())?;
+  if size > MAX_DOCX_DOWNLOAD_BYTES {
+    return Err(oversized_docx_download_error());
+  }
+
+  if !bytes.starts_with(ZIP_LOCAL_FILE_HEADER_MAGIC) {
+    return Err(non_docx_download_body_error());
+  }
+
+  let archive =
+    ZipArchive::new(Cursor::new(bytes)).map_err(|_| non_docx_download_body_error())?;
+  let has_content_types = archive.index_for_name(DOCX_CONTENT_TYPES_ENTRY).is_some();
+  let has_document = archive.index_for_name(DOCX_DOCUMENT_ENTRY).is_some();
+
+  if has_content_types && has_document {
+    return Ok(());
+  }
+
+  Err(non_docx_download_body_error())
+}
+
+async fn align_managed_copy_file_name(
+  file_path: &str,
+  file_name: &str,
+) -> Result<String, String> {
+  let path = Path::new(file_path);
+  let current_name = path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .unwrap_or_default();
+
+  if current_name == file_name {
+    return Ok(file_path.to_string());
+  }
+
+  let parent = path.parent().ok_or_else(|| {
+    "stella desktop could not resolve the managed DOCX folder.".to_string()
+  })?;
+  let aligned_path = parent.join(file_name);
+
+  if tokio::fs::try_exists(&aligned_path).await.map_err(|e| {
+    format!("stella desktop could not inspect the managed DOCX file: {e}")
+  })? {
+    return Err(
+      "stella desktop could not align the managed DOCX file name.".to_string(),
+    );
+  }
+
+  tokio::fs::rename(path, &aligned_path).await.map_err(|e| {
+    format!("stella desktop could not rename the managed DOCX file: {e}")
+  })?;
+
+  Ok(aligned_path.to_string_lossy().to_string())
 }
 
 /// Reduces a string to a single safe path segment so callers can't widen the
@@ -345,9 +498,11 @@ impl SessionManager {
     Self {
       sessions: HashMap::new(),
       session_ids_by_key: HashMap::new(),
+      unconfirmed_sessions: HashMap::new(),
       cleanup_paths: HashSet::new(),
       linked_account: None,
       notification_preferences: DesktopNotificationPreferences::default(),
+      trusted_self_host_connections: Vec::new(),
       update: DesktopUpdateSnapshot::default(),
       running_since: chrono_now(),
       bridge_port,
@@ -371,6 +526,7 @@ impl SessionManager {
     if let Some(prefs) = store.notification_preferences {
       self.notification_preferences = prefs;
     }
+    self.trusted_self_host_connections = store.trusted_self_host_connections;
     self.store_load_issue = store.load_issue;
 
     if self.store_load_issue.is_some() {
@@ -385,25 +541,52 @@ impl SessionManager {
       self.cleanup_paths.insert(path);
     }
 
-    for persisted in store.sessions {
-      if !Path::new(&persisted.file_path).exists() {
-        continue;
-      }
+    self.unconfirmed_sessions.clear();
 
-      // Token lives in OS keychain; skip sessions without one. The timeout
-      // keeps a stalled keychain (pending authorization prompt) from holding
-      // the session manager lock indefinitely during startup.
-      let Some(session_token) = crate::keychain::get_token_with_timeout(
-        &persisted.id,
-        KEYCHAIN_RESTORE_TIMEOUT,
+    let persisted_sessions: Vec<PersistedDesktopSession> = store
+      .sessions
+      .into_iter()
+      .filter(|persisted| Path::new(&persisted.file_path).exists())
+      .collect();
+    let restored_tokens = join_all(persisted_sessions.iter().map(|persisted| async {
+      (
+        persisted.id.clone(),
+        crate::keychain::get_token_with_timeout(
+          &persisted.id,
+          KEYCHAIN_RESTORE_TIMEOUT,
+        )
+        .await,
       )
-      .await
-      else {
-        tracing::warn!(
-            session_id = %persisted.id,
-            "session token missing from keychain, skipping restore"
-        );
-        continue;
+    }))
+    .await;
+    let mut token_restore_unavailable = false;
+
+    for (persisted, (_, restored_token)) in
+      persisted_sessions.into_iter().zip(restored_tokens)
+    {
+      // Token lives in OS keychain. A confirmed missing token prunes the
+      // session, but an inconclusive keychain read must retain the persisted
+      // metadata for a later retry.
+      let session_token = match restored_token {
+        Ok(Some(token)) => token,
+        Ok(None) => {
+          tracing::warn!(
+              session_id = %persisted.id,
+              "session token missing from keychain, skipping restore"
+          );
+          continue;
+        }
+        Err(crate::keychain::KeychainReadUnavailable) => {
+          token_restore_unavailable = true;
+          tracing::warn!(
+              session_id = %persisted.id,
+              "session token could not be confirmed, retaining persisted session for retry"
+          );
+          self
+            .unconfirmed_sessions
+            .insert(persisted.id.clone(), persisted);
+          continue;
+        }
       };
 
       let session = DesktopSession {
@@ -438,10 +621,17 @@ impl SessionManager {
 
       let key = session.key.clone();
       let id = session.id.clone();
+      self.unconfirmed_sessions.remove(&id);
       self.sessions.insert(id.clone(), session);
       self.session_ids_by_key.insert(key, id);
     }
 
+    if token_restore_unavailable {
+      tracing::warn!(
+        "session store persistence skipped because one or more keychain reads were inconclusive"
+      );
+      return;
+    }
     self.retry_pending_cleanup().await;
     self.persist_sessions().await;
   }
@@ -472,6 +662,7 @@ impl SessionManager {
       notification_preferences: self.notification_preferences.clone(),
       running_since: self.running_since.clone(),
       sessions,
+      trusted_self_host_connections: self.trusted_self_host_connections.clone(),
       update: self.update.clone(),
     }
   }
@@ -539,6 +730,10 @@ impl SessionManager {
 
     if can_reuse {
       let eid = existing_id.unwrap();
+      let file_path = {
+        let existing = self.sessions.get(&eid).unwrap();
+        align_managed_copy_file_name(&existing.file_path, &managed_file_name).await?
+      };
 
       // Update keychain with the (potentially refreshed) token
       if let Err(e) = crate::keychain::store_token(&eid, &remote.session_token) {
@@ -551,6 +746,7 @@ impl SessionManager {
         session.api_base_url = normalize_api_base_url(&request.api_base_url);
         session.base_version_number = remote.base_version_number;
         session.file_name = managed_file_name;
+        session.file_path = file_path;
         session.last_checkpoint_at = remote.last_checkpoint_at.clone();
         session.last_error = None;
         session.local_open_seen = false;
@@ -663,6 +859,7 @@ impl SessionManager {
       );
     }
 
+    self.unconfirmed_sessions.remove(&session_id);
     self.sessions.insert(session_id.clone(), session);
     self.session_ids_by_key.insert(key, session_id.clone());
     self.persist_sessions().await;
@@ -772,6 +969,100 @@ impl SessionManager {
     self.persist_sessions().await;
     self.emit_state_change();
     self.get_snapshot()
+  }
+
+  pub fn is_trusted_self_host_origin(&self, origin: &str) -> bool {
+    self
+      .trusted_self_host_connections
+      .iter()
+      .any(|connection| connection.web_origin == origin)
+  }
+
+  pub fn is_trusted_self_host_api_base_url(&self, api_base_url: &str) -> bool {
+    // Approval stores the API via the full self-host normalizer, so the lookup
+    // must canonicalize the same way (default ports, host case) or a valid
+    // connection reads back as untrusted.
+    let Ok(normalized_api_base_url) =
+      config::normalize_self_host_api_base_url(api_base_url)
+    else {
+      return false;
+    };
+    self
+      .trusted_self_host_connections
+      .iter()
+      .any(|connection| connection.api_base_url == normalized_api_base_url)
+  }
+
+  pub fn is_trusted_self_host_connection(
+    &self,
+    web_origin: &str,
+    api_base_url: &str,
+  ) -> bool {
+    let Ok(normalized_api_base_url) =
+      config::normalize_self_host_api_base_url(api_base_url)
+    else {
+      return false;
+    };
+    self.trusted_self_host_connections.iter().any(|connection| {
+      connection.web_origin == web_origin
+        && connection.api_base_url == normalized_api_base_url
+    })
+  }
+
+  pub async fn trust_self_host_connection(
+    &mut self,
+    web_origin: String,
+    api_base_url: String,
+  ) -> AppSnapshot {
+    self.upsert_trusted_self_host_connection(web_origin, api_base_url, chrono_now());
+    self.persist_sessions().await;
+    self.emit_state_change();
+    self.get_snapshot()
+  }
+
+  #[cfg(test)]
+  pub fn trust_self_host_connection_for_test(
+    &mut self,
+    web_origin: String,
+    api_base_url: String,
+  ) {
+    self.upsert_trusted_self_host_connection(
+      web_origin,
+      api_base_url,
+      "2026-01-01T00:00:00Z".to_string(),
+    );
+  }
+
+  fn upsert_trusted_self_host_connection(
+    &mut self,
+    web_origin: String,
+    api_base_url: String,
+    trusted_at: String,
+  ) {
+    let normalized_api_base_url = normalize_api_base_url(&api_base_url);
+    if let Some(connection) =
+      self
+        .trusted_self_host_connections
+        .iter_mut()
+        .find(|connection| {
+          connection.web_origin == web_origin
+            && connection.api_base_url == normalized_api_base_url
+        })
+    {
+      connection.trusted_at = trusted_at;
+      return;
+    }
+
+    self
+      .trusted_self_host_connections
+      .push(TrustedSelfHostConnection {
+        api_base_url: normalized_api_base_url,
+        trusted_at,
+        web_origin,
+      });
+    self
+      .trusted_self_host_connections
+      .sort_by(|a, b| a.web_origin.cmp(&b.web_origin));
   }
 
   pub async fn persist_sessions_public(&self) {
@@ -1606,8 +1897,15 @@ impl SessionManager {
     let active_folders: HashSet<String> = self
       .sessions
       .values()
-      .filter_map(|s| {
-        Path::new(&s.file_path)
+      .map(|session| session.file_path.as_str())
+      .chain(
+        self
+          .unconfirmed_sessions
+          .values()
+          .map(|session| session.file_path.as_str()),
+      )
+      .filter_map(|file_path| {
+        Path::new(file_path)
           .parent()
           .map(|p| p.to_string_lossy().to_string())
       })
@@ -1673,11 +1971,11 @@ impl SessionManager {
       return Err("stella desktop could not download the DOCX draft.".to_string());
     }
 
-    response
-      .bytes()
-      .await
-      .map(|b| b.to_vec())
-      .map_err(|e| format!("stella desktop could not read the DOCX download: {e}"))
+    validate_docx_download_response(&response)?;
+
+    let bytes = read_docx_download_bytes(response).await?;
+    validate_docx_download_bytes(&bytes)?;
+    Ok(bytes)
   }
 
   async fn write_managed_copy(
@@ -1701,8 +1999,14 @@ impl SessionManager {
   }
 
   async fn persist_sessions(&self) {
-    let persisted: Vec<PersistedDesktopSession> =
-      self.sessions.values().map(|s| s.to_persisted()).collect();
+    let mut persisted: Vec<PersistedDesktopSession> = self
+      .unconfirmed_sessions
+      .values()
+      .filter(|session| !self.sessions.contains_key(&session.id))
+      .cloned()
+      .collect();
+    persisted.extend(self.sessions.values().map(|s| s.to_persisted()));
+    persisted.sort_by(|a, b| a.id.cmp(&b.id));
 
     let cleanup: Vec<String> = {
       let mut v: Vec<String> = self.cleanup_paths.iter().cloned().collect();
@@ -1716,6 +2020,7 @@ impl SessionManager {
       &self.linked_account,
       &self.notification_preferences,
       &persisted,
+      &self.trusted_self_host_connections,
     )
     .await
     {
@@ -2020,11 +2325,11 @@ pub async fn download_docx_standalone(
     return Err("stella desktop could not download the DOCX draft.".to_string());
   }
 
-  response
-    .bytes()
-    .await
-    .map(|b| b.to_vec())
-    .map_err(|e| format!("stella desktop could not read the DOCX download: {e}"))
+  validate_docx_download_response(&response)?;
+
+  let bytes = read_docx_download_bytes(response).await?;
+  validate_docx_download_bytes(&bytes)?;
+  Ok(bytes)
 }
 
 // --- Platform helpers ---
@@ -2122,6 +2427,67 @@ fn chrono_now() -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::io::{Cursor, Write};
+  use zip::write::SimpleFileOptions;
+
+  fn persisted_session_for_test(id: &str) -> PersistedDesktopSession {
+    PersistedDesktopSession {
+      api_base_url: "https://api.example.com".to_string(),
+      base_version_number: 1,
+      entity_id: format!("entity-{id}"),
+      file_name: format!("{id}.docx"),
+      file_path: std::env::temp_dir()
+        .join(format!("{id}.docx"))
+        .to_string_lossy()
+        .to_string(),
+      id: id.to_string(),
+      key: format!("workspace-{id}:entity-{id}:property-{id}"),
+      last_checkpoint_at: None,
+      last_checkpoint_sha: None,
+      last_error: None,
+      last_local_sha: "local-sha".to_string(),
+      pending_finalize: false,
+      property_id: format!("property-{id}"),
+      status: SessionStatus::Ready,
+      takeover_detected: false,
+      workspace_id: format!("workspace-{id}"),
+    }
+  }
+
+  fn desktop_session_for_test(
+    persisted: PersistedDesktopSession,
+    session_token: &str,
+  ) -> DesktopSession {
+    DesktopSession {
+      api_base_url: persisted.api_base_url,
+      base_version_number: persisted.base_version_number,
+      entity_id: persisted.entity_id,
+      file_name: persisted.file_name,
+      file_path: persisted.file_path,
+      id: persisted.id,
+      key: persisted.key,
+      last_checkpoint_at: persisted.last_checkpoint_at,
+      last_checkpoint_sha: persisted.last_checkpoint_sha,
+      last_error: persisted.last_error,
+      last_local_sha: persisted.last_local_sha,
+      pending_finalize: persisted.pending_finalize,
+      property_id: persisted.property_id,
+      session_token: session_token.to_string(),
+      status: persisted.status,
+      takeover_detected: persisted.takeover_detected,
+      workspace_id: persisted.workspace_id,
+      changed_during_remote_save: false,
+      checkpoint_in_flight: false,
+      finalize_in_flight: false,
+      local_open_seen: false,
+      closed_recheck_count: 0,
+      retry_notice_shown: false,
+      watcher: None,
+      checkpoint_timer: None,
+      open_poll_timer: None,
+      sse_listener: None,
+    }
+  }
 
   #[test]
   fn is_word_lock_file_for_matches_replacement_and_prefixed_owner_files() {
@@ -2146,6 +2512,129 @@ mod tests {
       "document.docx",
       "document.docx"
     ));
+  }
+
+  #[test]
+  fn sanitize_file_name_preserves_only_docx_outputs() {
+    assert_eq!(sanitize_file_name("brief.docx"), "brief.docx");
+    assert_eq!(sanitize_file_name("brief.DOCX"), "brief.DOCX");
+    assert_eq!(sanitize_file_name("Agreement"), "Agreement.docx");
+    assert_eq!(sanitize_file_name("payload.sh"), "payload.sh.docx");
+    assert_eq!(sanitize_file_name("../payload.bat"), "payload.bat.docx");
+  }
+
+  #[test]
+  fn docx_download_content_type_allows_docx_and_generic_binary() {
+    assert!(is_allowed_docx_download_content_type(DOCX_MIME_TYPE));
+    assert!(is_allowed_docx_download_content_type(
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document; charset=binary"
+    ));
+    assert!(is_allowed_docx_download_content_type(
+      "application/octet-stream"
+    ));
+    assert!(is_allowed_docx_download_content_type("binary/octet-stream"));
+    assert!(!is_allowed_docx_download_content_type("text/html"));
+  }
+
+  #[test]
+  fn docx_download_bytes_require_docx_archive_entries() {
+    assert!(
+      validate_docx_download_bytes(&zip_bytes(&[
+        DOCX_CONTENT_TYPES_ENTRY,
+        DOCX_DOCUMENT_ENTRY
+      ]))
+      .is_ok()
+    );
+    assert!(validate_docx_download_bytes(&zip_bytes(&["payload.bin"])).is_err());
+    assert!(validate_docx_download_bytes(b"#!/bin/sh\n").is_err());
+  }
+
+  #[tokio::test]
+  async fn reused_managed_copy_is_renamed_to_sanitized_docx_name() {
+    let dir = std::env::temp_dir()
+      .join(format!("stella-desktop-test-{}", uuid::Uuid::new_v4()));
+    let source = dir.join("Agreement");
+    let target = dir.join("Agreement.docx");
+
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    tokio::fs::write(&source, b"test").await.unwrap();
+
+    let aligned_path =
+      align_managed_copy_file_name(&source.to_string_lossy(), "Agreement.docx")
+        .await
+        .unwrap();
+
+    assert_eq!(aligned_path, target.to_string_lossy());
+    assert!(!source.exists());
+    assert!(target.exists());
+
+    tokio::fs::remove_dir_all(dir).await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn persist_sessions_keeps_unconfirmed_sessions() {
+    let path = std::env::temp_dir().join(format!(
+      "stella-desktop-sessions-{}.json",
+      uuid::Uuid::new_v4()
+    ));
+    let mut manager = SessionManager::new();
+    manager.store_path = path.clone();
+    manager.unconfirmed_sessions.insert(
+      "session-unconfirmed".to_string(),
+      persisted_session_for_test("session-unconfirmed"),
+    );
+
+    manager.persist_sessions().await;
+
+    let loaded = session_store::load_session_store(&path).await;
+    let session_ids: Vec<String> = loaded
+      .sessions
+      .into_iter()
+      .map(|session| session.id)
+      .collect();
+    assert_eq!(session_ids, vec!["session-unconfirmed"]);
+
+    tokio::fs::remove_file(path).await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn active_session_supersedes_unconfirmed_copy_on_persist() {
+    let path = std::env::temp_dir().join(format!(
+      "stella-desktop-sessions-{}.json",
+      uuid::Uuid::new_v4()
+    ));
+    let mut manager = SessionManager::new();
+    manager.store_path = path.clone();
+    let persisted = persisted_session_for_test("session-restored");
+    manager
+      .unconfirmed_sessions
+      .insert(persisted.id.clone(), persisted.clone());
+    manager.sessions.insert(
+      persisted.id.clone(),
+      desktop_session_for_test(persisted, "restored-token"),
+    );
+
+    manager.persist_sessions().await;
+
+    let loaded = session_store::load_session_store(&path).await;
+    assert_eq!(loaded.sessions.len(), 1);
+    assert_eq!(loaded.sessions[0].id, "session-restored");
+
+    tokio::fs::remove_file(path).await.unwrap();
+  }
+
+  fn zip_bytes(entries: &[&str]) -> Vec<u8> {
+    let cursor = Cursor::new(Vec::new());
+    let mut archive = zip::ZipWriter::new(cursor);
+    let options =
+      SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    for entry in entries {
+      archive.start_file(entry, options).unwrap();
+      archive.write_all(b"test").unwrap();
+    }
+
+    archive.finish().unwrap().into_inner()
   }
 
   #[test]
@@ -2194,5 +2683,28 @@ mod tests {
     assert_eq!(sanitize_path_segment(""), "session");
     assert_eq!(sanitize_path_segment("."), "session");
     assert_eq!(sanitize_path_segment("   "), "session");
+  }
+
+  #[test]
+  fn trust_lookup_canonicalizes_api_base_url_like_approval() {
+    let mut manager = SessionManager::new();
+    manager.trust_self_host_connection_for_test(
+      "https://web.example".to_string(),
+      "https://api.example".to_string(),
+    );
+
+    // A lookup using a canonical-equivalent form (explicit default port,
+    // uppercase host, trailing slash) must still match the stored connection.
+    assert!(manager.is_trusted_self_host_connection(
+      "https://web.example",
+      "https://API.example:443/",
+    ));
+    assert!(manager.is_trusted_self_host_api_base_url("https://API.example:443/"));
+    assert!(
+      !manager.is_trusted_self_host_connection(
+        "https://web.example",
+        "https://other.example"
+      )
+    );
   }
 }

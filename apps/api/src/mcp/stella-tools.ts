@@ -1,10 +1,13 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { and, desc, eq, sql } from "drizzle-orm";
 import * as v from "valibot";
 
 import { COUNTRY_CODES } from "@stll/country-codes";
 import { roles } from "@stll/permissions";
 
 import type { PracticeJurisdiction } from "@/api/db/schema";
+import { workspaces } from "@/api/db/schema";
+import type { ContactEmail, ContactPhone } from "@/api/db/schema-validators";
 import { readDecisionHandler } from "@/api/handlers/case-law/decisions/read-by-id";
 import { searchDecisionsHandler } from "@/api/handlers/case-law/decisions/search";
 import { hasUsableAst } from "@/api/handlers/case-law/document-ast";
@@ -15,19 +18,37 @@ import {
 import { readWorkspaceHandler } from "@/api/handlers/workspaces/read-by-id";
 import { readOverviewHandler } from "@/api/handlers/workspaces/read-overview";
 import { readWorkspaceContactsHandler } from "@/api/handlers/workspaces/workspace-contacts-read";
+import { readWorkspaceMembersHandler } from "@/api/handlers/workspaces/workspace-members-read";
 import { caseLawPublicReadDb } from "@/api/lib/case-law-public-read-db";
 import { decryptContent } from "@/api/lib/content-encryption";
 import { isUuid } from "@/api/lib/custom-schema";
 import { LIMITS } from "@/api/lib/limits";
+import {
+  createCursorPage,
+  decodePaginationCursor,
+  encodePaginationCursor,
+  isUuidPaginationCursorPart,
+} from "@/api/lib/pagination";
 import {
   brandPersistedCaseLawDecisionId,
   brandPersistedCaseLawSourceId,
   brandPersistedContactId,
   brandPersistedEntityId,
 } from "@/api/lib/safe-id-boundaries";
+import { decodeCursor } from "@/api/lib/search/cursor";
 import { getSearchProvider } from "@/api/lib/search/provider";
 import type { McpRequestContext } from "@/api/mcp/context";
-import type { McpToolDefinition, McpToolHandler } from "@/api/mcp/tool-types";
+import {
+  defineTextFieldSpec,
+  deriveTextFieldPaths,
+  runTextFieldSpecs,
+} from "@/api/mcp/text-field-spec";
+import type {
+  McpTextFieldSpec,
+  McpToolDefinition,
+  McpToolHandler,
+} from "@/api/mcp/tool-types";
+import { defineMcpToolSet } from "@/api/mcp/tool-types";
 import {
   buildCaseLawDecisionAppUrl,
   DEFAULT_LIST_LIMIT,
@@ -37,18 +58,26 @@ import {
   errorResult,
   getAppBaseUrl,
   intProp,
+  isToolErrorResult,
   MAX_LIST_LIMIT,
   MAX_SEARCH_LIMIT,
+  notFoundResult,
+  parseOptionalCursor,
   parseOptionalEnum,
   parseOptionalLimit,
   parseRequiredString,
+  resolveWindowBounds,
   stringProp,
+  structuredErrorResult,
   textResult,
+  validationErrorResult,
 } from "@/api/mcp/tool-utils";
 
 const MCP_CONTENT_MAX_CHARS = 8000;
+// Page size for each citation list on read_case_law_decision. The decision
+// text and both citation lists are paged together by a single compound cursor.
+const MCP_CASE_LAW_CITATIONS_PER_DECISION = 50;
 type StellaToolName =
-  | "get_matter_overview"
   | "list_matters"
   | "read_case_law_decision"
   | "read_contact"
@@ -59,38 +88,388 @@ type StellaToolName =
 
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
 
+// --- Text-field specs (plan 049, Option B) --------------------------------
+
+/**
+ * list_matters, list mode: one matter per row, scoped under its own matter id
+ * (a matter's workspace id IS its anonymization scope). Both fields already
+ * ride in the served payload, so no external attribution is needed.
+ */
+type ListedMatter = { id: string; name: string; reference: string };
+type ListMattersListPayload = { matters: readonly ListedMatter[] };
+
+const LIST_MATTERS_LIST_TEXT_FIELD_SPECS: readonly McpTextFieldSpec<ListMattersListPayload>[] =
+  [
+    defineTextFieldSpec({
+      path: "matters[].name",
+      items: (payload: ListMattersListPayload) => payload.matters,
+      scope: (matter: ListedMatter) => matter.id,
+      read: (matter: ListedMatter) => matter.name,
+      apply: (matter: ListedMatter, value) => {
+        matter.name = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "matters[].reference",
+      items: (payload: ListMattersListPayload) => payload.matters,
+      scope: (matter: ListedMatter) => matter.id,
+      read: (matter: ListedMatter) => matter.reference,
+      apply: (matter: ListedMatter, value) => {
+        matter.reference = value;
+      },
+    }),
+  ];
+
+/**
+ * list_matters, detail mode (one matter's overview): every field below
+ * belongs to the one matter this response describes, so `payload.matter.id`
+ * is the anonymization scope throughout — including the nested
+ * entity/contact/member cards, which carry no workspace id of their own on
+ * the wire. Each nested item selector pairs the item with that scope id
+ * read straight off the payload, so no request-scoped closure is needed.
+ */
+type MatterOverviewMatter = {
+  clientName: string | null;
+  id: string;
+  name: string;
+  reference: string;
+};
+type MatterOverviewEntity = {
+  assignedTo: string | null;
+  createdBy: string | null;
+  name: string;
+};
+type MatterOverviewContact = { displayName: string };
+type MatterOverviewMember = { name: string };
+type MatterOverviewPayload = {
+  contacts: readonly MatterOverviewContact[];
+  matter: MatterOverviewMatter;
+  members: readonly MatterOverviewMember[];
+  overview: { recentEntities: readonly MatterOverviewEntity[] };
+};
+
+const matterOverviewMatterItems = (
+  payload: MatterOverviewPayload,
+): readonly [MatterOverviewMatter] => [payload.matter];
+
+type EntityWithScope = { entity: MatterOverviewEntity; workspaceId: string };
+const matterOverviewEntityItems = (
+  payload: MatterOverviewPayload,
+): readonly EntityWithScope[] =>
+  payload.overview.recentEntities.map((entity) => ({
+    entity,
+    workspaceId: payload.matter.id,
+  }));
+
+type ContactWithScope = {
+  contact: MatterOverviewContact;
+  workspaceId: string;
+};
+const matterOverviewContactItems = (
+  payload: MatterOverviewPayload,
+): readonly ContactWithScope[] =>
+  payload.contacts.map((contact) => ({
+    contact,
+    workspaceId: payload.matter.id,
+  }));
+
+type MemberWithScope = { member: MatterOverviewMember; workspaceId: string };
+const matterOverviewMemberItems = (
+  payload: MatterOverviewPayload,
+): readonly MemberWithScope[] =>
+  payload.members.map((member) => ({
+    member,
+    workspaceId: payload.matter.id,
+  }));
+
+const MATTER_OVERVIEW_TEXT_FIELD_SPECS: readonly McpTextFieldSpec<MatterOverviewPayload>[] =
+  [
+    defineTextFieldSpec({
+      path: "matter.name",
+      items: matterOverviewMatterItems,
+      scope: (matter: MatterOverviewMatter) => matter.id,
+      read: (matter: MatterOverviewMatter) => matter.name,
+      apply: (matter: MatterOverviewMatter, value) => {
+        matter.name = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "matter.reference",
+      items: matterOverviewMatterItems,
+      scope: (matter: MatterOverviewMatter) => matter.id,
+      read: (matter: MatterOverviewMatter) => matter.reference,
+      apply: (matter: MatterOverviewMatter, value) => {
+        matter.reference = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "matter.clientName",
+      items: matterOverviewMatterItems,
+      scope: (matter: MatterOverviewMatter) => matter.id,
+      read: (matter: MatterOverviewMatter) => matter.clientName,
+      apply: (matter: MatterOverviewMatter, value) => {
+        matter.clientName = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "overview.recentEntities[].name",
+      items: matterOverviewEntityItems,
+      scope: (item: EntityWithScope) => item.workspaceId,
+      read: (item: EntityWithScope) => item.entity.name,
+      apply: (item: EntityWithScope, value) => {
+        item.entity.name = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "overview.recentEntities[].createdBy",
+      items: matterOverviewEntityItems,
+      scope: (item: EntityWithScope) => item.workspaceId,
+      read: (item: EntityWithScope) => item.entity.createdBy,
+      apply: (item: EntityWithScope, value) => {
+        item.entity.createdBy = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "overview.recentEntities[].assignedTo",
+      items: matterOverviewEntityItems,
+      scope: (item: EntityWithScope) => item.workspaceId,
+      read: (item: EntityWithScope) => item.entity.assignedTo,
+      apply: (item: EntityWithScope, value) => {
+        item.entity.assignedTo = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "contacts[].displayName",
+      items: matterOverviewContactItems,
+      scope: (item: ContactWithScope) => item.workspaceId,
+      read: (item: ContactWithScope) => item.contact.displayName,
+      apply: (item: ContactWithScope, value) => {
+        item.contact.displayName = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "members[].name",
+      items: matterOverviewMemberItems,
+      scope: (item: MemberWithScope) => item.workspaceId,
+      read: (item: MemberWithScope) => item.member.name,
+      apply: (item: MemberWithScope, value) => {
+        item.member.name = value;
+      },
+    }),
+  ];
+
+/**
+ * search_across_matters: hits span multiple matters, each already carrying
+ * its own `workspaceId` on the wire (P2 per-item attribution).
+ */
+type SearchAcrossMattersHit = {
+  headline: string | null;
+  name: string;
+  workspaceId: string;
+  workspaceName: string | null;
+};
+type SearchAcrossMattersPayload = { hits: readonly SearchAcrossMattersHit[] };
+
+const SEARCH_ACROSS_MATTERS_TEXT_FIELD_SPECS: readonly McpTextFieldSpec<SearchAcrossMattersPayload>[] =
+  [
+    defineTextFieldSpec({
+      path: "hits[].name",
+      items: (payload: SearchAcrossMattersPayload) => payload.hits,
+      scope: (hit: SearchAcrossMattersHit) => hit.workspaceId,
+      read: (hit: SearchAcrossMattersHit) => hit.name,
+      apply: (hit: SearchAcrossMattersHit, value) => {
+        hit.name = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "hits[].headline",
+      items: (payload: SearchAcrossMattersPayload) => payload.hits,
+      scope: (hit: SearchAcrossMattersHit) => hit.workspaceId,
+      read: (hit: SearchAcrossMattersHit) => hit.headline,
+      apply: (hit: SearchAcrossMattersHit, value) => {
+        hit.headline = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "hits[].workspaceName",
+      items: (payload: SearchAcrossMattersPayload) => payload.hits,
+      scope: (hit: SearchAcrossMattersHit) => hit.workspaceId,
+      read: (hit: SearchAcrossMattersHit) => hit.workspaceName,
+      apply: (hit: SearchAcrossMattersHit, value) => {
+        hit.workspaceName = value;
+      },
+    }),
+  ];
+
+/**
+ * read_content_across_matters: a single document, windowed after
+ * anonymization (P8). The window co-declaration in the handler is untouched;
+ * only the `name`/`text` textFields construction migrates here. `workspaceId`
+ * already rides in the payload (stripped by nothing — this tool has no
+ * compat-style field-stripping), so it is read straight off the item.
+ */
+type ReadContentAcrossMattersPayload = {
+  name: string;
+  text: string;
+  workspaceId: string;
+};
+
+const READ_CONTENT_ACROSS_MATTERS_TEXT_FIELD_SPECS: readonly McpTextFieldSpec<ReadContentAcrossMattersPayload>[] =
+  [
+    defineTextFieldSpec({
+      path: "name",
+      items: (payload: ReadContentAcrossMattersPayload) => [payload],
+      scope: (item: ReadContentAcrossMattersPayload) => item.workspaceId,
+      read: (item: ReadContentAcrossMattersPayload) => item.name,
+      apply: (item: ReadContentAcrossMattersPayload, value) => {
+        item.name = value;
+      },
+    }),
+    defineTextFieldSpec({
+      path: "text",
+      items: (payload: ReadContentAcrossMattersPayload) => [payload],
+      scope: (item: ReadContentAcrossMattersPayload) => item.workspaceId,
+      read: (item: ReadContentAcrossMattersPayload) => item.text,
+      apply: (item: ReadContentAcrossMattersPayload, value) => {
+        item.text = value;
+      },
+    }),
+  ];
+
+/**
+ * read_contact: contacts are organization-scoped (no owning workspace), so
+ * `organizationId` is the anonymization scope for every field. Unlike the
+ * per-item/per-matter cases above, `organizationId` is not part of the served
+ * payload, so it is threaded in as a builder argument. `STELLA_TOOL_DEFINITIONS`
+ * below calls this same builder with a placeholder id purely to derive the
+ * documented `textFields` path list — `deriveTextFieldPaths` only reads each
+ * spec's static `path`, never `scope`, so the placeholder never affects the
+ * declaration.
+ */
+type ContactPayload = {
+  displayName: string;
+  emails: readonly ContactEmail[];
+  firstName: string | null;
+  lastName: string | null;
+  organizationName: string | null;
+  phones: readonly ContactPhone[];
+};
+
+const buildContactTextFieldSpecs = (
+  organizationId: string,
+): readonly McpTextFieldSpec<ContactPayload>[] => [
+  defineTextFieldSpec({
+    path: "displayName",
+    items: (payload: ContactPayload) => [payload],
+    scope: () => organizationId,
+    read: (item: ContactPayload) => item.displayName,
+    apply: (item: ContactPayload, value) => {
+      item.displayName = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "firstName",
+    items: (payload: ContactPayload) => [payload],
+    scope: () => organizationId,
+    read: (item: ContactPayload) => item.firstName,
+    apply: (item: ContactPayload, value) => {
+      item.firstName = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "lastName",
+    items: (payload: ContactPayload) => [payload],
+    scope: () => organizationId,
+    read: (item: ContactPayload) => item.lastName,
+    apply: (item: ContactPayload, value) => {
+      item.lastName = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "organizationName",
+    items: (payload: ContactPayload) => [payload],
+    scope: () => organizationId,
+    read: (item: ContactPayload) => item.organizationName,
+    apply: (item: ContactPayload, value) => {
+      item.organizationName = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "emails[].label",
+    items: (payload: ContactPayload) => payload.emails,
+    scope: () => organizationId,
+    read: (email: ContactEmail) => email.label,
+    apply: (email: ContactEmail, value) => {
+      email.label = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "emails[].address",
+    items: (payload: ContactPayload) => payload.emails,
+    scope: () => organizationId,
+    read: (email: ContactEmail) => email.address,
+    apply: (email: ContactEmail, value) => {
+      email.address = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "phones[].label",
+    items: (payload: ContactPayload) => payload.phones,
+    scope: () => organizationId,
+    read: (phone: ContactPhone) => phone.label,
+    apply: (phone: ContactPhone, value) => {
+      phone.label = value;
+    },
+  }),
+  defineTextFieldSpec({
+    path: "phones[].number",
+    items: (payload: ContactPayload) => payload.phones,
+    scope: () => organizationId,
+    read: (phone: ContactPhone) => phone.number,
+    apply: (phone: ContactPhone, value) => {
+      phone.number = value;
+    },
+  }),
+];
+
 export const STELLA_TOOL_DEFINITIONS = [
   {
     annotations: { readOnlyHint: true },
     description:
-      "List the matters you can access. Use this first when the user does not " +
-      "name a matter explicitly or when you need matter IDs for follow-up tools.",
+      "List the matters you can access, or get one matter's overview. Omit " +
+      "matter_id to list accessible matters (filter with status, page with " +
+      "cursor); list first when the user does not name a matter or you need " +
+      "matter IDs for follow-up tools. Pass matter_id to return that matter's " +
+      "overview instead: counts, recent entities, linked contacts, and members.",
     inputSchema: {
       type: "object",
       properties: {
-        status: enumProp("Filter by matter status", ["active", "all"]),
-        limit: intProp("Max matters to return", {
+        matter_id: stringProp(
+          "Matter/workspace ID to return a single matter's overview; omit to list matters",
+        ),
+        status: enumProp("Filter by matter status (list mode)", [
+          "active",
+          "all",
+        ]),
+        limit: intProp("Max matters to return (list mode)", {
           min: 1,
           max: MAX_LIST_LIMIT,
         }),
+        cursor: stringProp(
+          "Opaque cursor from a previous list_matters call to fetch the next page",
+          { maxLength: 512 },
+        ),
       },
+    },
+    access: "read",
+    anonymized: {
+      exposure: "anonymize",
+      textFields: [
+        ...deriveTextFieldPaths(LIST_MATTERS_LIST_TEXT_FIELD_SPECS),
+        ...deriveTextFieldPaths(MATTER_OVERVIEW_TEXT_FIELD_SPECS),
+      ],
     },
     name: "list_matters",
-    scope: "stella:read",
-  },
-  {
-    annotations: { readOnlyHint: true },
-    description:
-      "Get a compact overview of a matter including counts, recent entities, " +
-      "and linked contacts. Use this to orient yourself before drilling in.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        matter_id: stringProp("Matter/workspace ID"),
-      },
-      required: ["matter_id"],
-    },
-    name: "get_matter_overview",
     scope: "stella:read",
   },
   {
@@ -108,8 +487,17 @@ export const STELLA_TOOL_DEFINITIONS = [
           min: 1,
           max: MAX_SEARCH_LIMIT,
         }),
+        cursor: stringProp(
+          "Opaque cursor from a previous search_across_matters call to fetch the next page",
+          { maxLength: 512 },
+        ),
       },
       required: ["query"],
+    },
+    access: "read",
+    anonymized: {
+      exposure: "anonymize",
+      textFields: deriveTextFieldPaths(SEARCH_ACROSS_MATTERS_TEXT_FIELD_SPECS),
     },
     name: "search_across_matters",
     scope: "stella:search",
@@ -152,6 +540,11 @@ export const STELLA_TOOL_DEFINITIONS = [
       },
       required: ["query"],
     },
+    access: "read",
+    anonymized: { exposure: "passthrough" },
+    // Backed by the public case-law corpus (caseLawPublicReadDb), the same
+    // surface the public routes gate behind env.isDev || env.FEATURE_PUBLIC_LAW.
+    feature: "FEATURE_PUBLIC_LAW",
     name: "search_case_law",
     scope: "stella:search",
   },
@@ -159,13 +552,25 @@ export const STELLA_TOOL_DEFINITIONS = [
     annotations: { readOnlyHint: true },
     description:
       "Read extracted text from a document found anywhere in your accessible " +
-      "matters. Use after search_across_matters.",
+      "matters. Use after search_across_matters. Long documents are returned " +
+      "in windows; pass the returned nextCursor back as cursor to read more.",
     inputSchema: {
       type: "object",
       properties: {
         entity_id: stringProp("Entity ID"),
+        cursor: stringProp(
+          "Opaque cursor from a previous call to read the next window of text",
+          { maxLength: 512 },
+        ),
       },
       required: ["entity_id"],
+    },
+    access: "read",
+    anonymized: {
+      exposure: "anonymize",
+      textFields: deriveTextFieldPaths(
+        READ_CONTENT_ACROSS_MATTERS_TEXT_FIELD_SPECS,
+      ),
     },
     name: "read_content_across_matters",
     scope: "stella:read",
@@ -174,14 +579,25 @@ export const STELLA_TOOL_DEFINITIONS = [
     annotations: { readOnlyHint: true },
     description:
       "Read a single case-law decision by its decision ID. Returns metadata, " +
-      "plain text, citation links, and source URLs.",
+      "plain text, citation links, and source URLs. Long decision text and " +
+      "large citation lists are returned in windows; pass the returned " +
+      "nextCursor back as cursor to read more.",
     inputSchema: {
       type: "object",
       properties: {
         decision_id: stringProp("Case-law decision ID"),
+        cursor: stringProp(
+          "Opaque cursor from a previous call to read the next window of decision text and citations",
+          { maxLength: 512 },
+        ),
       },
       required: ["decision_id"],
     },
+    access: "read",
+    anonymized: { exposure: "passthrough" },
+    // Backed by the public case-law corpus (caseLawPublicReadDb), the same
+    // surface the public routes gate behind env.isDev || env.FEATURE_PUBLIC_LAW.
+    feature: "FEATURE_PUBLIC_LAW",
     name: "read_case_law_decision",
     scope: "stella:read",
   },
@@ -196,6 +612,13 @@ export const STELLA_TOOL_DEFINITIONS = [
         contact_id: stringProp("Contact ID"),
       },
       required: ["contact_id"],
+    },
+    access: "read",
+    anonymized: {
+      exposure: "anonymize",
+      // Placeholder org id: derivation only ever reads `.path`, see
+      // `buildContactTextFieldSpecs`'s doc comment above.
+      textFields: deriveTextFieldPaths(buildContactTextFieldSpecs("")),
     },
     name: "read_contact",
     scope: "stella:read",
@@ -237,6 +660,8 @@ export const STELLA_TOOL_DEFINITIONS = [
       },
       required: ["jurisdictions"],
     },
+    access: "write",
+    anonymized: { exposure: "excluded", reason: "write" },
     name: "set_practice_jurisdictions",
     scope: "stella:onboarding",
   },
@@ -285,7 +710,45 @@ const withOnboardingHintIfApplicable = async ({
   };
 };
 
+// The list_matters cursor is the boundary matter id alone; the query
+// resolves its (lastActivityAt, id) in-DB. A malformed id is rejected here
+// so it never reaches the SQL comparison.
+const decodeMatterPageCursor = (cursor: string): string | null => {
+  const parts = decodePaginationCursor(cursor);
+  if (!parts || parts.length !== 1) {
+    return null;
+  }
+  const [rawId] = parts;
+  return isUuidPaginationCursorPart(rawId) ? rawId : null;
+};
+
 const handleListMattersTool: McpToolHandler = async ({ args, context }) => {
+  // Detail mode: matter_id selects one matter's overview. The list-only
+  // filters (status/limit/cursor) do not apply, so reject the mixed request
+  // up front rather than silently ignoring them.
+  if (args["matter_id"] !== undefined) {
+    if (
+      args["status"] !== undefined ||
+      args["limit"] !== undefined ||
+      args["cursor"] !== undefined
+    ) {
+      return structuredErrorResult({
+        code: "validation_error",
+        message:
+          "status, limit, and cursor apply when listing matters; omit matter_id to list",
+        issues: [
+          {
+            path: "matter_id",
+            message:
+              "status, limit, and cursor apply when listing matters; omit matter_id to list",
+          },
+        ],
+        hint: "Omit 'matter_id' to list matters with 'status'/'limit'/'cursor', or pass only 'matter_id' to read one matter's overview.",
+      });
+    }
+    return await readMatterOverview({ args, context });
+  }
+
   const status = parseOptionalEnum({
     args,
     defaultValue: "active",
@@ -306,48 +769,98 @@ const handleListMattersTool: McpToolHandler = async ({ args, context }) => {
     return limit;
   }
 
-  const matters = await context.scopedDb((tx) =>
-    tx.query.workspaces.findMany({
-      where: {
-        organizationId: { eq: context.organizationId },
-        ...(status === "all" ? {} : { status }),
-      },
-      columns: {
-        id: true,
-        name: true,
-        reference: true,
-        status: true,
-        lastActivityAt: true,
-        createdAt: true,
-      },
-      orderBy: { lastActivityAt: "desc" },
-      limit,
-    }),
+  const cursor = parseOptionalCursor({ args, key: "cursor" });
+  if (isToolErrorResult(cursor)) {
+    return cursor;
+  }
+  let boundaryId: string | undefined;
+  if (cursor !== undefined) {
+    const decoded = decodeMatterPageCursor(cursor);
+    if (decoded === null) {
+      return structuredErrorResult({
+        code: "validation_error",
+        message: "Invalid cursor",
+        issues: [{ path: "cursor", message: "Invalid cursor" }],
+        hint: "Pass the 'cursor' verbatim as returned by a previous call, or omit it for the first page.",
+      });
+    }
+    boundaryId = decoded;
+  }
+
+  const rows = await context.scopedDb((tx) =>
+    tx
+      .select({
+        id: workspaces.id,
+        name: workspaces.name,
+        reference: workspaces.reference,
+        status: workspaces.status,
+        lastActivityAt: workspaces.lastActivityAt,
+        createdAt: workspaces.createdAt,
+      })
+      .from(workspaces)
+      .where(
+        and(
+          eq(workspaces.organizationId, context.organizationId),
+          status === "all" ? undefined : eq(workspaces.status, status),
+          // Compare the full-precision (lastActivityAt, id) tuple in-DB
+          // against the boundary row (looked up by id) so the cursor never
+          // round-trips lastActivityAt through a millisecond JS Date;
+          // matters sharing a now()-generated microsecond timestamp cannot
+          // be skipped or duplicated across pages. The boundary lookup is
+          // scoped to the same org and status filter as the page (defense in
+          // depth beyond RLS) so a cursor carrying a foreign or out-of-filter
+          // workspace id cannot shift this page's boundary. The status clause
+          // is conditional: comparing against the synthetic "all" value would
+          // fail to cast to the status enum.
+          boundaryId === undefined
+            ? undefined
+            : sql`(${workspaces.lastActivityAt}, ${workspaces.id}) < (select b.last_activity_at, b.id from workspaces b where b.id = ${boundaryId} and b.organization_id = ${context.organizationId}${status === "all" ? sql`` : sql` and b.status = ${status}`})`,
+        ),
+      )
+      .orderBy(desc(workspaces.lastActivityAt), desc(workspaces.id))
+      .limit(limit + 1),
   );
 
-  const result = textResult({
-    matters: matters.map((matter) => ({
-      id: matter.id,
-      name: matter.name,
-      reference: matter.reference,
-      status: matter.status,
-      lastActivityAt: matter.lastActivityAt.toISOString(),
-      createdAt: matter.createdAt.toISOString(),
-    })),
-    totalCountLimit: LIMITS.workspacesCount,
+  const page = createCursorPage({
+    rows,
+    limit,
+    cursorForItem: (item) => encodePaginationCursor([item.id]),
   });
 
-  return await withOnboardingHintIfApplicable({
-    context,
-    isEmpty: matters.length === 0,
-    result,
-  });
+  const matters = page.items.map((matter) => ({
+    id: matter.id,
+    name: matter.name,
+    reference: matter.reference,
+    status: matter.status,
+    lastActivityAt: matter.lastActivityAt.toISOString(),
+    createdAt: matter.createdAt.toISOString(),
+  }));
+
+  // An empty page carries no tenant text to anonymize, so return the finished
+  // result directly (and let the onboarding hint attach). A non-empty page runs
+  // through the egress pipeline, which anonymizes each matter's name under its
+  // own workspace scope in anonymized mode. The matter id is its workspace id.
+  if (matters.length === 0) {
+    return await withOnboardingHintIfApplicable({
+      context,
+      isEmpty: true,
+      result: textResult({ matters, nextCursor: page.nextCursor }),
+    });
+  }
+
+  const payload = { matters, nextCursor: page.nextCursor };
+  const textFields = runTextFieldSpecs(
+    LIST_MATTERS_LIST_TEXT_FIELD_SPECS,
+    payload,
+  );
+
+  return { egress: "structured", payload, textFields };
 };
 
-const handleGetMatterOverviewTool: McpToolHandler = async ({
-  args,
-  context,
-}) => {
+// Detail branch of list_matters: one matter's overview (counts, recent
+// entities, contacts, members). Reused verbatim from the former
+// get_matter_overview tool, which list_matters absorbed.
+const readMatterOverview: McpToolHandler = async ({ args, context }) => {
   const matterId = parseRequiredString(args, "matter_id");
   if (typeof matterId !== "string") {
     return matterId;
@@ -358,10 +871,10 @@ const handleGetMatterOverviewTool: McpToolHandler = async ({
     workspaceId: matterId,
   });
   if (!workspaceId) {
-    return errorResult("Matter not found or not accessible");
+    return notFoundResult("Matter not found or not accessible");
   }
 
-  const [workspace, overview, contacts] = await Promise.all([
+  const [workspace, overview, contacts, members] = await Promise.all([
     readWorkspaceHandler({
       organizationId: context.organizationId,
       scopedDb: context.scopedDb,
@@ -375,35 +888,80 @@ const handleGetMatterOverviewTool: McpToolHandler = async ({
       scopedDb: context.scopedDb,
       workspaceId,
     }),
+    readWorkspaceMembersHandler({
+      scopedDb: context.scopedDb,
+      workspaceId,
+    }),
   ]);
 
   if (typeof workspace !== "object" || !("name" in workspace)) {
-    return errorResult("Matter not found or not accessible");
+    return notFoundResult("Matter not found or not accessible");
   }
 
-  return textResult({
-    matter: {
-      id: workspace.id,
-      name: workspace.name,
-      reference: workspace.reference,
-      status: workspace.status,
-      clientName: workspace.client?.displayName ?? null,
-    },
-    overview,
-    contacts: contacts.flatMap((workspaceContact) => {
-      if (!workspaceContact.contact) {
-        return [];
-      }
-      return [
-        {
-          contactId: workspaceContact.contact.id,
-          displayName: workspaceContact.contact.displayName,
-          role: workspaceContact.role,
-          type: workspaceContact.contact.type,
-        },
-      ];
-    }),
+  const matter = {
+    id: workspace.id,
+    name: workspace.name,
+    reference: workspace.reference,
+    status: workspace.status,
+    clientName: workspace.client?.displayName ?? null,
+  };
+  const contactCards = contacts.flatMap((workspaceContact) => {
+    if (!workspaceContact.contact) {
+      return [];
+    }
+    return [
+      {
+        // The matter-contact link id, so link_matter_contact can unlink a
+        // precise role even when the contact holds several.
+        workspaceContactId: workspaceContact.id,
+        contactId: workspaceContact.contact.id,
+        displayName: workspaceContact.contact.displayName,
+        role: workspaceContact.role,
+        type: workspaceContact.contact.type,
+      },
+    ];
   });
+  // Workspace members are the users save_task can assign, so surface their ids
+  // and names here for discoverability. Bounded by readWorkspaceMembersHandler's
+  // LIMITS.workspaceMembersCount cap.
+  const memberCards = members.flatMap((member) =>
+    member.user === null
+      ? []
+      : [{ userId: member.user.id, name: member.user.name }],
+  );
+
+  const overviewWithoutAvatarUrls = {
+    ...overview,
+    recentEntities: overview.recentEntities.map(
+      ({
+        assignedToImage: _assignedToImage,
+        createdByImage: _createdByImage,
+        ...entity
+      }) => entity,
+    ),
+  };
+  const payload = {
+    matter,
+    overview: overviewWithoutAvatarUrls,
+    contacts: contactCards,
+    members: memberCards,
+  };
+
+  // Everything below belongs to one matter, so it all anonymizes under this
+  // single workspace scope. Ids/status/dates pass through; user-authored
+  // matter references and free-text party/person names are redacted. The
+  // entity/contact/member item selectors above read `payload.matter.id` for
+  // the scope and `payload.overview.recentEntities` (not the source
+  // `overview.recentEntities`) for the entities — the avatar-URL strip above
+  // copies each entity into a new object, so extracting items from the
+  // object actually placed in the payload (not the pre-strip source) is what
+  // keeps the write-back landing on the object the response serializes.
+  const textFields = runTextFieldSpecs(
+    MATTER_OVERVIEW_TEXT_FIELD_SPECS,
+    payload,
+  );
+
+  return { egress: "structured", payload, textFields };
 };
 
 const handleSearchAcrossMattersTool: McpToolHandler = async ({
@@ -427,24 +985,53 @@ const handleSearchAcrossMattersTool: McpToolHandler = async ({
     return limit;
   }
 
+  const cursor = parseOptionalCursor({ args, key: "cursor" });
+  if (isToolErrorResult(cursor)) {
+    return cursor;
+  }
+  // Reject an undecodable provider cursor instead of forwarding it: the
+  // provider treats a malformed cursor as no cursor and silently returns the
+  // first page, which would duplicate hits or loop a paginating client.
+  if (cursor !== undefined && decodeCursor(cursor) === null) {
+    return structuredErrorResult({
+      code: "validation_error",
+      message: "Invalid cursor",
+      issues: [{ path: "cursor", message: "Invalid cursor" }],
+      hint: "Pass the 'cursor' verbatim as returned by a previous call, or omit it for the first page.",
+    });
+  }
+
   const result = await getSearchProvider().search({
     query,
     organizationId: context.organizationId,
     workspaceIds: context.accessibleWorkspaceIds,
     limit,
+    ...(cursor === undefined ? {} : { cursor }),
   });
 
-  return textResult({
+  const hits = result.hits.map((hit) => ({
+    entityId: hit.entityId,
+    workspaceId: hit.workspaceId,
+    workspaceName: hit.workspaceName,
+    name: hit.title,
+    kind: hit.kind,
+    headline: hit.headline,
+  }));
+
+  // Hits span multiple matters; each anonymizes under its own workspace scope.
+  // `workspaceName` embeds the matter name (party names), so it is redacted
+  // alongside the hit name and headline to stay consistent with list_matters.
+  const payload = {
     totalCount: result.totalCount,
-    hits: result.hits.map((hit) => ({
-      entityId: hit.entityId,
-      workspaceId: hit.workspaceId,
-      workspaceName: hit.workspaceName,
-      name: hit.title,
-      kind: hit.kind,
-      headline: hit.headline,
-    })),
-  });
+    nextCursor: result.nextCursor,
+    hits,
+  };
+  const textFields = runTextFieldSpecs(
+    SEARCH_ACROSS_MATTERS_TEXT_FIELD_SPECS,
+    payload,
+  );
+
+  return { egress: "structured", payload, textFields };
 };
 
 const parseOptionalStringArg = ({
@@ -461,12 +1048,21 @@ const parseOptionalStringArg = ({
     return undefined;
   }
   if (typeof value !== "string") {
-    return errorResult(`Invalid parameter: ${key}. Expected a string`);
+    const message = `Invalid parameter: ${key}. Expected a string`;
+    return structuredErrorResult({
+      code: "validation_error",
+      message,
+      issues: [{ path: key, message }],
+    });
   }
   if (maxLength !== undefined && value.length > maxLength) {
-    return errorResult(
-      `Parameter ${key} exceeds maximum length of ${maxLength}`,
-    );
+    const message = `Parameter ${key} exceeds maximum length of ${maxLength}`;
+    return structuredErrorResult({
+      code: "validation_error",
+      message,
+      issues: [{ path: key, message }],
+      hint: `Shorten '${key}' to at most ${maxLength} characters.`,
+    });
   }
   return value;
 };
@@ -483,29 +1079,29 @@ const parseOptionalDateArg = ({
     return value;
   }
   if (!ISO_DATE_PATTERN.test(value)) {
-    return errorResult(
-      `Invalid parameter: ${key}. Expected an ISO date in YYYY-MM-DD format`,
-    );
+    const message = `Invalid parameter: ${key}. Expected an ISO date in YYYY-MM-DD format`;
+    return structuredErrorResult({
+      code: "validation_error",
+      message,
+      issues: [{ path: key, message }],
+      hint: `Set '${key}' to a calendar date formatted as YYYY-MM-DD.`,
+    });
   }
   const parsed = new Date(value);
   if (
     Number.isNaN(parsed.getTime()) ||
     parsed.toISOString().slice(0, 10) !== value
   ) {
-    return errorResult(
-      `Invalid parameter: ${key}. Expected an ISO date in YYYY-MM-DD format`,
-    );
+    const message = `Invalid parameter: ${key}. Expected an ISO date in YYYY-MM-DD format`;
+    return structuredErrorResult({
+      code: "validation_error",
+      message,
+      issues: [{ path: key, message }],
+      hint: `Set '${key}' to a calendar date formatted as YYYY-MM-DD.`,
+    });
   }
   return value;
 };
-
-const isToolErrorResult = (
-  value: unknown,
-): value is ReturnType<typeof errorResult> =>
-  typeof value === "object" &&
-  value !== null &&
-  "isError" in value &&
-  value.isError === true;
 
 const getResultMessage = (value: unknown): string | null => {
   if (typeof value !== "object" || value === null) {
@@ -591,6 +1187,11 @@ const handleReadContentAcrossMattersTool: McpToolHandler = async ({
 
   const entityId = brandPersistedEntityId(rawEntityId);
 
+  const cursor = parseOptionalCursor({ args, key: "cursor" });
+  if (isToolErrorResult(cursor)) {
+    return cursor;
+  }
+
   if (context.accessibleWorkspaceIds.length === 0) {
     return errorResult("No extracted content available for this entity.");
   }
@@ -623,17 +1224,42 @@ const handleReadContentAcrossMattersTool: McpToolHandler = async ({
     row.ciphertext,
     row.iv,
   );
-  const truncated = plaintext.length > MCP_CONTENT_MAX_CHARS;
 
-  return textResult({
-    charCount: row.charCount,
+  const workspaceId = row.entity.workspaceId;
+  // Carry the FULL decrypted text and window it in the egress pipeline, so an
+  // anonymized read redacts the whole document before slicing (slicing raw text
+  // first could split an entity name across the window boundary and leak its
+  // prefix). Default mode leaves name/text as-is and windows the same way.
+  const payload = {
+    charCount: plaintext.length,
     entityId,
     kind: row.entity.kind,
     name: row.entity.name,
-    text: truncated ? plaintext.slice(0, MCP_CONTENT_MAX_CHARS) : plaintext,
-    truncated,
-    workspaceId: row.entity.workspaceId,
-  });
+    text: plaintext,
+    truncated: false,
+    nextCursor: null as string | null,
+    workspaceId,
+  };
+
+  return {
+    egress: "structured",
+    payload,
+    textFields: runTextFieldSpecs(
+      READ_CONTENT_ACROSS_MATTERS_TEXT_FIELD_SPECS,
+      payload,
+    ),
+    window: {
+      cursor,
+      maxChars: MCP_CONTENT_MAX_CHARS,
+      read: () => payload.text,
+      apply: (textWindow) => {
+        payload.text = textWindow.text;
+        payload.charCount = textWindow.charCount;
+        payload.truncated = textWindow.truncated;
+        payload.nextCursor = textWindow.nextCursor;
+      },
+    },
+  };
 };
 
 const handleSearchCaseLawTool: McpToolHandler = async ({ args, context }) => {
@@ -703,7 +1329,16 @@ const handleSearchCaseLawTool: McpToolHandler = async ({ args, context }) => {
     return sourceId;
   }
   if (sourceId !== undefined && !isUuid(sourceId)) {
-    return errorResult("Invalid parameter: source_id. Expected a UUID");
+    return structuredErrorResult({
+      code: "validation_error",
+      message: "Invalid parameter: source_id. Expected a UUID",
+      issues: [
+        {
+          path: "source_id",
+          message: "Invalid parameter: source_id. Expected a UUID",
+        },
+      ],
+    });
   }
   const dateFrom = parseOptionalDateArg({ args, key: "date_from" });
   if (isToolErrorResult(dateFrom)) {
@@ -774,10 +1409,55 @@ const handleSearchCaseLawTool: McpToolHandler = async ({ args, context }) => {
   });
 };
 
+type DecisionCursorOffsets = { text: number; from: number; to: number };
+
+// read_case_law_decision pages the decision text and both citation lists with
+// a single compound cursor encoding [textOffset, fromOffset, toOffset].
+const decodeDecisionCursor = (
+  cursor: string | undefined,
+): DecisionCursorOffsets | null => {
+  if (cursor === undefined) {
+    return { text: 0, from: 0, to: 0 };
+  }
+  const parts = decodePaginationCursor(cursor);
+  if (!parts || parts.length !== 3) {
+    return null;
+  }
+  const [text, from, to] = parts;
+  if (
+    typeof text !== "number" ||
+    !Number.isInteger(text) ||
+    text < 0 ||
+    typeof from !== "number" ||
+    !Number.isInteger(from) ||
+    from < 0 ||
+    typeof to !== "number" ||
+    !Number.isInteger(to) ||
+    to < 0
+  ) {
+    return null;
+  }
+  return { text, from, to };
+};
+
 const handleReadCaseLawDecisionTool: McpToolHandler = async ({ args }) => {
   const decisionId = parseRequiredString(args, "decision_id");
   if (typeof decisionId !== "string") {
     return decisionId;
+  }
+
+  const cursor = parseOptionalCursor({ args, key: "cursor" });
+  if (isToolErrorResult(cursor)) {
+    return cursor;
+  }
+  const offsets = decodeDecisionCursor(cursor);
+  if (offsets === null) {
+    return structuredErrorResult({
+      code: "validation_error",
+      message: "Invalid cursor",
+      issues: [{ path: "cursor", message: "Invalid cursor" }],
+      hint: "Pass the 'cursor' verbatim as returned by a previous call, or omit it for the first page.",
+    });
   }
 
   const result = await readDecisionHandler(
@@ -789,7 +1469,7 @@ const handleReadCaseLawDecisionTool: McpToolHandler = async ({ args }) => {
     return errorResult(resultMessage);
   }
   if (!isReadCaseLawDecisionSuccess(result)) {
-    return errorResult("Decision not found");
+    return notFoundResult("Decision not found");
   }
 
   // allowsRedistribution gates whether the decision is publicly
@@ -797,7 +1477,42 @@ const handleReadCaseLawDecisionTool: McpToolHandler = async ({ args }) => {
   // model, which is exactly this tool's context.
   const aiTextAllowed = result.source.allowsDerivedAi;
 
+  const plainText = aiTextAllowed
+    ? (toPlainDecisionText({
+        documentAst: result.documentAst,
+        fulltext: result.fulltext,
+      }) ?? null)
+    : null;
+  const textLength = plainText === null ? 0 : plainText.length;
+
+  const textBounds = resolveWindowBounds(
+    textLength,
+    offsets.text,
+    MCP_CONTENT_MAX_CHARS,
+  );
+  const fromBounds = resolveWindowBounds(
+    result.citationsFrom.length,
+    offsets.from,
+    MCP_CASE_LAW_CITATIONS_PER_DECISION,
+  );
+  const toBounds = resolveWindowBounds(
+    result.citationsTo.length,
+    offsets.to,
+    MCP_CASE_LAW_CITATIONS_PER_DECISION,
+  );
+
+  // One compound cursor advances all three streams together; it resolves to
+  // null only once the text and both citation lists are fully consumed.
+  const hasMore =
+    textBounds.nextOffset !== null ||
+    fromBounds.nextOffset !== null ||
+    toBounds.nextOffset !== null;
+  const nextCursor = hasMore
+    ? encodePaginationCursor([textBounds.end, fromBounds.end, toBounds.end])
+    : null;
+
   return textResult({
+    nextCursor,
     decision: {
       appUrl: buildCaseLawDecisionAppUrl({
         caseNumber: result.caseNumber,
@@ -808,9 +1523,12 @@ const handleReadCaseLawDecisionTool: McpToolHandler = async ({ args }) => {
         slug: result.slug,
       }),
       caseNumber: result.caseNumber,
-      citationsFrom: result.citationsFrom.slice(0, 50),
+      citationsFrom: result.citationsFrom.slice(
+        fromBounds.start,
+        fromBounds.end,
+      ),
       citationsFromTotal: result.citationsFrom.length,
-      citationsTo: result.citationsTo.slice(0, 50),
+      citationsTo: result.citationsTo.slice(toBounds.start, toBounds.end),
       citationsToTotal: result.citationsTo.length,
       country: result.country,
       court: result.court,
@@ -823,12 +1541,12 @@ const handleReadCaseLawDecisionTool: McpToolHandler = async ({ args }) => {
       metadata: result.metadata,
       source: result.source,
       sourceUrl: result.sourceUrl,
-      text: aiTextAllowed
-        ? toPlainDecisionText({
-            documentAst: result.documentAst,
-            fulltext: result.fulltext,
-          })
-        : null,
+      text:
+        plainText === null
+          ? null
+          : plainText.slice(textBounds.start, textBounds.end),
+      charCount: plainText === null ? null : textLength,
+      truncated: textBounds.nextOffset !== null,
       ...(aiTextAllowed
         ? {}
         : {
@@ -867,19 +1585,31 @@ const handleReadContactTool: McpToolHandler = async ({ args, context }) => {
   );
 
   if (!contact) {
-    return errorResult("Contact not found");
+    return notFoundResult("Contact not found");
   }
 
-  return textResult({
+  // Contacts are organization-scoped (no owning workspace), so the org id is
+  // the anonymization scope. The placeholder card is intentional and consistent
+  // with how chat anonymizes contact fields.
+  const payload = {
     contactId: contact.id,
     type: contact.type,
     displayName: contact.displayName,
     firstName: contact.firstName,
     lastName: contact.lastName,
     organizationName: contact.organizationName,
+    // The rows are request-scoped and owned by this handler, so the address /
+    // number fields are anonymized in place below.
     emails: contact.emails ?? [],
     phones: contact.phones ?? [],
-  });
+  };
+
+  const textFields = runTextFieldSpecs(
+    buildContactTextFieldSpecs(context.organizationId),
+    payload,
+  );
+
+  return { egress: "structured", payload, textFields };
 };
 
 const countryCodeSchema = v.picklist(COUNTRY_CODES);
@@ -910,9 +1640,11 @@ const handleSetPracticeJurisdictionsTool: McpToolHandler = async ({
 
   const parsed = v.safeParse(setPracticeJurisdictionsArgsSchema, args);
   if (!parsed.success) {
-    return errorResult(
-      "Invalid input: expected { jurisdictions: Array<{ countryCode: ISO 3166-1 alpha-2, isPrimary: boolean }> }",
-    );
+    return validationErrorResult({
+      issues: parsed.issues,
+      message:
+        "Invalid input: expected { jurisdictions: Array<{ countryCode: ISO 3166-1 alpha-2, isPrimary: boolean }> }",
+    });
   }
 
   const primaryCount = parsed.output.jurisdictions.filter(
@@ -939,7 +1671,6 @@ const handleSetPracticeJurisdictionsTool: McpToolHandler = async ({
 };
 
 export const STELLA_TOOL_HANDLERS = {
-  get_matter_overview: handleGetMatterOverviewTool,
   list_matters: handleListMattersTool,
   read_case_law_decision: handleReadCaseLawDecisionTool,
   read_contact: handleReadContactTool,
@@ -948,3 +1679,8 @@ export const STELLA_TOOL_HANDLERS = {
   search_across_matters: handleSearchAcrossMattersTool,
   set_practice_jurisdictions: handleSetPracticeJurisdictionsTool,
 } satisfies Record<StellaToolName, McpToolHandler>;
+
+export const STELLA_TOOL_SET = defineMcpToolSet(
+  STELLA_TOOL_DEFINITIONS,
+  STELLA_TOOL_HANDLERS,
+);

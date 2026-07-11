@@ -4,14 +4,30 @@ import { panic } from "better-result";
 import * as BetterAuthOTP from "@stll/transactional/emails/better-auth-otp";
 import * as NewDeviceLogin from "@stll/transactional/emails/new-device-login";
 import * as OrganizationInvitation from "@stll/transactional/emails/organization-invitation";
+import * as ProductFeedback from "@stll/transactional/emails/product-feedback";
+import type { ProductFeedbackKind } from "@stll/transactional/emails/product-feedback";
 
 import { env } from "@/api/env";
 import type { SupportedLang } from "@/api/lib/locale";
 
+import { isEmailTransportConfigComplete } from "./config";
 import { formatTransactionalEmailFrom } from "./from";
 import { createSESTransport } from "./ses";
 import { createSMTPTransport } from "./smtp";
 import type { EmailTransport } from "./transport";
+
+export const isTransactionalEmailConfigured = () =>
+  isEmailTransportConfigComplete({
+    emailProvider: env.EMAIL_PROVIDER,
+    sesAccessKeyId: env.SES_ACCESS_KEY_ID,
+    sesRegion: env.SES_REGION,
+    sesSecretAccessKey: env.SES_SECRET_ACCESS_KEY,
+    smtpHost: env.SMTP_HOST,
+    smtpPassword: env.SMTP_PASSWORD,
+    smtpPort: env.SMTP_PORT,
+    smtpUsername: env.SMTP_USERNAME,
+    transactionalEmailFrom: env.TRANSACTIONAL_EMAIL_FROM,
+  });
 
 const resolveTransport = (): EmailTransport => {
   switch (env.EMAIL_PROVIDER) {
@@ -44,6 +60,10 @@ const resolveTransport = (): EmailTransport => {
         }),
         requireTLS: !env.isDev,
       });
+    case undefined:
+      return panic(
+        "EMAIL_PROVIDER is required before sending transactional email",
+      );
     default: {
       const _exhaustive: never = env.EMAIL_PROVIDER;
       return _exhaustive;
@@ -59,7 +79,10 @@ const getTransport = (): EmailTransport => {
 };
 
 const getTransactionalEmailFrom = () =>
-  formatTransactionalEmailFrom(env.TRANSACTIONAL_EMAIL_FROM);
+  formatTransactionalEmailFrom(
+    env.TRANSACTIONAL_EMAIL_FROM ??
+      panic("TRANSACTIONAL_EMAIL_FROM is required before sending email"),
+  );
 
 type SendOTPEmailProps = {
   email: string;
@@ -168,6 +191,43 @@ export const sendOrganizationInvitation = async ({
     subject: OrganizationInvitation.subject(lang, {
       organizationName,
     }),
+    html,
+    text,
+  });
+};
+
+type SendFeedbackEmailOptions = {
+  to: string;
+  kind: ProductFeedbackKind;
+  title: string;
+  body: string;
+  reporter: ProductFeedback.FeedbackReporter;
+};
+
+export const sendFeedbackEmail = async ({
+  body,
+  kind,
+  reporter,
+  title,
+  to,
+}: SendFeedbackEmailOptions) => {
+  const node = (
+    <ProductFeedback.Email
+      body={body}
+      kind={kind}
+      reporter={reporter}
+      title={title}
+    />
+  );
+  const [html, text] = await Promise.all([
+    render(node),
+    render(node, { plainText: true }),
+  ]);
+
+  await getTransport().send({
+    from: getTransactionalEmailFrom(),
+    to,
+    subject: ProductFeedback.subject({ kind, title }),
     html,
     text,
   });

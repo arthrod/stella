@@ -23,6 +23,7 @@ const VIEW_LAYOUT_TYPES = [
 
 const config = {
   permissions: { view: ["update"] },
+  mcp: { type: "capability", reason: "workspace_schema" },
   params: workspaceParams({ viewId: tSafeId("workspaceView") }),
   body: t.Object({
     targetType: t.UnionEnum(VIEW_LAYOUT_TYPES),

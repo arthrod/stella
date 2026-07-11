@@ -1,10 +1,10 @@
 import { create } from "zustand";
 
 import type { TemplateRecipeDefinition } from "@stll/api/types";
-import type { DirectiveRange, TemplatePreviewValue } from "@stll/folio";
+import type { DirectiveRange, TemplatePreviewValue } from "@stll/folio-react";
 
 import type { ReplacementSpec } from "@/routes/_protected.knowledge/-components/template-studio-suggestions";
-import type { EditableField } from "@/routes/_protected.knowledge/-components/template-wizard";
+import type { TemplateEditableField } from "@/routes/_protected.knowledge/-components/template-wizard";
 
 // The Studio's editable manifest data + live document selection. Lives in a
 // module-level store (not the inspector tab payload, which must be
@@ -12,7 +12,7 @@ import type { EditableField } from "@/routes/_protected.knowledge/-components/te
 // History tab — rendered in the global inspector, a separate React tree — share
 // one source of truth. Only one template is authored at a time.
 
-export type StudioField = EditableField & {
+export type StudioField = TemplateEditableField & {
   aiPrompt: string | undefined;
   /** Person fills a stub; AI rewords it per occurrence to fit the context. */
   aiAdapt: boolean;
@@ -37,6 +37,13 @@ type TemplateStudioSession = {
   fields: StudioField[];
 };
 
+/** One deferred link-row slot rename in the replay log
+ *  (see {@link TemplateStudioState.pendingSlotRenames}). `fromSlot` is the
+ *  name the step renames away from: until the flush lands, the server row
+ *  (first step) or the replay sequence (intermediate steps) still claims it,
+ *  so new-slot pickers must treat both names as reserved. */
+type PendingSlotRename = { linkId: string; slotName: string; fromSlot: string };
+
 /** Document actions the page owns; the inspector tab renders the buttons. */
 export type StudioActions = {
   toggleDirectives: () => void;
@@ -59,6 +66,11 @@ export type StudioActions = {
   /** Rewrite {{oldPath}} markers in the document and rename the field.
    *  Returns false when the new path is invalid or already taken. */
   renameFieldPath: (oldPath: string, newPath: string) => boolean;
+  /** Rewrite the document's `{{@clause:oldSlot}}` markers (preserving any
+   *  version modifier) to a new slot name. Returns false when the new name is
+   *  invalid, unchanged, or already used by another clause slot. Document-only:
+   *  callers must keep any linked clause row's slotName in sync themselves. */
+  renameClauseSlot: (oldSlot: string, newSlot: string) => boolean;
   /** Rewrite the selected `{{#if …}}` / `{{#elseif …}}` opener with a new
    *  expression. Returns false when nothing suitable is selected or the
    *  expression is invalid. */
@@ -93,6 +105,10 @@ export type StudioActions = {
    *  multi-format lookup field, `formatKey` selects a non-default output
    *  (`{{path.key}}`); omit it to insert the default (`{{path}}`). */
   insertExistingField: (path: string, formatKey?: string) => void;
+  /** Insert (or wrap the selection in) a `{{#if expr}}…{{/if}}` block for an
+   *  existing condition's expression, so the open condition can be placed in
+   *  the document the same way a field marker is. */
+  insertExistingCondition: (expr: string) => void;
   /** Remove every {{path}} marker from the document and drop the field. */
   deleteField: (path: string) => void;
   /** Insert a saved recipe at the caret: loop recipes add the `{{#each}}`
@@ -166,6 +182,31 @@ type TemplateStudioState = {
   upsertField: (path: string, patch: Partial<StudioField>) => void;
   removeField: (path: string) => void;
   renameField: (oldPath: string, newPath: string) => void;
+  /** Deferred link-row slot renames as an ordered replay log: each recorded
+   *  rename APPENDS a step, preserving edit order; the log is never collapsed.
+   *  Recorded when a LINKED clause slot is renamed in the document: the
+   *  `{{@clause:...}}` markers rewrite immediately (marking the session dirty
+   *  via `renameClauseSlot`), while the stored link rows' slotNames are only
+   *  flushed to the API in the save flow, replayed step by step in this order.
+   *  Replaying the full log (not a collapsed final state) is what makes chained
+   *  or cyclic renames — e.g. a slot-name swap where every single-pass order
+   *  collides on the per-template unique-slot constraint — resolvable: each step
+   *  was validated against the live document when recorded, so the log order is
+   *  always replayable. Leaving without saving discards the document edit and
+   *  this log together (cleared on init/reset), so a link row never ends up
+   *  pointing at a slot name the stored document lacks. */
+  pendingSlotRenames: PendingSlotRename[];
+  /** Append a replay step for a linked clause's slot rename. */
+  setPendingSlotRename: (
+    linkId: string,
+    slotName: string,
+    fromSlot: string,
+  ) => void;
+  /** Remove every pending step for a link (unlink-side cleanup). */
+  clearPendingSlotRename: (linkId: string) => void;
+  /** Drop the given replayed steps (matched by identity), keeping any
+   *  unresolved steps pending for the next save's retry. */
+  dropPendingSlotRenames: (flushed: readonly PendingSlotRename[]) => void;
   /** Document structure tree, rebuilt by the editor on every scan. */
   outline: OutlineNode[];
   setOutline: (outline: OutlineNode[]) => void;
@@ -199,6 +240,7 @@ export const useTemplateStudioStore = create<TemplateStudioState>((set) => ({
       isDirty: false,
       fillValues: null,
       pendingMirrorRequests: [],
+      pendingSlotRenames: [],
     }),
   reset: (templateId) =>
     set((state) =>
@@ -215,6 +257,7 @@ export const useTemplateStudioStore = create<TemplateStudioState>((set) => ({
             actions: null,
             ui: DEFAULT_UI,
             pendingMirrorRequests: [],
+            pendingSlotRenames: [],
           }
         : state,
     ),
@@ -243,6 +286,40 @@ export const useTemplateStudioStore = create<TemplateStudioState>((set) => ({
       ),
       isDirty: true,
     })),
+  pendingSlotRenames: [],
+  setPendingSlotRename: (linkId, slotName, fromSlot) =>
+    set((state) => ({
+      pendingSlotRenames: [
+        ...state.pendingSlotRenames,
+        { linkId, slotName, fromSlot },
+      ],
+    })),
+  clearPendingSlotRename: (linkId) =>
+    set((state) => {
+      const remaining = state.pendingSlotRenames.filter(
+        (step) => step.linkId !== linkId,
+      );
+      if (remaining.length === state.pendingSlotRenames.length) {
+        return state;
+      }
+      return { pendingSlotRenames: remaining };
+    }),
+  dropPendingSlotRenames: (flushed) =>
+    set((state) => {
+      if (flushed.length === 0) {
+        return state;
+      }
+      // Remove by step identity, not by position: if any other path ever
+      // removes a step while a flush is in flight, a positional slice would
+      // drop the wrong entries. Steps are frozen object literals appended
+      // once, so reference equality identifies exactly the replayed ones.
+      const flushedSet = new Set(flushed);
+      return {
+        pendingSlotRenames: state.pendingSlotRenames.filter(
+          (step) => !flushedSet.has(step),
+        ),
+      };
+    }),
   setSelected: (selected) => set({ selected }),
   markDirty: () => set({ isDirty: true }),
   markSaved: () => set({ isDirty: false }),

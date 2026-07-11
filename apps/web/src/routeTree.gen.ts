@@ -24,6 +24,7 @@ import { Route as SitemapsLawDotxmlRouteImport } from './routes/sitemaps/law[.]x
 import { Route as McpOauthCallbackRouteImport } from './routes/mcp.oauth-callback'
 import { Route as AuthOtpRouteImport } from './routes/auth/otp'
 import { Route as AuthOrganizationRouteImport } from './routes/auth/organization'
+import { Route as AuthErrorRouteImport } from './routes/auth/error'
 import { Route as ProtectedSettingsRouteRouteImport } from './routes/_protected.settings/route'
 import { Route as ProtectedKnowledgeRouteRouteImport } from './routes/_protected.knowledge/route'
 import { Route as ProtectedChatRouteRouteImport } from './routes/_protected.chat/route'
@@ -39,6 +40,7 @@ import { Route as ProtectedKnowledgeToolsRouteImport } from './routes/_protected
 import { Route as ProtectedKnowledgeTemplatesRouteImport } from './routes/_protected.knowledge/templates'
 import { Route as ProtectedKnowledgeSkillsRouteImport } from './routes/_protected.knowledge/skills'
 import { Route as ProtectedKnowledgePromptsRouteImport } from './routes/_protected.knowledge/prompts'
+import { Route as ProtectedKnowledgePlaybooksRouteImport } from './routes/_protected.knowledge/playbooks'
 import { Route as ProtectedKnowledgeMcpRouteImport } from './routes/_protected.knowledge/mcp'
 import { Route as ProtectedKnowledgeClausesRouteImport } from './routes/_protected.knowledge/clauses'
 import { Route as ProtectedDevAutocompleteRouteImport } from './routes/_protected.dev_.autocomplete'
@@ -55,11 +57,13 @@ import { Route as ProtectedWorkspacesWorkspaceIdExpensesRouteImport } from './ro
 import { Route as ProtectedSettingsOrganizationUsageRouteImport } from './routes/_protected.settings/organization.usage'
 import { Route as ProtectedSettingsOrganizationMembersRouteImport } from './routes/_protected.settings/organization.members'
 import { Route as ProtectedSettingsOrganizationMatterNumberingRouteImport } from './routes/_protected.settings/organization.matter-numbering'
+import { Route as ProtectedSettingsOrganizationDocumentTypesRouteImport } from './routes/_protected.settings/organization.document-types'
 import { Route as ProtectedSettingsOrganizationCatalogueRouteImport } from './routes/_protected.settings/organization.catalogue'
 import { Route as ProtectedSettingsOrganizationAnonymizationRouteImport } from './routes/_protected.settings/organization.anonymization'
 import { Route as ProtectedSettingsOrganizationAiRouteImport } from './routes/_protected.settings/organization.ai'
 import { Route as ProtectedSettingsAccountProfileRouteImport } from './routes/_protected.settings/account.profile'
 import { Route as ProtectedSettingsAccountDesktopRouteImport } from './routes/_protected.settings/account.desktop'
+import { Route as ProtectedSettingsAccountConnectionsRouteImport } from './routes/_protected.settings/account.connections'
 import { Route as ProtectedSettingsAccountBetaRouteImport } from './routes/_protected.settings/account.beta'
 import { Route as ProtectedKnowledgeToolsSkillIdRouteImport } from './routes/_protected.knowledge/tools_.$skillId'
 import { Route as ProtectedWorkspacesWorkspaceIdViewIdRouteRouteImport } from './routes/_protected.workspaces/$workspaceId/$viewId.route'
@@ -148,6 +152,11 @@ const AuthOrganizationRoute = AuthOrganizationRouteImport.update({
   path: '/organization',
   getParentRoute: () => AuthRouteRoute,
 } as any)
+const AuthErrorRoute = AuthErrorRouteImport.update({
+  id: '/error',
+  path: '/error',
+  getParentRoute: () => AuthRouteRoute,
+} as any)
 const ProtectedSettingsRouteRoute = ProtectedSettingsRouteRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -226,6 +235,12 @@ const ProtectedKnowledgePromptsRoute =
   ProtectedKnowledgePromptsRouteImport.update({
     id: '/prompts',
     path: '/prompts',
+    getParentRoute: () => ProtectedKnowledgeRouteRoute,
+  } as any)
+const ProtectedKnowledgePlaybooksRoute =
+  ProtectedKnowledgePlaybooksRouteImport.update({
+    id: '/playbooks',
+    path: '/playbooks',
     getParentRoute: () => ProtectedKnowledgeRouteRoute,
   } as any)
 const ProtectedKnowledgeMcpRoute = ProtectedKnowledgeMcpRouteImport.update({
@@ -321,6 +336,12 @@ const ProtectedSettingsOrganizationMatterNumberingRoute =
     path: '/matter-numbering',
     getParentRoute: () => ProtectedSettingsOrganizationRouteRoute,
   } as any)
+const ProtectedSettingsOrganizationDocumentTypesRoute =
+  ProtectedSettingsOrganizationDocumentTypesRouteImport.update({
+    id: '/document-types',
+    path: '/document-types',
+    getParentRoute: () => ProtectedSettingsOrganizationRouteRoute,
+  } as any)
 const ProtectedSettingsOrganizationCatalogueRoute =
   ProtectedSettingsOrganizationCatalogueRouteImport.update({
     id: '/catalogue',
@@ -349,6 +370,12 @@ const ProtectedSettingsAccountDesktopRoute =
   ProtectedSettingsAccountDesktopRouteImport.update({
     id: '/account/desktop',
     path: '/account/desktop',
+    getParentRoute: () => ProtectedSettingsRouteRoute,
+  } as any)
+const ProtectedSettingsAccountConnectionsRoute =
+  ProtectedSettingsAccountConnectionsRouteImport.update({
+    id: '/account/connections',
+    path: '/account/connections',
     getParentRoute: () => ProtectedSettingsRouteRoute,
   } as any)
 const ProtectedSettingsAccountBetaRoute =
@@ -442,6 +469,7 @@ export interface FileRoutesByFullPath {
   '/chat': typeof ProtectedChatRouteRouteWithChildren
   '/knowledge': typeof ProtectedKnowledgeRouteRouteWithChildren
   '/settings': typeof ProtectedSettingsRouteRouteWithChildren
+  '/auth/error': typeof AuthErrorRoute
   '/auth/organization': typeof AuthOrganizationRoute
   '/auth/otp': typeof AuthOtpRoute
   '/mcp/oauth-callback': typeof McpOauthCallbackRoute
@@ -456,6 +484,7 @@ export interface FileRoutesByFullPath {
   '/dev/autocomplete': typeof ProtectedDevAutocompleteRoute
   '/knowledge/clauses': typeof ProtectedKnowledgeClausesRoute
   '/knowledge/mcp': typeof ProtectedKnowledgeMcpRoute
+  '/knowledge/playbooks': typeof ProtectedKnowledgePlaybooksRoute
   '/knowledge/prompts': typeof ProtectedKnowledgePromptsRoute
   '/knowledge/skills': typeof ProtectedKnowledgeSkillsRoute
   '/knowledge/templates': typeof ProtectedKnowledgeTemplatesRoute
@@ -471,11 +500,13 @@ export interface FileRoutesByFullPath {
   '/workspaces/$workspaceId/$viewId': typeof ProtectedWorkspacesWorkspaceIdViewIdRouteRouteWithChildren
   '/knowledge/tools/$skillId': typeof ProtectedKnowledgeToolsSkillIdRoute
   '/settings/account/beta': typeof ProtectedSettingsAccountBetaRoute
+  '/settings/account/connections': typeof ProtectedSettingsAccountConnectionsRoute
   '/settings/account/desktop': typeof ProtectedSettingsAccountDesktopRoute
   '/settings/account/profile': typeof ProtectedSettingsAccountProfileRoute
   '/settings/organization/ai': typeof ProtectedSettingsOrganizationAiRoute
   '/settings/organization/anonymization': typeof ProtectedSettingsOrganizationAnonymizationRoute
   '/settings/organization/catalogue': typeof ProtectedSettingsOrganizationCatalogueRoute
+  '/settings/organization/document-types': typeof ProtectedSettingsOrganizationDocumentTypesRoute
   '/settings/organization/matter-numbering': typeof ProtectedSettingsOrganizationMatterNumberingRoute
   '/settings/organization/members': typeof ProtectedSettingsOrganizationMembersRoute
   '/settings/organization/usage': typeof ProtectedSettingsOrganizationUsageRoute
@@ -502,6 +533,7 @@ export interface FileRoutesByTo {
   '/dev': typeof DevRoute
   '/robots.txt': typeof RobotsDottxtRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/auth/error': typeof AuthErrorRoute
   '/auth/organization': typeof AuthOrganizationRoute
   '/auth/otp': typeof AuthOtpRoute
   '/mcp/oauth-callback': typeof McpOauthCallbackRoute
@@ -514,6 +546,7 @@ export interface FileRoutesByTo {
   '/dev/autocomplete': typeof ProtectedDevAutocompleteRoute
   '/knowledge/clauses': typeof ProtectedKnowledgeClausesRoute
   '/knowledge/mcp': typeof ProtectedKnowledgeMcpRoute
+  '/knowledge/playbooks': typeof ProtectedKnowledgePlaybooksRoute
   '/knowledge/prompts': typeof ProtectedKnowledgePromptsRoute
   '/knowledge/skills': typeof ProtectedKnowledgeSkillsRoute
   '/knowledge/templates': typeof ProtectedKnowledgeTemplatesRoute
@@ -528,11 +561,13 @@ export interface FileRoutesByTo {
   '/law/cases': typeof LawCasesIndexRoute
   '/knowledge/tools/$skillId': typeof ProtectedKnowledgeToolsSkillIdRoute
   '/settings/account/beta': typeof ProtectedSettingsAccountBetaRoute
+  '/settings/account/connections': typeof ProtectedSettingsAccountConnectionsRoute
   '/settings/account/desktop': typeof ProtectedSettingsAccountDesktopRoute
   '/settings/account/profile': typeof ProtectedSettingsAccountProfileRoute
   '/settings/organization/ai': typeof ProtectedSettingsOrganizationAiRoute
   '/settings/organization/anonymization': typeof ProtectedSettingsOrganizationAnonymizationRoute
   '/settings/organization/catalogue': typeof ProtectedSettingsOrganizationCatalogueRoute
+  '/settings/organization/document-types': typeof ProtectedSettingsOrganizationDocumentTypesRoute
   '/settings/organization/matter-numbering': typeof ProtectedSettingsOrganizationMatterNumberingRoute
   '/settings/organization/members': typeof ProtectedSettingsOrganizationMembersRoute
   '/settings/organization/usage': typeof ProtectedSettingsOrganizationUsageRoute
@@ -566,6 +601,7 @@ export interface FileRoutesById {
   '/_protected/chat': typeof ProtectedChatRouteRouteWithChildren
   '/_protected/knowledge': typeof ProtectedKnowledgeRouteRouteWithChildren
   '/_protected/settings': typeof ProtectedSettingsRouteRouteWithChildren
+  '/auth/error': typeof AuthErrorRoute
   '/auth/organization': typeof AuthOrganizationRoute
   '/auth/otp': typeof AuthOtpRoute
   '/mcp/oauth-callback': typeof McpOauthCallbackRoute
@@ -580,6 +616,7 @@ export interface FileRoutesById {
   '/_protected/dev_/autocomplete': typeof ProtectedDevAutocompleteRoute
   '/_protected/knowledge/clauses': typeof ProtectedKnowledgeClausesRoute
   '/_protected/knowledge/mcp': typeof ProtectedKnowledgeMcpRoute
+  '/_protected/knowledge/playbooks': typeof ProtectedKnowledgePlaybooksRoute
   '/_protected/knowledge/prompts': typeof ProtectedKnowledgePromptsRoute
   '/_protected/knowledge/skills': typeof ProtectedKnowledgeSkillsRoute
   '/_protected/knowledge/templates': typeof ProtectedKnowledgeTemplatesRoute
@@ -595,11 +632,13 @@ export interface FileRoutesById {
   '/_protected/workspaces/$workspaceId/$viewId': typeof ProtectedWorkspacesWorkspaceIdViewIdRouteRouteWithChildren
   '/_protected/knowledge/tools_/$skillId': typeof ProtectedKnowledgeToolsSkillIdRoute
   '/_protected/settings/account/beta': typeof ProtectedSettingsAccountBetaRoute
+  '/_protected/settings/account/connections': typeof ProtectedSettingsAccountConnectionsRoute
   '/_protected/settings/account/desktop': typeof ProtectedSettingsAccountDesktopRoute
   '/_protected/settings/account/profile': typeof ProtectedSettingsAccountProfileRoute
   '/_protected/settings/organization/ai': typeof ProtectedSettingsOrganizationAiRoute
   '/_protected/settings/organization/anonymization': typeof ProtectedSettingsOrganizationAnonymizationRoute
   '/_protected/settings/organization/catalogue': typeof ProtectedSettingsOrganizationCatalogueRoute
+  '/_protected/settings/organization/document-types': typeof ProtectedSettingsOrganizationDocumentTypesRoute
   '/_protected/settings/organization/matter-numbering': typeof ProtectedSettingsOrganizationMatterNumberingRoute
   '/_protected/settings/organization/members': typeof ProtectedSettingsOrganizationMembersRoute
   '/_protected/settings/organization/usage': typeof ProtectedSettingsOrganizationUsageRoute
@@ -633,6 +672,7 @@ export interface FileRouteTypes {
     | '/chat'
     | '/knowledge'
     | '/settings'
+    | '/auth/error'
     | '/auth/organization'
     | '/auth/otp'
     | '/mcp/oauth-callback'
@@ -647,6 +687,7 @@ export interface FileRouteTypes {
     | '/dev/autocomplete'
     | '/knowledge/clauses'
     | '/knowledge/mcp'
+    | '/knowledge/playbooks'
     | '/knowledge/prompts'
     | '/knowledge/skills'
     | '/knowledge/templates'
@@ -662,11 +703,13 @@ export interface FileRouteTypes {
     | '/workspaces/$workspaceId/$viewId'
     | '/knowledge/tools/$skillId'
     | '/settings/account/beta'
+    | '/settings/account/connections'
     | '/settings/account/desktop'
     | '/settings/account/profile'
     | '/settings/organization/ai'
     | '/settings/organization/anonymization'
     | '/settings/organization/catalogue'
+    | '/settings/organization/document-types'
     | '/settings/organization/matter-numbering'
     | '/settings/organization/members'
     | '/settings/organization/usage'
@@ -693,6 +736,7 @@ export interface FileRouteTypes {
     | '/dev'
     | '/robots.txt'
     | '/sitemap.xml'
+    | '/auth/error'
     | '/auth/organization'
     | '/auth/otp'
     | '/mcp/oauth-callback'
@@ -705,6 +749,7 @@ export interface FileRouteTypes {
     | '/dev/autocomplete'
     | '/knowledge/clauses'
     | '/knowledge/mcp'
+    | '/knowledge/playbooks'
     | '/knowledge/prompts'
     | '/knowledge/skills'
     | '/knowledge/templates'
@@ -719,11 +764,13 @@ export interface FileRouteTypes {
     | '/law/cases'
     | '/knowledge/tools/$skillId'
     | '/settings/account/beta'
+    | '/settings/account/connections'
     | '/settings/account/desktop'
     | '/settings/account/profile'
     | '/settings/organization/ai'
     | '/settings/organization/anonymization'
     | '/settings/organization/catalogue'
+    | '/settings/organization/document-types'
     | '/settings/organization/matter-numbering'
     | '/settings/organization/members'
     | '/settings/organization/usage'
@@ -756,6 +803,7 @@ export interface FileRouteTypes {
     | '/_protected/chat'
     | '/_protected/knowledge'
     | '/_protected/settings'
+    | '/auth/error'
     | '/auth/organization'
     | '/auth/otp'
     | '/mcp/oauth-callback'
@@ -770,6 +818,7 @@ export interface FileRouteTypes {
     | '/_protected/dev_/autocomplete'
     | '/_protected/knowledge/clauses'
     | '/_protected/knowledge/mcp'
+    | '/_protected/knowledge/playbooks'
     | '/_protected/knowledge/prompts'
     | '/_protected/knowledge/skills'
     | '/_protected/knowledge/templates'
@@ -785,11 +834,13 @@ export interface FileRouteTypes {
     | '/_protected/workspaces/$workspaceId/$viewId'
     | '/_protected/knowledge/tools_/$skillId'
     | '/_protected/settings/account/beta'
+    | '/_protected/settings/account/connections'
     | '/_protected/settings/account/desktop'
     | '/_protected/settings/account/profile'
     | '/_protected/settings/organization/ai'
     | '/_protected/settings/organization/anonymization'
     | '/_protected/settings/organization/catalogue'
+    | '/_protected/settings/organization/document-types'
     | '/_protected/settings/organization/matter-numbering'
     | '/_protected/settings/organization/members'
     | '/_protected/settings/organization/usage'
@@ -933,6 +984,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthOrganizationRouteImport
       parentRoute: typeof AuthRouteRoute
     }
+    '/auth/error': {
+      id: '/auth/error'
+      path: '/error'
+      fullPath: '/auth/error'
+      preLoaderRoute: typeof AuthErrorRouteImport
+      parentRoute: typeof AuthRouteRoute
+    }
     '/_protected/settings': {
       id: '/_protected/settings'
       path: '/settings'
@@ -1036,6 +1094,13 @@ declare module '@tanstack/react-router' {
       path: '/prompts'
       fullPath: '/knowledge/prompts'
       preLoaderRoute: typeof ProtectedKnowledgePromptsRouteImport
+      parentRoute: typeof ProtectedKnowledgeRouteRoute
+    }
+    '/_protected/knowledge/playbooks': {
+      id: '/_protected/knowledge/playbooks'
+      path: '/playbooks'
+      fullPath: '/knowledge/playbooks'
+      preLoaderRoute: typeof ProtectedKnowledgePlaybooksRouteImport
       parentRoute: typeof ProtectedKnowledgeRouteRoute
     }
     '/_protected/knowledge/mcp': {
@@ -1150,6 +1215,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProtectedSettingsOrganizationMatterNumberingRouteImport
       parentRoute: typeof ProtectedSettingsOrganizationRouteRoute
     }
+    '/_protected/settings/organization/document-types': {
+      id: '/_protected/settings/organization/document-types'
+      path: '/document-types'
+      fullPath: '/settings/organization/document-types'
+      preLoaderRoute: typeof ProtectedSettingsOrganizationDocumentTypesRouteImport
+      parentRoute: typeof ProtectedSettingsOrganizationRouteRoute
+    }
     '/_protected/settings/organization/catalogue': {
       id: '/_protected/settings/organization/catalogue'
       path: '/catalogue'
@@ -1183,6 +1255,13 @@ declare module '@tanstack/react-router' {
       path: '/account/desktop'
       fullPath: '/settings/account/desktop'
       preLoaderRoute: typeof ProtectedSettingsAccountDesktopRouteImport
+      parentRoute: typeof ProtectedSettingsRouteRoute
+    }
+    '/_protected/settings/account/connections': {
+      id: '/_protected/settings/account/connections'
+      path: '/account/connections'
+      fullPath: '/settings/account/connections'
+      preLoaderRoute: typeof ProtectedSettingsAccountConnectionsRouteImport
       parentRoute: typeof ProtectedSettingsRouteRoute
     }
     '/_protected/settings/account/beta': {
@@ -1280,6 +1359,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthRouteRouteChildren {
+  AuthErrorRoute: typeof AuthErrorRoute
   AuthOrganizationRoute: typeof AuthOrganizationRoute
   AuthOtpRoute: typeof AuthOtpRoute
   AuthIndexRoute: typeof AuthIndexRoute
@@ -1287,6 +1367,7 @@ interface AuthRouteRouteChildren {
 }
 
 const AuthRouteRouteChildren: AuthRouteRouteChildren = {
+  AuthErrorRoute: AuthErrorRoute,
   AuthOrganizationRoute: AuthOrganizationRoute,
   AuthOtpRoute: AuthOtpRoute,
   AuthIndexRoute: AuthIndexRoute,
@@ -1337,6 +1418,7 @@ const ProtectedChatRouteRouteWithChildren =
 interface ProtectedKnowledgeRouteRouteChildren {
   ProtectedKnowledgeClausesRoute: typeof ProtectedKnowledgeClausesRoute
   ProtectedKnowledgeMcpRoute: typeof ProtectedKnowledgeMcpRoute
+  ProtectedKnowledgePlaybooksRoute: typeof ProtectedKnowledgePlaybooksRoute
   ProtectedKnowledgePromptsRoute: typeof ProtectedKnowledgePromptsRoute
   ProtectedKnowledgeSkillsRoute: typeof ProtectedKnowledgeSkillsRoute
   ProtectedKnowledgeTemplatesRoute: typeof ProtectedKnowledgeTemplatesRoute
@@ -1349,6 +1431,7 @@ const ProtectedKnowledgeRouteRouteChildren: ProtectedKnowledgeRouteRouteChildren
   {
     ProtectedKnowledgeClausesRoute: ProtectedKnowledgeClausesRoute,
     ProtectedKnowledgeMcpRoute: ProtectedKnowledgeMcpRoute,
+    ProtectedKnowledgePlaybooksRoute: ProtectedKnowledgePlaybooksRoute,
     ProtectedKnowledgePromptsRoute: ProtectedKnowledgePromptsRoute,
     ProtectedKnowledgeSkillsRoute: ProtectedKnowledgeSkillsRoute,
     ProtectedKnowledgeTemplatesRoute: ProtectedKnowledgeTemplatesRoute,
@@ -1366,6 +1449,7 @@ interface ProtectedSettingsOrganizationRouteRouteChildren {
   ProtectedSettingsOrganizationAiRoute: typeof ProtectedSettingsOrganizationAiRoute
   ProtectedSettingsOrganizationAnonymizationRoute: typeof ProtectedSettingsOrganizationAnonymizationRoute
   ProtectedSettingsOrganizationCatalogueRoute: typeof ProtectedSettingsOrganizationCatalogueRoute
+  ProtectedSettingsOrganizationDocumentTypesRoute: typeof ProtectedSettingsOrganizationDocumentTypesRoute
   ProtectedSettingsOrganizationMatterNumberingRoute: typeof ProtectedSettingsOrganizationMatterNumberingRoute
   ProtectedSettingsOrganizationMembersRoute: typeof ProtectedSettingsOrganizationMembersRoute
   ProtectedSettingsOrganizationUsageRoute: typeof ProtectedSettingsOrganizationUsageRoute
@@ -1379,6 +1463,8 @@ const ProtectedSettingsOrganizationRouteRouteChildren: ProtectedSettingsOrganiza
       ProtectedSettingsOrganizationAnonymizationRoute,
     ProtectedSettingsOrganizationCatalogueRoute:
       ProtectedSettingsOrganizationCatalogueRoute,
+    ProtectedSettingsOrganizationDocumentTypesRoute:
+      ProtectedSettingsOrganizationDocumentTypesRoute,
     ProtectedSettingsOrganizationMatterNumberingRoute:
       ProtectedSettingsOrganizationMatterNumberingRoute,
     ProtectedSettingsOrganizationMembersRoute:
@@ -1398,6 +1484,7 @@ interface ProtectedSettingsRouteRouteChildren {
   ProtectedSettingsOrganizationRouteRoute: typeof ProtectedSettingsOrganizationRouteRouteWithChildren
   ProtectedSettingsIndexRoute: typeof ProtectedSettingsIndexRoute
   ProtectedSettingsAccountBetaRoute: typeof ProtectedSettingsAccountBetaRoute
+  ProtectedSettingsAccountConnectionsRoute: typeof ProtectedSettingsAccountConnectionsRoute
   ProtectedSettingsAccountDesktopRoute: typeof ProtectedSettingsAccountDesktopRoute
   ProtectedSettingsAccountProfileRoute: typeof ProtectedSettingsAccountProfileRoute
 }
@@ -1408,6 +1495,8 @@ const ProtectedSettingsRouteRouteChildren: ProtectedSettingsRouteRouteChildren =
       ProtectedSettingsOrganizationRouteRouteWithChildren,
     ProtectedSettingsIndexRoute: ProtectedSettingsIndexRoute,
     ProtectedSettingsAccountBetaRoute: ProtectedSettingsAccountBetaRoute,
+    ProtectedSettingsAccountConnectionsRoute:
+      ProtectedSettingsAccountConnectionsRoute,
     ProtectedSettingsAccountDesktopRoute: ProtectedSettingsAccountDesktopRoute,
     ProtectedSettingsAccountProfileRoute: ProtectedSettingsAccountProfileRoute,
   }

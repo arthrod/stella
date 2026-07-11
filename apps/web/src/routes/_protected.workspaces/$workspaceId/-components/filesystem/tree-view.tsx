@@ -1,6 +1,7 @@
 import {
   Fragment,
   useCallback,
+  useDeferredValue,
   useEffect,
   useEffectEvent,
   useMemo,
@@ -29,6 +30,7 @@ import {
 } from "lucide-react";
 import { useDebouncedCallback } from "use-debounce";
 import { useLocale, useTranslations } from "use-intl";
+import * as v from "valibot";
 
 import { BidiText } from "@stll/ui/components/bidi-text";
 import {
@@ -54,6 +56,8 @@ import type { DragPreviewData } from "@/components/drag-preview";
 import { FileTreeNameCell } from "@/components/file-tree/file-tree";
 import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
 import { HOTKEYS } from "@/lib/hotkeys";
+import { toSafeId } from "@/lib/safe-id";
+import { readStoredJson, writeStoredJson } from "@/lib/stored-json";
 import { isFileDisplayable } from "@/lib/types";
 import type {
   ViewLayout,
@@ -63,6 +67,7 @@ import type {
 } from "@/lib/types";
 import { ActiveEditBadge } from "@/routes/_protected.workspaces/$workspaceId/-components/active-edit-badge";
 import { AddEntityMenu } from "@/routes/_protected.workspaces/$workspaceId/-components/add-entity-menu";
+import { resolveAncestorIds } from "@/routes/_protected.workspaces/$workspaceId/-components/copy-to-matter-dialog.logic";
 import { DocumentIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/document-icon";
 import { ENTITY_DRAG_TYPE } from "@/routes/_protected.workspaces/$workspaceId/-components/drag-constants";
 import { EmptyState } from "@/routes/_protected.workspaces/$workspaceId/-components/empty-state";
@@ -87,7 +92,7 @@ import {
 } from "@/routes/_protected.workspaces/$workspaceId/-mutations/entities";
 import { useUpdateView } from "@/routes/_protected.workspaces/$workspaceId/-mutations/views";
 import {
-  useFilesystemEntitiesOptions,
+  filesystemEntitiesOptions,
   visibleEntityFieldIds,
 } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
 import { propertiesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/properties";
@@ -231,30 +236,27 @@ type ColumnWidthsApi = {
   setWidth: (id: string, width: number) => void;
 };
 
+// Top-level shape only: each value is checked for finite-number below, so
+// one non-numeric entry drops just that column rather than the whole map.
+const ColumnWidthsRecordSchema = v.record(v.string(), v.unknown());
+
 const useColumnWidths = (storageKey: string): ColumnWidthsApi => {
   const [widths, setWidths] = useState<Record<string, number>>(() => {
     if (typeof window === "undefined") {
       return {};
     }
-    try {
-      const raw = window.localStorage.getItem(storageKey);
-      if (!raw) {
-        return {};
-      }
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed === null || typeof parsed !== "object") {
-        return {};
-      }
-      const result: Record<string, number> = {};
-      for (const [key, value] of Object.entries(parsed)) {
-        if (typeof value === "number" && Number.isFinite(value)) {
-          result[key] = value;
-        }
-      }
-      return result;
-    } catch {
+    const raw = window.localStorage.getItem(storageKey);
+    const parsed = readStoredJson(raw, ColumnWidthsRecordSchema);
+    if (!parsed) {
       return {};
     }
+    const result: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        result[key] = value;
+      }
+    }
+    return result;
   });
 
   const setWidth = useCallback(
@@ -268,11 +270,7 @@ const useColumnWidths = (storageKey: string): ColumnWidthsApi => {
           return prev;
         }
         const next = { ...prev, [id]: clamped };
-        try {
-          window.localStorage.setItem(storageKey, JSON.stringify(next));
-        } catch {
-          // Ignore quota / unavailable storage.
-        }
+        writeStoredJson(window.localStorage, storageKey, next);
         return next;
       });
     },
@@ -302,6 +300,7 @@ const collectFolderIds = (
   return ids;
 };
 
+// eslint-disable-next-line react/react-compiler -- react-compiler skips this component: an API it uses returns functions that cannot be memoized, so the compiler bails out of the whole component (Compilation Skipped: incompatible library)
 export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
   const t = useTranslations();
   const { data: properties } = useSuspenseQuery(propertiesOptions(workspaceId));
@@ -311,32 +310,15 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
   const [editingEntityId, setEditingEntityId] = useState<string | null>(null);
   const [breadcrumbEditValue, setBreadcrumbEditValue] = useState("");
   const [selectedIds, setSelectedIds] = useState(new Set<string>());
+  // Pivot for shift-range selection: the last row chosen by a plain or
+  // cmd/ctrl click; a shift-click extends from here to the clicked row.
+  const anchorIdRef = useRef<string | null>(null);
   const setFilesystemSelectedIds = useWorkspaceStore(
     (s) => s.setFilesystemSelectedIds,
   );
   const clearFilesystemSelectedIds = useWorkspaceStore(
     (s) => s.clearFilesystemSelectedIds,
   );
-
-  const handleSelect = useCallback((entityId: string, meta: boolean) => {
-    setSelectedIds((prev) => {
-      if (meta) {
-        const next = new Set(prev);
-        if (next.has(entityId)) {
-          next.delete(entityId);
-        } else {
-          next.add(entityId);
-        }
-        return next;
-      }
-      // Single click: toggle if already the sole selection,
-      // otherwise select only this item.
-      if (prev.size === 1 && prev.has(entityId)) {
-        return new Set();
-      }
-      return new Set([entityId]);
-    });
-  }, []);
 
   // Background right-click context menu
   const [bgContextAnchor, setBgContextAnchor] = useState<{
@@ -351,36 +333,40 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
     [hiddenProperties, properties],
   );
 
-  const handleSortColumn = useCallback(
-    (propertyId: string) => {
-      const desc =
-        primarySort?.propertyId === propertyId ? !primarySort.desc : false;
-      updateView.mutate({
-        viewId: view.id,
-        layout: {
-          ...view.layout,
-          sorts: [
-            { propertyId, desc },
-            ...view.layout.sorts.filter(
-              (sort) => sort.propertyId !== propertyId,
-            ),
-          ],
-        },
-      });
-    },
-    [primarySort, updateView, view.id, view.layout],
-  );
+  const handleSortColumn = (propertyId: string) => {
+    const desc =
+      primarySort?.propertyId === propertyId ? !primarySort.desc : false;
+    updateView.mutate({
+      viewId: view.id,
+      layout: {
+        ...view.layout,
+        sorts: [
+          { propertyId, desc },
+          ...view.layout.sorts.filter((sort) => sort.propertyId !== propertyId),
+        ],
+      },
+    });
+  };
 
+  // Defers the key so useSuspenseQuery keeps showing stale data instead of
+  // triggering the suspense boundary when filters or sorts change.
   const { data: entityData } = useSuspenseQuery(
-    useFilesystemEntitiesOptions({
-      workspaceId,
-      filters,
-      sorts,
-      fieldMode: "visible",
-      fieldIds,
-    }),
+    filesystemEntitiesOptions(
+      useDeferredValue({
+        workspaceId,
+        filters,
+        sorts,
+        fieldMode: "visible",
+        fieldIds,
+      }),
+    ),
   );
   const data = entityData.entities;
+  // Parent links of ancestor folders the API backfills when a filter/search
+  // hides an intermediate folder. Used ONLY to complete the ancestor lookup
+  // below so cross-matter copy/move dedup works across hidden folders; never
+  // rendered or selectable, so they cannot become an action target.
+  const ancestorLinks = entityData.ancestorLinks;
 
   // Build a lookup for drag preview data from selected entities.
   const entityMap = useMemo(() => {
@@ -390,6 +376,21 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
     }
     return map;
   }, [data]);
+  // Spans matched rows plus backfilled ancestor links (not just the selection)
+  // so a dragged descendant's ancestor chain stays unbroken across intermediate
+  // folders hidden by a filter or never selected.
+  const parentById = useMemo(
+    () =>
+      new Map([
+        ...data.map((e) => [e.entityId, e.parentId] as const),
+        ...ancestorLinks.map((l) => [l.entityId, l.parentId] as const),
+      ]),
+    [data, ancestorLinks],
+  );
+  const getAncestorIds = useCallback(
+    (id: string) => resolveAncestorIds(id, parentById),
+    [parentById],
+  );
   const tree = useMemo(() => buildTree(data), [data]);
   const treeNodeMap = useMemo(() => {
     const map = new Map<string, TableTreeNode>();
@@ -476,6 +477,7 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
 
   const clearSelection = useCallback(() => {
     setSelectedIds(new Set());
+    anchorIdRef.current = null;
   }, []);
 
   useHotkey("Escape", clearSelection, { ignoreInputs: true });
@@ -486,7 +488,7 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
     }
     const trail: { id: string; name: string }[] = [];
     const nodeMap = new Map(data.map((e) => [e.entityId, e]));
-    let current = nodeMap.get(currentFolderId);
+    let current = nodeMap.get(toSafeId<"entity">(currentFolderId));
     while (current) {
       trail.unshift({
         id: current.entityId,
@@ -497,16 +499,13 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
     return trail;
   }, [currentFolderId, data]);
 
-  const navigateToFolder = useCallback(
-    async (folderId?: string) => {
-      await navigate({
-        from: "/workspaces/$workspaceId/$viewId",
-        search: (prev) => ({ ...prev, folder: folderId }),
-        replace: true,
-      });
-    },
-    [navigate],
-  );
+  const navigateToFolder = async (folderId?: string) => {
+    await navigate({
+      from: "/workspaces/$workspaceId/$viewId",
+      search: (prev) => ({ ...prev, folder: folderId }),
+      replace: true,
+    });
+  };
 
   // Expanded folders state: starts with all folders expanded.
   const allFolderIds = useMemo(() => collectFolderIds(data), [data]);
@@ -515,7 +514,7 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
     allFolderIds.size > 0 &&
     [...allFolderIds].every((id) => expandedIds.has(id));
 
-  const toggleFolder = useCallback((folderId: string) => {
+  const toggleFolder = (folderId: string) => {
     setExpandedIds((prev) => {
       const next = new Set(prev);
       if (next.has(folderId)) {
@@ -525,15 +524,15 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
       }
       return next;
     });
-  }, []);
+  };
 
-  const toggleAll = useCallback(() => {
+  const toggleAll = () => {
     if (allExpanded) {
       setExpandedIds(new Set());
     } else {
       setExpandedIds(new Set(allFolderIds));
     }
-  }, [allExpanded, allFolderIds]);
+  };
 
   const setFolderState = useWorkspaceStore((s) => s.setFolderState);
   const toggleVersion = useWorkspaceStore((s) => s.folderState.toggleVersion);
@@ -562,7 +561,7 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
     () => ({
       [FILESYSTEM_CREATED_BY_ID]: t("workspaces.filesystem.author"),
       [FILESYSTEM_UPDATED_AT_ID]: t("workspaces.filesystem.lastUpdated"),
-      [FILESYSTEM_VERSION_ID]: t("workspaces.filesystem.version"),
+      [FILESYSTEM_VERSION_ID]: t("common.version"),
     }),
     [t],
   );
@@ -581,50 +580,87 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
     [columnWidths, extraColumns],
   );
 
-  const handleHideColumn = useCallback(
-    (propertyId: string) => {
-      // Generic helper preserves the union discriminant. A bare spread of
-      // `view.layout` plus an object literal would collapse the union.
-      const mergeLayout = <L extends ViewLayout>(
-        layout: L,
-        changes: Partial<L>,
-      ): L => ({ ...layout, ...changes });
-      updateView.mutate({
-        viewId: view.id,
-        layout: mergeLayout(view.layout, {
-          hiddenProperties: [...new Set([...hiddenProperties, propertyId])],
-        }),
-      });
-    },
-    [hiddenProperties, updateView, view.id, view.layout],
-  );
+  const handleHideColumn = (propertyId: string) => {
+    // Generic helper preserves the union discriminant. A bare spread of
+    // `view.layout` plus an object literal would collapse the union.
+    const mergeLayout = <L extends ViewLayout>(
+      layout: L,
+      changes: Partial<L>,
+    ): L => ({ ...layout, ...changes });
+    updateView.mutate({
+      viewId: view.id,
+      layout: mergeLayout(view.layout, {
+        hiddenProperties: [...new Set([...hiddenProperties, propertyId])],
+      }),
+    });
+  };
 
-  const handleBgContextMenu = useCallback((e: React.MouseEvent) => {
+  const handleBgContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     const x = e.clientX;
     const y = e.clientY;
     setBgContextAnchor({
       getBoundingClientRect: () => new DOMRect(x, y, 0, 0),
     });
-  }, []);
+  };
 
-  const handleFolderCreated = useCallback((entityId: string) => {
+  const handleFolderCreated = (entityId: string) => {
     setEditingEntityId(entityId);
     setExpandedIds((prev) => new Set(prev).add(entityId));
-  }, []);
+  };
 
-  const handleSubfolderCreated = useCallback(
-    (entityId: string, parentId: string) => {
-      setEditingEntityId(entityId);
-      setExpandedIds((prev) => new Set(prev).add(parentId).add(entityId));
-    },
-    [],
-  );
+  const handleSubfolderCreated = (entityId: string, parentId: string) => {
+    setEditingEntityId(entityId);
+    setExpandedIds((prev) => new Set(prev).add(parentId).add(entityId));
+  };
 
   const flattenedRows = useMemo(
     () => flattenFilesystemRows(visibleNodes, expandedIds),
     [visibleNodes, expandedIds],
   );
+
+  const orderedEntityIds = useMemo(
+    () => flattenedRows.map((row) => row.node.entityId),
+    [flattenedRows],
+  );
+
+  // meta = cmd/ctrl (toggle a single row); shift = extend a contiguous range
+  // from the anchor to the clicked row, inclusive, over the visible order.
+  const handleSelect = (
+    entityId: string,
+    mods: { meta: boolean; shift: boolean },
+  ) => {
+    const selectedEntityId = toSafeId<"entity">(entityId);
+    setSelectedIds((prev) => {
+      if (mods.shift && anchorIdRef.current !== null) {
+        const from = orderedEntityIds.indexOf(
+          toSafeId<"entity">(anchorIdRef.current),
+        );
+        const to = orderedEntityIds.indexOf(selectedEntityId);
+        if (from !== -1 && to !== -1) {
+          const [lo, hi] = from <= to ? [from, to] : [to, from];
+          return new Set(orderedEntityIds.slice(lo, hi + 1));
+        }
+      }
+      // A plain or cmd/ctrl click makes this row the new range anchor.
+      anchorIdRef.current = selectedEntityId;
+      if (mods.meta) {
+        const next = new Set(prev);
+        if (next.has(selectedEntityId)) {
+          next.delete(selectedEntityId);
+        } else {
+          next.add(selectedEntityId);
+        }
+        return next;
+      }
+      // Plain click: sole selection (clicking the only selected row clears it).
+      if (prev.size === 1 && prev.has(selectedEntityId)) {
+        return new Set();
+      }
+      return new Set([selectedEntityId]);
+    });
+  };
+
   const rowsViewportRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
     count: flattenedRows.length,
@@ -885,6 +921,7 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
                     extraColumns={extraColumns}
                     getSelectedDragItems={getSelectedDragItems}
                     getSelectedEntities={getSelectedEntities}
+                    getAncestorIds={getAncestorIds}
                     gridTemplate={gridTemplate}
                     node={row.node}
                     onNavigateToFolder={(folderId) => {
@@ -977,46 +1014,40 @@ const ColumnHeaderCell = ({
   const isActive = activeSort?.propertyId === propertyId;
   const SortIcon = activeSort?.desc ? ArrowDownIcon : ArrowUpIcon;
 
-  const handleResizePointerDown = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const startX = event.clientX;
-      const startWidth =
-        currentWidth ??
-        containerRef.current?.getBoundingClientRect().width ??
-        0;
-      const handleMove = (moveEvent: PointerEvent) => {
-        moveEvent.preventDefault();
-        const delta = moveEvent.clientX - startX;
-        onResize(startWidth + delta);
-      };
-      const handleUp = () => {
-        window.removeEventListener("pointermove", handleMove);
-        window.removeEventListener("pointerup", handleUp);
-        document.body.style.cursor = "";
-      };
-      document.body.style.cursor = "col-resize";
-      window.addEventListener("pointermove", handleMove);
-      window.addEventListener("pointerup", handleUp);
-    },
-    [currentWidth, onResize],
-  );
+  const handleResizePointerDown = (
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth =
+      currentWidth ?? containerRef.current?.getBoundingClientRect().width ?? 0;
+    const handleMove = (moveEvent: PointerEvent) => {
+      moveEvent.preventDefault();
+      const delta = moveEvent.clientX - startX;
+      onResize(startWidth + delta);
+    };
+    const handleUp = () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+      document.body.style.cursor = "";
+    };
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+  };
 
-  const handleContextMenu = useCallback(
-    (event: React.MouseEvent) => {
-      if (!onHide) {
-        return;
-      }
-      event.preventDefault();
-      const x = event.clientX;
-      const y = event.clientY;
-      setContextAnchor({
-        getBoundingClientRect: () => new DOMRect(x, y, 0, 0),
-      });
-    },
-    [onHide],
-  );
+  const handleContextMenu = (event: React.MouseEvent) => {
+    if (!onHide) {
+      return;
+    }
+    event.preventDefault();
+    const x = event.clientX;
+    const y = event.clientY;
+    setContextAnchor({
+      getBoundingClientRect: () => new DOMRect(x, y, 0, 0),
+    });
+  };
 
   return (
     <div
@@ -1098,10 +1129,11 @@ type FilesystemRowProps = {
   onStartEditing: (entityId: string | null) => void;
   onRename: (entityId: string, newName: string) => void;
   onClearSelection: () => void;
-  onSelect: (entityId: string, meta: boolean) => void;
+  onSelect: (entityId: string, mods: { meta: boolean; shift: boolean }) => void;
   onSubfolderCreated: (entityId: string, parentId: string) => void;
   getSelectedDragItems: (ids: Set<string>) => DragPreviewData[];
   getSelectedEntities: (ids: Set<string>) => WorkspaceEntity[];
+  getAncestorIds: (id: string) => string[];
 };
 
 const FilesystemRow = ({
@@ -1124,6 +1156,7 @@ const FilesystemRow = ({
   onSubfolderCreated,
   getSelectedDragItems,
   getSelectedEntities,
+  getAncestorIds,
 }: FilesystemRowProps) => {
   const t = useTranslations();
   // RowActions can open via two paths: a trigger-button click (anchors
@@ -1172,7 +1205,9 @@ const FilesystemRow = ({
   };
 
   const isBulkSelected = selectedIds.size > 1 && isSelected;
-  const bulkEntitiesRef = useRef<WorkspaceEntity[] | undefined>(undefined);
+  const [bulkEntities, setBulkEntities] = useState<
+    WorkspaceEntity[] | undefined
+  >(undefined);
   const getBulkSelectedEntities = () =>
     isBulkSelected ? getSelectedEntities(selectedIds) : undefined;
 
@@ -1181,9 +1216,9 @@ const FilesystemRow = ({
     e.stopPropagation();
     // If right-clicking an unselected item, select only it.
     if (!isSelected) {
-      onSelect(node.entityId, false);
+      onSelect(node.entityId, { meta: false, shift: false });
     }
-    bulkEntitiesRef.current = getBulkSelectedEntities();
+    setBulkEntities(getBulkSelectedEntities());
     const x = e.clientX;
     const y = e.clientY;
     setMenuState({
@@ -1215,6 +1250,9 @@ const FilesystemRow = ({
   );
   const getCurrentSelectedEntities = useEffectEvent((ids: Set<string>) =>
     getSelectedEntities(ids),
+  );
+  const getCurrentAncestorIds = useEffectEvent((id: string) =>
+    getAncestorIds(id),
   );
   const toggleCurrentFolder = useEffectEvent(() => {
     onToggleFolder(node.entityId);
@@ -1272,6 +1310,7 @@ const FilesystemRow = ({
                 kind: e.kind,
                 mimeType: getFirstFile(e)?.mimeType ?? null,
                 parentId: e.parentId ?? null,
+                ancestorIds: getCurrentAncestorIds(e.entityId),
               }))
             : [
                 {
@@ -1280,6 +1319,7 @@ const FilesystemRow = ({
                   kind: node.kind,
                   mimeType: file?.mimeType ?? null,
                   parentId: node.parentId ?? null,
+                  ancestorIds: getCurrentAncestorIds(node.entityId),
                 },
               ];
           return {
@@ -1521,13 +1561,14 @@ const FilesystemRow = ({
       <RowActions
         anchor={contextAnchor}
         entity={node}
+        getAncestorIds={getAncestorIds}
         onOpen={openInInspector}
         onOpenChange={(o) => {
           if (!o) {
             setMenuState({ type: "closed" });
-            bulkEntitiesRef.current = undefined;
+            setBulkEntities(undefined);
           } else if (menuState.type === "closed") {
-            bulkEntitiesRef.current = getBulkSelectedEntities();
+            setBulkEntities(getBulkSelectedEntities());
             // Trigger-button click: Base UI positions the menu against
             // the trigger element, so no virtual anchor is needed.
             setMenuState({ type: "trigger" });
@@ -1536,7 +1577,7 @@ const FilesystemRow = ({
         onRename={startEditing}
         onSubfolderCreated={onSubfolderCreated}
         open={isContextOpen}
-        selectedEntities={isContextOpen ? bulkEntitiesRef.current : undefined}
+        selectedEntities={isContextOpen ? bulkEntities : undefined}
         workspaceId={workspaceId}
       />
     </span>
@@ -1558,13 +1599,19 @@ const FilesystemRow = ({
             <button
               className={rowButtonCls}
               onClick={(e) => {
+                // Shift extends a range like the file rows, taking priority
+                // over folder navigation/toggle.
+                if (e.shiftKey) {
+                  onSelect(node.entityId, { meta: false, shift: true });
+                  return;
+                }
                 const intent = getFolderClickIntent({
                   currentFolderId,
                   hasModifier: e.metaKey || e.ctrlKey,
                 });
 
                 if (intent.type === "toggle-selection") {
-                  onSelect(node.entityId, true);
+                  onSelect(node.entityId, { meta: true, shift: false });
                   return;
                 }
 
@@ -1590,7 +1637,12 @@ const FilesystemRow = ({
           >
             <button
               className={rowButtonCls}
-              onClick={(e) => onSelect(node.entityId, e.metaKey || e.ctrlKey)}
+              onClick={(e) =>
+                onSelect(node.entityId, {
+                  meta: e.metaKey || e.ctrlKey,
+                  shift: e.shiftKey,
+                })
+              }
               onDoubleClick={() => openInInspector?.()}
               style={contentSpanStyle}
               type="button"
@@ -1655,7 +1707,7 @@ const ExtraColumnCell = ({ column, entity }: ExtraColumnCellProps) => {
   }
 
   // Regular property
-  const field = entity.fields[column.id];
+  const field = entity.fields[toSafeId<"property">(column.id)];
 
   // Date fields need explicit formatting; raw Date objects
   // crash React ("Objects are not valid as a React child").

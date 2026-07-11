@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { panic } from "better-result";
 import {
-  ArrowRightIcon,
   CheckIcon,
   GlobeIcon,
   LoaderIcon,
@@ -13,7 +12,6 @@ import {
 import { useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
-import { DirectionalIcon } from "@stll/ui/components/directional-icon";
 import { cn } from "@stll/ui/lib/utils";
 
 import { useReviewStore } from "@/components/ai-suggestions/review-store";
@@ -21,8 +19,12 @@ import { useChatApproval } from "@/components/chat/chat-approval-context";
 import {
   getChatToolTitleKey,
   getApprovalToolName,
+  isApprovalOnceChatToolName,
+  isExternalInputChatToolName,
   isExternalMcpToolName,
+  isNonPersistentGrantChatToolName,
   isPublicOfficialChatToolName,
+  isRegistryWriteSummaryToolName,
   isToolApprovedByGrant,
 } from "@/components/chat/chat-ui-tools";
 import type {
@@ -30,16 +32,208 @@ import type {
   ApprovalToolPart,
   ChatUITools,
 } from "@/components/chat/chat-ui-tools";
+import { SpawnSubagentsSubtaskList } from "@/components/chat/spawn-subagents-card";
+import {
+  buildRegistryWriteSummaryRows,
+  getReadableInputRows,
+  humanizeIdentifier,
+} from "@/components/chat/tool-approval-summary";
 import { sanitizeHref } from "@/lib/sanitize-href";
 import type { WorkspaceProperty } from "@/lib/types";
 import { mcpConnectorsOptions } from "@/routes/_protected.knowledge/-queries";
-import { DocumentIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/document-icon";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
 import {
   emptyColor,
   resolveOptionColor,
 } from "@/routes/_protected.workspaces/$workspaceId/-components/utils";
 import { propertiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/properties";
+
+type UpdateEntityFieldsInput = ChatUITools["update-entity-fields"]["input"];
+type ActiveDocxEditInput = ChatUITools["apply-active-docx-edits"]["input"];
+
+const getApprovalId = (part: ApprovalToolPart): string | null => {
+  switch (part.state) {
+    case "awaiting-input":
+    case "input-complete":
+    case "input-streaming":
+      return null;
+    case "approval-requested":
+    case "approval-responded":
+      return part.approval.id;
+    case "complete":
+      return part.approval.id;
+    default:
+      return null;
+  }
+};
+
+const getApprovalPartInput = (part: ApprovalToolPart): unknown => part.input;
+
+// -- Select badge (colored chip matching table UX) --
+
+type SelectBadgeProps = {
+  value: string | null;
+  property: WorkspaceProperty | undefined;
+};
+
+const SelectBadge = ({ value, property }: SelectBadgeProps) => {
+  const t = useTranslations();
+  let color = emptyColor;
+
+  if (value && property?.content.type === "single-select") {
+    const opt = property.content.options.find((o) => o.value === value);
+    if (opt) {
+      color = resolveOptionColor(opt.color);
+    }
+  }
+
+  return (
+    <span
+      className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] leading-none font-medium"
+      style={{
+        backgroundColor: color.background,
+        color: color.foreground,
+      }}
+    >
+      {value ?? t("common.empty")}
+    </span>
+  );
+};
+
+// -- Update summary (rich rendering) --
+
+type UpdateSummaryProps = {
+  input: UpdateEntityFieldsInput;
+  workspaceId?: string | undefined;
+};
+
+const UpdateSummary = ({ input, workspaceId }: UpdateSummaryProps) => {
+  const t = useTranslations();
+  const qc = useQueryClient();
+  const newVal = input.value;
+
+  // Look up the property from cache for colors.
+  let property: WorkspaceProperty | undefined;
+  if (workspaceId) {
+    const cached = qc.getQueryData<WorkspaceProperty[]>(
+      propertiesKeys.all(workspaceId),
+    );
+    if (cached !== undefined) {
+      property = cached.find((p) => p.id === input.propertyId);
+    }
+  }
+  const propName = property?.name ?? input.propertyId;
+
+  const isSelect =
+    property?.content.type === "single-select" ||
+    property?.content.type === "multi-select";
+
+  let displayNew: string | null = null;
+  if (Array.isArray(newVal)) {
+    displayNew = newVal.join(", ");
+  } else if (typeof newVal === "string") {
+    displayNew = newVal;
+  } else if (newVal !== null) {
+    displayNew = JSON.stringify(newVal);
+  }
+
+  return (
+    <div className="border-border/50 flex flex-col gap-1.5 border-t px-3 py-2">
+      <code className="text-muted-foreground text-xs break-all">
+        {input.entityId}
+      </code>
+      {/* Property change */}
+      <div className="flex items-center gap-1.5 text-xs">
+        <span className="text-muted-foreground">{propName}:</span>
+        {isSelect ? (
+          <SelectBadge property={property} value={displayNew} />
+        ) : (
+          <span className="font-medium">{displayNew ?? t("common.empty")}</span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// -- Active DOCX edit summary --
+
+type ActiveDocxEditSummaryProps = {
+  input: ActiveDocxEditInput;
+};
+
+const ActiveDocxEditSummary = ({ input }: ActiveDocxEditSummaryProps) => {
+  const t = useTranslations("chat.tool");
+  const previewOperations = input.operations.slice(0, 3);
+  const hiddenCount = input.operations.length - previewOperations.length;
+
+  const renderOperationSummary = (
+    operation: ActiveDocxEditInput["operations"][number],
+  ) => {
+    switch (operation.type) {
+      case "replaceInBlock":
+        return t("docxReplaceSummary", {
+          find: operation.find,
+          replace: operation.replace,
+        });
+      case "replaceBlock":
+        return t("docxReplaceBlockSummary", {
+          blockId: operation.blockId,
+        });
+      case "insertAfterBlock":
+        return t("docxInsertAfterSummary", {
+          blockId: operation.blockId,
+        });
+      case "insertBeforeBlock":
+        return t("docxInsertBeforeSummary", {
+          blockId: operation.blockId,
+        });
+      case "deleteBlock":
+        return t("docxDeleteSummary", {
+          blockId: operation.blockId,
+        });
+      case "commentOnBlock":
+        return t("docxCommentSummary", {
+          blockId: operation.blockId,
+        });
+      case "insertSignatureTable":
+        return t("docxSignatureTableSummary", {
+          blockId: operation.blockId,
+        });
+      default:
+        operation satisfies never;
+        return panic("Unsupported DOCX edit operation");
+    }
+  };
+
+  return (
+    <div className="border-border/50 flex flex-col gap-1.5 border-t px-3 py-2 text-xs">
+      <div className="text-muted-foreground">
+        {t("docxEditSummary", { count: input.operations.length })}
+      </div>
+      {previewOperations.map((operation, index) => (
+        <div
+          className="text-foreground-strong-muted truncate"
+          // eslint-disable-next-line react/no-array-index-key -- previewOperations is a read-only summary of an immutable AI tool-call input; never edited/reordered by the user.
+          key={`${operation.blockId}-${operation.type}-${index}`}
+        >
+          {renderOperationSummary(operation)}
+        </div>
+      ))}
+      {hiddenCount > 0 && (
+        <div className="text-muted-foreground">
+          {t("docxEditMore", { count: hiddenCount })}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// -- Main card --
+
+type ToolApprovalCardProps = {
+  part: ApprovalToolPart;
+  workspaceId?: string | undefined;
+};
 
 export const ToolApprovalCard = ({
   part,
@@ -64,13 +258,22 @@ export const ToolApprovalCard = ({
 
   const isApprovalRequested = part.state === "approval-requested";
   const isApprovalResponded = part.state === "approval-responded";
-  const isApproved = part.state === "output-available";
-  const isDenied = part.state === "output-denied";
+  const isApproved = part.state === "complete" && part.output !== undefined;
+  const isDenied =
+    part.state === "approval-responded" && part.approval.approved === false;
   const isProcessing =
     isApprovalResponded || (responded && isApprovalRequested);
   const isBlocked = blockedApprovalTools?.has(name) ?? false;
   const isExternalMcpApproval = isExternalMcpToolName(name);
-  const canAllowInConversation = name !== "apply-active-docx-edits";
+  const showsExternalInput =
+    isExternalMcpApproval || isExternalInputChatToolName(name);
+  // High-impact writes may only be approved once or denied: no persistent
+  // grant can auto-approve a later call.
+  const isApprovalOnce = isApprovalOnceChatToolName(name);
+  const canAllowInConversation =
+    name !== "apply-active-docx-edits" &&
+    !isApprovalOnce &&
+    !isNonPersistentGrantChatToolName(name);
   const canAlwaysAllow = canAllowInConversation;
   const isPublicOfficialApproval = isPublicOfficialChatToolName(name);
   /**
@@ -83,8 +286,8 @@ export const ToolApprovalCard = ({
   const externalMcpProviderName = getExternalMcpProviderName(name);
   const label = externalMcpProviderName ?? t(getChatToolTitleKey(name));
   const externalMcpConnectorSlug = getExternalMcpConnectorSlug(name);
-  const externalMcpInput =
-    isExternalMcpApproval && part.state !== "input-streaming"
+  const externalInput =
+    showsExternalInput && part.state !== "input-streaming"
       ? getApprovalPartInput(part)
       : undefined;
   const { data: mcpConnectorsData } = useQuery({
@@ -109,6 +312,7 @@ export const ToolApprovalCard = ({
       return;
     }
     autoDenyRef.current = true;
+    // eslint-disable-next-line react/react-compiler -- auto-deny effect reacts to the incoming approval-request prop transition and fires the onDeny callback side effect; not derivable in render
     setResponded(true);
     onDeny(id);
   }, [isApprovalRequested, isBlocked, part, onDeny]);
@@ -120,6 +324,10 @@ export const ToolApprovalCard = ({
   // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- auto-approve once the incoming `part` prop reaches approval-requested and a prior grant/allow (from context) covers it. The trigger is an external prop/context transition, not a local setter, so there is no call site to fold this into. Keep.
   useEffect(() => {
     if (
+      // Delegation must be reviewed each call: never let a stored grant
+      // auto-approve it, even if one somehow exists (the grant buttons are
+      // also hidden for this tool — belt and suspenders).
+      isNonPersistentGrantChatToolName(name) ||
       !isApprovalRequested ||
       isBlocked ||
       autoApproveRef.current ||
@@ -135,6 +343,7 @@ export const ToolApprovalCard = ({
       return;
     }
     autoApproveRef.current = true;
+    // eslint-disable-next-line react/react-compiler -- auto-approve effect reacts to the incoming approval-request prop/context transition and fires the onApprove callback side effect; not derivable in render
     setResponded(true);
     onApprove(id, name);
   }, [
@@ -166,12 +375,15 @@ export const ToolApprovalCard = ({
   // ids are the same client-side suggestion ids the review store
   // keys its session entries by, so we look up the entity by
   // matching any of them.
-  const queuedIds: string[] | null =
+  const docxEditBatchOutput =
     isDocxEditBatch &&
-    part.type === "tool-apply-active-docx-edits" &&
-    part.state === "output-available" &&
-    part.output.queued !== undefined
-      ? part.output.queued.map((q) => q.id)
+    part.name === "apply-active-docx-edits" &&
+    part.state === "complete"
+      ? part.output
+      : undefined;
+  const queuedIds =
+    docxEditBatchOutput?.queued !== undefined
+      ? docxEditBatchOutput.queued.map((q) => q.id)
       : null;
   const handleOpenReviewPanel =
     queuedIds !== null && queuedIds.length > 0
@@ -238,30 +450,44 @@ export const ToolApprovalCard = ({
       </div>
 
       {/* Rich summary */}
-      {part.type === "tool-update-entity-fields" &&
+      {part.name === "update-entity-fields" &&
         part.state !== "input-streaming" &&
         part.input !== undefined && (
           <UpdateSummary input={part.input} workspaceId={workspaceId} />
         )}
-      {part.type === "tool-apply-active-docx-edits" &&
+      {part.name === "apply-active-docx-edits" &&
         part.state !== "input-streaming" &&
         part.input !== undefined && (
           <ActiveDocxEditSummary input={part.input} />
         )}
-      {isExternalMcpApproval &&
+      {part.name === "spawn_subagents" &&
         part.state !== "input-streaming" &&
-        externalMcpInput !== undefined && (
+        part.input !== undefined && (
+          <SpawnSubagentsSubtaskList
+            isAwaitingApproval={isApprovalRequested}
+            subagents={part.input.subagents}
+          />
+        )}
+      {showsExternalInput &&
+        part.state !== "input-streaming" &&
+        externalInput !== undefined && (
           <ExternalMcpInputSummary
-            input={externalMcpInput}
+            input={externalInput}
             isAwaitingDecision={
               isApprovalRequested &&
               !isProcessing &&
               !isBlocked &&
               !isPublicOfficialApproval
             }
-            providerName={
-              externalMcpProviderName ?? t("knowledge.sections.mcp.title")
-            }
+            providerName={externalMcpProviderName ?? label}
+          />
+        )}
+      {isRegistryWriteSummaryToolName(name) &&
+        part.state !== "input-streaming" &&
+        getApprovalPartInput(part) !== undefined && (
+          <RegistryWriteSummary
+            input={getApprovalPartInput(part)}
+            toolName={name}
           />
         )}
 
@@ -331,269 +557,38 @@ export const ToolApprovalCard = ({
   );
 };
 
-const DOCX_MIME =
-  "application/vnd.openxmlformats-officedocument" +
-  ".wordprocessingml.document";
-
-type UpdateEntityFieldsInput = ChatUITools["update-entity-fields"]["input"];
-type ActiveDocxEditInput = ChatUITools["apply-active-docx-edits"]["input"];
-
-/** Guess a mime type from a file name extension. */
-const mimeFromName = (name: string): string => {
-  const ext = name.split(".").pop()?.toLowerCase();
-
-  if (!ext) {
-    return "application/octet-stream";
-  }
-
-  switch (ext) {
-    case "pdf":
-      return "application/pdf";
-    case "doc":
-      return "application/msword";
-    case "docx":
-      return DOCX_MIME;
-    case "xls":
-      return "application/vnd.ms-excel";
-    case "xlsx":
-      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-    case "csv":
-      return "text/csv";
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "txt":
-      return "text/plain";
-    default:
-      return "application/octet-stream";
-  }
-};
-
-const getApprovalId = (part: ApprovalToolPart): string | null => {
-  switch (part.state) {
-    case "input-available":
-    case "input-streaming":
-      return null;
-    case "approval-requested":
-    case "approval-responded":
-    case "output-denied":
-      return part.approval.id;
-    case "output-available":
-    case "output-error":
-      return part.approval?.id ?? null;
-    default:
-      return null;
-  }
-};
-
-const getApprovalPartInput = (part: ApprovalToolPart): unknown => {
-  if (!("input" in part)) {
-    return undefined;
-  }
-
-  // SAFETY: external MCP tool inputs are intentionally schema-less on the
-  // frontend. Treat the payload as unknown before rendering a read-only summary.
-  return (part as { input?: unknown }).input;
-};
-
-// -- Select badge (colored chip matching table UX) --
-
-type SelectBadgeProps = {
-  value: string | null;
-  property: WorkspaceProperty | undefined;
-};
-
-const SelectBadge = ({ value, property }: SelectBadgeProps) => {
+const RegistryWriteSummary = ({
+  input,
+  toolName,
+}: {
+  input: unknown;
+  toolName: string;
+}) => {
   const t = useTranslations();
-  let color = emptyColor;
+  const rows = buildRegistryWriteSummaryRows({
+    documentLabel: t("common.document"),
+    emptyLabel: t("common.empty"),
+    input,
+    toolName,
+    uploadPlaceholder: t("chat.approval.uploadedDocumentPlaceholder"),
+  });
 
-  if (value && property?.content.type === "single-select") {
-    const opt = property.content.options.find((o) => o.value === value);
-    if (opt) {
-      color = resolveOptionColor(opt.color);
-    }
+  if (rows.length === 0) {
+    return null;
   }
 
   return (
-    <span
-      className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] leading-none font-medium"
-      style={{
-        backgroundColor: color.background,
-        color: color.foreground,
-      }}
-    >
-      {value ?? t("common.empty")}
-    </span>
-  );
-};
-
-// -- Update summary (rich rendering) --
-
-type UpdateSummaryProps = {
-  input: UpdateEntityFieldsInput;
-  workspaceId?: string | undefined;
-};
-
-const UpdateSummary = ({ input, workspaceId }: UpdateSummaryProps) => {
-  const t = useTranslations();
-  const qc = useQueryClient();
-  const propName = input.propertyName ?? t("chat.toolCall.field");
-  const entityName = input.entityName;
-  const newVal = input.value;
-  const oldVal = input.oldValue;
-
-  // Look up the property from cache for colors.
-  let property: WorkspaceProperty | undefined;
-  if (workspaceId) {
-    const cached = qc.getQueryData<WorkspaceProperty[]>(
-      propertiesKeys.all(workspaceId),
-    );
-    if (cached !== undefined) {
-      property = cached.find((p) => p.id === input.propertyId);
-    }
-  }
-
-  const isSelect =
-    property?.content.type === "single-select" ||
-    property?.content.type === "multi-select";
-
-  let displayNew: string | null = null;
-  if (Array.isArray(newVal)) {
-    displayNew = newVal.join(", ");
-  } else if (newVal !== null) {
-    displayNew = JSON.stringify(newVal);
-  }
-
-  return (
-    <div className="border-border/50 flex flex-col gap-1.5 border-t px-3 py-2">
-      {/* Property change */}
-      <div className="flex items-center gap-1.5 text-xs">
-        <span className="text-muted-foreground">{propName}:</span>
-        {isSelect ? (
-          <>
-            {oldVal && (
-              <>
-                <SelectBadge property={property} value={oldVal} />
-                <DirectionalIcon
-                  className="text-muted-foreground size-3 shrink-0"
-                  icon={ArrowRightIcon}
-                />
-              </>
-            )}
-            <SelectBadge property={property} value={displayNew} />
-          </>
-        ) : (
-          <span className="font-medium">
-            {oldVal && (
-              <>
-                <span className="text-muted-foreground line-through">
-                  {oldVal}
-                </span>
-                {" → "}
-              </>
-            )}
-            {displayNew ?? t("common.empty")}
-          </span>
-        )}
-      </div>
-
-      {/* Entity name with icon */}
-      {entityName && (
-        <div className="text-muted-foreground flex items-center gap-1.5 text-xs">
-          <DocumentIcon
-            className="size-3.5 shrink-0"
-            mimeType={
-              entityName.includes(".")
-                ? mimeFromName(entityName)
-                : "application/octet-stream"
-            }
-          />
-          <span className="truncate">{entityName}</span>
-        </div>
-      )}
+    <div className="border-border/50 border-t px-3 py-2">
+      <dl className="space-y-1.5">
+        {rows.map((row) => (
+          <div className="grid gap-1 sm:grid-cols-[9rem_1fr]" key={row.key}>
+            <dt className="text-muted-foreground text-xs">{row.label}</dt>
+            <dd className="text-xs break-words">{row.value}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
-};
-
-// -- Active DOCX edit summary --
-
-type ActiveDocxEditSummaryProps = {
-  input: ActiveDocxEditInput;
-};
-
-const ActiveDocxEditSummary = ({ input }: ActiveDocxEditSummaryProps) => {
-  const t = useTranslations("chat.tool");
-  const previewOperations = input.operations.slice(0, 3);
-  const hiddenCount = input.operations.length - previewOperations.length;
-
-  const renderOperationSummary = (
-    operation: ActiveDocxEditInput["operations"][number],
-  ) => {
-    switch (operation.type) {
-      case "replaceInBlock":
-        return t("docxReplaceSummary", {
-          find: operation.find,
-          replace: operation.replace,
-        });
-      case "replaceBlock":
-        return t("docxReplaceBlockSummary", {
-          blockId: operation.blockId,
-        });
-      case "insertAfterBlock":
-        return t("docxInsertAfterSummary", {
-          blockId: operation.blockId,
-        });
-      case "insertBeforeBlock":
-        return t("docxInsertBeforeSummary", {
-          blockId: operation.blockId,
-        });
-      case "deleteBlock":
-        return t("docxDeleteSummary", {
-          blockId: operation.blockId,
-        });
-      case "commentOnBlock":
-        return t("docxCommentSummary", {
-          blockId: operation.blockId,
-        });
-      case "insertSignatureTable":
-        return t("docxSignatureTableSummary", {
-          blockId: operation.blockId,
-        });
-      default:
-        operation satisfies never;
-        return panic("Unsupported DOCX edit operation");
-    }
-  };
-
-  return (
-    <div className="border-border/50 flex flex-col gap-1.5 border-t px-3 py-2 text-xs">
-      <div className="text-muted-foreground">
-        {t("docxEditSummary", { count: input.operations.length })}
-      </div>
-      {previewOperations.map((operation, index) => (
-        <div
-          className="text-foreground-strong-muted truncate"
-          key={`${operation.blockId}-${operation.type}-${index}`}
-        >
-          {renderOperationSummary(operation)}
-        </div>
-      ))}
-      {hiddenCount > 0 && (
-        <div className="text-muted-foreground">
-          {t("docxEditMore", { count: hiddenCount })}
-        </div>
-      )}
-    </div>
-  );
-};
-
-// -- Main card --
-
-type ToolApprovalCardProps = {
-  part: ApprovalToolPart;
-  workspaceId?: string | undefined;
 };
 
 const ExternalMcpInputSummary = ({
@@ -721,92 +716,3 @@ const fallbackIconUrl = (rawUrl: string): string | undefined => {
     return undefined;
   }
 };
-
-type ReadableInputRow = {
-  key: string;
-  label: string;
-  value: string;
-};
-
-const getReadableInputRows = ({
-  emptyLabel,
-  input,
-  requestLabel,
-}: {
-  emptyLabel: string;
-  input: unknown;
-  requestLabel: string;
-}): ReadableInputRow[] => {
-  if (input === undefined || input === null || typeof input !== "object") {
-    return [
-      {
-        key: "request",
-        label: requestLabel,
-        value: formatReadableInputValue({ emptyLabel, value: input }),
-      },
-    ];
-  }
-
-  if (Array.isArray(input)) {
-    return input.map((value, index) => ({
-      key: String(index),
-      label: String(index + 1),
-      value: formatReadableInputValue({ emptyLabel, value }),
-    }));
-  }
-
-  const rows: ReadableInputRow[] = [];
-  for (const [key, value] of Object.entries(input)) {
-    rows.push({
-      key,
-      label: humanizeIdentifier(key),
-      value: formatReadableInputValue({ emptyLabel, value }),
-    });
-  }
-
-  return rows;
-};
-
-const formatReadableInputValue = ({
-  emptyLabel,
-  value,
-}: {
-  emptyLabel: string;
-  value: unknown;
-}): string => {
-  if (value === null || value === undefined) {
-    return emptyLabel;
-  }
-
-  if (typeof value === "string") {
-    return value;
-  }
-
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-
-  if (Array.isArray(value)) {
-    return value
-      .map((child) => formatReadableInputValue({ emptyLabel, value: child }))
-      .join(", ");
-  }
-
-  const parts: string[] = [];
-  for (const [key, child] of Object.entries(value)) {
-    parts.push(
-      `${humanizeIdentifier(key)}: ${formatReadableInputValue({
-        emptyLabel,
-        value: child,
-      })}`,
-    );
-  }
-  return parts.join("; ");
-};
-
-const humanizeIdentifier = (value: string): string =>
-  value
-    .replaceAll(/[_-]+/gu, " ")
-    .replaceAll(/\s+/gu, " ")
-    .trim()
-    .replace(/^\p{L}/u, (match) => match.toLocaleUpperCase());

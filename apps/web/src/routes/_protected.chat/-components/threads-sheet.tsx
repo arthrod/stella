@@ -38,6 +38,7 @@ import type { SafeId } from "@/lib/safe-id";
 import { toSafeId } from "@/lib/safe-id";
 import {
   groupedChatThreadsOptions,
+  invalidateChatThreadLists,
   mergeGroupedChatThreadPages,
 } from "@/routes/_protected.chat/-queries";
 
@@ -109,11 +110,10 @@ export const ThreadsSheet = ({
       ) : (
         <SheetTrigger
           render={
-            <Button aria-label={triggerLabel} size="sm" variant="ghost" />
+            <Button aria-label={triggerLabel} size="icon-sm" variant="ghost" />
           }
         >
           <MessageSquareIcon className="size-4" />
-          {triggerLabel}
         </SheetTrigger>
       )}
       <SheetPopup side="inline-end">
@@ -204,9 +204,16 @@ const DeleteThreadButton = ({
         throw toAPIError(response.error);
       }
     },
-    onSettled: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: groupedChatThreadsOptions(activeOrganizationId).queryKey,
+    onSettled: async (_data, error, variables) => {
+      if (error) {
+        await queryClient.invalidateQueries({
+          queryKey: groupedChatThreadsOptions(activeOrganizationId).queryKey,
+        });
+        return;
+      }
+      await invalidateChatThreadLists({
+        queryClient,
+        workspaceId: variables.workspaceId,
       });
     },
     onError: () => {

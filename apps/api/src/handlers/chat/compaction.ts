@@ -1,21 +1,38 @@
-import { generateText, isFileUIPart, isTextUIPart, isToolUIPart } from "ai";
-import type { LanguageModel, ModelMessage } from "ai";
+import type { ModelMessage } from "@tanstack/ai";
 import { Result } from "better-result";
 
+import type { ModelRole } from "@stll/ai-catalog";
+
+import {
+  getChatAttachmentFilename,
+  getChatAttachmentMimeType,
+  isChatAttachmentPart,
+  isChatTextPart,
+} from "@/api/handlers/chat/chat-message-parts";
 import type { ChatThirdPartyBoundary } from "@/api/handlers/chat/third-party-boundary";
 import { prepareTextForThirdParty } from "@/api/handlers/chat/third-party-boundary";
 import type {
   ChatCompactionSummary,
   ChatMessage,
 } from "@/api/handlers/chat/types";
-import type { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
+import { resolveCaching, type OrgAIConfig } from "@/api/lib/ai-config";
+import type { TanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
+import type { SafeId } from "@/api/lib/branded-types";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
+import { generateTanStackTextForRole } from "@/api/lib/tanstack-ai-generate";
 
 const ESTIMATED_CHARS_PER_TOKEN = 4;
 const MESSAGE_OVERHEAD_TOKENS = 12;
 const FILE_PART_ESTIMATED_TOKENS = 8000;
 const DEFAULT_TRIGGER_TOKENS = 64_000;
 const DEFAULT_PRESERVE_TOKENS = 38_000;
+/**
+ * Upper bound on the per-model compaction trigger. Even a 1M-token model
+ * checkpoints well before its hard limit: summaries stay cheap, the tail
+ * we resummarize stays bounded, and provider latency/cost stay sane. The
+ * lower bound is `DEFAULT_TRIGGER_TOKENS` (the historical single value).
+ */
+const MAX_TRIGGER_TOKENS = 200_000;
 const MAX_TEXT_PART_CHARS = 8000;
 const MAX_STRUCTURED_PART_CHARS = 4000;
 const MAX_SUMMARY_OUTPUT_TOKENS = 1800;
@@ -30,9 +47,9 @@ const COMPACTION_SYSTEM_PROMPT = [
   "Do not invent facts. Keep placeholder tokens, IDs, citations, and quoted legal terms exactly as provided.",
 ].join("\n");
 
-type CompactionAIAnalytics = Pick<
-  ReturnType<typeof createAIAnalyticsCallbacks>,
-  "captureError" | "stepCallbacks"
+type TanStackCompactionAIAnalytics = Pick<
+  TanStackAIAnalyticsCallbacks,
+  "captureError" | "middleware"
 >;
 
 const CHAT_COMPACTION_FORMAT_PROMPT = [
@@ -101,12 +118,143 @@ export const shouldCompactChatMessages = (
   triggerTokens: number = DEFAULT_TRIGGER_TOKENS,
 ): boolean => estimateMessagesTokens(messages) > triggerTokens;
 
+/**
+ * Per-model compaction trigger: half the model's documented input window,
+ * clamped to `[DEFAULT_TRIGGER_TOKENS, MAX_TRIGGER_TOKENS]`. Half-window
+ * leaves room for the reply plus the untrusted suffix and tool traffic the
+ * estimate here does not model. An undefined window (unknown model) falls
+ * back to the historical single trigger so behaviour never regresses.
+ */
+export const resolveCompactionTriggerTokens = (
+  contextWindowTokens: number | undefined,
+): number => {
+  if (contextWindowTokens === undefined) {
+    return DEFAULT_TRIGGER_TOKENS;
+  }
+  return Math.min(
+    MAX_TRIGGER_TOKENS,
+    Math.max(DEFAULT_TRIGGER_TOKENS, Math.floor(contextWindowTokens / 2)),
+  );
+};
+
+/**
+ * Scale the preserved-tail budget proportionally to the resolved trigger so
+ * the summarize/keep ratio stays constant as the trigger grows with the
+ * model's window.
+ */
+export const resolvePreserveTokensForTrigger = (
+  triggerTokens: number,
+): number =>
+  Math.floor(
+    (triggerTokens * DEFAULT_PRESERVE_TOKENS) / DEFAULT_TRIGGER_TOKENS,
+  );
+
+export type ThreadContextUsage = {
+  estimatedTokens: number;
+  triggerTokens: number;
+  /** Prompt-cache-stable prefix (instructions + tool catalog). Equal to
+   *  `breakdown.promptTokens + breakdown.toolTokens`. */
+  cacheStableTokens: number;
+  /** Messages folded into the active checkpoint summary; 0 when none. */
+  summarizedMessageCount: number;
+  /** Five parts in legend/render order. They sum to `estimatedTokens`
+   *  exactly, so the segmented bar needs no reconciliation. */
+  breakdown: {
+    promptTokens: number;
+    toolTokens: number;
+    summaryTokens: number;
+    attachmentTokens: number;
+    conversationTokens: number;
+  };
+};
+
+type ComputeThreadContextUsageOptions = {
+  messages: readonly ChatMessage[];
+  /** Active compaction checkpoint carried into the next send, or null when the
+   *  thread has not been summarized yet. Its rendered summary message is what
+   *  the model actually receives, so it is estimated the same way here. */
+  summary: {
+    summarizedMessageCount: number;
+    summaryMarkdown: string;
+  } | null;
+  /** System-prompt estimate (core rules + skill catalog). Supplied by the
+   *  caller from the shared prompt builders; defaults to 0 for pure
+   *  token-math callers/tests. */
+  promptTokens?: number | undefined;
+  /** Tool-catalog estimate (the read.* API surface in the system prompt).
+   *  Supplied by the caller; defaults to 0. */
+  toolTokens?: number | undefined;
+  triggerTokens?: number | undefined;
+};
+
+/**
+ * Estimate the model context a thread's next send would carry, split into the
+ * five parts the composer meter renders: the cache-stable prefix (system
+ * prompt + tool catalog), the active compaction summary, the attachment file
+ * parts, and the conversation text. The message-derived parts reuse the same
+ * estimators as `planChatCompaction`, so the conversation/summary/attachment
+ * split tracks what `shouldCompactChatMessages` sees; the five parts sum to
+ * `estimatedTokens` exactly.
+ */
+export const computeThreadContextUsage = ({
+  messages,
+  summary,
+  promptTokens = 0,
+  toolTokens = 0,
+  triggerTokens = DEFAULT_TRIGGER_TOKENS,
+}: ComputeThreadContextUsageOptions): ThreadContextUsage => {
+  const summaryTokens = summary
+    ? estimateMessageTokens(
+        createCompactionSummaryMessage({
+          summarizedMessageCount: summary.summarizedMessageCount,
+          summary: summary.summaryMarkdown,
+        }),
+      )
+    : 0;
+
+  let conversationTokens = 0;
+  let attachmentTokens = 0;
+  for (const message of messages) {
+    const messageAttachmentTokens =
+      countAttachmentParts(message) * FILE_PART_ESTIMATED_TOKENS;
+    attachmentTokens += messageAttachmentTokens;
+    // The message's non-attachment share (overhead + text/structured parts) is
+    // whatever estimateMessageTokens counts beyond its file parts, so the split
+    // stays exact against the estimator the send path uses.
+    conversationTokens +=
+      estimateMessageTokens(message) - messageAttachmentTokens;
+  }
+
+  return {
+    estimatedTokens:
+      promptTokens +
+      toolTokens +
+      summaryTokens +
+      attachmentTokens +
+      conversationTokens,
+    triggerTokens,
+    cacheStableTokens: promptTokens + toolTokens,
+    summarizedMessageCount: summary?.summarizedMessageCount ?? 0,
+    breakdown: {
+      promptTokens,
+      toolTokens,
+      summaryTokens,
+      attachmentTokens,
+      conversationTokens,
+    },
+  };
+};
+
+const countAttachmentParts = (message: ChatMessage): number =>
+  message.parts.filter(isChatAttachmentPart).length;
+
 export const planChatCompaction = ({
   messages,
   preserveTokens = DEFAULT_PRESERVE_TOKENS,
   triggerTokens = DEFAULT_TRIGGER_TOKENS,
 }: PlanChatCompactionOptions): ChatCompactionPlan => {
-  const totalTokens = estimateMessagesTokens(messages);
+  const providerVisibleMessages = getProviderVisibleMessages(messages);
+  const totalTokens = estimateMessagesTokens(providerVisibleMessages);
   if (totalTokens <= triggerTokens) {
     return { totalTokens, type: "none" };
   }
@@ -114,8 +262,8 @@ export const planChatCompaction = ({
   const recentMessages: ChatMessage[] = [];
   let preservedTokens = 0;
 
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages.at(index);
+  for (let index = providerVisibleMessages.length - 1; index >= 0; index -= 1) {
+    const message = providerVisibleMessages.at(index);
     if (!message) {
       continue;
     }
@@ -133,9 +281,9 @@ export const planChatCompaction = ({
     recentMessages.unshift(message);
   }
 
-  const messagesToSummarize = messages.slice(
+  const messagesToSummarize = providerVisibleMessages.slice(
     0,
-    messages.length - recentMessages.length,
+    providerVisibleMessages.length - recentMessages.length,
   );
   if (messagesToSummarize.length === 0) {
     return { totalTokens, type: "none" };
@@ -362,19 +510,25 @@ export const compactModelMessages = async ({
 
 type CompactChatMessagesForModelOptions = PlanChatCompactionOptions & {
   abortSignal: AbortSignal;
-  aiAnalytics?: CompactionAIAnalytics | undefined;
+  aiAnalytics?: TanStackCompactionAIAnalytics | undefined;
   boundary: ChatThirdPartyBoundary;
-  model: LanguageModel;
+  modelId?: string | undefined;
   onSummaryError?: ((error: HandlerError<500>) => void) | undefined;
+  organizationId: SafeId<"organization">;
+  orgAIConfig: OrgAIConfig | null;
 };
 
 type CompactModelMessagesForModelOptions = {
   abortSignal: AbortSignal;
-  aiAnalytics?: CompactionAIAnalytics | undefined;
+  aiAnalytics?: TanStackCompactionAIAnalytics | undefined;
+  modelId?: string | undefined;
   messages: ModelMessage[];
-  model: LanguageModel;
   onSummaryError?: ((error: HandlerError<500>) => void) | undefined;
+  organizationId: SafeId<"organization">;
+  orgAIConfig: OrgAIConfig | null;
   preserveTokens?: number | undefined;
+  role: ModelRole;
+  summarizeWithModel?: ((transcript: string) => Promise<string>) | undefined;
   triggerTokens?: number | undefined;
 };
 
@@ -383,8 +537,10 @@ export const compactChatMessagesForModel = async ({
   aiAnalytics,
   boundary,
   messages,
-  model,
+  modelId,
   onSummaryError,
+  organizationId,
+  orgAIConfig,
   preserveTokens,
   triggerTokens,
 }: CompactChatMessagesForModelOptions): Promise<
@@ -400,19 +556,28 @@ export const compactChatMessagesForModel = async ({
     summarizeTranscript: async (transcript) => {
       const result = await Result.tryPromise({
         try: async () =>
-          await generateText({
+          await generateTanStackTextForRole({
             abortSignal,
+            analytics: aiAnalytics,
+            caching: resolveCaching({
+              promptCachingEnabled: false,
+              role: "chat",
+              scopeKey: null,
+            }),
             maxOutputTokens: MAX_SUMMARY_OUTPUT_TOKENS,
-            model,
+            modelId,
+            organizationId,
+            orgAIConfig,
             prompt: [
               "Compact the earlier conversation transcript below.",
               "Return only the checkpoint summary.",
               "",
               transcript,
             ].join("\n"),
+            role: "chat",
+            serviceTier: "standard",
             system: CHAT_COMPACTION_SYSTEM_PROMPT,
             temperature: 0,
-            ...aiAnalytics?.stepCallbacks,
           }),
         catch: (error) => {
           aiAnalytics?.captureError(error);
@@ -423,7 +588,7 @@ export const compactChatMessagesForModel = async ({
         throw result.error;
       }
 
-      return result.value.text;
+      return result.value;
     },
   });
 
@@ -432,8 +597,10 @@ export const summarizeChatCompactionForModel = async ({
   aiAnalytics,
   boundary,
   messages,
-  model,
+  modelId,
   onSummaryError,
+  organizationId,
+  orgAIConfig,
   preserveTokens,
   triggerTokens,
 }: CompactChatMessagesForModelOptions): Promise<
@@ -449,19 +616,28 @@ export const summarizeChatCompactionForModel = async ({
     summarizeTranscript: async (transcript) => {
       const result = await Result.tryPromise({
         try: async () =>
-          await generateText({
+          await generateTanStackTextForRole({
             abortSignal,
+            analytics: aiAnalytics,
+            caching: resolveCaching({
+              promptCachingEnabled: false,
+              role: "chat",
+              scopeKey: null,
+            }),
             maxOutputTokens: MAX_SUMMARY_OUTPUT_TOKENS,
-            model,
+            modelId,
+            organizationId,
+            orgAIConfig,
             prompt: [
               "Compact the earlier conversation transcript below.",
               "Return only the checkpoint summary.",
               "",
               transcript,
             ].join("\n"),
+            role: "chat",
+            serviceTier: "standard",
             system: CHAT_COMPACTION_SYSTEM_PROMPT,
             temperature: 0,
-            ...aiAnalytics?.stepCallbacks,
           }),
         catch: (error) => {
           aiAnalytics?.captureError(error);
@@ -472,17 +648,21 @@ export const summarizeChatCompactionForModel = async ({
         throw result.error;
       }
 
-      return result.value.text;
+      return result.value;
     },
   });
 
 export const compactModelMessagesForModel = async ({
   abortSignal,
   aiAnalytics,
+  modelId,
   messages,
-  model,
   onSummaryError,
+  organizationId,
+  orgAIConfig,
   preserveTokens,
+  role,
+  summarizeWithModel,
   triggerTokens,
 }: CompactModelMessagesForModelOptions): Promise<
   Result<ModelMessage[], HandlerError<500>>
@@ -492,12 +672,24 @@ export const compactModelMessagesForModel = async ({
     onSummaryError,
     preserveTokens,
     summarizeTranscript: async (transcript) => {
+      if (summarizeWithModel) {
+        return await summarizeWithModel(transcript);
+      }
+
       const result = await Result.tryPromise({
         try: async () =>
-          await generateText({
+          await generateTanStackTextForRole({
             abortSignal,
+            analytics: aiAnalytics,
+            caching: resolveCaching({
+              promptCachingEnabled: false,
+              role,
+              scopeKey: null,
+            }),
             maxOutputTokens: MAX_SUMMARY_OUTPUT_TOKENS,
-            model,
+            modelId,
+            organizationId,
+            orgAIConfig,
             prompt: [
               "Compact the earlier model-step transcript below.",
               "Return only the checkpoint summary.",
@@ -505,8 +697,9 @@ export const compactModelMessagesForModel = async ({
               transcript,
             ].join("\n"),
             system: COMPACTION_SYSTEM_PROMPT,
+            role,
+            serviceTier: "standard",
             temperature: 0,
-            ...aiAnalytics?.stepCallbacks,
           }),
         catch: (error) => {
           aiAnalytics?.captureError(error);
@@ -517,23 +710,33 @@ export const compactModelMessagesForModel = async ({
         throw result.error;
       }
 
-      return result.value.text;
+      return result.value;
     },
     triggerTokens,
   });
 
 export const renderChatMessagesForCompaction = (
   messages: readonly ChatMessage[],
-): string =>
-  messages
-    .map((message, index) =>
+): string => {
+  const renderedMessages: string[] = [];
+
+  for (const message of messages) {
+    const visibleParts = getProviderVisibleParts(message);
+    if (visibleParts.length === 0) {
+      continue;
+    }
+
+    renderedMessages.push(
       [
-        `<message index="${index + 1}" role="${message.role}" id="${message.id}">`,
-        ...message.parts.map(renderPartForCompaction),
+        `<message index="${renderedMessages.length + 1}" role="${message.role}" id="${message.id}">`,
+        ...visibleParts.map(renderPartForCompaction),
         "</message>",
       ].join("\n"),
-    )
-    .join("\n\n");
+    );
+  }
+
+  return renderedMessages.join("\n\n");
+};
 
 export const renderModelMessagesForCompaction = (
   messages: readonly ModelMessage[],
@@ -566,7 +769,7 @@ export const createCompactionSummaryMessage = ({
   parts: [
     {
       type: "text",
-      text: [
+      content: [
         `Earlier conversation compacted from ${summarizedMessageCount} message(s).`,
         summary,
       ].join("\n\n"),
@@ -703,25 +906,55 @@ const estimateMessagesTokens = (messages: readonly ChatMessage[]): number =>
     0,
   );
 
-const estimateMessageTokens = (message: ChatMessage): number =>
-  message.parts.reduce(
-    (total, part) => total + estimatePartTokens(part),
-    MESSAGE_OVERHEAD_TOKENS,
-  );
-
-const estimatePartTokens = (part: ChatMessage["parts"][number]): number => {
-  if (isTextUIPart(part)) {
-    return estimateTextTokens(part.text);
+const estimateMessageTokens = (message: ChatMessage): number => {
+  const visibleParts = getProviderVisibleParts(message);
+  if (visibleParts.length === 0) {
+    return 0;
   }
 
-  if (isFileUIPart(part)) {
+  let total = MESSAGE_OVERHEAD_TOKENS;
+
+  for (const part of visibleParts) {
+    total += estimatePartTokens(part);
+  }
+
+  return total;
+};
+
+const getProviderVisibleParts = (message: ChatMessage): ChatMessage["parts"] =>
+  message.parts;
+
+const getProviderVisibleMessages = (
+  messages: readonly ChatMessage[],
+): ChatMessage[] => {
+  const visibleMessages: ChatMessage[] = [];
+
+  for (const message of messages) {
+    if (getProviderVisibleParts(message).length > 0) {
+      visibleMessages.push(message);
+    }
+  }
+
+  return visibleMessages;
+};
+
+const estimatePartTokens = (part: ChatMessage["parts"][number]): number => {
+  if (isChatTextPart(part)) {
+    return estimateTextTokens(part.content);
+  }
+
+  if (isChatAttachmentPart(part)) {
     return FILE_PART_ESTIMATED_TOKENS;
   }
 
   return estimateTextTokens(safeStringify(part));
 };
 
-const estimateTextTokens = (text: string): number =>
+/**
+ * Canonical chars/4 token estimate. Shared with the prompt builders so the
+ * meter's prompt/tool parts use the same estimator as the message parts.
+ */
+export const estimateTextTokens = (text: string): number =>
   Math.ceil(text.length / ESTIMATED_CHARS_PER_TOKEN);
 
 const startsWithUserMessage = (
@@ -742,25 +975,31 @@ const estimateModelMessageTokens = (message: ModelMessage): number =>
 const renderPartForCompaction = (
   part: ChatMessage["parts"][number],
 ): string => {
-  if (isTextUIPart(part)) {
+  // The bundled UI-message parts union is narrower than the parts that
+  // appear at runtime (tool, reasoning, structured output), so capture the
+  // discriminant before the guards narrow `part` to `never`; the final
+  // branch could not otherwise read its tag.
+  const partType: string = part.type;
+
+  if (isChatTextPart(part)) {
     return renderTaggedValue(
       "text",
-      truncateForCompaction(part.text, MAX_TEXT_PART_CHARS),
+      truncateForCompaction(part.content, MAX_TEXT_PART_CHARS),
     );
   }
 
-  if (isFileUIPart(part)) {
+  if (isChatAttachmentPart(part)) {
     return renderTaggedValue(
       "file",
       [
-        `name: ${part.filename ?? "unnamed"}`,
-        `mediaType: ${part.mediaType}`,
-        "content: omitted; old file attachments are not rehydrated during compaction",
+        `name: ${getChatAttachmentFilename(part) ?? "unnamed"}`,
+        `mediaType: ${getChatAttachmentMimeType(part)}`,
+        "content: omitted; attachments are not inlined during compaction",
       ].join("\n"),
     );
   }
 
-  if (isToolUIPart(part)) {
+  if (isChatToolPart(part)) {
     return renderTaggedValue(
       "tool",
       truncateForCompaction(safeStringify(part), MAX_STRUCTURED_PART_CHARS),
@@ -768,7 +1007,7 @@ const renderPartForCompaction = (
   }
 
   return renderTaggedValue(
-    part.type,
+    partType,
     truncateForCompaction(safeStringify(part), MAX_STRUCTURED_PART_CHARS),
   );
 };
@@ -778,8 +1017,18 @@ const renderModelMessageContent = (message: ModelMessage): string => {
     return message.content;
   }
 
+  if (message.toolCalls && message.toolCalls.length > 0) {
+    return safeStringify({
+      content: message.content,
+      toolCalls: message.toolCalls,
+    });
+  }
+
   return safeStringify(message.content);
 };
+
+const isChatToolPart = (part: ChatMessage["parts"][number]): boolean =>
+  part.type === "tool-call" || part.type === "tool-result";
 
 const renderTaggedValue = (tag: string, value: string): string =>
   `<${tag}>\n${value}\n</${tag}>`;

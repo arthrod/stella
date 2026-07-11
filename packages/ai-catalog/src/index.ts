@@ -2,7 +2,8 @@
  * Canonical AI provider and model catalog.
  *
  * Single source of truth for every provider/model identifier stella
- * offers. Imported by the API runtime (`apps/api/src/lib/ai-models.ts`)
+ * offers. Imported by the API runtime
+ * (`apps/api/src/lib/tanstack-ai-models.ts`)
  * and the BYOK settings UI (`apps/web`), so the picker can never offer
  * a model the backend rejects, and vice versa.
  *
@@ -16,6 +17,10 @@
  * ID here against live provider/aggregator listings so a retired model
  * fails CI instead of 400-ing a user at runtime.
  */
+import type { AnthropicModelInputModalitiesByName } from "@tanstack/ai-anthropic";
+import type { BedrockModelInputModalitiesByName } from "@tanstack/ai-bedrock";
+import type { GeminiModelInputModalitiesByName } from "@tanstack/ai-gemini";
+import type { OpenRouterModelInputModalitiesByName } from "@tanstack/ai-openrouter";
 
 /**
  * Logical model roles. Call sites declare *what* they need, not
@@ -36,12 +41,24 @@ export const AI_PROVIDERS = [
   "openai",
   "azure_foundry",
   "anthropic",
+  "bedrock",
   "mistral",
   "openai_compatible",
   "huggingface",
 ] as const;
 
 export type AIProvider = (typeof AI_PROVIDERS)[number];
+
+export const TANSTACK_AI_PROVIDERS = [
+  "google",
+  "openrouter",
+  "openai",
+  "anthropic",
+  "bedrock",
+  "mistral",
+] as const satisfies readonly AIProvider[];
+
+export type TanStackAIProvider = (typeof TANSTACK_AI_PROVIDERS)[number];
 
 /**
  * Per-role default model IDs for the BYOK-capable cloud providers.
@@ -73,13 +90,19 @@ export const BYOK_DEFAULT_MODELS = {
     reasoning: "claude-sonnet-4-6",
     pdf: "claude-sonnet-4-6",
   },
+  bedrock: {
+    fast: "us.amazon.nova-micro-v1:0",
+    chat: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    reasoning: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    pdf: "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  },
   mistral: {
     fast: "mistral-small-latest",
     chat: "mistral-large-latest",
     reasoning: "magistral-medium-latest",
     pdf: "mistral-large-latest",
   },
-} as const satisfies Partial<Record<AIProvider, Record<ModelRole, string>>>;
+} as const satisfies Record<TanStackAIProvider, Record<ModelRole, string>>;
 
 /**
  * Instance-level default model IDs per provider. Extends the BYOK
@@ -114,9 +137,9 @@ export const DEFAULT_MODELS = {
  * The frontend list is not a security boundary; this is what the API
  * accepts.
  *
- * Limited to providers BYOK supports (no openai_compatible).
- * `azure_foundry` and `huggingface` take custom deployment IDs, so they
- * carry no curated list.
+ * Limited to providers the TanStack AI integration supports for BYOK.
+ * Providers without a first-class TanStack adapter path are intentionally
+ * not accepted at this boundary.
  */
 export const BYOK_MODEL_OPTIONS = {
   google: [
@@ -132,15 +155,7 @@ export const BYOK_MODEL_OPTIONS = {
     "claude-opus-4-6",
     "claude-haiku-4-5-20251001",
   ],
-  mistral: [
-    "mistral-medium-3-5",
-    "mistral-large-latest",
-    "mistral-small-latest",
-    "magistral-medium-latest",
-  ],
   openai: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.2"],
-  azure_foundry: [],
-  huggingface: [],
   openrouter: [
     "google/gemini-3.1-pro-preview",
     "google/gemini-3.5-flash",
@@ -150,12 +165,199 @@ export const BYOK_MODEL_OPTIONS = {
     "openai/gpt-5.5",
     "openai/gpt-5.4-mini",
   ],
-} as const satisfies Record<
-  Exclude<AIProvider, "openai_compatible">,
-  readonly string[]
->;
+  bedrock: [
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.amazon.nova-pro-v1:0",
+    "us.amazon.nova-lite-v1:0",
+    "us.amazon.nova-micro-v1:0",
+    "openai.gpt-oss-120b-1:0",
+    "openai.gpt-oss-20b-1:0",
+    "us.deepseek.r1-v1:0",
+  ],
+  mistral: [
+    "mistral-large-latest",
+    "mistral-medium-latest",
+    "mistral-small-latest",
+    "magistral-medium-latest",
+    "magistral-small",
+    "pixtral-large-latest",
+  ],
+} as const satisfies Record<TanStackAIProvider, readonly string[]>;
 
 export type BYOKProvider = keyof typeof BYOK_MODEL_OPTIONS;
+
+type ModelInputModalitiesByName = Record<string, readonly string[]>;
+
+type ModelWithInputModality<
+  TModels extends ModelInputModalitiesByName,
+  TModality extends string,
+> = Extract<
+  {
+    [TModel in keyof TModels]: TModality extends TModels[TModel][number]
+      ? TModel
+      : never;
+  }[keyof TModels],
+  string
+>;
+
+type TanStackDocumentInputModelByProvider = {
+  anthropic: ModelWithInputModality<
+    AnthropicModelInputModalitiesByName,
+    "document"
+  >;
+  bedrock: ModelWithInputModality<
+    BedrockModelInputModalitiesByName,
+    "document"
+  >;
+  google: ModelWithInputModality<GeminiModelInputModalitiesByName, "document">;
+  openrouter: ModelWithInputModality<
+    OpenRouterModelInputModalitiesByName,
+    "document"
+  >;
+};
+
+type BYOKModelIdByProvider = {
+  [TProvider in BYOKProvider]: (typeof BYOK_MODEL_OPTIONS)[TProvider][number];
+};
+
+const TANSTACK_DOCUMENT_INPUT_MODEL_OPTIONS = {
+  anthropic: ["claude-sonnet-4-6"],
+  bedrock: [
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.amazon.nova-pro-v1:0",
+    "us.amazon.nova-lite-v1:0",
+  ],
+  google: [
+    "gemini-3.1-pro-preview",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+  ],
+  openrouter: [
+    "google/gemini-3.1-pro-preview",
+    "google/gemini-3.5-flash",
+    "google/gemini-3.1-flash-lite",
+    "anthropic/claude-opus-4.8",
+    "anthropic/claude-sonnet-4.6",
+    "openai/gpt-5.5",
+    "openai/gpt-5.4-mini",
+  ],
+} as const satisfies {
+  [TProvider in keyof TanStackDocumentInputModelByProvider]: readonly Extract<
+    BYOKModelIdByProvider[TProvider],
+    TanStackDocumentInputModelByProvider[TProvider]
+  >[];
+};
+
+const STELLA_EXTENDED_DOCUMENT_INPUT_MODEL_OPTIONS = {
+  anthropic: [
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-haiku-4-5-20251001",
+  ],
+  openai: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.2"],
+} as const satisfies Partial<{
+  [TProvider in BYOKProvider]: readonly BYOKModelIdByProvider[TProvider][];
+}>;
+
+export const BYOK_DOCUMENT_INPUT_MODEL_OPTIONS = {
+  anthropic: [
+    ...TANSTACK_DOCUMENT_INPUT_MODEL_OPTIONS.anthropic,
+    ...STELLA_EXTENDED_DOCUMENT_INPUT_MODEL_OPTIONS.anthropic,
+  ],
+  bedrock: TANSTACK_DOCUMENT_INPUT_MODEL_OPTIONS.bedrock,
+  google: TANSTACK_DOCUMENT_INPUT_MODEL_OPTIONS.google,
+  mistral: [],
+  openai: STELLA_EXTENDED_DOCUMENT_INPUT_MODEL_OPTIONS.openai,
+  openrouter: TANSTACK_DOCUMENT_INPUT_MODEL_OPTIONS.openrouter,
+} as const satisfies {
+  [TProvider in BYOKProvider]: readonly BYOKModelIdByProvider[TProvider][];
+};
+
+export const isBYOKProviderRoleSupported = ({
+  provider,
+  role,
+}: {
+  provider: BYOKProvider;
+  role: ModelRole;
+}): boolean =>
+  role !== "pdf" || BYOK_DOCUMENT_INPUT_MODEL_OPTIONS[provider].length > 0;
+
+export const isBYOKModelRoleSupported = ({
+  provider,
+  modelId,
+  role,
+}: {
+  provider: BYOKProvider;
+  modelId: string;
+  role: ModelRole;
+}): boolean => {
+  if (role !== "pdf") {
+    return true;
+  }
+  const supportedModels: readonly string[] =
+    BYOK_DOCUMENT_INPUT_MODEL_OPTIONS[provider];
+  return supportedModels.includes(modelId);
+};
+
+/**
+ * Whether a model id is currently offered for this provider+role: it
+ * must be in the curated catalog for the provider AND satisfy the
+ * role's input-modality constraint (PDF needs a document-capable
+ * model). This is the runtime allowlist, so a model dropped by a
+ * catalog bump stops being valid here even though it is still a
+ * non-empty string in a stored org config.
+ */
+const isOfferedBYOKModelForRole = ({
+  provider,
+  modelId,
+  role,
+}: {
+  provider: BYOKProvider;
+  modelId: string;
+  role: ModelRole;
+}): boolean => {
+  const offered: readonly string[] = BYOK_MODEL_OPTIONS[provider];
+  return (
+    offered.includes(modelId) &&
+    isBYOKModelRoleSupported({ provider, modelId, role })
+  );
+};
+
+/**
+ * Resolve a model id that will actually work for this provider+role,
+ * keeping the SAME provider. Returns the caller's model unchanged when
+ * it is still offered; otherwise falls back to the provider's per-role
+ * default (`BYOK_DEFAULT_MODELS`). Returns `null` only when the
+ * provider has no valid model for the role at all — the sole case
+ * today is `mistral` + `pdf`, because the TanStack Mistral adapter
+ * exposes no `document` input modality, so no Mistral model (not even
+ * the default) can serve the PDF role.
+ *
+ * Used to auto-heal org AI configs whose pinned model was removed by a
+ * catalog bump, so generation resolves to a supported model instead of
+ * 400-ing (or forwarding a retired id to the provider).
+ */
+export const resolveWorkingBYOKModelForRole = ({
+  provider,
+  modelId,
+  role,
+}: {
+  provider: BYOKProvider;
+  modelId: string;
+  role: ModelRole;
+}): string | null => {
+  if (isOfferedBYOKModelForRole({ provider, modelId, role })) {
+    return modelId;
+  }
+  const fallback = BYOK_DEFAULT_MODELS[provider][role];
+  return isOfferedBYOKModelForRole({ provider, modelId: fallback, role })
+    ? fallback
+    : null;
+};
 
 /**
  * Anthropic models that use the adaptive-thinking request shape
@@ -174,10 +376,9 @@ export const ANTHROPIC_ADAPTIVE_THINKING_MODELS = [
 /**
  * Anthropic models that reject sampling overrides (`temperature`,
  * `topP`, `topK`) with a 400 on every request shape; they always run
- * with provider-side defaults. Enforced by a strip middleware in the
- * model wrapper (`withInstrumentation` in
- * `apps/api/src/lib/ai-models.ts`) so neither role defaults nor
- * call-site overrides can reach the provider.
+ * with provider-side defaults. Enforced by TanStack model-option
+ * construction in `apps/api/src/lib/tanstack-ai-models.ts` so neither
+ * role defaults nor call-site overrides can reach the provider.
  */
 export const ANTHROPIC_FIXED_SAMPLING_MODELS = [
   "claude-opus-4-7",
@@ -188,7 +389,7 @@ export const ANTHROPIC_FIXED_SAMPLING_MODELS = [
 /**
  * Per-model ledger rates, normalized micro-units per 1M tokens.
  *
- * Keys are the canonical model IDs stella passes to the AI SDK.
+ * Keys are the canonical model IDs stella passes to provider adapters.
  * Consumers (`apps/api/src/lib/usage/unit-model.ts`) fall back to a
  * defensive default for unknown IDs. The nightly
  * `model-catalog-upstream` check validates that every offered
@@ -213,8 +414,8 @@ export type ModelRate = {
  * Providers whose catalog entries are first-party API model IDs and so
  * must carry an explicit rate. Mirrors `MODELS_DEV_PROVIDER` in the
  * nightly check; `openrouter` (provider-prefixed slugs) and the
- * custom-deployment providers are metered by their underlying model
- * IDs or the fallback rate.
+ * legacy/custom-deployment providers are metered by their underlying
+ * model IDs or the fallback rate.
  */
 type FirstPartyProvider = "google" | "openai" | "anthropic" | "mistral";
 
@@ -324,6 +525,10 @@ export const MODEL_RATES: Readonly<Record<string, ModelRate>> = {
     inputPerMTok: 50_000,
     outputPerMTok: 150_000,
   },
+  "mistral-medium-latest": {
+    inputPerMTok: 150_000,
+    outputPerMTok: 750_000,
+  },
   "mistral-medium-3-5": {
     inputPerMTok: 150_000,
     outputPerMTok: 750_000,
@@ -332,5 +537,99 @@ export const MODEL_RATES: Readonly<Record<string, ModelRate>> = {
     inputPerMTok: 200_000,
     outputPerMTok: 500_000,
   },
+  "magistral-small": {
+    inputPerMTok: 50_000,
+    outputPerMTok: 150_000,
+  },
+  "magistral-small-latest": {
+    inputPerMTok: 50_000,
+    outputPerMTok: 150_000,
+  },
+  "pixtral-large-latest": {
+    inputPerMTok: 200_000,
+    outputPerMTok: 600_000,
+  },
 } satisfies Record<OfferedFirstPartyModelId, ModelRate> &
   Record<string, ModelRate>;
+
+/**
+ * Documented input context-window sizes (in tokens) per model ID.
+ *
+ * Keys are the canonical model IDs stella resolves for the provider
+ * adapters (the same forms used in `MODEL_RATES`, `BYOK_MODEL_OPTIONS`,
+ * and `DEFAULT_MODELS`, including OpenRouter provider-prefixed slugs and
+ * AWS Bedrock IDs). Values are the providers' publicly documented input
+ * windows; where a provider offers a larger beta window we intentionally
+ * take the conservative default (e.g. Claude's standard 200K rather than
+ * the 1M beta) so context budgeting never overpromises.
+ *
+ * Consumers must go through `getContextWindowTokens`, which falls back to
+ * `DEFAULT_CONTEXT_WINDOW_TOKENS` for any unlisted ID. Unlike
+ * `MODEL_RATES`, the nightly `model-catalog-upstream` check does not
+ * validate this map, so an unknown model degrades to the conservative
+ * default rather than failing CI.
+ */
+export const CONTEXT_WINDOW_TOKENS: Readonly<Record<string, number>> = {
+  // Google Gemini: 1M-token input window across the current lineup.
+  "gemini-2.5-flash": 1_048_576,
+  "gemini-2.5-pro": 1_048_576,
+  "gemini-3.1-flash-lite": 1_048_576,
+  "gemini-3.5-flash": 1_048_576,
+  "gemini-3.1-pro-preview": 1_048_576,
+  // OpenAI: GPT-4o family 128K; GPT-5 family 400K input.
+  "gpt-4o-mini": 128_000,
+  "gpt-4o": 128_000,
+  "gpt-5.2": 400_000,
+  "gpt-5.4-nano": 400_000,
+  "gpt-5.4-mini": 400_000,
+  "gpt-5.4": 400_000,
+  "gpt-5.5": 400_000,
+  // Anthropic Claude: standard 200K window (1M is beta-gated; not assumed).
+  "claude-haiku-4-5-20251001": 200_000,
+  "claude-sonnet-4-6": 200_000,
+  "claude-opus-4-6": 200_000,
+  "claude-opus-4-7": 200_000,
+  "claude-opus-4-8": 200_000,
+  "claude-fable-5": 200_000,
+  // Mistral: 128K across the offered text/vision models.
+  "mistral-small-latest": 128_000,
+  "mistral-large-latest": 128_000,
+  "mistral-medium-latest": 128_000,
+  "mistral-medium-3-5": 128_000,
+  "magistral-medium-latest": 128_000,
+  "magistral-small-latest": 128_000,
+  "magistral-small": 128_000,
+  "pixtral-large-latest": 128_000,
+  // OpenRouter provider-prefixed slugs mirror their upstream windows.
+  "google/gemini-3.1-pro-preview": 1_048_576,
+  "google/gemini-3.5-flash": 1_048_576,
+  "google/gemini-3.1-flash-lite": 1_048_576,
+  "anthropic/claude-opus-4.8": 200_000,
+  "anthropic/claude-sonnet-4.6": 200_000,
+  "openai/gpt-5.5": 400_000,
+  "openai/gpt-5.4-mini": 400_000,
+  // AWS Bedrock IDs.
+  "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 200_000,
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0": 200_000,
+  "us.amazon.nova-pro-v1:0": 300_000, // Nova Pro/Lite: 300K input.
+  "us.amazon.nova-lite-v1:0": 300_000,
+  "us.amazon.nova-micro-v1:0": 128_000, // Nova Micro: 128K input.
+  "openai.gpt-oss-120b-1:0": 128_000, // gpt-oss on Bedrock: 128K.
+  "openai.gpt-oss-20b-1:0": 128_000,
+  "us.deepseek.r1-v1:0": 128_000, // DeepSeek-R1: 128K.
+};
+
+/**
+ * Conservative window assumed for any model ID absent from
+ * `CONTEXT_WINDOW_TOKENS` (custom deployments, OpenAI-compatible
+ * endpoints, brand-new IDs not yet catalogued).
+ */
+export const DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000;
+
+/**
+ * Documented input context window for a model ID, or the conservative
+ * default for unlisted IDs. Callers must never index
+ * `CONTEXT_WINDOW_TOKENS` directly.
+ */
+export const getContextWindowTokens = (modelId: string): number =>
+  CONTEXT_WINDOW_TOKENS[modelId] ?? DEFAULT_CONTEXT_WINDOW_TOKENS;

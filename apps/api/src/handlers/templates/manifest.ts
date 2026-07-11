@@ -113,6 +113,7 @@ export const manifestHandler = async ({
 
 const config = {
   permissions: { workspace: ["read"] },
+  mcp: { type: "capability", reason: "template_authoring_ui" },
   body: manifestBodySchema,
 } satisfies HandlerConfig;
 

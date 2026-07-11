@@ -1,8 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 
 import { useForm } from "@tanstack/react-form";
 import { useMutation } from "@tanstack/react-query";
-import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
+import {
+  createFileRoute,
+  Navigate,
+  redirect,
+  useNavigate,
+} from "@tanstack/react-router";
 import { useSelector } from "@tanstack/react-store";
 import { panic } from "better-result";
 import { useTranslations } from "use-intl";
@@ -23,12 +28,21 @@ import { Input } from "@stll/ui/components/input";
 import { Skeleton } from "@stll/ui/components/skeleton";
 import { stellaToast } from "@stll/ui/components/toast";
 
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { useInvalidateSession } from "@/hooks/use-invalidate-session";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { authClient } from "@/lib/auth";
 import { toAuthClientError } from "@/lib/errors";
-import { getOauthRedirectUrl, hasSignedOauthQuery } from "@/lib/oauth-provider";
-import { isAcceptInvitationRedirect, redirectToSchema } from "@/lib/redirect";
+import {
+  getOauthHashFragment,
+  getOauthRedirectUrl,
+  getSignedOauthQueryFromHash,
+  hasSignedOauthQuery,
+} from "@/lib/oauth-provider";
+import {
+  isAcceptInvitationRedirect,
+  normalizeRedirectTo,
+} from "@/lib/redirect";
 import { toFormErrors } from "@/lib/schema";
 import {
   createSlug,
@@ -36,13 +50,22 @@ import {
 } from "@/routes/_protected.organization/-utils";
 
 const searchSchema = v.object({
-  redirectTo: redirectToSchema,
+  redirectTo: v.optional(v.pipe(v.string(), v.transform(normalizeRedirectTo))),
 });
 
 export const Route = createFileRoute("/auth/organization")({
   validateSearch: searchSchema,
   beforeLoad: ({ context, location, search }) => {
+    const bridgedQuery = getSignedOauthQueryFromHash(location.hash);
+
     if (!context.session) {
+      if (bridgedQuery) {
+        throw redirect({
+          href: `/auth#${getOauthHashFragment(bridgedQuery)}`,
+          replace: true,
+        });
+      }
+
       throw redirect({
         to: "/auth",
         search: {
@@ -52,14 +75,15 @@ export const Route = createFileRoute("/auth/organization")({
       });
     }
 
-    const isOauthPostLogin = hasSignedOauthQuery(location.searchStr);
+    const isOauthPostLogin =
+      bridgedQuery !== null || hasSignedOauthQuery(location.searchStr);
 
     if (
       !isOauthPostLogin &&
       (context.session.activeOrganizationId ||
-        isAcceptInvitationRedirect(search.redirectTo))
+        isAcceptInvitationRedirect(search.redirectTo ?? "/"))
     ) {
-      throw redirect({ to: search.redirectTo, replace: true });
+      throw redirect({ to: search.redirectTo ?? "/", replace: true });
     }
   },
   component: Organization,
@@ -70,15 +94,12 @@ function Organization() {
   const hasOrganizations = (organizations?.length ?? 0) > 0;
   const isOauthPostLogin =
     typeof window !== "undefined" &&
-    hasSignedOauthQuery(window.location.search);
-  const navigate = useNavigate();
+    (getSignedOauthQueryFromHash(window.location.hash) !== null ||
+      hasSignedOauthQuery(window.location.search));
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- navigation side-effect driven by derived auth state, move into the data-loading flow
-  useEffect(() => {
-    if (!isPending && !hasOrganizations && !isOauthPostLogin) {
-      void navigate({ to: "/onboarding", replace: true });
-    }
-  }, [hasOrganizations, isOauthPostLogin, isPending, navigate]);
+  if (!isPending && !hasOrganizations && !isOauthPostLogin) {
+    return <Navigate replace to="/onboarding" />;
+  }
 
   if (isPending || (!hasOrganizations && !isOauthPostLogin)) {
     return (
@@ -155,7 +176,7 @@ const OrganizationList = ({
   organizations,
 }: OrganizationListProps) => {
   const t = useTranslations();
-  const redirectTo = Route.useSearch({ select: (s) => s.redirectTo });
+  const redirectTo = Route.useSearch({ select: (s) => s.redirectTo ?? "/" });
   const analytics = useAnalytics();
   const navigate = useNavigate();
   const invalidateSession = useInvalidateSession();
@@ -190,8 +211,7 @@ const OrganizationList = ({
   // Auto-select when there's only one organization
   const singleOrg = organizations.length === 1 ? organizations[0] : null;
   const autoSelected = useRef(false);
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (auto-trigger select mutation on derived single-org state), move into handler
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (singleOrg && !autoSelected.current && !isSelectPending) {
       autoSelected.current = true;
       selectOrg(singleOrg.id);
@@ -199,6 +219,7 @@ const OrganizationList = ({
   }, [singleOrg, isSelectPending, selectOrg]);
 
   // Show skeleton while auto-selecting the single org
+  // eslint-disable-next-line react/react-compiler -- one-time guard ref read during render only gates the initial skeleton (before the auto-select effect fires) and the error path; the re-render is driven by singleOrg/isSelectPending
   if (singleOrg && (isSelectPending || !autoSelected.current)) {
     return (
       <Frame className="w-full max-w-sm">
@@ -250,7 +271,7 @@ const CreateOrganizationForm = ({
   isOauthPostLogin: boolean;
 }) => {
   const t = useTranslations();
-  const redirectTo = Route.useSearch({ select: (s) => s.redirectTo });
+  const redirectTo = Route.useSearch({ select: (s) => s.redirectTo ?? "/" });
   const analytics = useAnalytics();
   const navigate = useNavigate();
   const invalidateSession = useInvalidateSession();

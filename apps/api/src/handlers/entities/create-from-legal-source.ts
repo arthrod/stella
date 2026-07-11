@@ -15,10 +15,15 @@ const createFromLegalSourceBodySchema = t.Object({
   source: t.String({ minLength: 1 }),
 });
 
+const CREATE_FROM_LEGAL_SOURCE_ERROR_CODE = {
+  structuralRepairRequired: "legal_source_structural_repair_required",
+} as const;
+
 export default createSafeHandler(
   {
     body: createFromLegalSourceBodySchema,
     permissions: { entity: ["create"] },
+    mcp: { type: "capability", reason: "document_processing" },
   },
   async function* (ctx) {
     const {
@@ -36,6 +41,7 @@ export default createSafeHandler(
     if (compiled.status !== "ok") {
       return Result.err(
         new HandlerError({
+          code: CREATE_FROM_LEGAL_SOURCE_ERROR_CODE.structuralRepairRequired,
           status: 422,
           message: `The document source needs structural repair before a DOCX can be created: ${compiled.errors.map((error) => error.message).join("; ")}`,
         }),
@@ -98,12 +104,14 @@ const toHandlerError = (
   switch (error._tag) {
     case "EntityLimitError":
       return new HandlerError({
+        code: "legal_source_entity_limit_reached",
         status: 409,
         message:
           "This matter has reached the entity limit, so the document could not be created.",
       });
     case "MissingFilePropertyError":
       return new HandlerError({
+        code: "legal_source_file_property_missing",
         status: 422,
         message:
           "This matter is missing a file property, so the document could not be created.",

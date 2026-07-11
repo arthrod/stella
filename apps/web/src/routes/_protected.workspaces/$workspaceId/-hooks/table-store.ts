@@ -9,6 +9,7 @@ import { persist } from "zustand/middleware";
 import type { PersistStorage, StorageValue } from "zustand/middleware";
 import { immer } from "zustand/middleware/immer";
 
+import { readStoredJson } from "@/lib/stored-json";
 import type { WorkspaceEntity } from "@/lib/types";
 
 const MAP_TAG = "__map";
@@ -62,32 +63,22 @@ const StorageSchema = v.strictObject({
   }),
   version: v.optional(v.number(), 0),
 });
-const parseStorage = v.safeParser(StorageSchema);
-
 const parsePersistedStorage = (
   json: string,
 ): StorageValue<PersistedState> | null => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(json);
-  } catch {
+  const result = readStoredJson(json, StorageSchema);
+  if (!result) {
     return null;
   }
-  const result = parseStorage(parsed);
-  if (!result.success) {
-    return null;
-  }
-  const entries = result.output.state.columnSizing[MAP_TAG];
+  const entries = result.state.columnSizing[MAP_TAG];
   const columnSizing = new Map<string, ColumnSizingState>(entries);
   return {
     state: {
       columnSizing,
       contentMode:
-        result.output.state.contentMode ??
-        result.output.state.columnWidthMode ??
-        {},
+        result.state.contentMode ?? result.state.columnWidthMode ?? {},
     },
-    version: result.output.version,
+    version: result.version,
   };
 };
 
@@ -127,6 +118,16 @@ type TableStore = {
    */
   selectedEntities: Record<string, WorkspaceEntity[]>;
   setSelectedEntities: (viewId: string, entities: WorkspaceEntity[]) => void;
+  /**
+   * Union of every group section's loaded row ids for a grouped table view,
+   * synced by the grouped layout so a section's "select all" can preserve
+   * selections in other sections (they share one row selection) without
+   * resurrecting ids that dropped out of every section. Read imperatively
+   * (`useTableStore.getState()`) from the click handler rather than
+   * subscribed, so publishing a growing union never re-renders the table.
+   */
+  preservableRowIds: Record<string, string[]>;
+  setPreservableRowIds: (viewId: string, rowIds: string[]) => void;
   pruneStaleViews: (activeViewIds: string[]) => void;
 };
 
@@ -137,6 +138,7 @@ export const useTableStore = create<TableStore>()(
       contentMode: {},
       rowSelection: {},
       selectedEntities: {},
+      preservableRowIds: {},
 
       setContentMode: (viewId, mode) => {
         set((state) => {
@@ -167,6 +169,12 @@ export const useTableStore = create<TableStore>()(
             return;
           }
           state.selectedEntities[viewId] = entities;
+        });
+      },
+
+      setPreservableRowIds: (viewId, rowIds) => {
+        set((state) => {
+          state.preservableRowIds[viewId] = rowIds;
         });
       },
 
@@ -201,6 +209,13 @@ export const useTableStore = create<TableStore>()(
             }
           }
           state.selectedEntities = prunedSelectedEntities;
+          const prunedPreservableRowIds: Record<string, string[]> = {};
+          for (const [vid, rowIds] of Object.entries(state.preservableRowIds)) {
+            if (active.has(vid)) {
+              prunedPreservableRowIds[vid] = rowIds;
+            }
+          }
+          state.preservableRowIds = prunedPreservableRowIds;
         });
       },
     })),

@@ -31,7 +31,10 @@ import { useSyncJustifications } from "@/routes/_protected.workspaces/$workspace
 import { entityOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
 import { propertiesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/properties";
 import { workspaceKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/workspace";
-import { useWorkspaceStore } from "@/routes/_protected.workspaces/$workspaceId/-store";
+import {
+  selectJustificationByFieldId,
+  useWorkspaceStore,
+} from "@/routes/_protected.workspaces/$workspaceId/-store";
 
 const BBOX_POLL_INTERVAL_MS = 1000;
 
@@ -60,7 +63,7 @@ export const DocumentAiSourceBar = ({
   });
 
   const justification = useWorkspaceStore((s) =>
-    s.justifications.find((j) => j.fieldId === fieldId),
+    selectJustificationByFieldId(s.justifications, fieldId),
   );
 
   const slots = useMemo(() => {
@@ -109,7 +112,9 @@ export const DocumentAiSourceBar = ({
         ? {
             ...justification.content,
             blocks: justification.content.blocks.filter(
-              (block) => block.fileFieldId === activeTab.id,
+              (block) =>
+                block.kind !== "playbook-verdict" &&
+                block.fileFieldId === activeTab.id,
             ),
           }
         : null,
@@ -179,10 +184,16 @@ export const DocumentAiSourceBar = ({
     mutateBoundingBoxes({ justificationId });
   }, [needsBoxes, justificationId, mutateBoundingBoxes]);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset expansion when fieldId changes. setIsAnswerExpanded also backs the toggle button, so it is not pure derived state; a key-reset belongs in the parent (file-tab-panel.tsx, outside this batch) and would also reset this component's bbox refs. Keep.
-  useEffect(() => {
+  // Reset expansion when the field changes. setIsAnswerExpanded also backs the
+  // toggle button, so this is not pure derived state; a key-reset belongs in
+  // the parent (file-tab-panel.tsx, outside this batch) and would also reset
+  // this component's bbox refs. Adjusting state during render (instead of in an
+  // effect) avoids the extra commit and the cascading-render warning.
+  const [lastFieldId, setLastFieldId] = useState(fieldId);
+  if (fieldId !== lastFieldId) {
+    setLastFieldId(fieldId);
     setIsAnswerExpanded(false);
-  }, [fieldId]);
+  }
 
   // Nudge the justifications cache every second while we still need
   // bboxes. POST success doesn't guarantee the payload is in cache

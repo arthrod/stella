@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useLocale, useTranslations } from "use-intl";
 
+import type { ConditionNode } from "@stll/template-conditions";
 import { Button } from "@stll/ui/components/button";
 import { Checkbox } from "@stll/ui/components/checkbox";
 import {
@@ -95,7 +96,7 @@ export const FIELD_TYPE_CHOICES = [
 
 /** What the type picker (and the field row) shows: "company" when a lookup
  *  is configured, the manifest input type otherwise. */
-const fieldTypeChoice = (field: EditableField): InputType | "company" =>
+const fieldTypeChoice = (field: TemplateEditableField): InputType | "company" =>
   field.lookup === undefined ? field.inputType : "company";
 
 export const PART_INPUT_TYPES = ["text", "select"] as const;
@@ -170,7 +171,7 @@ export type EditablePart = {
   pattern?: string | undefined;
 };
 
-export type EditableField = {
+export type TemplateEditableField = {
   path: string;
   kind: string;
   label: string;
@@ -201,6 +202,11 @@ export type EditableField = {
    *  formula/lookup/parts/aiPrompt/aiAdapt (backend-validated). A boolean
    *  field with `condition` set is a "condition-field". */
   condition?: string | undefined;
+  /** Condition rule persisted as the canonical AST instead of the `condition`
+   *  string. Authoritative when set; required when the rule contains a formula
+   *  operand (which has no `{{#if}}` string form). Mutually exclusive with the
+   *  other value sources, same as `condition`. */
+  conditionAst?: ConditionNode | undefined;
   /** Locale-aware rendering of a "date" field's submitted ISO value at fill
    *  time; absent = the ISO value is substituted as typed. */
   dateFormat?: TemplateDateFormat | undefined;
@@ -265,7 +271,7 @@ const inferInputType = (field: ResolvedField): InputType => {
 
 export const buildEditableFields = (
   fields: readonly ResolvedField[],
-): EditableField[] =>
+): TemplateEditableField[] =>
   fields.map((f) => ({
     path: f.path,
     kind: f.kind,
@@ -317,7 +323,7 @@ export const defaultCompositeFormat = (
 };
 
 export const compositeManifestProps = (
-  field: EditableField,
+  field: TemplateEditableField,
 ): CompositeManifestProps => {
   const parts = (field.parts ?? []).filter((part) => part.key.trim() !== "");
   // An untyped format defaults to all parts joined by spaces, so a composite
@@ -355,7 +361,7 @@ export const compositeManifestProps = (
  * invalid empty lookup.
  */
 export const lookupManifestProps = (
-  field: EditableField,
+  field: TemplateEditableField,
 ): EditableLookup | undefined => {
   if (
     field.lookup === undefined ||
@@ -386,7 +392,9 @@ export const lookupManifestProps = (
  * The manifest shape of a field's fill hint: the trimmed text, with a blank
  * one normalized away. Kept short — the input enforces {@link HINT_MAX_LENGTH}.
  */
-export const hintManifestProps = (field: EditableField): string | undefined => {
+export const hintManifestProps = (
+  field: TemplateEditableField,
+): string | undefined => {
   const hint = field.hint?.trim() ?? "";
   return hint === "" ? undefined : hint;
 };
@@ -397,7 +405,7 @@ export const hintManifestProps = (field: EditableField): string | undefined => {
  * different value).
  */
 export const dateFormatManifestProps = (
-  field: EditableField,
+  field: TemplateEditableField,
 ): TemplateDateFormat | undefined => {
   if (
     field.inputType !== "date" ||
@@ -417,7 +425,7 @@ export const dateFormatManifestProps = (
  * composite configuration takes precedence and suppresses the formula.
  */
 export const formulaManifestProps = (
-  field: EditableField,
+  field: TemplateEditableField,
 ): string | undefined => {
   if (field.formula === undefined || field.parts !== undefined) {
     return undefined;
@@ -453,7 +461,7 @@ export const ConfigureStep = ({
   const [expandedField, setExpandedField] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const updateField = (path: string, patch: Partial<EditableField>) => {
+  const updateField = (path: string, patch: Partial<TemplateEditableField>) => {
     setFields((prev) =>
       prev.map((f) => (f.path === path ? { ...f, ...patch } : f)),
     );
@@ -758,8 +766,8 @@ const CompositePartsEditor = ({
   field,
   onUpdate,
 }: {
-  field: EditableField;
-  onUpdate: (patch: Partial<EditableField>) => void;
+  field: TemplateEditableField;
+  onUpdate: (patch: Partial<TemplateEditableField>) => void;
 }) => {
   const t = useTranslations();
   const parts = field.parts ?? [];
@@ -927,8 +935,8 @@ const OptionsFromFieldControl = ({
   onUpdate,
   siblingPaths,
 }: {
-  field: EditableField;
-  onUpdate: (patch: Partial<EditableField>) => void;
+  field: TemplateEditableField;
+  onUpdate: (patch: Partial<TemplateEditableField>) => void;
   siblingPaths?: readonly string[] | undefined;
 }) => {
   const t = useTranslations();
@@ -1186,8 +1194,8 @@ const CompanyLookupConfig = ({
   field,
   onUpdate,
 }: {
-  field: EditableField;
-  onUpdate: (patch: Partial<EditableField>) => void;
+  field: TemplateEditableField;
+  onUpdate: (patch: Partial<TemplateEditableField>) => void;
 }) => {
   const t = useTranslations();
   const locale = useLocale();
@@ -1486,8 +1494,8 @@ const DateFormatConfigControl = ({
   onUpdate,
   defaultLocale,
 }: {
-  field: EditableField;
-  onUpdate: (patch: Partial<EditableField>) => void;
+  field: TemplateEditableField;
+  onUpdate: (patch: Partial<TemplateEditableField>) => void;
   /** Locale preselected before the user picks one — the template's primary
    *  language when the host knows it, the app locale otherwise. */
   defaultLocale: string;
@@ -1567,8 +1575,8 @@ const FormulaConfigControl = ({
   field,
   onUpdate,
 }: {
-  field: EditableField;
-  onUpdate: (patch: Partial<EditableField>) => void;
+  field: TemplateEditableField;
+  onUpdate: (patch: Partial<TemplateEditableField>) => void;
 }) => {
   const t = useTranslations();
 
@@ -1628,8 +1636,8 @@ export const FieldConfigEditor = ({
   hideFormulaControl = false,
   defaultDateLocale,
 }: {
-  field: EditableField;
-  onUpdate: (patch: Partial<EditableField>) => void;
+  field: TemplateEditableField;
+  onUpdate: (patch: Partial<TemplateEditableField>) => void;
   /** Embedded in the Studio's field face: the face header already shows the
    *  path, and the wizard's chevron-row indent doesn't apply. */
   embedded?: boolean;

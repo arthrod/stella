@@ -9,8 +9,13 @@ import { toSafeId } from "@/lib/safe-id";
 // ── Key factory ─────────────────────────────────────
 
 const SKILLS_PAGE_SIZE = 100;
+const PLAYBOOKS_PAGE_SIZE = 50;
 
 type SkillsPageKey = {
+  limit: number;
+};
+
+type PlaybooksPageKey = {
   limit: number;
 };
 
@@ -21,27 +26,12 @@ type ClausesListKey = {
 };
 
 export const knowledgeKeys = {
-  shortcuts: {
-    all: (organizationId: string) => ["shortcuts", organizationId],
-    list: (organizationId: string) => [
-      ...knowledgeKeys.shortcuts.all(organizationId),
-      "list",
-    ],
-  },
   skills: {
     all: (organizationId: string) => ["skills", organizationId],
     list: (organizationId: string, { limit }: SkillsPageKey) => [
       ...knowledgeKeys.skills.all(organizationId),
       "list",
       { limit },
-    ],
-    // Skills with a slash command set. Feeds the chat slash menu and
-    // the property prompt editor's slash picker. Separate cache from
-    // the full skill list so the editor's add/edit invalidations
-    // don't reset the slash-menu data.
-    commands: (organizationId: string) => [
-      ...knowledgeKeys.skills.all(organizationId),
-      "commands",
     ],
     detail: (organizationId: string, skillId: string) => [
       ...knowledgeKeys.skills.all(organizationId),
@@ -119,6 +109,27 @@ export const knowledgeKeys = {
   },
   clauseCategories: {
     all: (organizationId: string) => ["clause-categories", organizationId],
+  },
+  playbooks: {
+    all: (organizationId: string) => ["playbooks", organizationId],
+    list: (organizationId: string, { limit }: PlaybooksPageKey) => [
+      ...knowledgeKeys.playbooks.all(organizationId),
+      "list",
+      { limit },
+    ],
+    detail: (organizationId: string, playbookId: string) => [
+      ...knowledgeKeys.playbooks.all(organizationId),
+      playbookId,
+      "detail",
+    ],
+    versions: (organizationId: string, playbookId: string) => [
+      ...knowledgeKeys.playbooks.all(organizationId),
+      playbookId,
+      "versions",
+    ],
+  },
+  playbookStarters: {
+    all: (organizationId: string) => ["playbook-starters", organizationId],
   },
   mcp: {
     all: (organizationId: string) => ["mcp", organizationId],
@@ -442,16 +453,108 @@ export const clauseDetailOptions = (organizationId: string, clauseId: string) =>
     staleTime: STALE_TIME.FIVE.MINUTES,
   });
 
-// ── Shortcuts queries ────────────────────────────────
+// ── Playbook queries ────────────────────────────────
 
-export const shortcutsOptions = (organizationId: string) =>
+// The org playbook cap equals the API's max page size, so one request returns
+// every playbook; pickers that launch a playbook (review facet, files-table run
+// menu) need them all selectable rather than the first default page.
+export const PLAYBOOK_PICKER_LIMIT = 100;
+
+export const playbooksOptions = (
+  organizationId: string,
+  limit: number = PLAYBOOKS_PAGE_SIZE,
+) =>
   queryOptions({
-    queryKey: knowledgeKeys.shortcuts.list(organizationId),
+    queryKey: knowledgeKeys.playbooks.list(organizationId, { limit }),
     queryFn: async ({ signal }) => {
-      const response = await api.shortcuts.get({ fetch: { signal } });
+      const response = await api.playbooks.get({
+        query: { limit },
+        fetch: { signal },
+      });
+
       if (response.error) {
         throw toAPIError(response.error);
       }
+
+      return response.data;
+    },
+    staleTime: STALE_TIME.FIVE.MINUTES,
+  });
+
+// Org-owned document-type taxonomy, used to scope a playbook to a document type
+// in the editor. Root-scoped API (keyed off the active org); keyed by org so a
+// switch doesn't serve a stale taxonomy.
+export const documentTypesOptions = (organizationId: string) =>
+  queryOptions({
+    queryKey: ["document-types", organizationId] as const,
+    queryFn: async ({ signal }) => {
+      const response = await api["document-types"].get({ fetch: { signal } });
+
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+
+      return response.data;
+    },
+    staleTime: STALE_TIME.FIVE.MINUTES,
+  });
+
+// Ready-made starter playbooks (NDA, DPA, MSA) a user can instantiate into
+// their org in one click. Minimal metadata only — the gallery does not need
+// the full position bodies.
+export const playbookStartersOptions = (organizationId: string) =>
+  queryOptions({
+    queryKey: knowledgeKeys.playbookStarters.all(organizationId),
+    queryFn: async ({ signal }) => {
+      const response = await api.playbooks.starters.get({ fetch: { signal } });
+
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+
+      return response.data;
+    },
+    staleTime: STALE_TIME.FIVE.MINUTES,
+  });
+
+export const playbookDetailOptions = (
+  organizationId: string,
+  playbookId: string,
+) =>
+  queryOptions({
+    queryKey: knowledgeKeys.playbooks.detail(organizationId, playbookId),
+    queryFn: async ({ signal }) => {
+      const response = await api
+        .playbooks({ playbookId: toSafeId<"playbookDefinition">(playbookId) })
+        .get({ fetch: { signal } });
+
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+
+      return response.data;
+    },
+    staleTime: STALE_TIME.FIVE.MINUTES,
+  });
+
+// Approval-version history for a playbook: a small, bounded, per-parent
+// collection (one row per approve call), so a plain list is enough — no
+// cursor pagination, mirroring the backend's `list-versions` handler.
+export const playbookVersionsOptions = (
+  organizationId: string,
+  playbookId: string,
+) =>
+  queryOptions({
+    queryKey: knowledgeKeys.playbooks.versions(organizationId, playbookId),
+    queryFn: async ({ signal }) => {
+      const response = await api
+        .playbooks({ playbookId: toSafeId<"playbookDefinition">(playbookId) })
+        .versions.get({ fetch: { signal } });
+
+      if (response.error) {
+        throw toAPIError(response.error);
+      }
+
       return response.data;
     },
     staleTime: STALE_TIME.FIVE.MINUTES,
@@ -465,11 +568,14 @@ export const skillsOptions = (organizationId: string) =>
       limit: SKILLS_PAGE_SIZE,
     }),
     queryFn: async ({ pageParam, signal }) => {
+      const query: { limit: number; cursor?: string } = {
+        limit: SKILLS_PAGE_SIZE,
+      };
+      if (pageParam !== "") {
+        query.cursor = pageParam;
+      }
       const response = await api.skills.get({
-        query: {
-          limit: SKILLS_PAGE_SIZE,
-          offset: pageParam,
-        },
+        query,
         fetch: { signal },
       });
       if (response.error) {
@@ -477,25 +583,8 @@ export const skillsOptions = (organizationId: string) =>
       }
       return response.data;
     },
-    initialPageParam: 0,
-    getNextPageParam: (lastPage) => lastPage.nextOffset ?? undefined,
-    staleTime: STALE_TIME.FIVE.MINUTES,
-  });
-
-// Skills with a slash command set. Backs the chat slash menu — the
-// hook returns a stable list, but the upstream cache uses its own
-// key so editor mutations on a single skill don't invalidate this
-// page-scoped read.
-export const skillCommandsOptions = (organizationId: string) =>
-  queryOptions({
-    queryKey: knowledgeKeys.skills.commands(organizationId),
-    queryFn: async ({ signal }) => {
-      const response = await api.skills.commands.get({ fetch: { signal } });
-      if (response.error) {
-        throw toAPIError(response.error);
-      }
-      return response.data;
-    },
+    initialPageParam: "",
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
     staleTime: STALE_TIME.FIVE.MINUTES,
   });
 

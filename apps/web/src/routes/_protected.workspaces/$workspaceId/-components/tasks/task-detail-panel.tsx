@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouteContext } from "@tanstack/react-router";
@@ -116,8 +116,7 @@ export const TaskDetailPanel = ({
 
   // Auto-assign current user and focus name for new tasks
   const didAutoAssign = useRef(false);
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay + data mutation, opens edit and auto-assigns the user on new task; move into the task-create flow
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (isNewTask && task) {
       setEditNameValue("");
       setIsEditingName(true);

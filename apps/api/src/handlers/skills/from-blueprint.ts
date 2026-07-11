@@ -22,6 +22,7 @@ const fromBlueprintBodySchema = t.Object({
 
 const config = {
   permissions: { agentSkill: ["create"] },
+  mcp: { type: "capability", reason: "agent_tool_authoring" },
   body: fromBlueprintBodySchema,
 } satisfies HandlerConfig;
 

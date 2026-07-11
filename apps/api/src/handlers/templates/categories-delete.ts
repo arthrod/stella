@@ -14,6 +14,7 @@ const deleteTemplateCategoryParamsSchema = t.Object({
 
 const config = {
   permissions: { template: ["delete"] },
+  mcp: { type: "capability", reason: "template_authoring_ui" },
   params: deleteTemplateCategoryParamsSchema,
 } satisfies HandlerConfig;
 

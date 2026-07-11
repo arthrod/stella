@@ -1,7 +1,6 @@
 import type { PropsWithChildren } from "react";
 import {
   useCallback,
-  useEffect,
   useOptimistic,
   useRef,
   useState,
@@ -20,9 +19,16 @@ import { cn } from "@stll/ui/lib/utils";
 
 import { MetadataPanelSkeleton } from "@/components/inspector/file-facets";
 import { QuerySuspenseBoundary } from "@/components/query-suspense-boundary";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
 import { formatFullTimestamp, formatRelativeTime } from "@/lib/relative-time";
-import type { EntityField, EntityKind, WorkspaceProperty } from "@/lib/types";
+import type {
+  EntityField,
+  EntityId,
+  EntityKind,
+  PropertyId,
+  WorkspaceProperty,
+} from "@/lib/types";
 import { CreateProperty } from "@/routes/_protected.workspaces/$workspaceId/-components/create-property";
 import { EditableField } from "@/routes/_protected.workspaces/$workspaceId/-components/editable-field";
 import { Justification } from "@/routes/_protected.workspaces/$workspaceId/-components/justification";
@@ -33,7 +39,10 @@ import {
 import { entityVersionsOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/entity-versions";
 import { propertiesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/properties";
 import { useIsWorkflowRunning } from "@/routes/_protected.workspaces/$workspaceId/-queries/workspace";
-import { useWorkspaceStore } from "@/routes/_protected.workspaces/$workspaceId/-store";
+import {
+  selectJustificationByFieldId,
+  useWorkspaceStore,
+} from "@/routes/_protected.workspaces/$workspaceId/-store";
 
 type AiFieldClickArgs = {
   fieldId: string;
@@ -64,14 +73,14 @@ type EntityMetadataContentProps = {
   onAiFieldClick: ((args: AiFieldClickArgs) => void) | undefined;
   entity: {
     kind: EntityKind;
-    entityId: string;
+    entityId: EntityId;
     fields: EntityField[];
   };
 };
 
 type FieldInfoRow = {
   id: string;
-  propertyId: string;
+  propertyId: PropertyId;
   content: EntityField["content"] | undefined;
 };
 
@@ -175,14 +184,14 @@ const EntityMetadataContent = ({
   // optimistic-only set empties. The placeholder must persist until
   // `entity.fields` actually contains the property id.
   const [pendingPlaceholderIds, setPendingPlaceholderIds] = useState<
-    readonly string[]
+    readonly PropertyId[]
   >([]);
-  const activeJustification = useWorkspaceStore((s) =>
-    activeJustificationFieldId
-      ? (s.justifications.find(
-          (j) => j.fieldId === activeJustificationFieldId,
-        ) ?? null)
-      : null,
+  const activeJustification = useWorkspaceStore(
+    (s) =>
+      selectJustificationByFieldId(
+        s.justifications,
+        activeJustificationFieldId,
+      ) ?? null,
   );
 
   const refreshEntityFields = useCallback(async () => {
@@ -196,8 +205,7 @@ const EntityMetadataContent = ({
     ]);
   }, [queryClient, workspaceId]);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (workflow-finished refetch), move into handler
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (isWorkflowRunning) {
       sawWorkflowRunning.current = true;
       return;
@@ -218,8 +226,14 @@ const EntityMetadataContent = ({
     .toSorted()
     .join(",");
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived state, compute in render
-  useEffect(() => {
+  // Prune optimistic placeholders whose real fields have now arrived. Adjusting
+  // state during render (instead of in an effect) drops the placeholder in the
+  // same commit the field lands in and avoids the cascading-render warning.
+  const [lastArrivedKey, setLastArrivedKey] = useState(
+    entityFieldPropertyIdsKey,
+  );
+  if (entityFieldPropertyIdsKey !== lastArrivedKey) {
+    setLastArrivedKey(entityFieldPropertyIdsKey);
     const arrivedIds = new Set(
       entityFieldPropertyIdsKey.split(",").filter((id) => id.length > 0),
     );
@@ -228,7 +242,7 @@ const EntityMetadataContent = ({
         ? prev
         : prev.filter((id) => !arrivedIds.has(id)),
     );
-  }, [entityFieldPropertyIdsKey]);
+  }
 
   if (propertiesQuery.isError) {
     return null;
@@ -339,10 +353,7 @@ const EntityMetadataContent = ({
             label={t("inspector.metadata.author")}
             value={authorLabel}
           />
-          <ReadOnlyRow
-            label={t("inspector.metadata.version")}
-            value={versionLabel}
-          />
+          <ReadOnlyRow label={t("common.version")} value={versionLabel} />
           {updatedAtIso !== null && (
             <ReadOnlyRow
               label={t("inspector.metadata.updatedAt")}

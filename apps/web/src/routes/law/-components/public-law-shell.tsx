@@ -154,10 +154,10 @@ function PublicLawSidebar({
   return (
     <Sidebar
       aria-label={t("navigation.toggleSidebar")}
-      className="border-sidebar-border/35"
+      className="border-sidebar-border"
       collapsible="icon"
     >
-      <SidebarHeader className="border-sidebar-border/35 h-12 border-b p-0">
+      <SidebarHeader className="border-sidebar-border h-12 border-b p-0">
         <div
           className={
             isCollapsed
@@ -391,7 +391,7 @@ function PublicInspectorRail({
         )}
       >
         <div className="bg-sidebar flex h-full w-full flex-col">
-          <div className="bg-background flex h-full border-s shadow-lg">
+          <div className="bg-background flex h-full shadow-lg">
             <div className={SIDE_RAIL_CONTAINER_CLASS}>
               {railButton({
                 icon: <PanelRightIcon className="size-4" />,

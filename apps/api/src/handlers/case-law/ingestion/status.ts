@@ -1,3 +1,4 @@
+import { Result } from "better-result";
 import { count, desc, gte, sql } from "drizzle-orm";
 
 import type { ScopedDb } from "@/api/db";
@@ -7,6 +8,9 @@ import {
   caseLawIngestionFailures,
   caseLawSources,
 } from "@/api/db/schema";
+import { createSafeRootHandler } from "@/api/lib/api-handlers";
+import type { HandlerConfig } from "@/api/lib/api-handlers";
+import { DAY_IN_MS } from "@/api/lib/time";
 
 type SourceStatus = {
   adapterKey: string;
@@ -39,7 +43,7 @@ export const getIngestionStatus = async (
   scopedDb: ScopedDb,
 ): Promise<IngestionStatus> => {
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-  const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const oneDayAgo = new Date(Date.now() - DAY_IN_MS);
 
   return await scopedDb(async (db) => {
     const sources = await db
@@ -58,13 +62,13 @@ export const getIngestionStatus = async (
     const sourceStatuses: SourceStatus[] = [];
 
     for (const source of sources) {
-      // oxlint-disable-next-line no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
+      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
       const [totalRow] = await db
         .select({ total: count() })
         .from(caseLawDecisions)
         .where(sql`${caseLawDecisions.sourceId} = ${source.id}`);
 
-      // oxlint-disable-next-line no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
+      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
       const [hourRow] = await db
         .select({
           inserted: sql<number>`coalesce(sum(${caseLawIngestionEvents.inserted}), 0)`,
@@ -75,7 +79,7 @@ export const getIngestionStatus = async (
             AND ${caseLawIngestionEvents.finishedAt} >= ${oneHourAgo}`,
         );
 
-      // oxlint-disable-next-line no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
+      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
       const [dayRow] = await db
         .select({
           inserted: sql<number>`coalesce(sum(${caseLawIngestionEvents.inserted}), 0)`,
@@ -86,7 +90,7 @@ export const getIngestionStatus = async (
             AND ${caseLawIngestionEvents.finishedAt} >= ${oneDayAgo}`,
         );
 
-      // oxlint-disable-next-line no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
+      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
       const [failRow] = await db
         .select({ total: count() })
         .from(caseLawIngestionFailures)
@@ -95,7 +99,7 @@ export const getIngestionStatus = async (
             AND ${caseLawIngestionFailures.createdAt} >= ${oneDayAgo}`,
         );
 
-      // oxlint-disable-next-line no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
+      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
       const [lastEvent] = await db
         .select({
           status: caseLawIngestionEvents.status,
@@ -110,7 +114,7 @@ export const getIngestionStatus = async (
         .orderBy(desc(caseLawIngestionEvents.finishedAt))
         .limit(1);
 
-      // oxlint-disable-next-line no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
+      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
       const topFailures = await db
         .select({
           errorType: caseLawIngestionFailures.errorType,
@@ -172,3 +176,27 @@ export const getIngestionStatus = async (
     };
   });
 };
+
+const config = {
+  // Operator-only ingestion observability: `auditLog: ["read"]` is held solely
+  // by owner/admin (see `packages/permissions`), matching the admin/owner gate
+  // this route used to carry as a route-level `onBeforeHandle`. Declaring it in
+  // the handler config means the safe-handler wrapper enforces it for BOTH the
+  // REST route and the generic `invoke_capability` path, so neither bypasses the
+  // gate. Keep this as the single source of the role check for this endpoint.
+  permissions: { auditLog: ["read"] },
+  mcp: { type: "capability", reason: "legal_corpus_admin" },
+} satisfies HandlerConfig;
+
+const getCaseLawIngestionStatus = createSafeRootHandler(
+  config,
+  async function* ({ scopedDb }) {
+    const response = yield* Result.await(
+      Result.tryPromise(async () => await getIngestionStatus(scopedDb)),
+    );
+
+    return Result.ok(response);
+  },
+);
+
+export default getCaseLawIngestionStatus;

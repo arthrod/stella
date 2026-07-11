@@ -1,26 +1,33 @@
-import type { ModelMessage } from "ai";
-import { MockLanguageModelV3 } from "ai/test";
+import type { ModelMessage } from "@tanstack/ai";
 import { Result } from "better-result";
 import { describe, expect, test } from "bun:test";
 
+import { createChatAttachmentPart } from "@/api/handlers/chat/chat-message-parts";
+import { resolveChatCompactionBudget } from "@/api/handlers/chat/compaction-budget";
 import type { ChatMessage } from "@/api/handlers/chat/types";
-import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
-import type { Analytics } from "@/api/lib/analytics/types";
 import { toSafeId } from "@/api/lib/branded-types";
-import { asTestRaw } from "@/api/tests/helpers/test-tool-set";
-import { createScopedDbMock } from "@/api/tests/scoped-db-mock";
 
 import {
   compactChatMessages,
   compactModelMessagesForModel,
   compactModelMessages,
+  computeThreadContextUsage,
   parseChatCompactionSummary,
   planChatCompaction,
   planModelCompaction,
   renderChatMessagesForCompaction,
   renderModelMessagesForCompaction,
+  resolveCompactionTriggerTokens,
+  resolvePreserveTokensForTrigger,
+  shouldCompactChatMessages,
   summarizeChatCompaction,
 } from "./compaction";
+
+// Mirrors the stable estimator contract in compaction.ts. If these change, the
+// exact-value assertions below intentionally fail so the meter math is revisited.
+const MESSAGE_OVERHEAD_TOKENS = 12;
+const FILE_PART_ESTIMATED_TOKENS = 8000;
+const DEFAULT_TRIGGER_TOKENS = 64_000;
 
 const textMessage = ({
   id,
@@ -33,14 +40,8 @@ const textMessage = ({
 }): ChatMessage => ({
   id,
   role,
-  parts: [{ type: "text", text }],
+  parts: [{ type: "text", content: text }],
 });
-
-const waitForAsyncSideEffects = async () => {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, 0);
-  });
-};
 
 describe("chat history compaction", () => {
   test("keeps full history below the token trigger", () => {
@@ -89,7 +90,8 @@ describe("chat history compaction", () => {
     expect(compacted.value.at(0)?.role).toBe("user");
     expect(compacted.value.at(0)?.parts.at(0)).toEqual({
       type: "text",
-      text: "Earlier conversation compacted from 2 message(s).\n\nold work summary",
+      content:
+        "Earlier conversation compacted from 2 message(s).\n\nold work summary",
     });
     expect(compacted.value.at(1)?.id).toBe("msg_3");
   });
@@ -169,19 +171,148 @@ describe("chat history compaction", () => {
         id: "msg_1",
         role: "user",
         parts: [
-          {
-            type: "file",
+          createChatAttachmentPart({
             filename: "contract.pdf",
-            mediaType: "application/pdf",
+            mimeType: "application/pdf",
             url: "stella-user-file://file_1",
-          },
+          }),
         ],
       },
     ]);
 
     expect(transcript).toContain("contract.pdf");
-    expect(transcript).toContain("old file attachments are not rehydrated");
+    expect(transcript).toContain(
+      "content: omitted; attachments are not inlined during compaction",
+    );
     expect(transcript).not.toContain("stella-user-file://file_1");
+  });
+
+  test("omits anonymization restoration metadata from the transcript", () => {
+    const transcript = renderChatMessagesForCompaction([
+      {
+        id: "msg_1",
+        role: "assistant",
+        metadata: {
+          anonRestorations: {
+            pairs: [
+              {
+                placeholder: "[ORG_1]",
+                original: "Confidential Client LLC",
+              },
+            ],
+          },
+        },
+        parts: [
+          {
+            type: "text",
+            content: "The answer references [ORG_1].",
+          },
+        ],
+      },
+    ]);
+
+    expect(transcript).toContain("The answer references [ORG_1].");
+    expect(transcript).not.toContain("Confidential Client LLC");
+  });
+
+  test("ignores anonymization restoration metadata when planning compaction", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "msg_1",
+        role: "assistant",
+        metadata: {
+          anonRestorations: {
+            pairs: [
+              {
+                placeholder: "[ORG_1]",
+                original: "Confidential Client LLC ".repeat(1000),
+              },
+            ],
+          },
+        },
+        parts: [
+          {
+            type: "text",
+            content: "The answer references [ORG_1].",
+          },
+        ],
+      },
+    ];
+
+    expect(shouldCompactChatMessages(messages, 1000)).toBe(false);
+    expect(planChatCompaction({ messages, triggerTokens: 1000 }).type).toBe(
+      "none",
+    );
+  });
+
+  test("drops restoration-only messages from transcript and planning", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "msg_1",
+        role: "assistant",
+        metadata: {
+          anonRestorations: {
+            pairs: [
+              {
+                placeholder: "[ORG_1]",
+                original: "Confidential Client LLC ".repeat(1000),
+              },
+            ],
+          },
+        },
+        parts: [],
+      },
+    ];
+
+    expect(renderChatMessagesForCompaction(messages)).toBe("");
+    expect(shouldCompactChatMessages(messages, 1)).toBe(false);
+    expect(planChatCompaction({ messages, triggerTokens: 1 }).type).toBe(
+      "none",
+    );
+  });
+
+  test("ignores restoration-only messages when finding the preserved tail", () => {
+    const messages: ChatMessage[] = [
+      textMessage({ id: "msg_1", role: "user", text: "old fact ".repeat(80) }),
+      textMessage({
+        id: "msg_2",
+        role: "assistant",
+        text: "old answer ".repeat(80),
+      }),
+      {
+        id: "msg_3",
+        role: "assistant",
+        metadata: {
+          anonRestorations: {
+            pairs: [
+              {
+                placeholder: "[ORG_1]",
+                original: "Confidential Client LLC",
+              },
+            ],
+          },
+        },
+        parts: [],
+      },
+      textMessage({ id: "msg_4", role: "user", text: "latest question" }),
+    ];
+
+    const plan = planChatCompaction({
+      messages,
+      preserveTokens: 20,
+      triggerTokens: 50,
+    });
+
+    expect(plan.type).toBe("compact");
+    if (plan.type === "none") {
+      return;
+    }
+
+    expect(plan.messagesToSummarize.map((message) => message.id)).toEqual([
+      "msg_1",
+      "msg_2",
+    ]);
+    expect(plan.recentMessages.map((message) => message.id)).toEqual(["msg_4"]);
   });
 
   test("falls back to the recent tail when summary generation fails", async () => {
@@ -329,7 +460,7 @@ Answer the latest question.
       { role: "user", content: "old request ".repeat(80) },
       {
         role: "assistant",
-        content: [{ type: "text", text: "old tool finding ".repeat(80) }],
+        content: [{ type: "text", content: "old tool finding ".repeat(80) }],
       },
       { role: "user", content: "latest request" },
     ];
@@ -357,108 +488,36 @@ Answer the latest question.
     ]);
   });
 
-  test("records usage for model compaction summaries", async () => {
-    const periodStart = new Date("2026-06-01T00:00:00.000Z");
-    const periodEnd = new Date("2026-07-01T00:00:00.000Z");
-    const insertedRows: unknown[] = [];
-    const tx = {
-      select: () => ({
-        from: () => ({
-          where: () => ({
-            limit: async () => [
-              {
-                currentPeriodEnd: periodEnd,
-                currentPeriodStart: periodStart,
-                status: "active",
-              },
-            ],
-          }),
-        }),
-      }),
-      insert: () => ({
-        values: async (values: unknown) => {
-          insertedRows.push(values);
-        },
-      }),
-    };
-    const { safeDb } = createScopedDbMock(tx);
-    const analytics: Analytics = {
-      capture: () => undefined,
-      flush: async () => undefined,
-    };
-    const aiAnalytics = createAIAnalyticsCallbacks({
-      analytics,
-      usageMetering: {
-        actionType: "chat",
-        organizationId: toSafeId<"organization">("org_compaction"),
-        safeDb,
-        serviceTier: "standard",
-        userId: toSafeId<"user">("user_compaction"),
-        workspaceId: toSafeId<"workspace">("workspace_compaction"),
-      },
-      feature: "chat.step_compaction",
-      modelRole: "chat",
-      traceId: "trace_compaction",
-    });
-    const model = new MockLanguageModelV3({
-      modelId: "gpt-4o-mini",
-      provider: "openai",
-      doGenerate: {
-        content: [{ type: "text", text: "metered summary" }],
-        finishReason: { raw: "stop", unified: "stop" },
-        usage: {
-          inputTokens: {
-            cacheRead: 0,
-            cacheWrite: 0,
-            noCache: 1_000_000,
-            total: 1_000_000,
-          },
-          outputTokens: {
-            reasoning: 0,
-            text: 0,
-            total: 0,
-          },
-        },
-        warnings: [],
-      },
-    });
+  test("uses the TanStack model wrapper for model compaction summaries", async () => {
+    let transcriptSeenBySummarizer = "";
 
     const compacted = await compactModelMessagesForModel({
       abortSignal: AbortSignal.timeout(1000),
-      aiAnalytics,
       messages: [
         { role: "user", content: "old request ".repeat(80) },
         { role: "assistant", content: "old response ".repeat(80) },
         { role: "user", content: "latest request" },
       ],
-      model,
+      organizationId: toSafeId<"organization">("org_compaction"),
+      orgAIConfig: null,
       preserveTokens: 20,
+      role: "chat",
+      summarizeWithModel: async (transcript) => {
+        transcriptSeenBySummarizer = transcript;
+        return "tanstack summary";
+      },
       triggerTokens: 50,
     });
 
-    await waitForAsyncSideEffects();
-
     expect(Result.isOk(compacted)).toBe(true);
-    expect(insertedRows).toHaveLength(1);
-    const row = asTestRaw<{
-      actionType: string;
-      unitsConsumed: number;
-      modelRole: string;
-      organizationId: string;
-      rawUsageMicroUnits: number;
-      serviceTier: string;
-      traceId: string;
-      workspaceId: string;
-    }>(insertedRows.at(0));
-    expect(row).toMatchObject({
-      actionType: "chat",
-      unitsConsumed: 225,
-      modelRole: "chat",
-      organizationId: "org_compaction",
-      rawUsageMicroUnits: 15_000,
-      serviceTier: "standard",
-      traceId: "trace_compaction",
-      workspaceId: "workspace_compaction",
+    if (Result.isError(compacted)) {
+      return;
+    }
+    expect(transcriptSeenBySummarizer).toContain("old request");
+    expect(compacted.value.at(0)).toEqual({
+      role: "user",
+      content:
+        "Earlier model-step history compacted from 2 message(s).\n\ntanstack summary",
     });
   });
 
@@ -469,25 +528,22 @@ Answer the latest question.
       { role: "user", content: "latest request ".repeat(20) },
       {
         role: "assistant",
-        content: [
+        content: null,
+        toolCalls: [
           {
-            type: "tool-call",
-            toolCallId: "call_1",
-            toolName: "searchMatter",
-            input: { query: "termination" },
+            id: "call_1",
+            type: "function",
+            function: {
+              name: "searchMatter",
+              arguments: JSON.stringify({ query: "termination" }),
+            },
           },
         ],
       },
       {
         role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call_1",
-            toolName: "searchMatter",
-            output: { type: "json", value: { finding: "survives" } },
-          },
-        ],
+        content: "searchMatter result: survives",
+        toolCallId: "call_1",
       },
     ];
 
@@ -528,15 +584,208 @@ Answer the latest question.
         role: "assistant",
         content: [
           {
-            type: "tool-call",
-            toolCallId: "call_1",
-            toolName: "searchMatter",
-            input: { value: 1n },
+            type: "text",
+            content: "search",
+            metadata: { value: 1n },
           },
         ],
       },
     ]);
 
     expect(transcript).toContain("[unserializable]");
+  });
+});
+
+describe("thread context usage", () => {
+  const attachmentPart = () =>
+    createChatAttachmentPart({
+      filename: "contract.pdf",
+      mimeType: "application/pdf",
+      url: "stella-user-file://file_1",
+    });
+
+  test("reports an all-zero breakdown for an empty thread", () => {
+    const usage = computeThreadContextUsage({ messages: [], summary: null });
+
+    expect(usage).toEqual({
+      estimatedTokens: 0,
+      triggerTokens: DEFAULT_TRIGGER_TOKENS,
+      cacheStableTokens: 0,
+      summarizedMessageCount: 0,
+      breakdown: {
+        promptTokens: 0,
+        toolTokens: 0,
+        summaryTokens: 0,
+        attachmentTokens: 0,
+        conversationTokens: 0,
+      },
+    });
+  });
+
+  test("counts only conversation tokens for a summary-free text thread", () => {
+    const usage = computeThreadContextUsage({
+      messages: [
+        textMessage({ id: "msg_1", role: "user", text: "hello" }),
+        textMessage({ id: "msg_2", role: "assistant", text: "hi there" }),
+      ],
+      summary: null,
+    });
+
+    // "hello" (5 chars) and "hi there" (8 chars) round up to 2 tokens each,
+    // plus the per-message overhead.
+    const expected = 2 * MESSAGE_OVERHEAD_TOKENS + 2 + 2;
+    expect(usage.breakdown).toEqual({
+      promptTokens: 0,
+      toolTokens: 0,
+      summaryTokens: 0,
+      attachmentTokens: 0,
+      conversationTokens: expected,
+    });
+    expect(usage.estimatedTokens).toBe(expected);
+  });
+
+  test("folds prompt and tool estimates into the sum and cache-stable total", () => {
+    const usage = computeThreadContextUsage({
+      messages: [textMessage({ id: "msg_1", role: "user", text: "hello" })],
+      summary: {
+        summarizedMessageCount: 7,
+        summaryMarkdown: "## Goal\nContinue the analysis.",
+      },
+      promptTokens: 1500,
+      toolTokens: 900,
+    });
+
+    const {
+      promptTokens,
+      toolTokens,
+      summaryTokens,
+      attachmentTokens,
+      conversationTokens,
+    } = usage.breakdown;
+
+    expect(promptTokens).toBe(1500);
+    expect(toolTokens).toBe(900);
+    expect(usage.cacheStableTokens).toBe(2400);
+    expect(usage.summarizedMessageCount).toBe(7);
+    // The invariant the segmented bar relies on: all five parts reconstruct the
+    // whole, now including the cache-stable prefix.
+    expect(usage.estimatedTokens).toBe(
+      promptTokens +
+        toolTokens +
+        summaryTokens +
+        attachmentTokens +
+        conversationTokens,
+    );
+  });
+
+  test("attributes each file part to attachmentTokens, its text to conversation", () => {
+    const usage = computeThreadContextUsage({
+      messages: [
+        {
+          id: "msg_1",
+          role: "user",
+          parts: [
+            { type: "text", content: "see attached" },
+            attachmentPart(),
+            attachmentPart(),
+          ],
+        },
+      ],
+      summary: null,
+    });
+
+    // "see attached" is 12 chars -> 3 tokens, plus the message overhead.
+    expect(usage.breakdown.conversationTokens).toBe(
+      MESSAGE_OVERHEAD_TOKENS + 3,
+    );
+    expect(usage.breakdown.attachmentTokens).toBe(
+      2 * FILE_PART_ESTIMATED_TOKENS,
+    );
+    expect(usage.breakdown.summaryTokens).toBe(0);
+  });
+
+  test("keeps the three parts summing to estimatedTokens with an active summary", () => {
+    const usage = computeThreadContextUsage({
+      messages: [
+        textMessage({ id: "msg_1", role: "user", text: "old context here" }),
+        {
+          id: "msg_2",
+          role: "user",
+          parts: [{ type: "text", content: "see attached" }, attachmentPart()],
+        },
+      ],
+      summary: {
+        summarizedMessageCount: 3,
+        summaryMarkdown: "## Goal\nContinue the analysis.",
+      },
+    });
+
+    const { summaryTokens, conversationTokens, attachmentTokens } =
+      usage.breakdown;
+
+    expect(summaryTokens).toBeGreaterThan(0);
+    expect(conversationTokens).toBeGreaterThan(0);
+    expect(attachmentTokens).toBe(FILE_PART_ESTIMATED_TOKENS);
+    // The invariant the frontend relies on: no reconciliation needed because the
+    // three segments reconstruct the whole.
+    expect(usage.estimatedTokens).toBe(
+      summaryTokens + conversationTokens + attachmentTokens,
+    );
+  });
+
+  test("honors a custom trigger and leaves the estimate independent of it", () => {
+    const usage = computeThreadContextUsage({
+      messages: [textMessage({ id: "msg_1", role: "user", text: "hello" })],
+      summary: null,
+      triggerTokens: 1000,
+    });
+
+    expect(usage.triggerTokens).toBe(1000);
+    expect(usage.estimatedTokens).toBe(MESSAGE_OVERHEAD_TOKENS + 2);
+  });
+});
+
+describe("per-model compaction budget", () => {
+  test("sizes encoded thread model selections by bare model id", () => {
+    const budget = resolveChatCompactionBudget({
+      chatModelOverride: "openai::gpt-5.4",
+      orgAIConfig: null,
+      organizationId: toSafeId<"organization">("org_test"),
+    });
+
+    expect(budget.triggerTokens).toBe(200_000);
+  });
+
+  test("uses half the window, clamped to [64k, 200k]", () => {
+    // 128k window -> 64k (lower clamp), 200k -> 100k, 300k -> 150k,
+    // 400k/1M -> 200k (upper clamp).
+    expect(resolveCompactionTriggerTokens(128_000)).toBe(
+      DEFAULT_TRIGGER_TOKENS,
+    );
+    expect(resolveCompactionTriggerTokens(200_000)).toBe(100_000);
+    expect(resolveCompactionTriggerTokens(300_000)).toBe(150_000);
+    expect(resolveCompactionTriggerTokens(400_000)).toBe(200_000);
+    expect(resolveCompactionTriggerTokens(1_048_576)).toBe(200_000);
+  });
+
+  test("never drops below the default trigger even for tiny windows", () => {
+    expect(resolveCompactionTriggerTokens(32_000)).toBe(DEFAULT_TRIGGER_TOKENS);
+  });
+
+  test("falls back to the default trigger for an unknown window", () => {
+    expect(resolveCompactionTriggerTokens(undefined)).toBe(
+      DEFAULT_TRIGGER_TOKENS,
+    );
+  });
+
+  test("scales the preserved tail proportionally to the trigger", () => {
+    // At the default trigger the preserve budget is unchanged (38k); a 100k
+    // trigger scales it up by the same 100k/64k ratio.
+    expect(resolvePreserveTokensForTrigger(DEFAULT_TRIGGER_TOKENS)).toBe(
+      38_000,
+    );
+    expect(resolvePreserveTokensForTrigger(200_000)).toBe(
+      Math.floor((200_000 * 38_000) / DEFAULT_TRIGGER_TOKENS),
+    );
   });
 });

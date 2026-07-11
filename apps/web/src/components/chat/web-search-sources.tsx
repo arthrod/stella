@@ -5,17 +5,17 @@ import { cn } from "@stll/ui/lib/utils";
 
 import type { ChatMessage } from "@/components/chat/chat-ui-tools";
 
-const WEB_SEARCH_PART_TYPE = "tool-web_search";
-
 const collectAnswers = (parts: ChatMessage["parts"]): string[] => {
   const answers: string[] = [];
   for (const part of parts) {
-    if (
-      part.type === WEB_SEARCH_PART_TYPE &&
-      part.state === "output-available" &&
-      part.output.answer
-    ) {
-      answers.push(part.output.answer);
+    const output =
+      part.type === "tool-call" &&
+      part.name === "web_search" &&
+      part.state === "complete"
+        ? part.output
+        : undefined;
+    if (output?.answer) {
+      answers.push(output.answer);
     }
   }
   return answers;
@@ -62,6 +62,7 @@ export const WebSearchSources = ({ parts }: WebSearchSourcesProps) => {
         {answers.map((answer, index) => (
           <p
             className="text-foreground text-sm leading-relaxed whitespace-pre-line"
+            // eslint-disable-next-line react/no-array-index-key -- answers is a read-only, immutable tool-result array from a persisted chat message; never edited/reordered by the user.
             key={`${index}-${answer.slice(0, 16)}`}
           >
             {answer}

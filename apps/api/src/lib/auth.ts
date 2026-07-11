@@ -11,7 +11,7 @@ import {
   organization,
 } from "better-auth/plugins";
 import { Result } from "better-result";
-import { and, eq, isNotNull, or } from "drizzle-orm";
+import { and, eq, exists, inArray, isNotNull, or } from "drizzle-orm";
 import type { InferSelectModel } from "drizzle-orm";
 import Elysia, { t } from "elysia";
 
@@ -19,14 +19,11 @@ import { ac, roles } from "@stll/permissions";
 import type { PermissionInput } from "@stll/permissions";
 
 import { createSafeDb, createScopedDb } from "@/api/db";
-import { authSchema } from "@/api/db/auth-schema";
+import { authSchema, member } from "@/api/db/auth-schema";
 import { rootDb, rlsDb } from "@/api/db/root";
 import { workspaceMembers, workspaces } from "@/api/db/schema";
 import { env } from "@/api/env";
-import {
-  loadOrgAIConfig,
-  loadPromptCachingPreference,
-} from "@/api/lib/ai-config-loader";
+import { loadOrgSettingsForAuth } from "@/api/lib/ai-config-loader";
 import { captureError } from "@/api/lib/analytics";
 import { createAuditRecorder } from "@/api/lib/audit-log";
 import { revokeOrganizationMemberAuthArtifacts } from "@/api/lib/auth-artifacts";
@@ -36,6 +33,7 @@ import { tUuid } from "@/api/lib/custom-schema";
 import { DEV_INSPECTOR_ORIGINS, frontendOrigins } from "@/api/lib/dev-origins";
 import { stashDevOtp } from "@/api/lib/dev-otp-store";
 import {
+  isTransactionalEmailConfigured,
   sendNewDeviceLoginEmail,
   sendOrganizationInvitation,
   sendOTPEmail,
@@ -50,7 +48,18 @@ import { isMemberRole } from "@/api/lib/member-roles";
 import type { MemberRole } from "@/api/lib/member-roles";
 import { enrichRequestContext } from "@/api/lib/observability/request-context";
 import { parseUserAgent } from "@/api/lib/parse-user-agent";
+import {
+  hasMemberPermission,
+  readAuthorizedMemberRole,
+} from "@/api/lib/permission-authorization";
 import { createAuthRateLimitStorage } from "@/api/lib/rate-limit/auth-storage";
+import { memoizePerRequest } from "@/api/lib/request-memo";
+import {
+  assertSelfhostEmailOtpAllowed,
+  assertSelfhostBootstrapSignUp,
+  isSelfhostLocalPasswordAuthEnabled,
+  shouldHandleSelfhostBootstrapPath,
+} from "@/api/lib/selfhost-auth";
 import {
   getMcpResourceUrl,
   MCP_ALL_RESOURCE_SCOPES,
@@ -64,6 +73,11 @@ const ACCESS_TOKEN_EXPIRES_IN = 15 * 60;
 const REFRESH_TOKEN_EXPIRES_IN = 30 * 24 * 60 * 60;
 
 const VERIFY_EMAIL_PATH = "/email-otp/verify-email";
+const SIGN_IN_EMAIL_PATH = "/sign-in/email";
+const NEW_SESSION_SECURITY_PATHS = new Set([
+  VERIFY_EMAIL_PATH,
+  SIGN_IN_EMAIL_PATH,
+]);
 const PREFERRED_NAME_MAX_LENGTH = 120;
 const WORD_EDIT_SHORTCUT_MAX_LENGTH = 16;
 
@@ -235,6 +249,7 @@ const createAuth = () => {
       ),
       customRules: {
         "/sign-in/email-otp": AUTH_RATE_LIMITS.signIn,
+        "/sign-in/email": AUTH_RATE_LIMITS.signIn,
         "/sign-up/email": AUTH_RATE_LIMITS.signUp,
         "/email-otp/send-verification-otp": AUTH_RATE_LIMITS.sendOtp,
         "/email-otp/verify-email": AUTH_RATE_LIMITS.verifyOtp,
@@ -242,6 +257,14 @@ const createAuth = () => {
         "/reset-password": AUTH_RATE_LIMITS.resetPassword,
       },
     },
+    emailAndPassword: isSelfhostLocalPasswordAuthEnabled()
+      ? {
+          enabled: true,
+          autoSignIn: true,
+          minPasswordLength: 12,
+          requireEmailVerification: false,
+        }
+      : undefined,
     databaseHooks: {
       user: {
         create: {
@@ -294,7 +317,14 @@ const createAuth = () => {
     },
     plugins: [
       bearer(),
-      jwt(),
+      // The after-hook on /get-session signs a `set-auth-jwt` response
+      // header on every session resolution by reading the jwks table.
+      // Nothing in the repo consumes that header: JWT issuance already
+      // goes through the disabled `/token` path above, and MCP bearer
+      // verification (mcp/auth.ts) hits the `/jwks` endpoint via its own
+      // client, unaffected by this flag. better-auth recommends disabling
+      // it when running alongside an oauth provider plugin.
+      jwt({ disableSettingJwtHeader: true }),
       lastLoginMethod(),
       emailOTP({
         async sendVerificationOTP({ email, otp, type }, ctx) {
@@ -305,6 +335,12 @@ const createAuth = () => {
             return;
           }
 
+          if (!isTransactionalEmailConfigured()) {
+            throw new APIError("BAD_REQUEST", {
+              message: "Email sign-in is not configured for this instance.",
+            });
+          }
+
           const lang = extractLangFromRequest(ctx?.request);
           await sendOTPEmail({ email, otp, type, lang });
         },
@@ -312,13 +348,17 @@ const createAuth = () => {
       organization({
         ac,
         roles,
+        membershipLimit: LIMITS.organizationMembersCount,
         organizationHooks: {
-          async afterRemoveMember({ member, organization: org }) {
+          async afterRemoveMember({
+            member: removedMember,
+            organization: org,
+          }) {
             await rootDb.transaction(
               async (tx) =>
                 await revokeOrganizationMemberAuthArtifacts(tx, {
                   organizationId: org.id,
-                  userId: member.userId,
+                  userId: removedMember.userId,
                 }),
             );
           },
@@ -409,8 +449,23 @@ const createAuth = () => {
       }) as BetterAuthPlugin,
     ],
     hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        await assertSelfhostEmailOtpAllowed(ctx.path);
+        if (!shouldHandleSelfhostBootstrapPath(ctx.path)) {
+          return;
+        }
+
+        await assertSelfhostBootstrapSignUp(ctx.body);
+      }),
       after: createAuthMiddleware(async (ctx) => {
-        if (ctx.path !== VERIFY_EMAIL_PATH || env.isDev) {
+        if (!NEW_SESSION_SECURITY_PATHS.has(ctx.path) || env.isDev) {
+          return;
+        }
+
+        if (
+          ctx.path === SIGN_IN_EMAIL_PATH &&
+          !isTransactionalEmailConfigured()
+        ) {
           return;
         }
 
@@ -534,26 +589,18 @@ export const getSessionAndMemberRole = async (
   const memberRoleResult =
     session && user && activeOrganizationId
       ? await Result.tryPromise(async () => {
-          const row = await rootDb.query.member.findFirst({
-            where: {
-              userId: { eq: user.id },
-              organizationId: { eq: activeOrganizationId },
-            },
-            columns: {
-              role: true,
-            },
-          });
+          const memberAccess = await resolveMemberAccess(
+            toSafeId<"user">(user.id),
+            toSafeId<"organization">(activeOrganizationId),
+          );
 
-          if (!row) {
-            return null;
-          }
-
-          if (!isMemberRole(row.role)) {
+          if (!memberAccess || !isMemberRole(memberAccess.role)) {
             return null;
           }
 
           return {
-            role: row.role,
+            role: memberAccess.role,
+            accessibleWorkspaces: memberAccess.accessibleWorkspaces,
           };
         })
       : Result.ok(null);
@@ -605,225 +652,323 @@ export type AccessibleWorkspace = {
   status: InferSelectModel<typeof workspaces>["status"];
 };
 
+export type MemberAccess = {
+  /** Raw DB value; not yet validated against `MemberRole`. */
+  role: string;
+  accessibleWorkspaces: AccessibleWorkspace[];
+};
+
 /**
- * Resolve which workspaces a user can access within an
- * organization. Admins/owners see all workspaces;
- * regular members see only workspaces they belong to.
- *
- * Returns id + status so callers can gate on active status
- * without an extra DB round-trip. RLS receives all IDs
- * regardless of status.
- *
- * Shared between the Elysia `authMacro` and RivetKit actor
- * validators so workspace resolution logic lives in one place.
+ * Structural subset of `rootDb` this query needs. Lets tests pass a
+ * PGlite `TestDatabase` (see `tests/security/test-utils.ts`) instead of
+ * the real `rootDb` connection, matching how `createScopedDb`/
+ * `createSafeDb` stay generic over prod vs. test drizzle instances.
  */
-export const resolveAccessibleWorkspaces = async (
+type MemberAccessDb = Pick<typeof rootDb, "select">;
+
+/**
+ * Resolve a user's role in an organization together with the
+ * workspaces they can access there, in a single statement.
+ *
+ * Admins/owners see every client matter in the org, plus any
+ * personal matter (clientId IS NULL) they themselves are a
+ * member of — without this gate, an org owner could open a
+ * personal scratchpad they were not explicitly added to by URL.
+ * Regular members see only workspaces they belong to.
+ *
+ * Both branches require "is a member of this workspace" to hold
+ * except that admins/owners get an additional `clientId IS NOT
+ * NULL` escape hatch, so the accessibility predicate collapses to
+ * a single expression: `membership EXISTS OR (role is admin/owner
+ * AND clientId IS NOT NULL)`. That predicate lives entirely in the
+ * LEFT JOIN's ON clause (never in WHERE) so a member with zero
+ * accessible workspaces — e.g. a freshly invited org member not
+ * yet added to any workspace — still yields their role row instead
+ * of being silently dropped from the result set.
+ *
+ * Returns `null` when the user has no membership row in the
+ * organization at all. Callers validate `role` against
+ * `MemberRole` themselves: the HTTP auth macro and the MCP session
+ * context react to an invalid stored role differently (401 vs.
+ * `panic`), so that check is intentionally not baked in here.
+ *
+ * Shared between the Elysia `authMacro` and the MCP session
+ * context so this resolution logic lives in one place.
+ */
+export const resolveMemberAccess = async (
   userId: SafeId<"user">,
   organizationId: SafeId<"organization">,
-  memberRole: MemberRole,
-): Promise<AccessibleWorkspace[]> => {
-  if (ADMIN_BYPASS_ROLES.includes(memberRole)) {
-    // Admins see every client matter in the org, plus any personal
-    // matter (clientId IS NULL) they themselves are a member of.
-    // Without this gate, an org owner could open a personal
-    // scratchpad they were not explicitly added to by URL.
-    const accessibleWorkspaces = await rootDb
-      .select({
-        id: workspaces.id,
-        status: workspaces.status,
-      })
-      .from(workspaces)
-      .leftJoin(
-        workspaceMembers,
-        and(
-          eq(workspaceMembers.workspaceId, workspaces.id),
-          eq(workspaceMembers.userId, userId),
-        ),
-      )
+  db: MemberAccessDb = rootDb,
+): Promise<MemberAccess | null> => {
+  const membershipExists = exists(
+    db
+      .select({ id: workspaceMembers.id })
+      .from(workspaceMembers)
       .where(
         and(
-          eq(workspaces.organizationId, organizationId),
-          or(
+          eq(workspaceMembers.workspaceId, workspaces.id),
+          eq(workspaceMembers.userId, member.userId),
+        ),
+      ),
+  );
+
+  const rows = await db
+    .select({
+      role: member.role,
+      workspaceId: workspaces.id,
+      workspaceStatus: workspaces.status,
+    })
+    .from(member)
+    .leftJoin(
+      workspaces,
+      and(
+        eq(workspaces.organizationId, member.organizationId),
+        or(
+          membershipExists,
+          and(
+            inArray(member.role, ADMIN_BYPASS_ROLES),
             isNotNull(workspaces.clientId),
-            eq(workspaceMembers.userId, userId),
           ),
         ),
-      );
-
-    return accessibleWorkspaces.map((workspace) => ({
-      id: toSafeId<"workspace">(workspace.id),
-      status: workspace.status,
-    }));
-  }
-
-  // JOIN with workspaces filters by org, preventing
-  // cross-org leaks when a user belongs to multiple
-  // organizations.
-  const accessibleWorkspaces = await rootDb
-    .select({
-      id: workspaceMembers.workspaceId,
-      status: workspaces.status,
-    })
-    .from(workspaceMembers)
-    .innerJoin(workspaces, eq(workspaceMembers.workspaceId, workspaces.id))
-    .where(
-      and(
-        eq(workspaceMembers.userId, userId),
-        eq(workspaces.organizationId, organizationId),
       ),
+    )
+    .where(
+      and(eq(member.userId, userId), eq(member.organizationId, organizationId)),
     );
 
-  return accessibleWorkspaces.map((workspace) => ({
-    id: toSafeId<"workspace">(workspace.id),
-    status: workspace.status,
-  }));
+  const memberRow = rows.at(0);
+  if (!memberRow) {
+    return null;
+  }
+
+  // Rows with no joined workspace (a member with zero accessible
+  // workspaces) come back with workspaceId/workspaceStatus both null;
+  // skip those rather than mapping them into a bogus entry.
+  const accessibleWorkspaces: AccessibleWorkspace[] = [];
+  for (const row of rows) {
+    if (row.workspaceId === null || row.workspaceStatus === null) {
+      continue;
+    }
+    accessibleWorkspaces.push({
+      id: toSafeId<"workspace">(row.workspaceId),
+      status: row.workspaceStatus,
+    });
+  }
+
+  return {
+    role: memberRow.role,
+    accessibleWorkspaces,
+  };
 };
+
+/**
+ * Per-request memoization of validateAuth's resolution.
+ *
+ * Elysia expands a macro property (here `validateAuth`, directly or
+ * transitively through `permissions` / `validateWorkspaceAccess`) into an
+ * independent `resolve` hook every time it appears at a distinct
+ * `.guard()` / `.group()` / route-level call site — see `applyMacro` in
+ * elysia's compose step, which only dedupes repeats *within* a single
+ * call's hook object, not across separate call sites. A route that
+ * stacks e.g. a top-level `.guard({ validateAuth: true })` with a
+ * per-route `permissions: {...}` therefore runs this resolve twice (three
+ * times when a `.group()` also carries `validateWorkspaceAccess: true`)
+ * for the exact same request, each time re-running the session, member
+ * role, workspace, and org-settings lookups.
+ *
+ * Rather than rely on route wiring alone to avoid every such stack (some
+ * duplication is structural — a workspace-scoped group and its
+ * permission-checked routes legitimately need both macros), memoize the
+ * resolved value per request here. The cache is a `WeakMap` keyed on the
+ * raw `Request` object: it never survives past the request that created
+ * it (no explicit eviction needed) and never leaks across requests, so a
+ * revoked session is still re-checked in full on the very next request.
+ *
+ * `resolveValidateAuth`'s return type is intentionally left for TypeScript
+ * to infer (no hand-written `ValidateAuthValue`/`ValidateAuthResolution`
+ * annotation). `scopedDb`/`safeDb` come from `createScopedDb`/`createSafeDb`,
+ * which are generic over the concrete Drizzle transaction type; annotating
+ * the resolve's return type with e.g. `ReturnType<typeof createScopedDb>`
+ * collapses that generic to its default constraint (a minimal structural
+ * type used only so test PGlite databases satisfy it) instead of the
+ * concrete transaction type this call site actually infers from `rlsDb`.
+ * Letting inference flow keeps the real (wide) transaction type, which is
+ * what every handler's `ctx.scopedDb`/`ctx.safeDb` callback expects.
+ */
+const resolveValidateAuth = async (
+  request: Request,
+  server: Parameters<typeof createAuditRecorder>[0]["server"],
+) => {
+  const { sessionResult, memberRoleResult } = await getSessionAndMemberRole(
+    request.headers,
+  );
+
+  if (Result.isError(sessionResult)) {
+    return { ok: false as const, statusCode: 500 as const };
+  }
+  const session = sessionResult.value?.session;
+  const user = sessionResult.value?.user;
+  const rawOrgId = session?.activeOrganizationId;
+
+  if (!session || !user || !rawOrgId) {
+    return { ok: false as const, statusCode: 401 as const };
+  }
+
+  if (Result.isError(memberRoleResult)) {
+    return { ok: false as const, statusCode: 500 as const };
+  }
+
+  const memberAccess = memberRoleResult.value;
+  if (!memberAccess) {
+    return { ok: false as const, statusCode: 401 as const };
+  }
+  const memberRole = { role: memberAccess.role };
+  const accessibleWorkspaces = memberAccess.accessibleWorkspaces;
+  const activeOrganizationId = toSafeId<"organization">(rawOrgId);
+  const userId = toSafeId<"user">(user.id);
+
+  enrichRequestContext(request, {
+    posthogDistinctId: userId,
+    organizationId: activeOrganizationId,
+  });
+
+  // Member role + accessible workspaces already resolved together in
+  // getSessionAndMemberRole's single statement; only org AI/prompt-caching
+  // settings still need their own round-trip.
+  const orgSettings = await loadOrgSettingsForAuth(activeOrganizationId);
+  const { orgAIConfig, promptCachingEnabled } = orgSettings;
+
+  const scopedDb = createScopedDb(
+    rlsDb,
+    accessibleWorkspaces.map((w) => w.id),
+    activeOrganizationId,
+    userId,
+  );
+  const safeDb = createSafeDb(
+    rlsDb,
+    accessibleWorkspaces.map((w) => w.id),
+    activeOrganizationId,
+    userId,
+  );
+
+  const activeWorkspaceIds = accessibleWorkspaces
+    .filter((w) => w.status !== "deleting")
+    .map((w) => w.id);
+
+  const recorderBindings = {
+    organizationId: activeOrganizationId,
+    workspaceId: null,
+    userId,
+    request,
+    server,
+  };
+
+  return {
+    ok: true as const,
+    value: {
+      user: {
+        id: toSafeId<"user">(user.id),
+      },
+      session: {
+        activeOrganizationId,
+      },
+      /**
+       * Excludes workspaces being deleted. Includes active and
+       * archived workspaces. Use for search, chat, MCP, and any
+       * query that should not surface content from sealed workspaces.
+       */
+      activeWorkspaceIds,
+      /**
+       * All accessible workspaces with status. Only use in
+       * workspaceAccessMacro (which needs the status to return
+       * appropriate HTTP codes) — never pass these IDs as a
+       * search/query allowlist.
+       */
+      accessibleWorkspaces,
+      scopedDb,
+      safeDb,
+      memberRole,
+      orgAIConfig,
+      promptCachingEnabled,
+      /**
+       * Records audit rows in the supplied tx. Identity fields
+       * (org/user/IP/UA) are bound from the request context;
+       * workspaceId defaults to null for root handlers and is
+       * overridden by workspaceAccessMacro to the validated
+       * workspaceId for workspace handlers. Individual events
+       * can still override workspaceId for cross-workspace ops.
+       */
+      recordAuditEvent: createAuditRecorder(recorderBindings),
+      /**
+       * Builds a recorder with an overridden default workspaceId.
+       * Use when threading audit recording through helpers that
+       * don't receive the handler ctx (cross-workspace operations,
+       * shared copy/move utilities).
+       */
+      createAuditRecorder: (opts?: {
+        workspaceId?: SafeId<"workspace"> | null;
+      }) =>
+        createAuditRecorder({
+          ...recorderBindings,
+          workspaceId:
+            opts && "workspaceId" in opts ? (opts.workspaceId ?? null) : null,
+        }),
+    },
+  };
+};
+
+/**
+ * Named alias for `resolveValidateAuth`'s resolved value, derived from the
+ * implementation rather than hand-written — see the inference note above.
+ */
+export type ValidateAuthValue = Extract<
+  Awaited<ReturnType<typeof resolveValidateAuth>>,
+  { ok: true }
+>["value"];
+
+type ValidateAuthResolution = Awaited<ReturnType<typeof resolveValidateAuth>>;
+
+const validateAuthResolutionCache = new WeakMap<
+  Request,
+  Promise<ValidateAuthResolution>
+>();
 
 export const authMacro = new Elysia({ name: "authMacro" }).macro({
   validateAuth: {
     async resolve({ status, request, server }) {
-      const { sessionResult, memberRoleResult } = await getSessionAndMemberRole(
-        request.headers,
-      );
-
-      if (Result.isError(sessionResult)) {
-        return status(500);
-      }
-      const session = sessionResult.value?.session;
-      const user = sessionResult.value?.user;
-      const rawOrgId = session?.activeOrganizationId;
-
-      if (!session || !user || !rawOrgId) {
-        return status(401);
-      }
-
-      if (Result.isError(memberRoleResult)) {
-        return status(500);
-      }
-
-      const memberRole = memberRoleResult.value;
-      if (!memberRole) {
-        return status(401);
-      }
-      const activeOrganizationId = toSafeId<"organization">(rawOrgId);
-      const userId = toSafeId<"user">(user.id);
-
-      enrichRequestContext(request, {
-        posthogDistinctId: userId,
-        organizationId: activeOrganizationId,
-      });
-
-      // Load workspaces and AI config in parallel.
-      const [accessibleWorkspaces, orgAIConfig, promptCachingEnabled] =
-        await Promise.all([
-          resolveAccessibleWorkspaces(
-            userId,
-            activeOrganizationId,
-            memberRole.role,
-          ),
-          loadOrgAIConfig(activeOrganizationId),
-          loadPromptCachingPreference(activeOrganizationId),
-        ]);
-
-      const scopedDb = createScopedDb(
-        rlsDb,
-        accessibleWorkspaces.map((w) => w.id),
-        activeOrganizationId,
-        userId,
-      );
-      const safeDb = createSafeDb(
-        rlsDb,
-        accessibleWorkspaces.map((w) => w.id),
-        activeOrganizationId,
-        userId,
-      );
-
-      const activeWorkspaceIds = accessibleWorkspaces
-        .filter((w) => w.status !== "deleting")
-        .map((w) => w.id);
-
-      const recorderBindings = {
-        organizationId: activeOrganizationId,
-        workspaceId: null,
-        userId,
+      const result = await memoizePerRequest(
+        validateAuthResolutionCache,
         request,
-        server,
-      };
+        async () => await resolveValidateAuth(request, server),
+      );
 
-      return {
-        user: {
-          id: toSafeId<"user">(user.id),
-        },
-        session: {
-          activeOrganizationId,
-        },
-        /**
-         * Excludes workspaces being deleted. Includes active and
-         * archived workspaces. Use for search, chat, MCP, and any
-         * query that should not surface content from sealed workspaces.
-         */
-        activeWorkspaceIds,
-        /**
-         * All accessible workspaces with status. Only use in
-         * workspaceAccessMacro (which needs the status to return
-         * appropriate HTTP codes) — never pass these IDs as a
-         * search/query allowlist.
-         */
-        accessibleWorkspaces,
-        scopedDb,
-        safeDb,
-        memberRole,
-        orgAIConfig,
-        promptCachingEnabled,
-        /**
-         * Records audit rows in the supplied tx. Identity fields
-         * (org/user/IP/UA) are bound from the request context;
-         * workspaceId defaults to null for root handlers and is
-         * overridden by workspaceAccessMacro to the validated
-         * workspaceId for workspace handlers. Individual events
-         * can still override workspaceId for cross-workspace ops.
-         */
-        recordAuditEvent: createAuditRecorder(recorderBindings),
-        /**
-         * Builds a recorder with an overridden default workspaceId.
-         * Use when threading audit recording through helpers that
-         * don't receive the handler ctx (cross-workspace operations,
-         * shared copy/move utilities).
-         */
-        createAuditRecorder: (opts?: {
-          workspaceId?: SafeId<"workspace"> | null;
-        }) =>
-          createAuditRecorder({
-            ...recorderBindings,
-            workspaceId:
-              opts && "workspaceId" in opts ? (opts.workspaceId ?? null) : null,
-          }),
-      };
+      if (!result.ok) {
+        return status(result.statusCode);
+      }
+
+      return result.value;
     },
   },
 });
 
-export const permissionMacro = new Elysia({ name: "permissionMacro" }).macro({
-  permissions: (permissions: PermissionInput) => ({
+export const permissionMacro = new Elysia({ name: "permissionMacro" })
+  .use(authMacro)
+  .macro("permissions", (permissions: PermissionInput) => ({
+    // Reuse authMacro's resolved member role instead of asking better-auth to
+    // perform the same permission check through a second session read.
+    validateAuth: true,
     // Without this, when this macro is used with another macro that extends the body,
     // the final merged body would not include the first macro's body extension.
     body: t.Object({}),
-    async beforeHandle(ctx) {
-      const hasPermissions = await getAuth().api.hasPermission({
-        headers: ctx.request.headers,
-        body: {
-          permissions,
-        },
-      });
-
-      if (!hasPermissions.success) {
+    beforeHandle(ctx) {
+      const memberRole = readAuthorizedMemberRole(ctx);
+      if (!memberRole || !hasMemberPermission(memberRole, permissions)) {
         return ctx.status(403);
       }
 
       return undefined;
     },
-  }),
-});
+  }));
 
 const bindWorkspaceRecorder = (
   ctx: {

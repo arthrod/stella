@@ -24,6 +24,7 @@ import type {
   IncomingActiveTemplate,
   IncomingUserContext,
 } from "@/api/handlers/chat/chat-schema";
+import { estimateTextTokens } from "@/api/handlers/chat/compaction";
 import {
   ACTIVE_SKILL_BODY_PROMPT_MAX_CHARS,
   type ActiveChatSkillContext,
@@ -32,11 +33,8 @@ import {
   resolveActiveChatSkillContext,
 } from "@/api/handlers/chat/skills";
 import { CHAT_THREAD_PLACEHOLDER_TITLE } from "@/api/handlers/chat/thread-title";
-import { readonlyOrgFunctionContracts } from "@/api/handlers/chat/tools/execute/org-manifest";
-import { buildReadonlyFunctionManifest } from "@/api/handlers/chat/tools/execute/readonly-manifest";
-import type { ReadonlyFunctionManifest } from "@/api/handlers/chat/tools/execute/readonly-manifest";
+import { CHAT_CODE_MODE_SYSTEM_PROMPT } from "@/api/handlers/chat/tools/execute/chat-code-mode";
 import type { ChatRefRegistry } from "@/api/handlers/chat/tools/execute/ref-registry";
-import { readonlyWorkspaceFunctionContracts } from "@/api/handlers/chat/tools/execute/workspace-manifest";
 import { CHAT_REFERENCE_HREF_PREFIXES } from "@/api/handlers/chat/types";
 import type { ChatMessage } from "@/api/handlers/chat/types";
 import type { SafeId } from "@/api/lib/branded-types";
@@ -70,12 +68,69 @@ const buildPromptMentionExample = ({
   id,
 }: BuildPromptMentionExampleProps) => `[${label}](${prefix}${id})`;
 
-const CORE_RULE_SECTIONS = [
+/**
+ * Which conditionally-registered tools this turn actually handed to
+ * the model. The prompt must never instruct the model to call a tool
+ * that is not in the registered `ChatToolMap`; capability flags flow
+ * from the same predicates that gate registration (see
+ * `areWebResearchToolsRegistered` in chat-tools.ts) so the two cannot
+ * drift.
+ */
+export type ChatToolAvailability = {
+  /**
+   * `suggest_template_fields` is registered for this turn: the
+   * caller's role has the `template: ["create"]` grant (see
+   * `areTemplateAuthoringToolsRegistered` in chat-tools.ts).
+   */
+  templateAuthoring: boolean;
+  /** `web_search` + `fetch_url` are registered for this turn. */
+  webResearch: boolean;
+  /**
+   * The folio-agents `read_document` / `find_text` tools are
+   * registered for this turn (see `hasActiveDocxFileClient` in
+   * chat-tools.ts / send-message.ts). File-overlay-only: Template
+   * Studio never sets this, so its prompt never mentions these tools.
+   */
+  folioAgentDocTools: boolean;
+  /**
+   * `spawn_subagents` is registered for this turn (see
+   * `areSubagentToolsRegistered` in chat-tools.ts).
+   */
+  subagents: boolean;
+};
+
+const DEFAULT_CHAT_TOOL_AVAILABILITY = {
+  templateAuthoring: true,
+  webResearch: true,
+  folioAgentDocTools: true,
+  subagents: false,
+} as const satisfies ChatToolAvailability;
+
+// EXTERNAL-FACT SOURCING has two shapes: with web research the model
+// is steered to `web_search`/`fetch_url`; without it, to skills and
+// then its own knowledge (with an explicit no-source flag). The
+// execute_typescript warning is identical either way — it is never an
+// external-research tool.
+const EXTERNAL_FACT_SOURCING_WITH_WEB =
+  "EXTERNAL-FACT SOURCING: Always try to ground factual answers in an external source before falling back to your own knowledge. The skill catalog is in this prompt — pick a matching skill and `load-skill` if one fits; otherwise call `web_search` (with `fetch_url` follow-up when snippets are short or contradict). Only when those tools return nothing usable may you answer from your own knowledge, and you MUST flag that you have no source for the claim. Never use `execute_typescript` for external research — its `external_*` functions read stella's internal workspace data only. Cite tool-returned sources in the reply.";
+
+const EXTERNAL_FACT_SOURCING_NO_WEB =
+  "EXTERNAL-FACT SOURCING: Ground factual answers in a matching skill when one fits — the skill catalog is in this prompt; `load-skill` before applying it. Web research is not enabled for this thread, so when no skill fits, answer from your own knowledge and explicitly flag that no external source was available in this conversation (the user can enable web search to add one). Never use `execute_typescript` for external research — its `external_*` functions read stella's internal workspace data only.";
+
+const SUBAGENT_DELEGATION_SECTION =
+  "DELEGATION: When a task splits into independent pieces (no piece depends on another's result), call `spawn_subagents` to run them in parallel instead of doing them one by one yourself. Subagents are cheaper and read/write workspace data under the single approval already granted to `spawn_subagents` — do not ask the user to approve each subagent separately. Prefer this whenever breadth or parallelism would speed up the task.";
+
+const buildCoreRuleSections = ({
+  webResearch,
+  subagents,
+}: ChatToolAvailability): readonly string[] => [
   "You are an AI inside stella, a legal workspace. Answer directly; skip greetings and persona. For complex or ambiguous tasks, call `ask-user` to gather requirements before acting.",
-  "ASK-USER BOUNDARY: Use `ask-user` only for missing task facts (preferences, jurisdiction, parties, scope). Never use it to request tool-call permission or consent — stella handles approvals outside the model. When you decide to call `ask-user`, do not emit any other tool calls (web_search, run-stella-query, etc.) in the same turn — wait for the user's answer first; otherwise the user sees retrieved data before they have answered the clarifying question and that data may be off-topic. EXCEPTION: `load-skill` may immediately precede `ask-user` in the same turn so the clarifying questions can be informed by the skill's methodology.",
+  "ASK-USER BOUNDARY: Use `ask-user` only for missing task facts (preferences, jurisdiction, parties, scope). Never use it to request tool-call permission or consent — stella handles approvals outside the model. When you decide to call `ask-user`, do not emit any other tool calls (e.g. `execute_typescript`) in the same turn — wait for the user's answer first; otherwise the user sees retrieved data before they have answered the clarifying question and that data may be off-topic. EXCEPTION: `load-skill` may immediately precede `ask-user` in the same turn so the clarifying questions can be informed by the skill's methodology.",
   "REPEATED-QUESTION GUARD: When the user answers a question (even tersely — 'Yes', 'Czechia', 'all parties'), treat the answer as the answer and advance to the next step. Do not re-ask the same question with cosmetic rewording or restate it as confirmation. If their answer leaves a required fact still missing, ask ONLY for that missing fact, never the one they already answered.",
   "TRUTHFULNESS: Never guess, infer, or fabricate document content — retrieve via tools first. Only claim an action occurred when its tool returned success for that action; surface skips, no-ops, and errors plainly.",
-  "EXTERNAL-FACT SOURCING: Always try to ground factual answers in an external source before falling back to your own knowledge. The skill catalog is in this prompt — pick a matching skill and `load-skill` if one fits; otherwise call `web_search` (with `fetch_url` follow-up when snippets are short or contradict). Only when those tools return nothing usable may you answer from your own knowledge, and you MUST flag that you have no source for the claim. Never use `run-stella-query` for external research — that tool reads stella's internal workspace data only. Cite tool-returned sources in the reply.",
+  "WRITES: Creating, updating, or deleting workspace data happens through direct write tools, discoverable the same way as the read surface. Every write is gated — the user approves each call before it runs — so never state or imply a change was made until that tool returns success; a pending approval is not a completed action.",
+  "FRESH DATA: Answer questions about what currently exists in the workspace (which matters, documents, tasks, contacts, or fields there are) from a fresh tool call, never from memory or an earlier turn — workspace data changes between turns.",
+  webResearch ? EXTERNAL_FACT_SOURCING_WITH_WEB : EXTERNAL_FACT_SOURCING_NO_WEB,
   "POST-LOAD-SKILL: After `load-skill` returns, never produce a 'Loaded the X skill' confirmation message. In the SAME turn, do one of: (a) immediately apply the skill's methodology to the user's stated task using the appropriate tool(s) and surface the result as your answer; or (b) if the user's request is bare (just a skill reference) or missing facts the skill explicitly requires (jurisdiction, parties, scope, parameters), call `ask-user` with the SPECIFIC clarifying questions the skill methodology calls for — never generic 'what do you want me to do?'. Read the skill body; ask only for what the skill needs to proceed.",
   "SKILL-RESOURCES: When `load-skill` returns a non-empty `resources` list, treat those paths as part of the skill's methodology — not optional appendices. Before producing the final answer, call `read-skill-resource` on every resource the user's task plausibly depends on (criteria checklists, jurisdictional references, templates the skill prescribes). EMIT ALL READ CALLS IN A SINGLE ASSISTANT TURN — multiple `read-skill-resource` invocations issued together execute in parallel and finish in one round-trip; issuing them across separate turns serializes the reads and multiplies latency. Never claim you 'applied the skill' if you only read the top-level instructions; if you skip resources, say so plainly and offer to re-run with the resources read.",
   "SKILL-REF LINKS: When the user's message contains a markdown link of the form `[name](#stella-skill-ref=slug)`, treat it as an explicit request to use that skill. Call `load-skill` with `skillName: slug` immediately (unless that skill is already loaded in this thread), then follow POST-LOAD-SKILL. Do not echo the link or narrate the load.",
@@ -83,7 +138,8 @@ const CORE_RULE_SECTIONS = [
   "CITATIONS: When a tool returns a stable URL, cite each individual claim inline with its OWN Markdown link — one citation per sentence (or per discrete fact) rather than a single trailing 'Sources:' block. Anchor text should be short (source domain, citation, or `[1]`-style footnote), and each link must point to the specific URL that supports THAT claim. The stella inspector opens these links in-app on click, so prefer them over plain text. Never invent URLs.",
   "LEGAL REFERENCE RESOLUTION: Citation resolvers are exact-match. On a no-match, retry with a broader search tool using citation variants before declaring it unavailable.",
   "USER-FACING LANGUAGE: Speak in legal-work terms; never expose internal names, tool names, or schema identifiers — refer to documents, matters, and folders by their human names. Reply in the user's UI language (see user context); switch only if the user themselves writes a natural-language message in another language. Copy `mention` strings from tool outputs verbatim instead of rewriting refs.",
-] as const;
+  ...(subagents ? [SUBAGENT_DELEGATION_SECTION] : []),
+];
 
 export type UserContext = IncomingUserContext;
 
@@ -161,7 +217,7 @@ const brandChatFullPrompt = (text: string): ChatFullPrompt =>
 
 const ANONYMIZED_MODE_SYSTEM_HINT = [
   "ANONYMIZED MODE: Names, organizations and other identifying entities the user mentions have been replaced with stable placeholders such as `[PERSON_1]`, `[ORGANIZATION_1]`, `[DATE_1]`. The same placeholder always refers to the same real entity within this conversation.",
-  'When you call a stella internal tool (run-stella-query, listContacts, listMatters, etc.), pass the placeholder verbatim — including the square brackets — as if it were the real name. stella deanonymizes the placeholder back to the real value before the lookup runs and re-anonymizes the result before you see it. So `read.listContacts({ query: "[PERSON_1]" })` is the correct shape; the lookup will hit the real record.',
+  'When you call a stella internal tool — `execute_typescript` and the `external_*` read functions it exposes (e.g. `external_list_matters`, `external_search_across_matters`) — pass the placeholder verbatim, including the square brackets, as if it were the real name. stella deanonymizes the placeholder back to the real value before the lookup runs and re-anonymizes the result before you see it. So `external_search_across_matters({ query: "[PERSON_1]" })` is the correct shape; the lookup will hit the real record.',
   'Do not try to invent the real value behind a placeholder, ask the user for it, or refuse to proceed because the placeholder "isn\'t a real name". External (non-stella) tools, by contrast, only ever receive the placeholder.',
 ].join(" ");
 
@@ -218,6 +274,12 @@ type BuildChatSystemPromptProps = {
   practiceJurisdictions: readonly PracticeJurisdiction[];
   refRegistry: ChatRefRegistry;
   safeDb: SafeDb;
+  /**
+   * The conditionally-registered tools handed to the model this turn.
+   * Prompt text is gated on these flags so it never names a tool that
+   * is absent from the registered `ChatToolMap`.
+   */
+  toolAvailability: ChatToolAvailability;
   userContext: IncomingUserContext | undefined;
   workspaceId: SafeId<"workspace"> | null;
   organizationId?: SafeId<"organization"> | undefined;
@@ -241,6 +303,7 @@ export const buildChatSystemPromptParts = async ({
   practiceJurisdictions,
   refRegistry,
   safeDb,
+  toolAvailability,
   userContext,
   userId,
   workspaceId,
@@ -287,6 +350,7 @@ export const buildChatSystemPromptParts = async ({
         ? buildGlobalPromptParts({
             practiceJurisdictions,
             skillMetadata: promptSkillMetadata,
+            toolAvailability,
             userContext: userContext ?? null,
           })
         : yield* Result.await(
@@ -295,6 +359,7 @@ export const buildChatSystemPromptParts = async ({
               refRegistry,
               safeDb,
               skillMetadata: promptSkillMetadata,
+              toolAvailability,
               userContext: userContext ?? null,
               workspaceId,
             }),
@@ -336,6 +401,7 @@ export const buildChatSystemPromptParts = async ({
         activeFile,
         entityExists: Boolean(entity),
         refRegistry,
+        toolAvailability,
         workspaceId,
       });
     }
@@ -357,7 +423,10 @@ export const buildChatSystemPromptParts = async ({
         ),
       );
       if (template) {
-        activeTemplateSection = buildActiveTemplatePrompt(activeTemplate);
+        activeTemplateSection = buildActiveTemplatePrompt(
+          activeTemplate,
+          toolAvailability,
+        );
       }
     }
 
@@ -455,7 +524,7 @@ const buildContextMatterScopeSection = ({
 
 export const extractTitle = (parts: ChatMessage["parts"]) => {
   const raw = parts
-    .map((part) => (part.type === "text" ? part.text : ""))
+    .map((part) => (part.type === "text" ? part.content : ""))
     .join("");
   const plainText = cheerio
     .load(raw, undefined, false)
@@ -473,37 +542,81 @@ export const extractTitle = (parts: ChatMessage["parts"]) => {
 type BuildGlobalPromptProps = {
   practiceJurisdictions?: readonly PracticeJurisdiction[];
   skillMetadata?: readonly PromptSkillMetadata[] | undefined;
+  toolAvailability?: ChatToolAvailability | undefined;
   userContext: UserContext | null;
 };
 
 export const buildGlobalPrompt = ({
   practiceJurisdictions = [],
   skillMetadata = getChatSkillMetadata(),
+  toolAvailability = DEFAULT_CHAT_TOOL_AVAILABILITY,
   userContext,
 }: BuildGlobalPromptProps) =>
   buildGlobalPromptParts({
     practiceJurisdictions,
     skillMetadata,
+    toolAvailability,
     userContext,
   }).fullPrompt;
 
 export const buildGlobalPromptParts = ({
   practiceJurisdictions = [],
   skillMetadata = getChatSkillMetadata(),
+  toolAvailability = DEFAULT_CHAT_TOOL_AVAILABILITY,
   userContext,
 }: BuildGlobalPromptProps): ChatPromptParts =>
   buildPromptParts({
     practiceJurisdictions,
     requestContextSections: [],
     skillMetadata,
+    toolAvailability,
     userContext,
   });
+
+export type ChatContextPromptEstimate = {
+  /** System-prompt tokens: core rule sections + built-in skill catalog. */
+  promptTokens: number;
+  /** Tool-catalog tokens: the code-mode read surface (`CHAT_CODE_MODE_SYSTEM_PROMPT`). */
+  toolTokens: number;
+};
+
+/**
+ * Token estimate for the cache-stable prompt prefix, split into the
+ * instructions (`promptTokens`) and tool-catalog (`toolTokens`) halves the
+ * context meter renders. Uses the same section builders as `buildPromptParts`
+ * and the shared chars/4 estimator, so it tracks what the send path actually
+ * caches.
+ *
+ * Deliberately excluded (kept cheap and deterministic for the read path, and
+ * documented so the meter's honesty is auditable): org-installed skill
+ * metadata, the workspace "Connected to matter" section, the practice-
+ * jurisdiction line, the user-context block, and the executable tool JSON
+ * schemas passed separately to the provider. These are per-request/per-org and
+ * would require extra DB reads the meter does not otherwise need.
+ */
+export const estimateChatContextPromptTokens = ({
+  toolAvailability = DEFAULT_CHAT_TOOL_AVAILABILITY,
+  skillMetadata = getChatSkillMetadata(),
+}: {
+  toolAvailability?: ChatToolAvailability | undefined;
+  skillMetadata?: readonly PromptSkillMetadata[] | undefined;
+} = {}): ChatContextPromptEstimate => {
+  const instructionsText = joinPromptSections([
+    ...buildCoreRuleSections(toolAvailability),
+    buildSkillCatalogSection(skillMetadata),
+  ]);
+  return {
+    promptTokens: estimateTextTokens(instructionsText),
+    toolTokens: estimateTextTokens(CHAT_CODE_MODE_SYSTEM_PROMPT),
+  };
+};
 
 type BuildWorkspacePromptProps = {
   practiceJurisdictions?: readonly PracticeJurisdiction[];
   refRegistry: ChatRefRegistry;
   safeDb: SafeDb;
   skillMetadata?: readonly PromptSkillMetadata[] | undefined;
+  toolAvailability: ChatToolAvailability;
   userContext: UserContext | null;
   workspaceId: SafeId<"workspace">;
 };
@@ -513,6 +626,7 @@ const buildWorkspacePromptPartsFromDb = async ({
   refRegistry,
   safeDb,
   skillMetadata = getChatSkillMetadata(),
+  toolAvailability,
   userContext,
   workspaceId,
 }: BuildWorkspacePromptProps): Promise<Result<ChatPromptParts, SafeDbError>> =>
@@ -530,6 +644,7 @@ const buildWorkspacePromptPartsFromDb = async ({
         practiceJurisdictions,
         refRegistry,
         skillMetadata,
+        toolAvailability,
         userContext,
         workspaceId,
         workspaceName: workspacePromptData.workspaceName,
@@ -603,6 +718,7 @@ type BuildWorkspacePromptTextProps = {
   practiceJurisdictions?: readonly PracticeJurisdiction[];
   refRegistry: ChatRefRegistry;
   skillMetadata?: readonly PromptSkillMetadata[] | undefined;
+  toolAvailability?: ChatToolAvailability | undefined;
   userContext: UserContext | null;
   workspaceId: SafeId<"workspace">;
   workspaceName: string;
@@ -613,6 +729,7 @@ export const buildWorkspacePromptText = ({
   practiceJurisdictions = [],
   refRegistry,
   skillMetadata = getChatSkillMetadata(),
+  toolAvailability = DEFAULT_CHAT_TOOL_AVAILABILITY,
   userContext,
   workspaceId,
   workspaceName,
@@ -622,6 +739,7 @@ export const buildWorkspacePromptText = ({
     practiceJurisdictions,
     refRegistry,
     skillMetadata,
+    toolAvailability,
     userContext,
     workspaceId,
     workspaceName,
@@ -632,6 +750,7 @@ export const buildWorkspacePromptParts = ({
   practiceJurisdictions = [],
   refRegistry,
   skillMetadata = getChatSkillMetadata(),
+  toolAvailability = DEFAULT_CHAT_TOOL_AVAILABILITY,
   userContext,
   workspaceId,
   workspaceName,
@@ -645,18 +764,21 @@ export const buildWorkspacePromptParts = ({
       workspaceName,
     }),
     skillMetadata,
+    toolAvailability,
     userContext,
   });
 
 type BuildActiveFilePromptProps = {
   activeFile: IncomingActiveFile;
   refRegistry: ChatRefRegistry;
+  toolAvailability: ChatToolAvailability;
   workspaceId: SafeId<"workspace">;
 };
 
 const buildActiveFilePrompt = ({
   activeFile,
   refRegistry,
+  toolAvailability,
   workspaceId,
 }: BuildActiveFilePromptProps) => {
   const safeName = sanitizePromptValue({
@@ -677,7 +799,9 @@ const buildActiveFilePrompt = ({
     activeFile.supportsDocxEdits
       ? "`create-document` creates a separate new DOCX from legal-source directives. Do NOT use it to edit, rewrite, replace, save, or make a new version of the active file. If live DOCX editing is available below, use `apply-active-docx-edits`; otherwise explain that the document must be opened for editing first. Never create a substitute document."
       : "`create-document` creates a separate new DOCX from legal-source directives. Do NOT use it to edit, rewrite, replace, save, or make a new version of the active file. Never create a substitute document.",
-    activeFile.supportsDocxEdits ? buildActiveDocxEditPrompt(activeFile) : "",
+    activeFile.supportsDocxEdits
+      ? buildActiveDocxEditPrompt(activeFile, toolAvailability)
+      : "",
     `Do NOT call matter-wide retrieval (\`read.searchMatterDocuments\`, \`read.listMatterEntities\`, or \`read.getMatterEntities\`) for these open-ended questions — the user does not want answers synthesised from other files in the matter. The chat history is always available; reference earlier turns directly without re-fetching.`,
     `Widen the scope to the rest of the matter ONLY when the user explicitly asks (e.g., "compare with the other contracts", "search across the matter", or names another document). When that happens, the matter-wide retrieval functions above are allowed again; scope them to \`matterRefs: ["${matterRef}"]\` as usual.`,
   ]
@@ -743,6 +867,7 @@ const buildEditableBlocksPromptParts = (snapshot: ActiveDocxEditSnapshot) => {
  */
 export const buildActiveTemplatePrompt = (
   activeTemplate: IncomingActiveTemplate,
+  toolAvailability: ChatToolAvailability,
 ) => {
   const safeName = sanitizePromptValue({
     maxLength: 200,
@@ -750,7 +875,9 @@ export const buildActiveTemplatePrompt = (
   });
   const snapshot = activeTemplate.docxEditSnapshot;
   const editingSections =
-    snapshot === undefined ? [] : buildActiveTemplateEditSections(snapshot);
+    snapshot === undefined
+      ? []
+      : buildActiveTemplateEditSections({ snapshot, toolAvailability });
 
   return [
     `ACTIVE TEMPLATE: The user is authoring the reusable document template "${safeName}" in the template studio. It is an org-level template, not a matter document — do not call matter retrieval (\`read.*\`) or \`create-document\` for requests about it; the full text is in the block list below. Plain questions about the template get a normal text answer.`,
@@ -759,15 +886,32 @@ export const buildActiveTemplatePrompt = (
   ].join("\n");
 };
 
-const buildActiveTemplateEditSections = (
-  snapshot: ActiveDocxEditSnapshot,
-): string[] => {
+// FIELD SUGGESTIONS has two shapes: with template authoring the model
+// is steered to `suggest_template_fields` for the analysis pass;
+// without it, straight to `apply-active-docx-edits` replacements.
+const FIELD_SUGGESTIONS_WITH_AUTHORING =
+  "FIELD SUGGESTIONS: When the user asks which literal values should become fillable fields (or uses the suggest-fields preset), first call `suggest_template_fields` with the document text (block texts joined with newlines) and any user guidance as `instructions`. Then apply the suggestions you keep with `apply-active-docx-edits`: one `replaceInBlock` per occurrence, `find` = the exact literalText, `replace` = the `{{fieldPath}}` marker verbatim (e.g. `{{company.name}}`). Reuse the same fieldPath for every occurrence of the same value.";
+
+const FIELD_SUGGESTIONS_NO_AUTHORING =
+  "FIELD SUGGESTIONS: When the user asks which literal values should become fillable fields, propose them with `apply-active-docx-edits`: one `replaceInBlock` per occurrence, `find` = the exact literal text, `replace` = the `{{fieldPath}}` marker verbatim (e.g. `{{company.name}}`). Reuse the same fieldPath for every occurrence of the same value.";
+
+type BuildActiveTemplateEditSectionsProps = {
+  snapshot: ActiveDocxEditSnapshot;
+  toolAvailability: ChatToolAvailability;
+};
+
+const buildActiveTemplateEditSections = ({
+  snapshot,
+  toolAvailability,
+}: BuildActiveTemplateEditSectionsProps): string[] => {
   const { blocks, truncationNotice } = buildEditableBlocksPromptParts(snapshot);
 
   return [
     "TEMPLATE EDITING: When the user asks — in any language — to change, edit, replace, rewrite, fix, correct, review, or revise the template text, you MUST call `apply-active-docx-edits` in the same turn before claiming any work. Operations are queued as in-document suggestions the user accepts or dismisses one by one; NEVER claim the document was changed (only ids in `applied` represent real changes, which this surface does not produce).",
     "SUPPORTED OPERATIONS: only `replaceInBlock` (exact `find`, copied verbatim from the block text), `replaceBlock`, and `deleteBlock`. The template studio cannot honour `insertAfterBlock`, `insertBeforeBlock`, `commentOnBlock`, or `insertSignatureTable` — such operations are skipped; do not emit them and do not promise insertions.",
-    "FIELD SUGGESTIONS: When the user asks which literal values should become fillable fields (or uses the suggest-fields preset), first call `suggest_template_fields` with the document text (block texts joined with newlines) and any user guidance as `instructions`. Then apply the suggestions you keep with `apply-active-docx-edits`: one `replaceInBlock` per occurrence, `find` = the exact literalText, `replace` = the `{{fieldPath}}` marker verbatim (e.g. `{{company.name}}`). Reuse the same fieldPath for every occurrence of the same value.",
+    toolAvailability.templateAuthoring
+      ? FIELD_SUGGESTIONS_WITH_AUTHORING
+      : FIELD_SUGGESTIONS_NO_AUTHORING,
     'ALWAYS set `severity` and `area` on each operation (`severity`: "low" | "medium" | "high"; `area`: short topic label such as "Fields", "Names", "Wording").',
     "After the tool returns, reply with ONE short sentence (in the user's language) covering the count and the goal — the suggestions already render in the document with full context; do not enumerate them.",
     truncationNotice,
@@ -780,7 +924,10 @@ const buildActiveTemplateEditSections = (
   ].filter((line): line is string => line !== null);
 };
 
-const buildActiveDocxEditPrompt = (activeFile: IncomingActiveFile) => {
+const buildActiveDocxEditPrompt = (
+  activeFile: IncomingActiveFile,
+  toolAvailability: ChatToolAvailability,
+) => {
   const snapshot = activeFile.docxEditSnapshot;
   if (!snapshot) {
     // Editor snapshot isn't ready yet, so we can't expose
@@ -799,7 +946,7 @@ const buildActiveDocxEditPrompt = (activeFile: IncomingActiveFile) => {
     'FORBIDDEN: Any reply that asserts work has been done, prepared, queued, suggested, drafted, or "is ready for review" — in any phrasing — without `apply-active-docx-edits` being called in the same turn is a TRUTHFULNESS violation. Examples of forbidden lies: "I prepared N suggestions", "the changes are ready in the panel", "formatting unification is ready", "draft is queued", "review is prepared". If you cannot produce any operations (nothing to fix, or the request is outside the tool\'s capability), say so plainly and DO NOT pretend otherwise.',
     'TOOL CAPABILITY (and its limits): `apply-active-docx-edits` operates on TEXT CONTENT inside paragraphs, headings, and list items, and can insert a few structural elements: page breaks (`pageBreakBefore` on an insert), clause-heading paragraphs (via `styleId`), and side-by-side signature tables (`insertSignatureTable`). It CANNOT change visual run formatting — fonts, bold/italic/underline, font size, colour, indents, alignment, margins, line spacing, list bullet style, tabs, or arbitrary paragraph styles outside the supported set. If the user asks for run-formatting changes ("make headings bigger", "bold the parties", "change the font"), tell them honestly that the AI tool only edits text and the structural elements listed above; suggest they use the document\'s own formatting controls. Do NOT pretend you queued formatting changes that have no operation.',
     'FIELD CODES: A block whose text shows odd gaps — e.g. "Section .", "Schedule No. .", "Page of", "Date: ." — has a Word field code (cross-reference, page number, date, sequence number) the user must edit IN WORD. The rendered number/text is generated from the field; it is not literal block text and `replaceInBlock` cannot fill it in. Skip those blocks: tell the user honestly that AI cannot edit cross-reference / field codes (they should refresh fields in Word with Ctrl+A then F9), and propose only the edits that target real block text. NEVER queue an op whose `find` contains a gap that\'s really a field code.',
-    "Do not call `run-stella-query`, `read.getMatterEntityContents`, `read.searchInEntityContent`, or `create-document` to satisfy active DOCX edit requests; `apply-active-docx-edits` is the only tool that can propose changes to the open document.",
+    "Do not call `execute_typescript` (or its `external_*` read functions) or `create-document` to satisfy active DOCX edit requests; `apply-active-docx-edits` is the only tool that can propose changes to the open document.",
     'CASCADING CHANGES: Before proposing any edit, scan the document for places that REFER TO or DEPEND ON the value being changed and include the dependent fixes in the SAME tool call. Examples: (a) the user changes a price — every restatement of that number in words, in totals, in instalment schedules, in deposit/balance lines, in penalty caps that reference it, must be updated together; (b) the user changes a party name — every occurrence (signature block, header, cross-reference list, defined-terms section) must follow; (c) the user changes a date — derived deadlines, anniversaries, and statute references that depend on it must follow; (d) the user changes a clause number — every cross-reference ("as set out in Article X") must follow. If the right cascade is genuinely ambiguous (e.g. user lowers the total but the document splits it into deposit + arrears and you cannot tell which side absorbs the delta), call `ask-user` ONCE with the specific cascade question before producing any operations. Don\'t propose half a change.',
     "Use the block ids below for tool operations. Prefer `replaceInBlock` with an exact `find` string for localized edits. Use `replaceBlock` when the whole paragraph/list item should change. Use `deleteBlock` to remove a paragraph. Use `insertAfterBlock` or `insertBeforeBlock` (anchored on the neighbouring block id) to add a new paragraph.",
     'STRUCTURAL INSERTS (use the canonical op, not directive text): For a page break, call `insertAfterBlock` with `pageBreakBefore: true` (the `text` may be empty). For a numbered heading (clause), call `insertAfterBlock` (or `insertBeforeBlock`) with `styleId: "ClauseHeading1"` (or `ClauseHeading2`, `ClauseHeading3`) and the heading text in `text`. For a signature block, call `insertSignatureTable` with one entry per party (`name` required; `signatory` and `title` optional). These ops produce real structural elements in the document. DO NOT emit directive markers like `@pagebreak`, `@clause`, `@signatures`, `@title`, or `[[placeholders]]` as paragraph text — those belong to `create-document`, not to this editor; in this tool they would land in the doc as literal characters. Pick one canonical op per intent and use it.',
@@ -808,6 +955,12 @@ const buildActiveDocxEditPrompt = (activeFile: IncomingActiveFile) => {
     'After the tool returns, reply with ONE short sentence (in the user\'s language) covering the count and the high-level goal — e.g. "13 spelling and typo fixes are ready to review in the panel." Do NOT enumerate the operations, do NOT list block ids or before/after pairs in your reply — the panel already shows every suggestion with its full context. Repeating them is noise. NEVER claim the document was changed; only ids that appear in `applied` represent actual document changes (rare with this tool). Never paraphrase a `queued` result as a completed change.',
     "CITATIONS IN PLAIN ANSWERS: When you summarise, quote, or refer to specific content from the open document in a normal text reply (i.e. NOT inside `apply-active-docx-edits`), wrap the supporting paragraph snippet in a Markdown link whose href is `#folio:<blockId>` (note the leading `#` — it is required, the link will be stripped without it). Example: `the contract is governed by [Delaware law](#folio:1A2B3C4D)`. Copy block ids verbatim from the block list — do NOT shorten, pad, prefix, or otherwise mangle them. The link TEXT must be a short, human-meaningful phrase quoted or paraphrased from the cited block — typically 1–6 words in the user's language (e.g. `[Delaware law]`, `[July 20, 2021]`, `[$1,500,000]`). NEVER use the href itself as the link text (NOT `[#folio:1A2B3C4D](#folio:1A2B3C4D)`), NEVER leave the text empty (`[](#folio:1A2B3C4D)`), NEVER use Markdown autolinks like `<#folio:1A2B3C4D>` — those render as broken citations. Cite at most a few blocks per reply (only the ones a user would want to verify); never invent a blockId that's not in the list.",
     truncationNotice,
+    toolAvailability.folioAgentDocTools
+      ? "LIVE DOCUMENT LOOKUPS: The block list below is current as of this turn only — it will not reflect edits you queue in this same turn. Reach for `read_document` (a fresh read of the current document) or `find_text` (locate an exact string match) only when the truncation notice above applies (blocks past the cutoff) or you need to confirm a verbatim match before referencing a `blockId`; for ordinary edits the block list below is already sufficient, so do not call either tool by default."
+      : null,
+    toolAvailability.folioAgentDocTools
+      ? "COMMENTS & TRACKED CHANGES: Use `read_comments` to list the document's comment threads and `read_changes` to list its pending tracked insertions/deletions when the user asks about review state or existing feedback. To act on comments, use `add_comment` (attach a new comment to a block), `reply_comment` (respond in an existing thread), or `resolve_comment` (mark a thread resolved / reopen it) — each needs the user to approve before it applies, so state plainly what you will do and wait. Prefer `apply-active-docx-edits` for editing the document text itself; use the comment tools only for commentary and review actions."
+      : null,
     ["Editable DOCX blocks:", "```json", JSON.stringify(blocks), "```"].join(
       "\n",
     ),
@@ -980,6 +1133,7 @@ const mergeActiveSkillMetadata = ({
   );
   if (activeSkillIndex === -1) {
     return [...skillMetadata, activeMetadata].toSorted((a, b) =>
+      // oxlint-disable-next-line require-cached-collator/require-cached-collator -- `name` here is the skill's machine tool name (toolName), not the user-facing displayName
       a.name.localeCompare(b.name),
     );
   }
@@ -1067,64 +1221,12 @@ export const buildActiveSkillSection = (
   ].join("\n");
 };
 
-const readonlyFunctionContracts = [
-  ...readonlyOrgFunctionContracts,
-  ...readonlyWorkspaceFunctionContracts,
-] as const;
-
-const formatInputShape = (entry: ReadonlyFunctionManifest) => {
-  const inputProperties =
-    entry.inputSchema.type === "object"
-      ? entry.inputSchema.properties
-      : undefined;
-
-  if (inputProperties === undefined) {
-    return "input";
-  }
-
-  const required = new Set(entry.inputSchema.required);
-  const fields: string[] = [];
-
-  for (const name of Object.keys(inputProperties)) {
-    fields.push(required.has(name) ? name : `${name}?`);
-  }
-
-  return fields.length === 0 ? "{}" : `{ ${fields.join(", ")} }`;
-};
-
-/**
- * Compact readonly read API catalog. This deliberately lists
- * names and top-level input keys, not full JSON Schemas; the
- * model can call `describe-stella-api({name})` when it needs
- * exact validation details. The catalog is generated from the
- * same contracts as the tool runtime so names and shapes cannot
- * drift by hand.
- */
-const READONLY_API_HINT = (() => {
-  const manifest = buildReadonlyFunctionManifest(
-    readonlyFunctionContracts,
-  ).unwrap();
-  const lines = manifest.map(
-    (entry) =>
-      `- read.${entry.name}(${formatInputShape(entry)}) -> ${entry.outputShape}: ${entry.summary}`,
-  );
-
-  return [
-    "For stella data reads, use the stella API:",
-    "- call `run-stella-query` with TypeScript that uses `read.*`",
-    "- every read result stores records in `result.items`; paginated list results also include `result.hasMore` and `result.nextOffset`",
-    "- call `describe-stella-api({name})` only when you need a function's full input/output schema",
-    "When answering about workspace or organization data, fetch current data inside `run-stella-query`; never answer counts or exhaustive lists from prior context, visible UI state, examples, or pasted arrays such as `const entities = [...]`. Paginate until `hasMore` is false when the answer requires the complete set. Prefer focused action/UI tools whenever one fits.",
-    "Available stella read functions:",
-    ...lines,
-  ].join("\n");
-})();
-
 type AppendActiveFilePromptIfEntityExistsProps = {
   activeFile: IncomingActiveFile;
   entityExists: boolean;
   prompt: string;
   refRegistry: ChatRefRegistry;
+  toolAvailability?: ChatToolAvailability | undefined;
   workspaceId: SafeId<"workspace">;
 };
 
@@ -1132,15 +1234,22 @@ const buildActiveFileSection = ({
   activeFile,
   entityExists,
   refRegistry,
+  toolAvailability = DEFAULT_CHAT_TOOL_AVAILABILITY,
   workspaceId,
 }: {
   activeFile: IncomingActiveFile;
   entityExists: boolean;
   refRegistry: ChatRefRegistry;
+  toolAvailability?: ChatToolAvailability | undefined;
   workspaceId: SafeId<"workspace">;
 }): string =>
   entityExists
-    ? buildActiveFilePrompt({ activeFile, refRegistry, workspaceId })
+    ? buildActiveFilePrompt({
+        activeFile,
+        refRegistry,
+        toolAvailability,
+        workspaceId,
+      })
     : "";
 
 /**
@@ -1154,12 +1263,14 @@ export const appendActiveFilePromptIfEntityExists = ({
   entityExists,
   prompt,
   refRegistry,
+  toolAvailability,
   workspaceId,
 }: AppendActiveFilePromptIfEntityExistsProps): string => {
   const section = buildActiveFileSection({
     activeFile,
     entityExists,
     refRegistry,
+    toolAvailability,
     workspaceId,
   });
   return section.length > 0 ? `${prompt}\n\n${section}` : prompt;
@@ -1169,6 +1280,7 @@ type BuildPromptProps = {
   practiceJurisdictions: readonly PracticeJurisdiction[];
   requestContextSections: string[];
   skillMetadata: readonly PromptSkillMetadata[];
+  toolAvailability: ChatToolAvailability;
   userContext: UserContext | null;
 };
 
@@ -1176,15 +1288,16 @@ const buildPromptParts = ({
   practiceJurisdictions,
   requestContextSections,
   skillMetadata,
+  toolAvailability,
   userContext,
 }: BuildPromptProps): ChatPromptParts => {
   const { safeSkillMetadata, untrustedSkillMetadata } =
     splitSkillMetadataForPrompt(skillMetadata);
   const cacheStablePrefix = brandChatCacheStablePrefix(
     joinPromptSections([
-      ...CORE_RULE_SECTIONS,
+      ...buildCoreRuleSections(toolAvailability),
       buildSkillCatalogSection(safeSkillMetadata),
-      READONLY_API_HINT,
+      CHAT_CODE_MODE_SYSTEM_PROMPT,
     ]),
   );
   // Safe half: scaffold + jurisdiction labels. Both are

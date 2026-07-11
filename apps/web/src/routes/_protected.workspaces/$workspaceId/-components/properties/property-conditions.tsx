@@ -18,9 +18,10 @@ import {
 import { ScrollArea } from "@stll/ui/components/scroll-area";
 import { Separator } from "@stll/ui/components/separator";
 
+import { ConditionBuilder } from "@/components/conditions/condition-builder";
+import type { FieldOption } from "@/components/conditions/condition-builder-logic";
 import type { PropertyDependency, WorkspaceProperty } from "@/lib/types";
-import { ConditionBuilder } from "@/routes/_protected.workspaces/$workspaceId/-components/conditions/condition-builder";
-import type { FieldOption } from "@/routes/_protected.workspaces/$workspaceId/-components/conditions/condition-builder.logic";
+import { filterCapabilities } from "@/routes/_protected.workspaces/$workspaceId/-components/conditions/filter-capabilities";
 import { PropertyIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/property-helpers";
 import { propertiesOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/properties";
 
@@ -77,7 +78,10 @@ export const PropertyConditions = ({
           count: String(conditionCount),
         })}
       </DialogTrigger>
-      <DialogPopup>
+      {/* Wider than the default dialog: the rule row (When <field> is <value>)
+          otherwise shrinks its selects to their min-widths and truncates the
+          field and option labels to "…". */}
+      <DialogPopup className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{t("workspaces.properties.editConditions")}</DialogTitle>
           <p className="text-muted-foreground text-sm">
@@ -151,7 +155,7 @@ const DependencyConditionEditor = ({
         {t("workspaces.properties.editConditionsWhen")}
       </p>
       <ConditionBuilder
-        fields={[field]}
+        capabilities={filterCapabilities({ fields: [field] })}
         onChange={(next) => {
           setDraft(next);
           onPersist(index, {

@@ -22,11 +22,12 @@ import infosoudImportAgenda from "@/api/handlers/workspaces/infosoud-import-agen
 import infosoudLookup from "@/api/handlers/workspaces/infosoud-lookup";
 import readWorkspaces from "@/api/handlers/workspaces/read";
 import readActiveWorkspace from "@/api/handlers/workspaces/read-active";
+import readWorkspaceActivity from "@/api/handlers/workspaces/read-activity";
 import { readWorkspaceHandler } from "@/api/handlers/workspaces/read-by-id";
-import { readJustificationsHandler } from "@/api/handlers/workspaces/read-justifications";
+import readJustifications from "@/api/handlers/workspaces/read-justifications";
 import readWorkspaceNavigation from "@/api/handlers/workspaces/read-navigation";
 import { readOverviewHandler } from "@/api/handlers/workspaces/read-overview";
-import { readWorkflowHandler } from "@/api/handlers/workspaces/read-workflow-status";
+import readWorkflow from "@/api/handlers/workspaces/read-workflow-status";
 import workflowTargetCount from "@/api/handlers/workspaces/read-workflow-target-count";
 import unarchiveWorkspace from "@/api/handlers/workspaces/unarchive";
 import updateActiveWorkspace from "@/api/handlers/workspaces/update-active";
@@ -43,11 +44,11 @@ import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { permissionMacro, workspaceAccessMacro } from "@/api/lib/auth";
 import { tSafeId } from "@/api/lib/custom-schema";
 import { invalidateQuery } from "@/api/lib/invalidate-query-macro";
-import { LIMITS } from "@/api/lib/limits";
 
 const readWorkspace = createSafeHandler(
   {
     permissions: { workspace: ["read"] },
+    mcp: { type: "covered", by: "list_matters" },
   } satisfies HandlerConfig,
   async function* ({ scopedDb, session, workspaceId }) {
     const response = yield* Result.await(
@@ -65,48 +66,10 @@ const readWorkspace = createSafeHandler(
   },
 );
 
-const readWorkflow = createSafeHandler(
-  {
-    permissions: { workspace: ["read"] },
-  } satisfies HandlerConfig,
-  async function* ({ workspaceId }) {
-    const response = yield* Result.await(
-      Result.tryPromise(async () => await readWorkflowHandler(workspaceId)),
-    );
-
-    return Result.ok(response);
-  },
-);
-
-const readJustifications = createSafeHandler(
-  {
-    permissions: { workspace: ["read"] },
-    body: t.Object({
-      entityIds: t.Array(tSafeId("entity"), {
-        minItems: 1,
-        maxItems: LIMITS.entitiesPageSizeMax,
-      }),
-    }),
-  } satisfies HandlerConfig,
-  async function* ({ body: { entityIds }, scopedDb, workspaceId }) {
-    const response = yield* Result.await(
-      Result.tryPromise(
-        async () =>
-          await readJustificationsHandler({
-            workspaceId,
-            scopedDb,
-            entityIds,
-          }),
-      ),
-    );
-
-    return Result.ok(response);
-  },
-);
-
 const readOverview = createSafeHandler(
   {
     permissions: { workspace: ["read"] },
+    mcp: { type: "covered", by: "list_matters" },
   } satisfies HandlerConfig,
   async function* ({ scopedDb, workspaceId }) {
     const response = yield* Result.await(
@@ -126,6 +89,7 @@ const readOverview = createSafeHandler(
 const readWorkspaceContacts = createSafeHandler(
   {
     permissions: { workspace: ["read"] },
+    mcp: { type: "covered", by: "list_matters" },
   } satisfies HandlerConfig,
   async function* ({ scopedDb, workspaceId }) {
     const response = yield* Result.await(
@@ -145,6 +109,7 @@ const readWorkspaceContacts = createSafeHandler(
 const readWorkspaceMembers = createSafeHandler(
   {
     permissions: { workspace: ["read"] },
+    mcp: { type: "covered", by: "list_matters" },
   } satisfies HandlerConfig,
   async function* ({ scopedDb, workspaceId }) {
     const response = yield* Result.await(
@@ -165,6 +130,15 @@ export const workspacesRoute = new Elysia({ prefix: "/workspaces" })
   .use(workspaceAccessMacro)
   .use(invalidateQuery)
   .use(permissionMacro)
+  // Kept deliberately: this guard is the type-level carrier of
+  // `validateAuth` for Elysia's context composition. `permissions` is a
+  // function-form macro (see "Known Elysia Gotchas" in AGENTS.md) that
+  // applies `validateAuth` at runtime but not in type composition, so a
+  // per-route `validateAuth: true` literal instead of this guard breaks
+  // sibling macros' schema merging (e.g. `invalidateQuery`'s body
+  // extension). The per-request memoization in `resolveValidateAuth`
+  // (lib/auth.ts) neutralizes the extra resolve this guard stacks on top
+  // of `permissions`. See tests/security/route-auth-invariants.test.ts.
   .guard({
     validateAuth: true,
   })
@@ -228,6 +202,10 @@ export const workspacesRoute = new Elysia({ prefix: "/workspaces" })
           body: infosoudImportAgenda.config.body,
           invalidateQuery: true,
           permissions: infosoudImportAgenda.config.permissions,
+        })
+        .get("/activity", readWorkspaceActivity.handler, {
+          permissions: readWorkspaceActivity.config.permissions,
+          query: readWorkspaceActivity.config.query,
         })
         .get("/overview", readOverview.handler, {
           permissions: readOverview.config.permissions,

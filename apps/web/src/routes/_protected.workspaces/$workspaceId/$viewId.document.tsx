@@ -29,7 +29,7 @@ import { UploadIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 import * as v from "valibot";
 
-import type { DocxEditorRef } from "@stll/folio";
+import type { DocxEditorRef } from "@stll/folio-react";
 import { Button } from "@stll/ui/components/button";
 import {
   Dialog,
@@ -40,7 +40,7 @@ import {
   DialogPopup,
   DialogTitle,
 } from "@stll/ui/components/dialog";
-import "@stll/folio/editor.css";
+import "@stll/folio-react/editor.css";
 import { cn } from "@stll/ui/lib/utils";
 
 import {
@@ -49,6 +49,7 @@ import {
 } from "@/components/docx-preview-zoom";
 import { TranslateDocumentDialog } from "@/components/translate-document-dialog";
 import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
+import { getAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
 import { APIError, ClientOperationError, toAPIError } from "@/lib/errors";
@@ -57,6 +58,7 @@ import {
   getPDFPageIdByNumber,
   usePDFStore,
 } from "@/lib/pdf/pdf-context";
+import { ensureRouteQueryData, prefetchRouteQuery } from "@/lib/react-query";
 import { toSafeId } from "@/lib/safe-id";
 import { composeRefs } from "@/lib/slot";
 import { shouldUseDocxBrowserEditor } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-browser-editor.logic";
@@ -73,16 +75,17 @@ import {
   entityVersionsOptions,
   fieldFileOptions,
 } from "@/routes/_protected.workspaces/$workspaceId/-queries/entity-versions";
+import { justificationsOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/workspace";
 import { useWorkspaceStore } from "@/routes/_protected.workspaces/$workspaceId/-store";
 import { PdfViewerControls } from "@/routes/_protected.workspaces/-components/pdf-viewer-controls";
 import "@/routes/_protected.workspaces/$workspaceId/-components/peek/peek-docx.css";
 
 const ReadOnlyDocxViewer = lazy(async () => {
-  const m = await import("@stll/folio");
+  const m = await import("@/components/docx/app-docx-editor");
   return { default: m.DocxEditor };
 });
 
-// Lazy-load DocxBrowserEditor so the @stll/folio editor graph
+// Lazy-load DocxBrowserEditor so the @stll/folio-react editor graph
 // (DocxEditor, FormattingBar, prosemirror-tables, yjs, utif2, …)
 // stays out of the eager preload list. Without this the static
 // import below pulled the whole vendor-folio chunk (~490 KB gz)
@@ -112,6 +115,62 @@ export const Route = createFileRoute(
   }),
   search: {
     middlewares: [stripSearchParams({ pdfPage: 1 })],
+  },
+  // The entity query is keyed on the `entity` search param, so the loader must
+  // re-run when it changes; `field` gates whether the detail view mounts at all.
+  loaderDeps: ({ search }) => ({ entity: search.entity, field: search.field }),
+  loader: async ({ context, params, deps }) => {
+    // Mirror the component guard: the entity query only runs when both `entity`
+    // and `field` are present (otherwise the route redirects without mounting
+    // the detail view). Prime it so the fetch starts during navigation instead
+    // of after the component mounts and suspends.
+    if (!deps.entity || !deps.field) {
+      return;
+    }
+
+    const entity = await ensureRouteQueryData(
+      context.queryClient,
+      entityOptions(params.workspaceId, deps.entity),
+    );
+
+    // useSyncJustifications mounts with entityIds=[deps.entity] as soon as the
+    // component renders; warm the same query so it's a cache hit. The hook
+    // normalizes entityIds (dedupe + sort) before building the key, but for a
+    // single-element array that's a no-op, so the key matches exactly.
+    void prefetchRouteQuery(
+      context.queryClient,
+      justificationsOptions({
+        workspaceId: params.workspaceId,
+        entityIds: [deps.entity],
+      }),
+      (error: unknown) => {
+        getAnalytics().captureError(error);
+      },
+    );
+
+    // `field` is the fieldId FullscreenPdfViewer eventually reads via
+    // usePDFStore, but on a cold navigation that store is only just created
+    // (PDFProvider seeds it from this same search param, see `key={fieldId}`
+    // below), so the value is already known here. Only PDF-family fields
+    // render through PdfViewer/fileOptions; docx fields take an entirely
+    // different display path (DocxBrowserEditor/fieldFileOptions) that never
+    // reads fileOptions, so gate the prefetch on the resolved mimeType to
+    // avoid downloading a file buffer the component will never use.
+    const field = entity.fields.find((f) => f.id === deps.field);
+    const rendersInPdfViewer =
+      field?.content.type === "file" && field.content.mimeType !== DOCX_MIME;
+    if (rendersInPdfViewer) {
+      // Warm the file query without blocking route commit: a large PDF
+      // download shouldn't hold the user on the pendingComponent. The
+      // component's useSuspenseQuery scopes the wait to the PDF area.
+      void prefetchRouteQuery(
+        context.queryClient,
+        fileOptions({ workspaceId: params.workspaceId, fieldId: deps.field }),
+        (error: unknown) => {
+          getAnalytics().captureError(error);
+        },
+      );
+    }
   },
   pendingComponent: () => <DocxLoadingShell />,
 });
@@ -312,10 +371,16 @@ function RouteComponentInner({
   const [docxLatestVersionDialogOpen, setDocxLatestVersionDialogOpen] =
     useState(false);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset setDocxUnlocked(false) when fieldId changes; setDocxUnlocked is also called from several editor handlers (onClose/onSaved/onUnlockedChange), and a key remount on fieldId would reset unrelated state, so it is neither pure derived state nor lift-to-key
-  useEffect(() => {
+  // Reset the docx-unlocked flag when fieldId changes, using React's
+  // adjust-state-during-render pattern instead of a reset effect. setDocxUnlocked
+  // is also called from editor handlers (onClose/onSaved/onUnlockedChange), so it
+  // is not pure derived state; tracking the previous fieldId resets only on a
+  // real change without remounting unrelated state.
+  const [prevFieldId, setPrevFieldId] = useState(fieldId);
+  if (fieldId !== prevFieldId) {
+    setPrevFieldId(fieldId);
     setDocxUnlocked(false);
-  }, [fieldId]);
+  }
 
   // Find the active file field to determine mimeType and propertyId
   const activeFileField = entity.fields.find((f) => {
@@ -331,6 +396,7 @@ function RouteComponentInner({
   // older version (leave alone). Ref-assign during render is the
   // sanctioned latest-value pattern; the write is idempotent.
   if (activeFileField !== undefined) {
+    // eslint-disable-next-line react/react-compiler -- sanctioned latest-value ref mirror: idempotent write consumed only by the version-switch effect below, never during render
     currentFileFieldIdsByPropertyRef.current.set(
       activeFileField.propertyId,
       activeFileField.id,
@@ -405,8 +471,7 @@ function RouteComponentInner({
         )
       : undefined;
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- auto-advances activeFieldId + navigate when a newer version appears via background query refetch; this reacts to async server-state changing (no user version-switch event to relay into) and runs setState/navigate post-commit
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (
       latestFileFieldForProperty === undefined ||
       latestFileFieldForProperty.id === fieldId

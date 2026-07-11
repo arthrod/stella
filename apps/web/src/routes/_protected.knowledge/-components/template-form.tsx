@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -14,7 +14,8 @@ import {
 } from "lucide-react";
 import { useLocale, useTranslations } from "use-intl";
 
-import { evaluateCondition } from "@stll/template-conditions";
+import type { ConditionNode, Operand } from "@stll/conditions";
+import { evaluateCondition, isSafeFieldPath } from "@stll/template-conditions";
 import { Button } from "@stll/ui/components/button";
 import { Checkbox } from "@stll/ui/components/checkbox";
 import {
@@ -48,6 +49,7 @@ import { DatePickerPopover } from "@/components/date-picker-popover";
 import { MatterTargetPicker } from "@/components/matter-target-picker";
 import type { MatterTarget } from "@/components/matter-target-picker";
 import Tooltip from "@/components/tooltip";
+import { useMountEffect } from "@/hooks/use-effect";
 import { api } from "@/lib/api";
 import { DOCX_MIME, PDF_MIME, TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
 import { userErrorMessage } from "@/lib/errors";
@@ -87,6 +89,51 @@ type StructureError = DiscoverData["structureErrors"][number];
 const REQUIRED_MARKER = "*";
 
 type CompositePart = NonNullable<ResolvedField["parts"]>[number];
+
+const addFormulaFieldReferences = (
+  expr: string,
+  fields: readonly ResolvedField[],
+  referencedPaths: Set<string>,
+): void => {
+  for (const field of fields) {
+    if (expr.includes(field.path)) {
+      referencedPaths.add(field.path);
+    }
+  }
+};
+
+const addConditionOperandReferences = (
+  operand: Operand,
+  fields: readonly ResolvedField[],
+  referencedPaths: Set<string>,
+): void => {
+  if (operand.type === "path") {
+    referencedPaths.add(operand.path);
+    return;
+  }
+  if (operand.type === "formula") {
+    addFormulaFieldReferences(operand.expr, fields, referencedPaths);
+  }
+};
+
+const addConditionAstReferences = (
+  node: ConditionNode,
+  fields: readonly ResolvedField[],
+  referencedPaths: Set<string>,
+): void => {
+  if (node.type === "compare") {
+    addConditionOperandReferences(node.left, fields, referencedPaths);
+    addConditionOperandReferences(node.right, fields, referencedPaths);
+    return;
+  }
+  if (node.type === "predicate") {
+    addConditionOperandReferences(node.operand, fields, referencedPaths);
+    return;
+  }
+  for (const child of node.children) {
+    addConditionAstReferences(child, fields, referencedPaths);
+  }
+};
 
 /** The field's parts when it is composite (parts + format), else null. */
 const compositeParts = (field: ResolvedField): CompositePart[] | null =>
@@ -273,7 +320,11 @@ type SaveTarget =
     };
 
 type TemplateFormProps = (TransientFillProps | ServerFillProps) & {
-  /** Live values tap for hosts that preview the fill elsewhere. */
+  /** Live values tap for hosts that preview the fill elsewhere. Called once
+   *  on mount with the merged initial snapshot (field defaults plus
+   *  `initialValues`), then again on every change, so a host that derives
+   *  state only from this callback (e.g. a preview) does not start blank
+   *  when the form restores previously-entered values. */
   onValuesChange?: (values: Record<string, unknown>) => void;
   /** Opt-in edit affordance: when set, each top-level field row shows a
    *  pencil that jumps to that field's configuration. Absent in the real
@@ -1121,7 +1172,7 @@ const buildSubmitValues = (
   fields: ResolvedField[],
   conditions: NamedCondition[],
 ): Record<string, unknown> => {
-  const result: Record<string, unknown> = {};
+  const result = createNullRecord();
 
   for (const field of fields) {
     // Skip hidden fields
@@ -1136,11 +1187,15 @@ const buildSubmitValues = (
       const arrayValues: Record<string, unknown>[] = [];
 
       for (let i = 0; i < items.length; i++) {
-        const itemObj: Record<string, unknown> = {};
+        const itemObj = createNullRecord();
         for (const subField of itemFields) {
           const path = `${field.path}[${i}].${subField.path}`;
           const val = values[path];
-          if (val !== undefined && val !== "") {
+          if (
+            val !== undefined &&
+            val !== "" &&
+            isSafeFieldPath(subField.path)
+          ) {
             itemObj[subField.path] = coerceValue(subField, val);
           }
         }
@@ -1192,11 +1247,17 @@ const coerceValue = (field: ResolvedField, value: unknown): unknown => {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+const createNullRecord = (): Record<string, unknown> => ({ __proto__: null });
+
 const setNestedValue = (
   obj: Record<string, unknown>,
   path: string,
   value: unknown,
 ) => {
+  if (!isSafeFieldPath(path)) {
+    return;
+  }
+
   const parts = path.split(".");
   const last = parts.at(-1);
   if (!last) {
@@ -1205,12 +1266,12 @@ const setNestedValue = (
   let current = obj;
 
   for (const part of parts.slice(0, -1)) {
-    const next = current[part];
+    const next = Object.hasOwn(current, part) ? current[part] : undefined;
     if (isRecord(next)) {
       current = next;
       continue;
     }
-    const child: Record<string, unknown> = {};
+    const child = createNullRecord();
     current[part] = child;
     current = child;
   }
@@ -1490,6 +1551,9 @@ export const TemplateForm = ({
   // field derives from (formula, optionsFrom).
   const referencedPaths = new Set<string>();
   for (const condition of conditions) {
+    if (condition.node !== undefined) {
+      addConditionAstReferences(condition.node, allFields, referencedPaths);
+    }
     for (const f of allFields) {
       if (condition.expression.includes(f.path)) {
         referencedPaths.add(f.path);
@@ -1501,11 +1565,7 @@ export const TemplateForm = ({
       referencedPaths.add(f.optionsFrom);
     }
     if (f.formula !== undefined) {
-      for (const other of allFields) {
-        if (f.formula.includes(other.path)) {
-          referencedPaths.add(other.path);
-        }
-      }
+      addFormulaFieldReferences(f.formula, allFields, referencedPaths);
     }
   }
   const fields = allFields.filter(
@@ -1513,6 +1573,7 @@ export const TemplateForm = ({
       f.formula === undefined &&
       f.aiPrompt === undefined &&
       f.condition === undefined &&
+      f.conditionAst === undefined &&
       (f.count > 0 || f.inputType === "boolean" || referencedPaths.has(f.path)),
   );
   const [values, setValues] = useState<FormValues>(() => ({
@@ -1524,10 +1585,6 @@ export const TemplateForm = ({
   const [clauseOverrides, setClauseOverrides] = useState<
     Record<string, ClauseBody>
   >({});
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- relays the live form values to a parent callback prop on every change; setValues is driven by many field handlers so this cannot be folded into a single one, lift the values to the parent
-  useEffect(() => {
-    onValuesChange?.(values);
-  }, [values, onValuesChange]);
   const [loading, setLoading] = useState(false);
   const [touched, setTouched] = useState<TouchedFields>({});
   const [errors, setErrors] = useState<FieldErrors>({});
@@ -1538,9 +1595,20 @@ export const TemplateForm = ({
     Record<string, string | null>
   >({});
   const touchedRef = useRef(touched);
+  // eslint-disable-next-line react/react-compiler -- latest-value ref mirror read only from submit/validation callbacks, never during render
   touchedRef.current = touched;
   const valuesRef = useRef(values);
+  // eslint-disable-next-line react/react-compiler -- latest-value ref mirror read only from submit/validation callbacks, never during render
   valuesRef.current = values;
+
+  // Notify once with the merged initial snapshot, matching the on-change
+  // notify in handleChange below. Without this, a host deriving state only
+  // from onValuesChange (e.g. the Studio fill facet's live preview) starts
+  // blank when the form restores previously-entered values via
+  // `initialValues` instead of receiving a first edit.
+  useMountEffect(() => {
+    onValuesChange?.(valuesRef.current);
+  });
 
   /** Resolve a ValidationError to a translated string. */
   const resolveError = useCallback(
@@ -1611,10 +1679,20 @@ export const TemplateForm = ({
     [fields],
   );
 
-  const handleChange = useCallback((path: string, value: unknown) => {
-    valuesRef.current = { ...valuesRef.current, [path]: value };
-    setValues((prev) => ({ ...prev, [path]: value }));
-  }, []);
+  // Sole writer of `values`: merges the change, updates state, and relays
+  // the resulting snapshot to the parent in the same tick (no post-commit
+  // effect). The ref update stays synchronous with `setValues` so validation
+  // reads the latest values inside ordinary event handlers, per the ref-mirror
+  // exemption above.
+  const handleChange = useCallback(
+    (path: string, value: unknown) => {
+      const next = { ...valuesRef.current, [path]: value };
+      valuesRef.current = next;
+      setValues(next);
+      onValuesChange?.(next);
+    },
+    [onValuesChange],
+  );
 
   /** Drop a field's prefill badge once its value is cleared (empty string,
    *  unchecked boolean, or every composite part blank). Edits keep it. */
@@ -1836,19 +1914,19 @@ export const TemplateForm = ({
     [fields, conditions, resolveError],
   );
 
-  // Soft empty-fields gate: the warning shown in the action row after the
-  // first attempt of an action while optional fields are still empty.
+  // Soft empty-fields gate: the warning shown in the action row when an action
+  // is attempted while optional fields are still empty. The warning carries its
+  // own explicit confirm button; the primary action button never relabels and
+  // clicking it again just re-arms the same warning.
   const [emptyWarning, setEmptyWarning] = useState<{
     action: SubmitAction;
     count: number;
     names: string;
   } | null>(null);
-  const emptyWarningRef = useRef(emptyWarning);
-  emptyWarningRef.current = emptyWarning;
 
-  /** Gate every submit path: with optional fields still empty, the first
-   *  attempt arms the warning and aborts; repeating the same action (its
-   *  button now reads "… anyway") proceeds. Returns true to proceed. */
+  /** Gate every submit path: with optional fields still empty, arm the warning
+   *  and abort. Only an empty-field-free form (or the warning's own confirm
+   *  button, which bypasses this gate) proceeds. Returns true to proceed. */
   const confirmEmptyFields = useCallback(
     (action: SubmitAction, currentValues: FormValues): boolean => {
       const empty = collectEmptyOptionalFields(
@@ -1856,7 +1934,7 @@ export const TemplateForm = ({
         currentValues,
         conditions,
       );
-      if (empty.length === 0 || emptyWarningRef.current?.action === action) {
+      if (empty.length === 0) {
         setEmptyWarning(null);
         return true;
       }
@@ -1894,7 +1972,7 @@ export const TemplateForm = ({
   });
 
   const handleDownload = useCallback(
-    async (format: FillFormat) => {
+    async (format: FillFormat, { skipEmptyGate = false } = {}) => {
       if (!validateAll(values)) {
         // Scroll to the first errored field
         const all = collectValidatableFields(fields, values, conditions);
@@ -1921,7 +1999,7 @@ export const TemplateForm = ({
 
       const action: SubmitAction =
         format === "pdf" ? "downloadPdf" : "downloadDocx";
-      if (!confirmEmptyFields(action, values)) {
+      if (!skipEmptyGate && !confirmEmptyFields(action, values)) {
         return;
       }
 
@@ -2117,6 +2195,43 @@ export const TemplateForm = ({
     handleDownload("docx").catch(() => undefined);
   };
 
+  /** The empty-fields warning's explicit confirm: run the armed action while
+   *  bypassing the gate. This is the only way to proceed once the warning is
+   *  shown; the primary action button just re-arms it. */
+  const confirmEmptyWarning = () => {
+    if (emptyWarning === null) {
+      return;
+    }
+    const { action } = emptyWarning;
+    setEmptyWarning(null);
+    if (action === "downloadDocx") {
+      handleDownload("docx", { skipEmptyGate: true }).catch(() => undefined);
+      return;
+    }
+    if (action === "downloadPdf") {
+      handleDownload("pdf", { skipEmptyGate: true }).catch(() => undefined);
+      return;
+    }
+    if (action === "moveToMatter") {
+      setMatterTarget(null);
+      setMatterDialogOpen(true);
+      return;
+    }
+    if (saveTarget?.kind === "matter") {
+      void fillToMatter(saveTarget.workspaceId, saveTarget.parentId ?? null);
+    }
+  };
+
+  const emptyWarningConfirmLabel = (action: SubmitAction): string => {
+    if (action === "createDocument") {
+      return t("templates.createDocumentAnyway");
+    }
+    if (action === "moveToMatter") {
+      return t("templates.moveToMatterAnyway");
+    }
+    return t("templates.downloadAnyway");
+  };
+
   // Filter visible non-array fields, then group
   const visibleScalarFields = fields.filter(
     (f) => f.kind !== "array" && isFieldVisible(f, values, conditions),
@@ -2129,20 +2244,12 @@ export const TemplateForm = ({
   const submitAction: SubmitAction =
     saveTarget?.kind === "matter" ? "createDocument" : "downloadDocx";
 
-  /** Action-row label: the busy label while generating, the "… anyway"
-   *  confirm variant while the empty-fields warning targets this action. */
+  /** Action-row label: the busy label while generating, otherwise the action's
+   *  normal label. The empty-fields warning carries its own confirm button, so
+   *  this button never relabels to a "… anyway" variant. */
   const actionButtonLabel = (action: SubmitAction): string => {
     if (loading && action !== "moveToMatter") {
       return t("templates.generating");
-    }
-    if (emptyWarning?.action === action) {
-      if (action === "createDocument") {
-        return t("templates.createDocumentAnyway");
-      }
-      if (action === "moveToMatter") {
-        return t("templates.moveToMatterAnyway");
-      }
-      return t("templates.downloadAnyway");
     }
     if (action === "downloadPdf") {
       return t("templates.downloadPdf");
@@ -2175,14 +2282,38 @@ export const TemplateForm = ({
           )}
 
           {structureErrors.length > 0 && (
-            <div className="border-warning/30 bg-warning/10 dark:bg-warning/10 mb-6 flex items-start gap-2 rounded-lg border p-3">
-              <AlertTriangleIcon className="text-warning-foreground mt-0.5 size-4 shrink-0" />
-              <span className="text-warning-foreground text-sm">
-                {t("templates.structureWarnings", {
-                  count: structureErrors.length,
-                })}
-              </span>
-            </div>
+            <details className="border-warning/30 bg-warning/10 dark:bg-warning/10 group mb-6 rounded-lg border p-3">
+              <summary className="text-warning-foreground flex cursor-pointer list-none items-start gap-2 text-sm [&::-webkit-details-marker]:hidden">
+                <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
+                <span className="flex-1">
+                  {t("templates.structureWarnings", {
+                    count: structureErrors.length,
+                  })}
+                </span>
+                <ChevronDownIcon className="mt-0.5 size-4 shrink-0 transition-transform group-open:rotate-180" />
+              </summary>
+              <ul className="mt-3 grid gap-2 ps-6">
+                {structureErrors.map((error, index) => (
+                  <li
+                    className="text-warning-foreground text-sm"
+                    // eslint-disable-next-line react/no-array-index-key -- structureErrors is a read-only validation result recomputed and re-rendered as a whole batch on every check; there is no add/remove/reorder interaction or per-row state to key against, and the index only disambiguates otherwise-identical paragraph/directive pairs.
+                    key={`${error.paragraphIndex}-${error.directive}-${index}`}
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="bg-muted rounded px-1 py-0.5 font-mono text-xs">
+                        {error.directive}
+                      </code>
+                      <span className="text-muted-foreground text-xs">
+                        {t("templates.structureWarningParagraph", {
+                          paragraph: error.paragraphIndex + 1,
+                        })}
+                      </span>
+                    </div>
+                    <p className="mt-0.5">{error.message}</p>
+                  </li>
+                ))}
+              </ul>
+            </details>
           )}
 
           <div className="flex flex-col gap-5">
@@ -2260,12 +2391,30 @@ export const TemplateForm = ({
       {emptyWarning !== null && (
         <div className="border-warning/30 bg-warning/10 dark:bg-warning/10 flex shrink-0 items-start gap-2 border-t px-3 py-2">
           <AlertTriangleIcon className="text-warning-foreground mt-0.5 size-4 shrink-0" />
-          <span className="text-warning-foreground text-sm">
+          <span className="text-warning-foreground flex-1 text-sm">
             {t("templates.emptyFieldsWarning", {
               count: emptyWarning.count,
               names: emptyWarning.names,
             })}
           </span>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              onClick={() => setEmptyWarning(null)}
+              size="xs"
+              type="button"
+              variant="ghost"
+            >
+              {t("common.goBack")}
+            </Button>
+            <Button
+              disabled={loading}
+              onClick={confirmEmptyWarning}
+              size="xs"
+              type="button"
+            >
+              {emptyWarningConfirmLabel(emptyWarning.action)}
+            </Button>
+          </div>
         </div>
       )}
 

@@ -7,7 +7,7 @@ import { panic } from "better-result";
 import type * as YProseMirror from "y-prosemirror";
 import type * as Yjs from "yjs";
 
-import type { DocxEditorCollaboration } from "@stll/folio";
+import type { DocxEditorCollaboration } from "@stll/folio-react";
 
 import { env } from "@/env";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
@@ -197,7 +197,7 @@ export const useFolioCollaborationSession = ({
         return;
       }
 
-      let tokenExpiresAtMs = Date.parse(response.data.tokenExpiresAt);
+      let tokenExpiresAtMs = new Date(response.data.tokenExpiresAt).getTime();
       const seedDocumentBuffer = await (async () => {
         if (!response.data.shouldSeed) {
           return null;
@@ -244,7 +244,7 @@ export const useFolioCollaborationSession = ({
         }
 
         token = refreshed.data.token;
-        tokenExpiresAtMs = Date.parse(refreshed.data.tokenExpiresAt);
+        tokenExpiresAtMs = new Date(refreshed.data.tokenExpiresAt).getTime();
         return token;
       };
       const ydoc = new yjs.Doc();

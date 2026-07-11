@@ -57,8 +57,73 @@ jobs:
             echo "::notice::Fork PR without 'run-ci' label — CI skipped. A maintainer must review the code and add the 'run-ci' label to run checks."
           fi
 
-  ci-checks:
+  ci-changes:
     needs: trust-check
+    if: >-
+      needs.trust-check.outputs.trusted == 'true'
+      || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      desktop_rust_checks_required: ${{ steps.changed-files.outputs.desktop_rust_checks_required }}
+      package_checks_required: ${{ steps.changed-files.outputs.package_checks_required }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check changed file scope
+        id: changed-files
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "desktop_rust_checks_required=true" >> "$GITHUB_OUTPUT"
+            echo "package_checks_required=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base_ref="origin/$BASE_REF"
+          mapfile -t changed_files < <(git diff --name-only "$base_ref"...HEAD)
+
+          if (( ${#changed_files[@]} == 0 )); then
+            echo "desktop_rust_checks_required=false" >> "$GITHUB_OUTPUT"
+            echo "package_checks_required=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          desktop_rust_checks_required=$(bash scripts/detect-tauri-rust-changes.sh "${changed_files[@]}")
+          package_checks_required=false
+          for file in "${changed_files[@]}"; do
+            case "$file" in
+              .github/*|.provenance.yml|provenance/*)
+                ;;
+              *)
+                package_checks_required=true
+                ;;
+            esac
+            if [[ "$desktop_rust_checks_required" == "true" && "$package_checks_required" == "true" ]]; then
+              break
+            fi
+          done
+
+          printf 'Changed files:\n'
+          printf ' - %s\n' "${changed_files[@]}"
+          echo "desktop_rust_checks_required=$desktop_rust_checks_required" >> "$GITHUB_OUTPUT"
+          echo "package_checks_required=$package_checks_required" >> "$GITHUB_OUTPUT"
+
+          if [[ "$package_checks_required" != "true" ]]; then
+            echo "::notice::Only workflow/provenance files changed; skipping package CI checks."
+          fi
+
+  ci-checks:
+    needs: [trust-check, ci-changes]
     if: >-
       needs.trust-check.outputs.trusted == 'true'
       || github.event_name == 'workflow_dispatch'
@@ -69,67 +134,27 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: true
 
-      - name: Check changed file scope
-        id: changed-files
-        env:
-          BASE_REF: ${{ github.base_ref || 'main' }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            echo "package_checks_required=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          base_ref="origin/$BASE_REF"
-          mapfile -t changed_files < <(git diff --name-only "$base_ref"...HEAD)
-
-          if (( ${#changed_files[@]} == 0 )); then
-            echo "package_checks_required=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          package_checks_required=false
-          for file in "${changed_files[@]}"; do
-            case "$file" in
-              .github/*|.provenance.yml|provenance/*)
-                ;;
-              *)
-                package_checks_required=true
-                break
-                ;;
-            esac
-          done
-
-          printf 'Changed files:\n'
-          printf ' - %s\n' "${changed_files[@]}"
-          echo "package_checks_required=$package_checks_required" >> "$GITHUB_OUTPUT"
-
-          if [[ "$package_checks_required" != "true" ]]; then
-            echo "::notice::Only workflow/provenance files changed; skipping package CI checks."
-          fi
-
       - name: Check AI prompt sync
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         run: bash scripts/sync-ai-skills.sh --check
 
       - name: Setup Bun
-        if: steps.changed-files.outputs.package_checks_required == 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: "package.json"
 
       - name: Turbo remote cache
-        if: steps.changed-files.outputs.package_checks_required == 'true'
-        uses: rharkor/caching-for-turbo@5d14fba18e450c09393333cfd4242e8b3cb455a6 # v2.4.2
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
+        uses: rharkor/caching-for-turbo@75f8ebf4a43d2c60b23bc2a27082cfea94ffdad9 # v2.5.0
 
       - name: Install dependencies
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         run: bash scripts/bun-ci-retry.sh --ignore-scripts
         env:
           # .npmrc references NPM_TOKEN, but PR installs must not expose
@@ -145,11 +170,18 @@ jobs:
         # is a superset of web-build, landing-build, db-migrations, and
         # nightly-typecheck, so coverage is identical to running it in
         # each install.
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         run: bun run lint:ws
 
+      - name: Policy evidence
+        run: bun run policies:check
+
+      - name: Railway template shape
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
+        run: bun run check:railway-template
+
       - name: Prepare environment
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         run: |
           cd ./apps/api
           mv .env.example .env
@@ -157,7 +189,7 @@ jobs:
           mv .env.example .env
 
       - name: Compute affected flag
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         id: affected
         env:
           BASE_REF: ${{ github.base_ref || 'main' }}
@@ -171,7 +203,7 @@ jobs:
           fi
 
       - name: Check i18n sync
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         run: bun run i18n:check
 
       - name: Release changelog guard
@@ -180,17 +212,8 @@ jobs:
           BASE_REF: ${{ github.base_ref || 'main' }}
         run: bash scripts/check-release-changelog.sh --base "origin/$BASE_REF"
 
-      - name: Lint
-        if: steps.changed-files.outputs.package_checks_required == 'true'
-        env:
-          AFFECTED_FLAG: ${{ steps.affected.outputs.flag }}
-        run: |
-          args=()
-          [[ -z "$AFFECTED_FLAG" ]] || args+=("$AFFECTED_FLAG")
-          bun run lint -- "${args[@]}"
-
       - name: Format
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         # Call turbo directly: the `format:check` script already
         # contains `-- --check`, so appending `--affected` via
         # `bun run` would land it after turbo's `--` and forward it
@@ -203,20 +226,11 @@ jobs:
           bun --bun turbo run format "${args[@]}" -- --check
 
       - name: Rust format
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.desktop_rust_checks_required == 'true'
         run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
 
-      - name: Typecheck
-        if: steps.changed-files.outputs.package_checks_required == 'true'
-        env:
-          AFFECTED_FLAG: ${{ steps.affected.outputs.flag }}
-        run: |
-          args=()
-          [[ -z "$AFFECTED_FLAG" ]] || args+=("$AFFECTED_FLAG")
-          bun run typecheck -- "${args[@]}"
-
       - name: React Compiler bailout guard
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         # Components the React Compiler bails out on (refs-in-render,
         # try/finally, an ESLint suppression on the component) are not
         # auto-memoized, so manual useMemo/useCallback there is load-bearing:
@@ -227,8 +241,73 @@ jobs:
         # local loop. Regenerate: `bun scripts/rc-bailouts.ts --write-baseline`.
         run: bun scripts/rc-bailouts.ts --check
 
+      - name: Ratchet guard
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
+        # Whole-repo convention metrics (as-casts, `?? []` fallbacks, barrel
+        # index files, direct error-message display) that may only ever
+        # decrease. Each metric's current count is compared to a committed
+        # baseline; a rise fails CI (a new violation), a fall just prompts a
+        # `--write` to lock in the improvement. Line-based counters, no AST —
+        # fast. The --self-test run first proves each counter counts what it
+        # claims and that a rise regresses, so a broken guard cannot pass
+        # silently. Regenerate: `bun scripts/ratchet.ts --write`.
+        run: |
+          bun scripts/ratchet.ts --self-test
+          bun scripts/ratchet.ts --check
+
+      - name: CLI registry snapshot guard
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
+        # The stella CLI's committed registry snapshot, generated route map, and
+        # the generated TanStack Intent agent skill must match the live MCP
+        # registry: regenerate all of them and fail on any diff so a registry
+        # change cannot silently ship a stale CLI surface (or stale skill docs).
+        # Regenerate: `bun run codegen` in packages/cli.
+        run: |
+          (cd packages/cli && bun run codegen)
+          git diff --exit-code -- packages/cli/src/generated packages/cli/skills
+
+      - name: Capability catalog drift guard
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
+        # The committed capability catalog (every `tool`/`covered` safe handler,
+        # projected to id + input schema + permissions + scope + access +
+        # destructive) must match the live handler graph. `--check` regenerates
+        # it in-memory and byte-compares against the committed JSON, so a handler
+        # or mapping-table change cannot silently ship a stale catalog.
+        # Regenerate: `bun --env-file=apps/api/.env
+        # apps/api/scripts/export-capability-catalog.ts`.
+        run: |
+          bun apps/api/scripts/export-capability-catalog.ts --check
+
+      - name: exactMirror route guard
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
+        # Elysia builds an "exactMirror" serializer per route schema. Some
+        # schemas (recursive ones: t.Recursive, or a Type.Unsafe wrapping a
+        # self-referential TypeBox node) cannot be mirrored: Elysia logs the
+        # failure and falls back to slow per-request serialization, which has
+        # taken the API down at boot. Typecheck and lint do not catch it. The
+        # guard builds the real app and forces every route's mirror to compile,
+        # failing if any cannot. The --self-test run first proves the detector
+        # still catches a known recursive schema, so a broken guard cannot pass
+        # silently.
+        run: |
+          bun apps/api/scripts/exact-mirror-guard.ts --self-test
+          bun apps/api/scripts/exact-mirror-guard.ts
+
+      - name: MCP coverage guard
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
+        # Every safe-handler config must declare an `mcp` disposition (a
+        # typecheck-enforced McpExposure). This guard imports every handler
+        # module, verifies each disposition is well-formed, that every
+        # tool/covered reference names a real static MCP tool, that no registry
+        # tool is orphaned, and that the `pending` baseline only ever shrinks
+        # (a new pending endpoint fails). The --self-test run first proves the
+        # ratchet detectors still fire, so a broken guard cannot pass silently.
+        run: |
+          bun apps/api/scripts/mcp-coverage-guard.ts --self-test
+          bun apps/api/scripts/mcp-coverage-guard.ts
+
       - name: Knip production dependency checks
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         # Static gate paired with the image compile/boot smokes
         # (api-image-deps): knip --strict verifies production code imports
         # only `dependencies` (never a devDependency) and flags transitively
@@ -243,7 +322,7 @@ jobs:
           done
 
       - name: Test
-        if: steps.changed-files.outputs.package_checks_required == 'true'
+        if: needs.ci-changes.outputs.package_checks_required == 'true'
         env:
           AFFECTED_FLAG: ${{ steps.affected.outputs.flag }}
         run: |
@@ -266,6 +345,13 @@ jobs:
       - name: Test release-channel script
         run: bash scripts/release-channel.test.sh
 
+      # Self-test the desktop-release skip decision. This script
+      # decides whether prod desktop users get an update at all; a
+      # regression either ships stale desktop builds or reintroduces
+      # pointless ~30 MB redownloads.
+      - name: Test detect-desktop-release-changes script
+        run: bash scripts/detect-desktop-release-changes.test.sh
+
       - name: Test bun ci retry script
         run: bash scripts/bun-ci-retry.test.sh
 
@@ -276,8 +362,125 @@ jobs:
         if: github.event_name == 'pull_request'
         run: bash scripts/check-bridge-version.sh
 
+  lint:
+    needs: [trust-check, ci-changes]
+    if: >-
+      needs.ci-changes.outputs.package_checks_required == 'true'
+      && (needs.trust-check.outputs.trusted == 'true'
+          || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: "package.json"
+
+      - name: Turbo remote cache
+        uses: rharkor/caching-for-turbo@75f8ebf4a43d2c60b23bc2a27082cfea94ffdad9 # v2.5.0
+
+      - name: Install dependencies
+        run: bash scripts/bun-ci-retry.sh --ignore-scripts
+        env:
+          # .npmrc references NPM_TOKEN, but PR installs must not expose
+          # the real npm token to dependency lifecycle scripts.
+          NPM_TOKEN: ""
+
+      - name: Compute affected flag
+        id: affected
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=--affected" >> "$GITHUB_OUTPUT"
+            echo "TURBO_SCM_BASE=origin/$BASE_REF" >> "$GITHUB_ENV"
+          fi
+
+      - name: Lint
+        env:
+          AFFECTED_FLAG: ${{ steps.affected.outputs.flag }}
+        run: |
+          args=()
+          [[ -z "$AFFECTED_FLAG" ]] || args+=("$AFFECTED_FLAG")
+          bun run lint -- "${args[@]}"
+
+  typecheck:
+    needs: [trust-check, ci-changes]
+    if: >-
+      needs.ci-changes.outputs.package_checks_required == 'true'
+      && (needs.trust-check.outputs.trusted == 'true'
+          || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: "package.json"
+
+      - name: Turbo remote cache
+        uses: rharkor/caching-for-turbo@75f8ebf4a43d2c60b23bc2a27082cfea94ffdad9 # v2.5.0
+
+      - name: Install dependencies
+        run: bash scripts/bun-ci-retry.sh --ignore-scripts
+        env:
+          # .npmrc references NPM_TOKEN, but PR installs must not expose
+          # the real npm token to dependency lifecycle scripts.
+          NPM_TOKEN: ""
+
+      - name: Prepare environment
+        run: |
+          cd ./apps/api
+          mv .env.example .env
+          cd ../web
+          mv .env.example .env
+
+      - name: Compute affected flag
+        id: affected
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=--affected" >> "$GITHUB_OUTPUT"
+            echo "TURBO_SCM_BASE=origin/$BASE_REF" >> "$GITHUB_ENV"
+          fi
+
+      - name: Typecheck
+        env:
+          AFFECTED_FLAG: ${{ steps.affected.outputs.flag }}
+        run: |
+          args=()
+          [[ -z "$AFFECTED_FLAG" ]] || args+=("$AFFECTED_FLAG")
+          bun run typecheck -- "${args[@]}"
+
   # Vite web build. Same rationale as landing-build below: the
-  # ci-checks job's lint + typecheck + test don't exercise the
+  # required lint, typecheck, and test checks don't exercise the
   # bundler, so worker bundling / wasm-loader / plugin issues
   # surface only at deploy time. Run `vite build` on every PR
   # that could plausibly affect the web output so this class of
@@ -294,7 +497,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -314,7 +517,7 @@ jobs:
           run=false
           for file in "${changed_files[@]}"; do
             case "$file" in
-              apps/web/*|packages/*|VERSION|bun.lock|bunfig.toml|package.json|.npmrc|.github/workflows/ci.yml)
+              apps/web/*|packages/*|scripts/bundle-baseline.ts|scripts/bundle-baseline.json|VERSION|bun.lock|bunfig.toml|package.json|.npmrc|.github/workflows/ci.yml)
                 run=true
                 break
                 ;;
@@ -350,6 +553,12 @@ jobs:
       - name: Build web
         if: steps.changed.outputs.run == 'true'
         run: bun --filter @stll/web build
+
+      - name: Bundle size guard
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          bun scripts/bundle-baseline.ts --self-test
+          bun scripts/bundle-baseline.ts --check
 
       - name: Prod-deps web boot smoke
         if: steps.changed.outputs.run == 'true'
@@ -388,8 +597,8 @@ jobs:
             exit 1
           fi
 
-  # Astro landing build. The existing ci-checks job runs lint,
-  # typecheck, and test, but no `astro build`, so plugin/runtime
+  # Astro landing build. The required checks run lint, typecheck,
+  # and test, but no `astro build`, so plugin/runtime
   # incompatibilities surface only at deploy time. Catch those
   # here on every PR that could plausibly affect the landing
   # output.
@@ -405,7 +614,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -469,16 +678,9 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
-    env:
-      # Authenticated Docker Hub pulls (when these secrets are set) avoid the
-      # anonymous per-IP pull-rate limit that intermittently fails the docker
-      # stack bring-up on shared GitHub runners.
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -529,11 +731,26 @@ jobs:
           cd ../web
           mv .env.example .env
 
+      - name: Check Docker Hub credentials
+        id: dockerhub
+        # Keep Docker Hub secrets scoped to this trusted inline check, not the
+        # whole job environment where repository-controlled code can read them.
+        if: steps.changed.outputs.run == 'true'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [[ -n "$DOCKERHUB_USERNAME" && -n "$DOCKERHUB_TOKEN" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "available=false" >> "$GITHUB_OUTPUT"
+
       - name: Log in to Docker Hub
         # Skipped automatically until DOCKERHUB_USERNAME / DOCKERHUB_TOKEN repo
         # secrets exist; authenticated pulls raise the rate limit well above the
         # shared-runner anonymous cap that flakes the gotenberg image pull.
-        if: steps.changed.outputs.run == 'true' && env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        if: steps.changed.outputs.run == 'true' && steps.dockerhub.outputs.available == 'true'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -560,6 +777,11 @@ jobs:
           done
           echo "::error::docker stack failed to start after 3 attempts"
           exit 1
+
+      - name: Log out of Docker Hub
+        # Remove credentials from the runner before executing app code and tests.
+        if: always() && steps.changed.outputs.run == 'true' && steps.dockerhub.outputs.available == 'true'
+        run: docker logout
 
       - name: Run database migrations
         if: steps.changed.outputs.run == 'true'
@@ -683,7 +905,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -723,7 +945,7 @@ jobs:
       - name: Install turbo
         if: steps.changed.outputs.run == 'true'
         # Match the Dockerfiles: Turbo is only used for pruned source overlays.
-        run: bun install -g turbo@2.9.18
+        run: bun install -g turbo@2.10.0
 
       - name: Prepare Docker install inputs
         if: steps.changed.outputs.run == 'true'
@@ -825,7 +1047,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -890,10 +1112,11 @@ jobs:
   # Both are standard GitHub-hosted runners, free for public repositories.
   desktop-clippy:
     name: Desktop Rust (${{ matrix.os }})
-    needs: trust-check
+    needs: [trust-check, ci-changes]
     if: >-
-      needs.trust-check.outputs.trusted == 'true'
-      || github.event_name == 'workflow_dispatch'
+      (needs.trust-check.outputs.trusted == 'true'
+       || github.event_name == 'workflow_dispatch')
+      && needs.ci-changes.outputs.desktop_rust_checks_required == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -911,43 +1134,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check whether desktop-affecting paths changed
-        id: changed
-        shell: bash
-        env:
-          BASE_REF: ${{ github.base_ref || 'main' }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          base_ref="origin/$BASE_REF"
-          # No `mapfile`: the macOS runner's default bash is 3.2, which
-          # lacks it. A while-read over process substitution keeps the
-          # loop in the current shell so `run`/`break` persist.
-          run=false
-          while IFS= read -r file; do
-            case "$file" in
-              apps/desktop/*|.github/workflows/ci.yml)
-                run=true
-                break
-                ;;
-            esac
-          done < <(git diff --name-only "$base_ref"...HEAD)
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-          if [[ "$run" != "true" ]]; then
-            echo "::notice::No desktop-affecting paths changed; skipping desktop clippy."
-          fi
-
       - name: Setup Rust
-        if: steps.changed.outputs.run == 'true'
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
@@ -958,31 +1151,28 @@ jobs:
       # timeout) is acceptable. It also keeps the LGPL-3.0 rust-cache
       # action out of the dependency-review-enforced diff.
       - name: Check
-        if: steps.changed.outputs.run == 'true'
         run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --all-targets --target ${{ matrix.target }} --locked
 
       - name: Clippy
-        if: steps.changed.outputs.run == 'true'
         run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --all-targets --target ${{ matrix.target }} --locked -- -D warnings
 
       - name: Test
-        if: steps.changed.outputs.run == 'true' && matrix.os == 'macos'
+        if: matrix.os == 'macos'
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --all-targets --target ${{ matrix.target }} --locked
 
       - name: Build test binaries
-        if: steps.changed.outputs.run == 'true' && matrix.os == 'windows'
+        if: matrix.os == 'windows'
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --all-targets --target ${{ matrix.target }} --locked --no-run
 
       - name: Install cargo-deny
-        if: steps.changed.outputs.run == 'true' && matrix.os == 'macos'
+        if: matrix.os == 'macos'
         run: cargo install cargo-deny --version 0.19.0 --locked
 
       - name: License audit
-        if: steps.changed.outputs.run == 'true' && matrix.os == 'macos'
+        if: matrix.os == 'macos'
         run: cargo deny --manifest-path apps/desktop/src-tauri/Cargo.toml check --config apps/desktop/src-tauri/deny.toml --hide-inclusion-graph
 
       - name: Docs
-        if: steps.changed.outputs.run == 'true'
         run: cargo doc --manifest-path apps/desktop/src-tauri/Cargo.toml --workspace --no-deps --target ${{ matrix.target }} --locked
         env:
           RUSTDOCFLAGS: -D warnings
@@ -1004,11 +1194,14 @@ jobs:
       [
         trust-check,
         ci-checks,
+        lint,
+        typecheck,
         web-build,
         landing-build,
         e2e,
         api-image-deps,
         windows-scripts,
+        ci-changes,
         desktop-clippy,
       ]
     runs-on: ubuntu-latest
@@ -1018,13 +1211,16 @@ jobs:
       - name: Evaluate CI outcome
         env:
           API_IMAGE_DEPS_RESULT: ${{ needs.api-image-deps.result }}
+          CI_CHANGES_RESULT: ${{ needs.ci-changes.result }}
           CI_RESULT: ${{ needs.ci-checks.result }}
           DESKTOP_CLIPPY_RESULT: ${{ needs.desktop-clippy.result }}
           E2E_RESULT: ${{ needs.e2e.result }}
           EVENT: ${{ github.event_name }}
           LANDING_RESULT: ${{ needs.landing-build.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
           TRUSTED: ${{ needs.trust-check.outputs.trusted }}
           TRUST_RESULT: ${{ needs.trust-check.result }}
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
           WEB_RESULT: ${{ needs.web-build.result }}
           WINDOWS_SCRIPTS_RESULT: ${{ needs.windows-scripts.result }}
         run: |
@@ -1038,11 +1234,14 @@ jobs:
 
           if [[ "$EVENT" == "workflow_dispatch" ]]; then
             if [[ "$CI_RESULT" == "failure" || "$CI_RESULT" == "cancelled" \
+                  || "$LINT_RESULT" == "failure" || "$LINT_RESULT" == "cancelled" \
+                  || "$TYPECHECK_RESULT" == "failure" || "$TYPECHECK_RESULT" == "cancelled" \
                   || "$WEB_RESULT" == "failure" || "$WEB_RESULT" == "cancelled" \
                   || "$LANDING_RESULT" == "failure" || "$LANDING_RESULT" == "cancelled" \
                   || "$E2E_RESULT" == "failure" || "$E2E_RESULT" == "cancelled" \
                   || "$API_IMAGE_DEPS_RESULT" == "failure" || "$API_IMAGE_DEPS_RESULT" == "cancelled" \
                   || "$WINDOWS_SCRIPTS_RESULT" == "failure" || "$WINDOWS_SCRIPTS_RESULT" == "cancelled" \
+                  || "$CI_CHANGES_RESULT" == "failure" || "$CI_CHANGES_RESULT" == "cancelled" \
                   || "$DESKTOP_CLIPPY_RESULT" == "failure" || "$DESKTOP_CLIPPY_RESULT" == "cancelled" ]]; then
               echo "::error::CI checks failed."
               exit 1
@@ -1057,12 +1256,12 @@ jobs:
 
           # "cancelled" means cancel-in-progress replaced this
           # run with a newer one; the newer run is authoritative.
-          if [[ "$CI_RESULT" == "cancelled" || "$WEB_RESULT" == "cancelled" || "$LANDING_RESULT" == "cancelled" || "$E2E_RESULT" == "cancelled" || "$API_IMAGE_DEPS_RESULT" == "cancelled" || "$WINDOWS_SCRIPTS_RESULT" == "cancelled" || "$DESKTOP_CLIPPY_RESULT" == "cancelled" ]]; then
+          if [[ "$CI_RESULT" == "cancelled" || "$LINT_RESULT" == "cancelled" || "$TYPECHECK_RESULT" == "cancelled" || "$WEB_RESULT" == "cancelled" || "$LANDING_RESULT" == "cancelled" || "$E2E_RESULT" == "cancelled" || "$API_IMAGE_DEPS_RESULT" == "cancelled" || "$WINDOWS_SCRIPTS_RESULT" == "cancelled" || "$CI_CHANGES_RESULT" == "cancelled" || "$DESKTOP_CLIPPY_RESULT" == "cancelled" ]]; then
             echo "CI run was superseded by a newer run (cancel-in-progress). Passing."
             exit 0
           fi
 
-          if [[ "$CI_RESULT" == "failure" || "$WEB_RESULT" == "failure" || "$LANDING_RESULT" == "failure" || "$E2E_RESULT" == "failure" || "$API_IMAGE_DEPS_RESULT" == "failure" || "$WINDOWS_SCRIPTS_RESULT" == "failure" || "$DESKTOP_CLIPPY_RESULT" == "failure" ]]; then
+          if [[ "$CI_RESULT" == "failure" || "$LINT_RESULT" == "failure" || "$TYPECHECK_RESULT" == "failure" || "$WEB_RESULT" == "failure" || "$LANDING_RESULT" == "failure" || "$E2E_RESULT" == "failure" || "$API_IMAGE_DEPS_RESULT" == "failure" || "$WINDOWS_SCRIPTS_RESULT" == "failure" || "$CI_CHANGES_RESULT" == "failure" || "$DESKTOP_CLIPPY_RESULT" == "failure" ]]; then
             echo "::error::CI checks failed."
             exit 1
           fi

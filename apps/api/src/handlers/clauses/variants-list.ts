@@ -12,6 +12,7 @@ const listVariantsParamsSchema = t.Object({
 
 const config = {
   permissions: { workspace: ["read"] },
+  mcp: { type: "covered", by: "list_clauses" },
   params: listVariantsParamsSchema,
 } satisfies HandlerConfig;
 

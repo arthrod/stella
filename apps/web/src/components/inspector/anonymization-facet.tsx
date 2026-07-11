@@ -25,7 +25,7 @@ import {
   RotateCcw,
   Trash2,
 } from "lucide-react";
-import { useFormatter, useTranslations } from "use-intl";
+import { useFormatter, useLocale, useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
 import {
@@ -46,18 +46,18 @@ import {
 } from "@stll/ui/components/menu";
 import { stellaToast } from "@stll/ui/components/toast";
 
-import { useAnonymizationActiveStore } from "@/components/inspector/anonymization-active-store";
 import { AnonymizationContextMenu } from "@/components/inspector/anonymization-context-menu";
 import {
   useAnonymizationMatches,
   useAnonymizationMatchesReady,
-} from "@/components/inspector/anonymization-matches-store";
-import { useAnonymizationSelectionStore } from "@/components/inspector/anonymization-selection-store";
-import { useDocumentTextSelection } from "@/components/inspector/document-text-selection-store";
+  useDocumentTextSelection,
+  useInspectorStore,
+} from "@/components/inspector/inspector-store";
 import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
 import type { TranslationKey } from "@/i18n/types";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
+import { compareByLocale } from "@/lib/collation";
 import { toAPIError } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
 import {
@@ -197,6 +197,7 @@ export const AnonymizationFacet = ({
 }: AnonymizationFacetProps) => {
   const t = useTranslations();
   const format = useFormatter();
+  const locale = useLocale();
   const analytics = useAnalytics();
   const formatLabel = (label: string): string =>
     isLabelTranslationKey(label) ? t(LABEL_TRANSLATION_KEYS[label]) : label;
@@ -274,9 +275,10 @@ export const AnonymizationFacet = ({
     if (!isVisible) {
       return undefined;
     }
-    const { acquire, release } = useAnonymizationActiveStore.getState();
-    acquire();
-    return release;
+    const { acquireAnonymizationActive, releaseAnonymizationActive } =
+      useInspectorStore.getState();
+    acquireAnonymizationActive();
+    return releaseAnonymizationActive;
   }, [isVisible]);
 
   // Selection bridge — when the user highlights text inside the
@@ -303,8 +305,8 @@ export const AnonymizationFacet = ({
     // paged editor doesn't — it sets PM selections
     // programmatically on an off-screen hidden PM and renders
     // visible selection via a custom overlay. Folio
-    // selections come in via the document-text-selection
-    // store (subscribed below); the listener here only
+    // selections come in via the inspector store
+    // (subscribed below); the listener here only
     // handles the PDF case.
     const PREVIEW_SURFACES = ".textLayer";
     const isInsidePreview = (node: Node | null): boolean => {
@@ -349,6 +351,7 @@ export const AnonymizationFacet = ({
     if (folioSelection === null) {
       return;
     }
+    // eslint-disable-next-line react/react-compiler -- external subscription: relays a selection the folio editor publishes into a store from its own dispatch wrapper (a different module); no in-component setter call-site can host it
     setPendingValue(folioSelection.text);
     // `seq` is part of the dep array so re-selecting the
     // same string still re-fires the prefill.
@@ -538,10 +541,11 @@ export const AnonymizationFacet = ({
     for (const entry of allowlistEntries ?? []) {
       push(entry.label, entry.canonical, 0, true);
     }
+    const compareText = compareByLocale(locale);
     for (const list of groups.values()) {
-      list.sort((a, b) => a.canonical.localeCompare(b.canonical));
+      list.sort((a, b) => compareText(a.canonical, b.canonical));
     }
-    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+    return [...groups.entries()].sort(([a], [b]) => compareText(a, b));
   })();
   const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -571,14 +575,23 @@ export const AnonymizationFacet = ({
   // object literal would re-render on every store change and risk
   // an infinite getSnapshot loop. Each primitive selector is
   // stable across unrelated updates.
-  const docSelectionCanonical = useAnonymizationSelectionStore((s) =>
-    s.source === "doc" && s.fieldId === activeFieldId ? s.canonical : null,
+  const docSelectionCanonical = useInspectorStore((s) =>
+    s.anonymizationSelection.source === "doc" &&
+    s.anonymizationSelection.fieldId === activeFieldId
+      ? s.anonymizationSelection.canonical
+      : null,
   );
-  const docSelectionLabel = useAnonymizationSelectionStore((s) =>
-    s.source === "doc" && s.fieldId === activeFieldId ? s.label : null,
+  const docSelectionLabel = useInspectorStore((s) =>
+    s.anonymizationSelection.source === "doc" &&
+    s.anonymizationSelection.fieldId === activeFieldId
+      ? s.anonymizationSelection.label
+      : null,
   );
-  const docSelectionSeq = useAnonymizationSelectionStore((s) =>
-    s.source === "doc" && s.fieldId === activeFieldId ? s.seq : 0,
+  const docSelectionSeq = useInspectorStore((s) =>
+    s.anonymizationSelection.source === "doc" &&
+    s.anonymizationSelection.fieldId === activeFieldId
+      ? s.anonymizationSelection.seq
+      : 0,
   );
   // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- two-pass reaction to a doc-selection store bump: first commit expands the target group (setExpandedGroups, shared with toggleGroup), the re-run then scrolls + flashes the row via DOM imperatives; the expand-then-measure dependency on expandedGroups can't move into render, so kept
   useEffect(() => {
@@ -596,6 +609,7 @@ export const AnonymizationFacet = ({
       // term rows live above it and are always visible.
       detectedGroups.some(([label]) => label === docSelectionLabel)
     ) {
+      // eslint-disable-next-line react/react-compiler -- external subscription: two-pass reaction to a doc-selection store bump; this commit expands the target group, the effect re-run then scrolls + flashes via DOM imperatives that depend on the expand having committed
       setExpandedGroups((prev) => {
         const next = new Set(prev);
         next.add(docSelectionLabel);
@@ -634,9 +648,9 @@ export const AnonymizationFacet = ({
     if (activeFieldId === null) {
       return;
     }
-    useAnonymizationSelectionStore
+    useInspectorStore
       .getState()
-      .select(canonical, label, "sidebar", activeFieldId);
+      .selectAnonymizationTerm(canonical, label, "sidebar", activeFieldId);
   };
 
   return (

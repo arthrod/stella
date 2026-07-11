@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 
 import { useQuery } from "@tanstack/react-query";
 import { useTranslations } from "use-intl";
@@ -9,6 +9,8 @@ import { stellaToast } from "@stll/ui/components/toast";
 import { useReviewStore } from "@/components/ai-suggestions/review-store";
 import { FacetBar } from "@/components/inspector/inspector-facet-bar";
 import type { FileTab } from "@/components/inspector/inspector-store";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { usePlaybooksPreviewEnabled } from "@/hooks/use-playbooks-preview";
 import { DOCX_MIME } from "@/lib/consts";
 import { entityVersionsOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/entity-versions";
 
@@ -25,12 +27,14 @@ export const FACETS: readonly Facet[] = [
   "metadata",
   "versions",
   "suggestions",
+  "playbook",
   "anonymization",
 ];
 export const FULLVIEW_FACETS: readonly Facet[] = [
   "metadata",
   "versions",
   "suggestions",
+  "playbook",
   "anonymization",
 ];
 
@@ -55,8 +59,7 @@ export const FullViewPreviewGuard = ({
   flashMinimize,
 }: FullViewPreviewGuardProps) => {
   const t = useTranslations();
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (stale "preview" facet -> swap facet + toast + flash); move into the full-view entry handler
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (facet !== "preview") {
       return;
     }
@@ -116,28 +119,42 @@ export const TabFacetBar = ({
     (state) => state.sessions[entityId]?.length ?? 0,
   );
   const isDocx = mimeType === DOCX_MIME;
+  const playbooksEnabled = usePlaybooksPreviewEnabled();
 
   const { facets, disabledFacets } = useMemo(() => {
+    // Playbook review is gated behind the preview flag; drop the chip entirely
+    // when it is off so the flagged-off review UI and its APIs aren't reachable
+    // from the inspector.
+    const gated = playbooksEnabled
+      ? baseFacets
+      : baseFacets.filter((f) => f !== "playbook");
+    // The chat-suggestions and playbook-review surfaces are
+    // DOCX-only (they need folio block ids to target). Drop both on
+    // non-DOCX tabs. The playbook chip stays enabled on DOCX even
+    // before a run — it doubles as the launcher for "Review with
+    // playbook"; only the suggestions chip is disabled until the
+    // chat queues a proposal.
     if (!isDocx) {
       return {
-        facets: baseFacets.filter((f) => f !== "suggestions"),
+        facets: gated.filter((f) => f !== "suggestions" && f !== "playbook"),
         disabledFacets: undefined,
       };
     }
     if (suggestionCount === 0) {
       return {
-        facets: baseFacets,
+        facets: gated,
         disabledFacets: new Set<Facet>(["suggestions"]),
       };
     }
-    return { facets: baseFacets, disabledFacets: undefined };
-  }, [baseFacets, isDocx, suggestionCount]);
+    return { facets: gated, disabledFacets: undefined };
+  }, [baseFacets, isDocx, suggestionCount, playbooksEnabled]);
 
   const labels: Record<Facet, string> = {
     preview: t("common.preview"),
     metadata: t("common.metadata"),
     versions: t("fileDetail.versionHistory"),
     suggestions: t("docxReview.title"),
+    playbook: t("knowledge.playbooks.review.facetTitle"),
     anonymization: t("inspector.facet.anonymization"),
   };
 

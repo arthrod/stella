@@ -17,7 +17,7 @@ RUN mkdir -p /json && \
 # Prune the monorepo for the API
 FROM base AS pruner
 # Keep in sync with the turbo version in the root package.json.
-RUN bun install -g turbo@2.9.18
+RUN bun install -g turbo@2.10.0
 COPY . .
 RUN turbo prune @stll/api @stll/legal-atlas-runner --docker
 
@@ -36,13 +36,23 @@ RUN bun install --filter @stll/api --filter @stll/legal-atlas-runner --frozen-lo
 FROM deps AS builder
 ENV NODE_ENV=production
 COPY --from=pruner /app/out/full/ .
+# Build the server unminified: `bun build --minify` can break Elysia's AOT
+# handler codegen (minified variable renames vs Sucrose). See elysiajs/elysia#1711.
 RUN bun build \
     --compile \
-    --minify-whitespace \
-    --minify-syntax \
     --target bun \
     --outfile /app/server \
     apps/api/src/index.ts
+# One-off maintenance tool: assigns public slugs to legacy case-law rows that
+# predate slug-at-ingest. Bundled to a single JS file (like the workers above,
+# not --compile) so it reuses the container's Bun runtime instead of embedding
+# a second copy; bundling still resolves the `@/api/*` aliases. Run as a one-off
+# task on the API task-def (it needs the API env, not the migrate env):
+#   command override -> ["bun", "/app/backfill.js"]
+RUN bun build \
+    --target bun \
+    --outfile /app/backfill.js \
+    apps/api/src/scripts/backfill-case-law-slugs.ts
 RUN mkdir -p /app/runtime-workers && \
     bun build \
       --target bun \
@@ -61,12 +71,22 @@ FROM deps AS runner
 # Defaults to "dev" for local `docker build` outside the release flow.
 ARG STELLA_VERSION=dev
 ARG STELLA_COMMIT_SHA=dev
+ARG RAILWAY_GIT_COMMIT_SHA=dev
 ENV STELLA_VERSION=${STELLA_VERSION}
 ENV STELLA_COMMIT_SHA=${STELLA_COMMIT_SHA}
+ENV RAILWAY_GIT_COMMIT_SHA=${RAILWAY_GIT_COMMIT_SHA}
+ENV NODE_ENV=production
+ENV FEATURE_CHAT=true
+ENV FEATURE_CONTACTS=true
+ENV FEATURE_DESKTOP_EDITING=true
+ENV FEATURE_KNOWLEDGE_TEMPLATES=true
+ENV FEATURE_TODOS=true
+ENV REQUIRE_PERSONAL_AI_KEY=true
 ENV STELLA_WORKER_DIR=/\$bunfs/root/workers
 RUN groupadd --system --gid 1001 stella && \
     useradd --system --uid 1001 --gid stella --no-create-home stella
 COPY --chown=stella:stella --from=builder /app/server /app/server
+COPY --chown=stella:stella --from=builder /app/backfill.js /app/backfill.js
 COPY --chown=stella:stella --from=builder /app/apps/legal-atlas-runner/dist/index.js /app/legal-atlas.js
 # Loose files for the one-off migrate task (the API itself is the compiled
 # /app/server binary). migrate.ts runs the drizzle migrator over Bun's SQL
@@ -78,16 +98,16 @@ COPY --chown=stella:stella --from=builder /app/apps/api/drizzle /app/apps/api/dr
 RUN mkdir -p '/$bunfs/root'
 COPY --chown=stella:stella --from=builder /app/runtime-workers /\$bunfs/root/workers
 COPY --chown=stella:stella --from=builder /app/apps/api/src/lib/file-scan/yara /\$bunfs/root/yara
+# @stll/anonymize-wasm resolves its native glue, WASM, and prepared pipeline
+# packages relative to `dist/wasm.mjs`; Bun's compiled binary resolves those
+# bundled asset URLs under `$bunfs/root/native`.
 COPY --chown=stella:stella --from=deps \
-    /app/node_modules/@stll/aho-corasick-wasm/dist/*.wasm \
-    /app/node_modules/@stll/fuzzy-search-wasm/dist/*.wasm \
-    /app/node_modules/@stll/regex-set-wasm/dist/*.wasm \
-    /\$bunfs/root/
+    /app/node_modules/@stll/anonymize-wasm/dist/native/ \
+    /\$bunfs/root/native/
 # quickjs-emscripten loads this WASM file at runtime from the
 # compiled Bun binary's `$bunfs/root` asset directory.
 COPY --chown=stella:stella --from=deps \
     /app/node_modules/@jitl/quickjs-wasmfile-release-asyncify/dist/emscripten-module.wasm \
-    /app/node_modules/@stll/aho-corasick-wasm/dist/wasi-worker-browser.mjs \
     /\$bunfs/root/
 WORKDIR /app/apps/api
 

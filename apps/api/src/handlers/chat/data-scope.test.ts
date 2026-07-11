@@ -9,9 +9,11 @@ import { toSafeId } from "@/api/lib/branded-types";
 import { createScopedDbMock } from "@/api/tests/scoped-db-mock";
 
 import {
+  computeAssistantTurnWorkspaceIds,
   expandThreadDataScope,
   extractAssistantWorkspaceIds,
   extractIncomingMessageWorkspaceIds,
+  extractMessageWorkspaceIds,
   extractMentionWorkspaceIds,
   extractThreadDataWorkspaceIds,
 } from "./data-scope";
@@ -76,46 +78,65 @@ describe("extractMentionWorkspaceIds", () => {
 });
 
 describe("extractAssistantWorkspaceIds", () => {
-  test("source-document parts contribute their workspaceId", () => {
-    const parts = [
-      {
-        type: "data-stella-source-document" as const,
-        data: {
-          entityId: "entity_1",
-          kind: "document",
-          mimeType: "application/pdf",
-          title: "Motion.pdf",
-          workspaceId: wsA,
-        },
+  test("source-document metadata contributes its workspaceId", () => {
+    const message = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [],
+      metadata: {
+        sourceDocuments: [
+          {
+            entityId: "entity_1",
+            kind: "document",
+            mimeType: "application/pdf",
+            title: "Motion.pdf",
+            workspaceId: wsA,
+          },
+        ],
       },
-    ];
-    expect(extractAssistantWorkspaceIds(parts)).toEqual([wsA]);
+    } satisfies ChatMessage;
+    expect(extractMessageWorkspaceIds(message)).toEqual([wsA]);
   });
 
-  test("source-document parts dedupe across workspaces", () => {
-    const parts = [
-      {
-        type: "data-stella-source-document" as const,
-        data: { workspaceId: wsA },
+  test("source-document metadata dedupes across workspaces", () => {
+    const message = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [],
+      metadata: {
+        sourceDocuments: [
+          {
+            entityId: "entity-1",
+            kind: "document",
+            mimeType: "application/pdf",
+            title: "A",
+            workspaceId: wsA,
+          },
+          {
+            entityId: "entity-2",
+            kind: "document",
+            mimeType: "application/pdf",
+            title: "B",
+            workspaceId: wsB,
+          },
+          {
+            entityId: "entity-3",
+            kind: "document",
+            mimeType: "application/pdf",
+            title: "C",
+            workspaceId: wsA,
+          },
+        ],
       },
-      {
-        type: "data-stella-source-document" as const,
-        data: { workspaceId: wsB },
-      },
-      {
-        type: "data-stella-source-document" as const,
-        data: { workspaceId: wsA },
-      },
-    ];
-    expect(new Set(extractAssistantWorkspaceIds(parts))).toEqual(
+    } satisfies ChatMessage;
+    expect(new Set(extractMessageWorkspaceIds(message))).toEqual(
       new Set([wsA, wsB]),
     );
   });
 
   test("text parts without stella refs are ignored", () => {
     const parts = [
-      { type: "text" as const, text: "Just a normal reply, no refs." },
-      { type: "data-stella-mentions" as const, data: { mentions: [] } },
+      { type: "text" as const, content: "Just a normal reply, no refs." },
     ];
     expect(extractAssistantWorkspaceIds(parts)).toEqual([]);
   });
@@ -128,7 +149,7 @@ describe("extractAssistantWorkspaceIds", () => {
     const parts = [
       {
         type: "text" as const,
-        text: `See [matter](#stella-workspace=${wsA}) and the related document at #stella-entity=${wsB}:abc.`,
+        content: `See [matter](#stella-workspace=${wsA}) and the related document at #stella-entity=${wsB}:abc.`,
       },
     ];
     expect(new Set(extractAssistantWorkspaceIds(parts))).toEqual(
@@ -136,18 +157,29 @@ describe("extractAssistantWorkspaceIds", () => {
     );
   });
 
-  test("text and source-document parts are unioned", () => {
-    const parts = [
-      {
-        type: "data-stella-source-document" as const,
-        data: { workspaceId: wsA },
+  test("text and source-document metadata are unioned", () => {
+    const message = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "text" as const,
+          content: `more context #stella-workspace=${wsB}`,
+        },
+      ],
+      metadata: {
+        sourceDocuments: [
+          {
+            entityId: "entity-1",
+            kind: "document",
+            mimeType: "application/pdf",
+            title: "A",
+            workspaceId: wsA,
+          },
+        ],
       },
-      {
-        type: "text" as const,
-        text: `more context #stella-workspace=${wsB}`,
-      },
-    ];
-    expect(new Set(extractAssistantWorkspaceIds(parts))).toEqual(
+    } satisfies ChatMessage;
+    expect(new Set(extractMessageWorkspaceIds(message))).toEqual(
       new Set([wsA, wsB]),
     );
   });
@@ -156,7 +188,8 @@ describe("extractAssistantWorkspaceIds", () => {
     const parts = [
       {
         type: "text" as const,
-        text: "garbage #stella-workspace=not-a-uuid and #stella-entity=zz:yy",
+        content:
+          "garbage #stella-workspace=not-a-uuid and #stella-entity=zz:yy",
       },
     ];
     expect(extractAssistantWorkspaceIds(parts)).toEqual([]);
@@ -171,9 +204,11 @@ describe("extractAssistantWorkspaceIds", () => {
     // empty data scope and leak after revocation.
     const parts = [
       {
-        type: "tool-listMatters-output" as const,
-        toolCallId: "call_1",
-        state: "output-available" as const,
+        type: "tool-call" as const,
+        id: "call_1",
+        name: "mcp__test__listMatters",
+        arguments: "{}",
+        state: "complete" as const,
         output: {
           items: [
             { matterRef: wsA, name: "Matter A" },
@@ -192,7 +227,11 @@ describe("extractAssistantWorkspaceIds", () => {
   test("regression: deeply nested workspaceId fields are picked up", () => {
     const parts = [
       {
-        type: "tool-getProperty-output" as const,
+        type: "tool-call" as const,
+        id: "call_1",
+        name: "mcp__test__getProperty",
+        arguments: "{}",
+        state: "complete" as const,
         output: {
           property: {
             id: "prop_1",
@@ -210,25 +249,42 @@ describe("extractAssistantWorkspaceIds", () => {
     // brand it as a workspace ID and must not crash.
     const parts = [
       {
-        type: "tool-listMatters-output" as const,
+        type: "tool-call" as const,
+        id: "call_1",
+        name: "mcp__test__listMatters",
+        arguments: "{}",
+        state: "complete" as const,
         output: { items: [{ matterRef: "mat_1" }] },
       },
     ];
     expect(extractAssistantWorkspaceIds(parts)).toEqual([]);
   });
 
-  test("source-document with empty workspaceId contributes nothing", () => {
-    const parts = [
-      {
-        type: "data-stella-source-document" as const,
-        data: { workspaceId: "" },
+  test("source-document metadata with empty workspaceId contributes nothing", () => {
+    const message = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [],
+      metadata: {
+        sourceDocuments: [
+          {
+            entityId: "entity-1",
+            kind: "document",
+            mimeType: "application/pdf",
+            title: "A",
+            workspaceId: "",
+          },
+          {
+            entityId: "entity-2",
+            kind: "document",
+            mimeType: "application/pdf",
+            title: "B",
+            workspaceId: null,
+          },
+        ],
       },
-      {
-        type: "data-stella-source-document" as const,
-        data: { workspaceId: null },
-      },
-    ];
-    expect(extractAssistantWorkspaceIds(parts)).toEqual([]);
+    } satisfies ChatMessage;
+    expect(extractMessageWorkspaceIds(message)).toEqual([]);
   });
 });
 
@@ -239,9 +295,14 @@ describe("extractIncomingMessageWorkspaceIds", () => {
       role: "assistant",
       parts: [
         {
-          type: "tool-create-document",
-          toolCallId: "tool-call-1",
-          state: "output-available",
+          type: "tool-call",
+          id: "tool-call-1",
+          name: "create-document",
+          arguments: JSON.stringify({
+            name: "Generated Agreement",
+            source: "@title Generated Agreement",
+          }),
+          state: "complete",
           input: {
             name: "Generated Agreement",
             source: "@title Generated Agreement",
@@ -276,25 +337,25 @@ describe("extractThreadDataWorkspaceIds", () => {
         parts: [
           {
             type: "text",
-            text: `Use [Matter A](#stella-workspace=${wsA}) and [Doc B](#stella-entity=${wsB}:00000000-0000-0000-0000-000000000001).`,
+            content: `Use [Matter A](#stella-workspace=${wsA}) and [Doc B](#stella-entity=${wsB}:00000000-0000-0000-0000-000000000001).`,
           },
         ],
       },
       {
         id: "assistant-1",
         role: "assistant",
-        parts: [
-          {
-            type: "data-stella-source-document",
-            data: {
+        parts: [],
+        metadata: {
+          sourceDocuments: [
+            {
               entityId: "00000000-0000-0000-0000-000000000002",
               kind: "document",
               mimeType: "application/pdf",
               title: "Motion.pdf",
               workspaceId: wsC,
             },
-          },
-        ],
+          ],
+        },
       },
     ] satisfies ChatMessage[];
 
@@ -308,18 +369,89 @@ describe("extractThreadDataWorkspaceIds", () => {
       {
         id: "user-1",
         role: "user",
-        parts: [{ type: "text", text: `Keep #stella-workspace=${wsA}` }],
+        parts: [{ type: "text", content: `Keep #stella-workspace=${wsA}` }],
       },
       {
         id: "assistant-deleted",
         role: "assistant",
-        parts: [{ type: "text", text: `Drop #stella-workspace=${wsC}` }],
+        parts: [{ type: "text", content: `Drop #stella-workspace=${wsC}` }],
       },
     ] satisfies ChatMessage[];
 
     expect(
       extractThreadDataWorkspaceIds(messagesBeforeTruncation.slice(0, 1)),
     ).toEqual([wsA]);
+  });
+});
+
+describe("computeAssistantTurnWorkspaceIds", () => {
+  // `send-message.ts` snapshots `refRegistry.getRegisteredWorkspaceIds()`
+  // before streaming and diffs it against the post-stream snapshot passed
+  // here as `registeredWorkspaceIdsAfterStream`. This is the mechanism that
+  // widens `chat_threads.data_workspace_ids` when a `spawn_subagents`
+  // subagent reads workspace-scoped content and only returns a free-form
+  // text summary — no structural `matterRef`/`workspaceId` field or
+  // `#stella-*` ref ever reaches the parent's response parts, so the
+  // structural scan alone would miss it.
+
+  test("folds in a workspace a subagent registered mid-stream, even with no matching response part", () => {
+    const ids = computeAssistantTurnWorkspaceIds({
+      responseParts: [
+        { type: "text", content: "Done — see the summary above." },
+      ],
+      workspaceIdsBeforeStream: new Set(),
+      registeredWorkspaceIdsAfterStream: [wsA],
+      accessibleWorkspaceIds: new Set([wsA]),
+    });
+
+    expect(ids).toEqual([wsA]);
+  });
+
+  test("excludes a workspace that was already registered before the stream started", () => {
+    // Prompt-time pins / prior-turn history refs should not re-widen scope
+    // on every later turn.
+    const ids = computeAssistantTurnWorkspaceIds({
+      responseParts: [],
+      workspaceIdsBeforeStream: new Set([wsA]),
+      registeredWorkspaceIdsAfterStream: [wsA],
+      accessibleWorkspaceIds: new Set([wsA]),
+    });
+
+    expect(ids).toEqual([]);
+  });
+
+  test("drops a subagent-registered workspace the caller can no longer access", () => {
+    // Guards against a stale/revoked workspace id ever reaching
+    // `data_workspace_ids`, mirroring the same accessibleWorkspaceIds
+    // intersection `extractIncomingMessageWorkspaceIds` callers apply.
+    const ids = computeAssistantTurnWorkspaceIds({
+      responseParts: [],
+      workspaceIdsBeforeStream: new Set(),
+      registeredWorkspaceIdsAfterStream: [wsA],
+      accessibleWorkspaceIds: new Set(),
+    });
+
+    expect(ids).toEqual([]);
+  });
+
+  test("unions the structural response scan with the registry delta", () => {
+    const ids = computeAssistantTurnWorkspaceIds({
+      responseParts: [
+        {
+          type: "tool-call",
+          id: "call_1",
+          name: "mcp__test__listMatters",
+          arguments: "{}",
+          state: "complete",
+          output: { items: [{ matterRef: wsB, name: "Matter B" }] },
+        },
+      ],
+      workspaceIdsBeforeStream: new Set(),
+      registeredWorkspaceIdsAfterStream: [wsA],
+      accessibleWorkspaceIds: new Set([wsA, wsB]),
+    });
+
+    expect(new Set(ids)).toEqual(new Set([wsA, wsB]));
   });
 });
 

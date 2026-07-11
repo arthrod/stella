@@ -5,7 +5,7 @@ import { cn } from "@stll/ui/lib/utils";
 import type { FileViewerWithAIProps } from "./file-viewer-with-ai.impl";
 
 // The actual implementation pulls in `host.tsx`, `file-chat-overlay.tsx`,
-// and ultimately `@stll/folio`'s AI-suggestion helpers (applySuggestions,
+// and ultimately `@stll/folio-react`'s AI-suggestion helpers (applySuggestions,
 // resolveSuggestionAnchor, citation/decoration meta setters). Keeping
 // it behind `lazy()` is what stops the Folio editor + Yjs + utif2 graph
 // (~490 KB gz) from being preloaded on the homepage. The wrapper just
@@ -24,6 +24,8 @@ export const FileViewerWithAI = ({
   className,
   docxEditable,
   docxEditorRef,
+  docxComments,
+  onDocxCommentsChange,
   requestDocxEditMode,
   children,
 }: FileViewerWithAIProps) => {
@@ -46,9 +48,11 @@ export const FileViewerWithAI = ({
           activeExternal={activeExternal}
           activeFile={activeFile}
           chatThreadId={chatThreadId}
+          docxComments={docxComments}
           docxEditable={docxEditable}
           docxEditorRef={docxEditorRef}
           key={overlayKey}
+          onDocxCommentsChange={onDocxCommentsChange}
           requestDocxEditMode={requestDocxEditMode}
           workspaceId={workspaceId}
         />

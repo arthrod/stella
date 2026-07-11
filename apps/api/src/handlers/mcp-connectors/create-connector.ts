@@ -25,6 +25,7 @@ const requestBody = t.Object({
 
 const config = {
   permissions: { organizationSettings: ["update"] },
+  mcp: { type: "internal", reason: "mcp_transport" },
   body: requestBody,
 } satisfies HandlerConfig;
 
@@ -218,7 +219,7 @@ const nextSlug = async ({
 }) => {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const slug = attempt === 0 ? base : `${base}-${attempt + 1}`;
-    // oxlint-disable-next-line no-await-in-loop -- sequential slug-collision probe: each attempt depends on the prior slug being taken
+    // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential slug-collision probe: each attempt depends on the prior slug being taken
     const existing = await safeDb((tx) =>
       tx
         .select({ id: mcpConnectors.id })

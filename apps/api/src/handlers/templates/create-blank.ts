@@ -1,6 +1,6 @@
 import { t } from "elysia";
 
-import { createDocx, createEmptyDocument } from "@stll/folio/server";
+import { createDocx, createEmptyDocument } from "@stll/folio-core/server";
 
 import type { SafeDb } from "@/api/db";
 import {
@@ -61,6 +61,9 @@ const createBlankTemplateHandler = async function* ({
 
 const config = {
   permissions: { template: ["create"] },
+  // Not reachable through save_template (which requires a DOCX on create);
+  // blank-template creation stays a tracked gap.
+  mcp: { type: "capability", reason: "template_authoring_ui" },
   body: createBlankTemplateBodySchema,
 } satisfies HandlerConfig;
 

@@ -11,6 +11,7 @@ import { tSafeId } from "@/api/lib/custom-schema";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { LIMITS } from "@/api/lib/limits";
 import { cents } from "@/api/lib/money";
+import { formatTodayInTimeZone } from "@/api/lib/timezone";
 
 const createExpenseBodySchema = t.Object({
   matterId: tSafeId("entity"),
@@ -27,6 +28,7 @@ const createExpenseBodySchema = t.Object({
 
 const config = {
   permissions: { expense: ["create"] },
+  mcp: { type: "capability", reason: "billing_admin" },
   body: createExpenseBodySchema,
 } satisfies HandlerConfig;
 
@@ -40,11 +42,9 @@ const createExpense = createSafeHandler(
     body,
     recordAuditEvent,
   }) {
-    const now = new Date();
-    // en-CA locale formats dates as YYYY-MM-DD (ISO 8601)
-    const todayStr = new Intl.DateTimeFormat("en-CA", {
-      timeZone: body.timezoneId,
-    }).format(now);
+    const todayStr = yield* formatTodayInTimeZone({
+      timezoneId: body.timezoneId,
+    });
     const dateIncurred = new Date(`${body.dateIncurred}T00:00:00`);
     const today = new Date(`${todayStr}T00:00:00`);
 

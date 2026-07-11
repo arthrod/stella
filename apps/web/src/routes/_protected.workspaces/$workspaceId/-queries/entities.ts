@@ -1,13 +1,21 @@
 import { useDeferredValue } from "react";
 
-import { infiniteQueryOptions, queryOptions } from "@tanstack/react-query";
+import {
+  infiniteQueryOptions,
+  keepPreviousData,
+  queryOptions,
+} from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
 import { toAPIError } from "@/lib/errors";
 import { ROUTE_QUERY_STALE_TIME_MS } from "@/lib/react-query";
 import type { QueryOptionsInput } from "@/lib/react-query";
 import { toSafeId } from "@/lib/safe-id";
-import type { WorkspaceEntity, WorkspaceField } from "@/lib/types";
+import type {
+  WorkspaceCellMetadata,
+  WorkspaceEntity,
+  WorkspaceField,
+} from "@/lib/types";
 import {
   DEFAULT_ENTITY_VIEW_PAGE_SIZE,
   DEFAULT_ENTITY_WINDOW_SIZE,
@@ -45,23 +53,25 @@ type RawWorkspaceEntity = Omit<
   }[];
   cellMetadata: {
     propertyId: string;
-    metadata: WorkspaceEntity["cellMetadata"][string];
+    metadata: WorkspaceCellMetadata;
   }[];
 };
 
 const toWorkspaceEntity = (entity: RawWorkspaceEntity): WorkspaceEntity => {
   const { fields: rawFields } = entity;
-  const fields: Record<string, WorkspaceField> = {};
+  const fields: WorkspaceEntity["fields"] = {};
   for (const field of rawFields) {
-    fields[field.propertyId] = {
+    const propertyId = toSafeId<"property">(field.propertyId);
+    fields[propertyId] = {
       id: toSafeId<"field">(field.id),
       entityId: toSafeId<"entity">(field.entityId),
+      propertyId,
       content: field.content,
     };
   }
   const cellMetadata: WorkspaceEntity["cellMetadata"] = {};
   for (const entry of entity.cellMetadata) {
-    cellMetadata[entry.propertyId] = entry.metadata;
+    cellMetadata[toSafeId<"property">(entry.propertyId)] = entry.metadata;
   }
   return {
     entityId: toSafeId<"entity">(entity.entityId),
@@ -107,16 +117,15 @@ const toWorkspaceEntity = (entity: RawWorkspaceEntity): WorkspaceEntity => {
 
 export const entitiesOptions = (key: EntitiesOptionsInput) =>
   queryOptions({
-    queryKey: entitiesKeys.page(key),
+    queryKey: entitiesKeys.sample(key),
     queryFn: async ({ signal }) => {
       const fieldMode = key.fieldMode ?? "full";
       const response = await api
         .entities({ workspaceId: toSafeId<"workspace">(key.workspaceId) })
-        .query.post(
+        ["query-window"].post(
           {
             filters: key.filters,
             sorts: key.sorts,
-            page: key.page,
             ...(key.search?.trim() && { search: key.search.trim() }),
             excludedKinds: key.excludedKinds ?? [],
             fieldMode,
@@ -127,7 +136,7 @@ export const entitiesOptions = (key: EntitiesOptionsInput) =>
                   )
                 : [],
             previewableForAi: key.previewableForAi ?? false,
-            pageSize: key.pageSize ?? DEFAULT_ENTITY_VIEW_PAGE_SIZE,
+            limit: key.pageSize ?? DEFAULT_ENTITY_VIEW_PAGE_SIZE,
           },
           { fetch: { signal } },
         );
@@ -136,7 +145,7 @@ export const entitiesOptions = (key: EntitiesOptionsInput) =>
         throw toAPIError(response.error);
       }
 
-      const { entities: rawEntities, ...rest } = response.data;
+      const { items: rawEntities, ...rest } = response.data;
       const entities: WorkspaceEntity[] = rawEntities.map(toWorkspaceEntity);
 
       return { ...rest, entities };
@@ -216,7 +225,12 @@ export const filesystemEntitiesOptions = (
       const entities: WorkspaceEntity[] =
         response.data.entities.map(toWorkspaceEntity);
 
-      return { entities };
+      // Parent links of ancestor folders a filter/search hid. Used only to
+      // complete the ancestor chain for cross-matter copy/move dedup; never
+      // rendered, so they stay out of selection and bulk actions.
+      const ancestorLinks = response.data.ancestorLinks;
+
+      return { entities, ancestorLinks };
     },
     staleTime: ROUTE_QUERY_STALE_TIME_MS,
   });
@@ -250,7 +264,6 @@ export const kanbanGroupOptions = (key: KanbanGroupOptionsInput) =>
             ...(key.optionValues !== undefined && {
               optionValues: key.optionValues,
             }),
-            includeTotalCount: key.includeTotalCount ?? false,
             ...(pageParam !== undefined && { cursor: pageParam }),
           },
           { fetch: { signal } },
@@ -267,6 +280,11 @@ export const kanbanGroupOptions = (key: KanbanGroupOptionsInput) =>
     },
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    // The key carries the visible fieldIds, so showing/hiding a column changes
+    // it and refetches. Keep the previous rows on screen during that refetch
+    // (and on filter/sort/paging changes) instead of dropping every group to
+    // skeleton — the rows already exist, only the column set changed.
+    placeholderData: keepPreviousData,
   });
 
 // Per-group entity counts in one query, so the grouped table can skip
@@ -303,10 +321,6 @@ export const groupCountsOptions = (key: GroupCountsOptionsInput) =>
 export const useEntitiesWindowOptions = (key: EntitiesWindowOptionsInput) =>
   entitiesWindowOptions(useDeferredValue(key));
 
-export const useFilesystemEntitiesOptions = (
-  key: FilesystemEntitiesOptionsInput,
-) => filesystemEntitiesOptions(useDeferredValue(key));
-
 export const useKanbanGroupOptions = (key: KanbanGroupOptionsInput) =>
   kanbanGroupOptions(useDeferredValue(key));
 
@@ -319,6 +333,7 @@ export const useEntitiesOptions = (key: EntitiesOptionsInput) =>
 export const entityOptions = (workspaceId: string, entityId: string) =>
   queryOptions({
     queryKey: [...entitiesKeys.all(workspaceId), entityId],
+    staleTime: ROUTE_QUERY_STALE_TIME_MS,
     queryFn: async ({ signal }) => {
       const response = await api
         .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
@@ -337,15 +352,31 @@ export const entitySummariesOptions = (workspaceId: string) =>
   queryOptions({
     queryKey: entitiesKeys.summaries(workspaceId),
     queryFn: async ({ signal }) => {
-      const response = await api
-        .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
-        .summaries.get({ fetch: { signal } });
+      const summaries: { id: string; name: string | null }[] = [];
+      let cursor: string | undefined;
+      do {
+        // oxlint-disable-next-line no-await-in-loop -- cursor pagination: each page depends on the previous response's nextCursor, so requests are strictly sequential
+        const response = await api
+          .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
+          .summaries.get({
+            fetch: { signal },
+            query: {
+              limit: DEFAULT_ENTITY_WINDOW_SIZE,
+              ...(cursor !== undefined && { cursor }),
+            },
+          });
 
-      if (response.error) {
-        throw toAPIError(response.error);
-      }
+        if (response.error) {
+          throw toAPIError(response.error);
+        }
 
-      return response.data.summaries;
+        summaries.push(
+          ...response.data.items.map(({ id, name }) => ({ id, name })),
+        );
+        cursor = response.data.nextCursor ?? undefined;
+      } while (cursor !== undefined);
+
+      return summaries;
     },
   });
 
@@ -355,7 +386,7 @@ export const entitySummariesCountOptions = (workspaceId: string) =>
     queryFn: async ({ signal }) => {
       const response = await api
         .entities({ workspaceId: toSafeId<"workspace">(workspaceId) })
-        .summaries.get({ fetch: { signal } });
+        .summaries.count.get({ fetch: { signal }, query: {} });
 
       if (response.error) {
         throw toAPIError(response.error);

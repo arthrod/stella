@@ -132,6 +132,7 @@ export default defineConfig({
       },
     ],
     "no-nanoid/no-nanoid": "error",
+    "no-direct-matter-glyph/no-direct-matter-glyph": "error",
     "no-raw-date-input/no-raw-date-input": "error",
     "stella-lowercase/stella-lowercase": "error",
     "must-use-result/must-use-result": "error",
@@ -228,10 +229,18 @@ export default defineConfig({
     "unicorn/prefer-response-static-json": "off",
     "unicorn/no-immediate-mutation": "off",
     "unicorn/prefer-ternary": "off",
+    // Disabled: the legitimate "throw Error() needs new" case is already
+    // covered (more strictly) by the custom no-bare-error rule, and oxlint
+    // 1.70+ broadened this rule to flag error-named factory calls in a class
+    // `extends` clause — a false positive on the better-result
+    // `TaggedError("X")<{...}>()` pattern used throughout the codebase.
+    "unicorn/throw-new-error": "off",
     "unicorn/no-array-reduce": "error",
     "unicorn/no-array-sort": "off",
     "unicorn/no-useless-spread": "off",
-    "oxc/no-map-spread": "error",
+    // NOT enabled: unicorn/prefer-number-coercion. Its parseInt(x, 10) ->
+    // Number(x) transform is not semantics-preserving (lenient prefix parsing,
+    // "" handling, hex strings); ingestion adapters rely on parseInt behavior.
     "unicorn/no-await-expression-member": "off",
     // Candidate strict rule, not enabled yet: overlaps with no-nested-ternary.
     "unicorn/no-nested-ternary": "off",
@@ -241,6 +250,9 @@ export default defineConfig({
     "react_perf/jsx-no-new-function-as-prop": "off",
 
     "react/hook-use-state": "off",
+    // Enabled ("error") only for apps/web/src via the override below; other
+    // React surfaces (folio, ui, desktop, landing, playground) are not swept
+    // yet.
     "react/no-array-index-key": "off",
     "react/no-children-prop": "off",
     "react/no-danger": "off",
@@ -304,6 +316,7 @@ export default defineConfig({
     "eslint-plugin-sonarjs",
     "@stll/oxlint-config/no-raw-colors",
     "./.oxlint-plugins/no-raw-date-input.ts",
+    "./.oxlint-plugins/no-raw-date-parsing.ts",
     "./.oxlint-plugins/no-raw-locale-format.ts",
     "./.oxlint-plugins/no-input-dir-auto.ts",
     "./.oxlint-plugins/require-dir-on-rendered-name.ts",
@@ -315,16 +328,19 @@ export default defineConfig({
     "./.oxlint-plugins/no-raw-error-logging.ts",
     "./.oxlint-plugins/no-untyped-updates.ts",
     "./.oxlint-plugins/no-nanoid.ts",
+    "./.oxlint-plugins/no-direct-matter-glyph.ts",
     "./.oxlint-plugins/no-crypto-random-uuid.ts",
     "./.oxlint-plugins/no-raw-use-effect.ts",
     "./.oxlint-plugins/no-ref-mirror.ts",
     "./.oxlint-plugins/no-shared-suspense-query.ts",
     "./.oxlint-plugins/no-bare-chrome-query.ts",
     "./.oxlint-plugins/require-router-select.ts",
+    "./.oxlint-plugins/require-loader-prefetch.ts",
     "./.oxlint-plugins/require-matter-affordance.ts",
     "./.oxlint-plugins/no-raw-route-query-client.ts",
-    "./.oxlint-plugins/no-component-on-redirect-route.ts",
+    "./.oxlint-plugins/no-beforeload-redirect.ts",
     "./.oxlint-plugins/require-safe-route-handlers.ts",
+    "./.oxlint-plugins/no-inline-endpoint-in-routes.ts",
     "./.oxlint-plugins/security-guards.ts",
     "./.oxlint-plugins/no-unbranded-ownership-id-param.ts",
     "./.oxlint-plugins/no-raw-user-id-schema.ts",
@@ -349,7 +365,6 @@ export default defineConfig({
     "./.oxlint-plugins/no-public-law-browser-globals.ts",
     "./.oxlint-plugins/no-raw-public-law-seo.ts",
     "./.oxlint-plugins/public-case-law-db-boundary.ts",
-    "./.oxlint-plugins/folio-layer-boundaries.ts",
     "./.oxlint-plugins/require-contained-handler.ts",
     "./.oxlint-plugins/suppression-hygiene.ts",
     "./.oxlint-plugins/no-coerced-optional-union-enum.ts",
@@ -362,6 +377,14 @@ export default defineConfig({
     "./.oxlint-plugins/no-static-catalogue-route-import.ts",
     "./.oxlint-plugins/no-workspace-field-value-drift.ts",
     "./.oxlint-plugins/icon-button-requires-tooltip.ts",
+    "./.oxlint-plugins/no-document-cookie.ts",
+    "./.oxlint-plugins/no-eager-singleton.ts",
+    "./.oxlint-plugins/no-db-await-in-loop.ts",
+    "./.oxlint-plugins/require-cached-collator.ts",
+    "./.oxlint-plugins/require-query-signal.ts",
+    "./.oxlint-plugins/require-stable-snapshot.ts",
+    "./.oxlint-plugins/require-use-shallow.ts",
+    "./.oxlint-plugins/no-raw-stored-json.ts",
   ],
 
   overrides: [
@@ -381,6 +404,10 @@ export default defineConfig({
         "typescript/strict-boolean-expressions": "off",
         "require-unicode-regexp": "off",
         "no-nested-ternary": "off",
+        // Regression fixtures deliberately embed ref-during-render and
+        // stale-closure patterns to exercise the custom plugin rules; they
+        // are not product code, so react-compiler noise stays off here.
+        "react/react-compiler": "off",
         // Plugin sources and fixtures embed directive strings as
         // documentation/regression examples; do not lint them as real
         // directives.
@@ -395,6 +422,13 @@ export default defineConfig({
       rules: { "no-raw-use-effect/no-raw-use-effect": "error" },
     },
     {
+      // Exercise require-query-signal against its regression fixture; the
+      // rule is otherwise scoped to apps/web/src, which the fixtures dir is
+      // not.
+      files: [".oxlint-plugins/__fixtures__/require-query-signal.fixture.ts"],
+      rules: { "require-query-signal/require-query-signal": "error" },
+    },
+    {
       files: [
         ".oxlint-plugins/__fixtures__/no-raw-route-query-client.fixture.tsx",
       ],
@@ -404,16 +438,25 @@ export default defineConfig({
     },
     {
       files: [
-        ".oxlint-plugins/__fixtures__/no-component-on-redirect-route.fixture.tsx",
+        ".oxlint-plugins/__fixtures__/no-beforeload-redirect.fixture.tsx",
       ],
       rules: {
-        "no-component-on-redirect-route/no-component-on-redirect-route":
-          "error",
+        "no-beforeload-redirect/no-beforeload-redirect": "error",
       },
     },
     {
       files: [".oxlint-plugins/__fixtures__/no-ref-mirror.fixture.tsx"],
       rules: { "no-ref-mirror/no-ref-mirror": "error" },
+    },
+    {
+      files: [".oxlint-plugins/__fixtures__/require-use-shallow.fixture.tsx"],
+      rules: { "require-use-shallow/require-use-shallow": "error" },
+    },
+    {
+      files: [
+        ".oxlint-plugins/__fixtures__/require-stable-snapshot.fixture.tsx",
+      ],
+      rules: { "require-stable-snapshot/require-stable-snapshot": "error" },
     },
     {
       files: [".oxlint-plugins/__fixtures__/require-escape-like.fixture.ts"],
@@ -448,6 +491,20 @@ export default defineConfig({
       ],
       rules: {
         "no-shared-suspense-query/no-shared-suspense-query": "error",
+      },
+    },
+    {
+      files: [
+        ".oxlint-plugins/__fixtures__/require-loader-prefetch.fixture.tsx",
+        ".oxlint-plugins/__fixtures__/require-loader-prefetch-loader.fixture.tsx",
+        ".oxlint-plugins/__fixtures__/require-loader-prefetch-nonroute.fixture.tsx",
+        ".oxlint-plugins/__fixtures__/require-loader-prefetch-nosuspense.fixture.tsx",
+        ".oxlint-plugins/__fixtures__/routes/-components/require-loader-prefetch-child.fixture.tsx",
+        ".oxlint-plugins/__fixtures__/routes/require-loader-prefetch-child-missing.fixture.tsx",
+        ".oxlint-plugins/__fixtures__/routes/require-loader-prefetch-child-ok.fixture.tsx",
+      ],
+      rules: {
+        "require-loader-prefetch/require-loader-prefetch": "error",
       },
     },
     {
@@ -489,7 +546,7 @@ export default defineConfig({
       // from a large intersection of module-augmented command interfaces.
       // oxlint's type-aware pass resolves the editor to `error`-typed here
       // (the only web consumer of toggleBold/toggleHeading/isActive), while
-      // tsc and tsgo --noEmit both type-check the file clean.
+      // tsc --noEmit type-checks the file clean.
       files: [
         "apps/web/src/routes/_protected.knowledge/-components/clause-editor.tsx",
       ],
@@ -539,28 +596,6 @@ export default defineConfig({
       },
     },
     {
-      // Legacy DOCX/editor code has parser and layout state machines that need
-      // dedicated extraction passes. Keep the rule visible without blocking
-      // this guardrail rollout on a broad folio rewrite.
-      files: ["packages/folio/src/**/*.{ts,tsx}"],
-      rules: { "sonarjs/cognitive-complexity": ["error", 200] },
-    },
-    {
-      // Folio render-pipeline layer boundaries. The painter is downstream of
-      // the engine and bridge and must not import upstream concerns; the
-      // bridge and engine must not pull from the painter. See
-      // `.oxlint-plugins/folio-layer-boundaries.ts` and the matching test at
-      // `packages/folio/src/core/__tests__/layer-boundaries.test.ts`.
-      files: [
-        "packages/folio/src/core/layout-bridge/**/*.{ts,tsx}",
-        "packages/folio/src/core/layout-engine/**/*.{ts,tsx}",
-        "packages/folio/src/core/layout-painter/**/*.{ts,tsx}",
-      ],
-      rules: {
-        "folio-layer-boundaries/no-upstream-import": "error",
-      },
-    },
-    {
       // Drizzle schema files are guarded by check-migrations.sh, which
       // requires a new migration on any byte-level change. Keep regex
       // flags off here so adding the rule globally doesn't force an
@@ -578,8 +613,6 @@ export default defineConfig({
         "apps/api/src/handlers/case-law/ingestion/adapters/utils.ts",
         "apps/api/src/lib/markdown/html-to-markdown.ts",
         "apps/web/src/routes/_protected.workspaces/$workspaceId/-components/create-property.tsx",
-        "packages/folio/src/core/utils/clipboard.ts",
-        "packages/folio/src/core/utils/fontResolver.ts",
       ],
       rules: { "require-unicode-regexp": "off" },
     },
@@ -616,16 +649,40 @@ export default defineConfig({
       rules: { "sonarjs/cognitive-complexity": ["error", 40] },
     },
     {
-      files: [
-        "apps/web/src/**/*.{ts,tsx}",
-        "packages/ui/src/**/*.{ts,tsx}",
-        "packages/folio/src/**/*.{ts,tsx}",
-      ],
+      files: ["apps/web/src/**/*.{ts,tsx}", "packages/ui/src/**/*.{ts,tsx}"],
       rules: {
         "no-raw-colors/no-raw-colors": "error",
         "no-raw-foreground-opacity/no-raw-foreground-opacity": "error",
         "no-inline-style-colors/no-inline-style-colors": "error",
         "no-physical-properties/no-physical-properties": "error",
+      },
+    },
+    {
+      // Browser surfaces only: `document` does not exist in apps/api's
+      // Bun runtime. CLAUDE.md: "No direct document.cookie assignment."
+      files: [
+        "apps/web/src/**/*.{ts,tsx}",
+        "apps/desktop/src/**/*.{ts,tsx}",
+        "apps/landing/src/**/*.{ts,tsx}",
+        "apps/playground/src/**/*.{ts,tsx}",
+        "packages/ui/src/**/*.{ts,tsx}",
+        ".oxlint-plugins/__fixtures__/no-document-cookie.fixture.ts",
+      ],
+      rules: {
+        "no-document-cookie/no-document-cookie": "error",
+      },
+    },
+    {
+      // Persisted-storage reads: scoped to apps/web, the only surface that
+      // reads localStorage/sessionStorage. The helper module itself is the
+      // one place a raw JSON.parse on a persisted string is intentional.
+      files: [
+        "apps/web/src/**/*.{ts,tsx}",
+        ".oxlint-plugins/__fixtures__/no-raw-stored-json.fixture.ts",
+      ],
+      excludeFiles: ["apps/web/src/lib/stored-json.ts"],
+      rules: {
+        "no-raw-stored-json/no-raw-stored-json": "error",
       },
     },
     {
@@ -663,6 +720,38 @@ export default defineConfig({
       ],
       rules: {
         "no-raw-locale-format/no-raw-locale-format": "error",
+      },
+    },
+    {
+      // Date/timezone footguns: date-only `new Date("...")` (UTC-midnight
+      // shift), `Date.parse` (engine-dependent), and raw day-length ms
+      // arithmetic (DST-unsafe). Use parseIsoDateLocal/addDays from
+      // lib/dates.ts and DAY_IN_MS from lib/time.ts.
+      files: [
+        "apps/api/src/**/*.{ts,tsx}",
+        "apps/web/src/**/*.{ts,tsx}",
+        ".oxlint-plugins/__fixtures__/no-raw-date-parsing.fixture.ts",
+      ],
+      rules: {
+        "no-raw-date-parsing/no-raw-date-parsing": "error",
+      },
+    },
+    {
+      // Tests construct fixture instants from literals deterministically and
+      // deliberately demonstrate the footguns (e.g. the dates.test.ts DST
+      // assertions), so the date-parsing rule stays out of them. The two
+      // time.ts modules are the one allowlisted home of the day-length
+      // literal that the rule points everything else at.
+      files: [
+        "apps/api/src/**/*.{test,spec}.{ts,tsx}",
+        "apps/web/src/**/*.{test,spec}.{ts,tsx}",
+        "apps/api/src/**/__tests__/**",
+        "apps/api/src/tests/**",
+        "apps/api/src/lib/time.ts",
+        "apps/web/src/lib/time.ts",
+      ],
+      rules: {
+        "no-raw-date-parsing/no-raw-date-parsing": "off",
       },
     },
     {
@@ -727,9 +816,9 @@ export default defineConfig({
     {
       files: ["apps/web/src/**/*.{ts,tsx}"],
       rules: {
+        "react/no-array-index-key": "error",
         // Direct useEffect is banned; route external-system sync through
         // useMountEffect / useExternalSyncEffect. See /conventions-use-effect.
-        // Upstream-synced packages/folio is intentionally exempt.
         "no-raw-use-effect/no-raw-use-effect": [
           "error",
           { allowedFiles: ["apps/web/src/hooks/use-effect.ts"] },
@@ -747,6 +836,7 @@ export default defineConfig({
         "@tanstack/query/no-rest-destructuring": "error",
         "@tanstack/query/no-unstable-deps": "error",
         "@tanstack/query/stable-query-client": "error",
+        "require-query-signal/require-query-signal": "error",
         "no-ref-mirror/no-ref-mirror": [
           "error",
           {
@@ -792,6 +882,13 @@ export default defineConfig({
             ],
           },
         ],
+        // A Zustand selector returning a fresh object/array literal fails
+        // Object.is every render; under Zustand v5 that can loop into
+        // "Maximum update depth exceeded". Wrap the selector in useShallow.
+        "require-use-shallow/require-use-shallow": "error",
+        // A useSyncExternalStore snapshot that never stabilizes trips
+        // React's getSnapshot-cache warning and can loop the same way.
+        "require-stable-snapshot/require-stable-snapshot": "error",
         "no-restricted-imports": [
           "error",
           {
@@ -830,12 +927,11 @@ export default defineConfig({
           },
         ],
         "no-raw-api-url/no-raw-api-url": "error",
-        // Initial i18n ratchet: catch new raw JSX copy in files that
-        // already participate in use-intl. Remove `requireTranslationUsage`
-        // once legacy product UI literals have been migrated.
+        // Catch raw JSX copy across product UI. Use narrow disables only for
+        // non-user-facing literals such as technical fixtures or brand marks.
         "no-untranslated-jsx-literal/no-untranslated-jsx-literal": [
           "error",
-          { requireTranslationUsage: true },
+          { allowedText: ["Anthropic", "Google AI", "OpenAI"] },
         ],
         "require-router-select/require-router-select": "error",
         "require-matter-affordance/require-matter-affordance": "error",
@@ -843,6 +939,15 @@ export default defineConfig({
         "sonarjs/jsx-no-leaked-render": "error",
         "sonarjs/no-hook-setter-in-body": "error",
         "stella-toast/stella-toast": "error",
+      },
+    },
+    {
+      files: [
+        "apps/web/src/routes/dev/**/*.{ts,tsx}",
+        "apps/web/src/components/dev-sidebar-group.tsx",
+      ],
+      rules: {
+        "no-untranslated-jsx-literal/no-untranslated-jsx-literal": "off",
       },
     },
     {
@@ -866,6 +971,12 @@ export default defineConfig({
       files: [".oxlint-plugins/__fixtures__/require-query-limit.fixture.ts"],
       rules: {
         "require-query-limit/require-query-limit": "error",
+      },
+    },
+    {
+      files: [".oxlint-plugins/__fixtures__/no-db-await-in-loop.fixture.ts"],
+      rules: {
+        "no-db-await-in-loop/no-db-await-in-loop": "error",
       },
     },
     {
@@ -1017,37 +1128,6 @@ export default defineConfig({
       rules: { "no-raw-colors/no-raw-colors": "off" },
     },
     {
-      // Color pickers, style galleries, and font pickers legitimately render
-      // inline color values as visual previews — not theme-dependent chrome.
-      files: [
-        "packages/folio/src/**/TableStyleGallery.tsx",
-        "packages/folio/src/**/TableBorderPicker.tsx",
-        "packages/folio/src/**/TableBorderWidthPicker.tsx",
-        "packages/folio/src/**/InsertSymbolDialog.tsx",
-        "packages/folio/src/**/FontSizePicker.tsx",
-        "packages/folio/src/**/IconGridDropdown.tsx",
-        "packages/folio/src/**/TableOptionsDropdown.tsx",
-        "packages/folio/src/**/TableMoreDropdown.tsx",
-        "packages/folio/src/**/TableMergeButton.tsx",
-        "packages/folio/src/**/TableGridPicker.tsx",
-        "packages/folio/src/**/ShapeGallery.tsx",
-        "packages/folio/src/**/FootnotePropertiesDialog.tsx",
-      ],
-      rules: { "no-inline-style-colors/no-inline-style-colors": "off" },
-    },
-    {
-      // OOXML color data: palette presets, hex-to-name mappings, table style
-      // definitions, and standard color arrays. These are document-format
-      // constants, not theme-dependent CSS.
-      files: [
-        "packages/folio/src/**/toolbarUtils.ts",
-        "packages/folio/src/**/table-styles.ts",
-        "packages/folio/src/**/colorResolver.ts",
-        "packages/folio/src/**/FormattingBar.tsx",
-      ],
-      rules: { "no-inline-style-colors/no-inline-style-colors": "off" },
-    },
-    {
       files: ["packages/ui/src/**/button.tsx"],
       rules: {
         "no-raw-colors/no-raw-colors": "off",
@@ -1149,9 +1229,19 @@ export default defineConfig({
       files: ["apps/web/src/routes/**/*.{ts,tsx}"],
       rules: {
         "@tanstack/router/create-route-property-order": "error",
-        "no-component-on-redirect-route/no-component-on-redirect-route":
-          "error",
+        "no-beforeload-redirect/no-beforeload-redirect": "error",
         "no-raw-route-query-client/no-raw-route-query-client": "error",
+        "require-loader-prefetch/require-loader-prefetch": "error",
+      },
+    },
+    {
+      // Public, server-rendered law routes (isPublicSsrPath) must redirect
+      // from beforeLoad so the server emits a real HTTP redirect for crawlers
+      // and no-JS clients. The client-only blank-page race the rule guards
+      // against does not apply to SSR routes.
+      files: ["apps/web/src/routes/law/**/*.{ts,tsx}"],
+      rules: {
+        "no-beforeload-redirect/no-beforeload-redirect": "off",
       },
     },
     {
@@ -1194,8 +1284,21 @@ export default defineConfig({
               "apps/api/src/lib/s3.ts",
               "apps/api/src/lib/scheduler/runner.ts",
               "apps/api/src/lib/subprocess.ts",
+              // Shared APP_VERSION resolution for routes.ts and posthog.ts
+              // above; reads STELLA_VERSION/RAILWAY_GIT_COMMIT_SHA directly
+              // rather than through env.ts so it stays side-effect-free at
+              // import time, matching the two call sites it replaces.
+              "apps/api/src/lib/version.ts",
               "apps/web/e2e/helpers/api.ts",
+              // Reads E2E_API_URL (same contract as helpers/api.ts) and the
+              // E2E_NETWORK_BASELINE write/rewrite mode switch; e2e infra has
+              // no app env module to route through.
+              "apps/web/e2e/helpers/network.ts",
               "apps/web/e2e/staging/global-setup.ts",
+              // Test-only helper: reads PROPERTY_TEST_NUM_RUNS_FACTOR and CI
+              // to tune fast-check at assert time. Never imported by runtime
+              // code, so there is no app env module to route through.
+              "packages/property-testing/src/index.ts",
             ],
           },
         ],
@@ -1239,6 +1342,20 @@ export default defineConfig({
       excludeFiles: ["apps/api/src/**/*.test.ts", "apps/api/src/tests/**/*.ts"],
       rules: {
         "require-query-limit/require-query-limit": "error",
+      },
+    },
+    {
+      // no-db-await-in-loop flags an `await db...` / `await tx...` /
+      // `await safeDb(...)` or `yield* Result.await(safeDb(...))` lexically
+      // inside a loop body, plus a
+      // `Promise.all(items.map(...))` fan-out — the N+1 antipattern. Scoped
+      // to backend source, where `db`/`tx`/`safeDb` are Drizzle handles;
+      // test files intentionally exercise unbatched loops in fixtures/mocks
+      // and are excluded.
+      files: ["apps/api/src/**/*.ts"],
+      excludeFiles: ["apps/api/src/**/*.test.ts", "apps/api/src/tests/**/*.ts"],
+      rules: {
+        "no-db-await-in-loop/no-db-await-in-loop": "error",
       },
     },
     {
@@ -1290,6 +1407,43 @@ export default defineConfig({
       },
     },
     {
+      // The legal-atlas-runner daemons are long-lived: an un-timed-out DB
+      // await on a connection the server reaped silently hangs forever and
+      // wedges the worker until external supervision restarts it.
+      // All DB access must go through the timeout-wrapped handles in
+      // apps/legal-atlas-runner/src/db.ts so no caller can build an unbounded
+      // handle. That module is the only sanctioned importer of the raw pools.
+      files: ["apps/legal-atlas-runner/**/*.ts"],
+      excludeFiles: [
+        "apps/legal-atlas-runner/src/db.ts",
+        "apps/legal-atlas-runner/**/*.test.ts",
+      ],
+      rules: {
+        "no-restricted-imports": [
+          "error",
+          {
+            paths: [
+              {
+                name: "zod",
+                message: "Use 'valibot' instead of 'zod'.",
+              },
+              {
+                name: "@/api/db/root",
+                message:
+                  "Import timeout-wrapped DB handles from '../db' instead of the raw Bun SQL pools.",
+              },
+              {
+                name: "@/api/db",
+                importNames: ["createIngestionDb", "createScopedDb"],
+                message:
+                  "Import the timeout-wrapped `ingestionDb` from '../db' instead of building a raw handle.",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    {
       files: [
         "apps/api/src/lib/auth.ts",
         "apps/api/src/lib/search/**",
@@ -1312,174 +1466,6 @@ export default defineConfig({
       },
     },
     {
-      // ProseMirror's node.attrs and mark.attrs are typed as
-      // { readonly [attr: string]: any } — a library FFI boundary.
-      // toDOM and parseDOM callbacks must cast attrs to their typed shapes,
-      // and NodeSpec/MarkSpec do not support generic type parameters.
-      // Extension commands also read attrs via the same any-typed API.
-      files: [
-        "packages/folio/src/core/prosemirror/extensions/**/*.ts",
-        "packages/folio/src/core/prosemirror/extensions/**/*.tsx",
-      ],
-      rules: {
-        "typescript/no-unsafe-type-assertion": "off",
-        "typescript/no-unsafe-assignment": "off",
-        "typescript/no-unsafe-member-access": "off",
-        "typescript/strict-boolean-expressions": "off",
-
-        "typescript/prefer-nullish-coalescing": "off",
-        "typescript/no-non-null-assertion": "off",
-        "typescript/no-unnecessary-type-assertion": "off",
-        "typescript/no-unsafe-return": "off",
-
-        "eslint/no-eq-null": "off",
-        "eslint/eqeqeq": "off",
-        "no-useless-assignment": "off",
-        "typescript/consistent-return": "off",
-      },
-    },
-    {
-      // Folio React components and hooks interact directly with ProseMirror
-      // state (node.attrs typed as any), OOXML data structures, and DOM APIs
-      // requiring HTMLElement subtype casts. Same FFI boundary as extensions.
-      files: [
-        "packages/folio/src/components/**/*.ts",
-        "packages/folio/src/components/**/*.tsx",
-        "packages/folio/src/hooks/**/*.ts",
-        "packages/folio/src/hooks/**/*.tsx",
-        "packages/folio/src/*.ts",
-        "packages/folio/src/*.tsx",
-      ],
-      rules: {
-        "typescript/no-unsafe-type-assertion": "off",
-        "typescript/no-unsafe-assignment": "off",
-        "typescript/no-unsafe-member-access": "off",
-        "typescript/strict-boolean-expressions": "off",
-        "typescript/no-non-null-assertion": "off",
-        "typescript/no-unnecessary-type-assertion": "off",
-        "typescript/prefer-nullish-coalescing": "off",
-
-        "eslint/no-eq-null": "off",
-        "eslint/eqeqeq": "off",
-        "no-useless-assignment": "off",
-        "typescript/consistent-return": "off",
-
-        "typescript/no-unsafe-return": "off",
-        "typescript/no-unsafe-call": "off",
-        "typescript/no-unsafe-argument": "off",
-
-        "typescript/no-deprecated": "off",
-        "typescript/promise-function-async": "off",
-      },
-    },
-    {
-      // Folio layout bridge, layout painter, layout engine, prosemirror commands,
-      // prosemirror conversion, prosemirror plugins, paged-editor,
-      // managers, and utils all work with ProseMirror's any-typed node.attrs and
-      // DOM APIs that return HTMLElement subtypes requiring narrowing casts.
-      files: [
-        "packages/folio/src/core/layout-bridge/**/*.ts",
-        "packages/folio/src/core/layout-bridge/**/*.tsx",
-        "packages/folio/src/core/layout-painter/**/*.ts",
-        "packages/folio/src/core/layout-painter/**/*.tsx",
-        "packages/folio/src/core/layout-engine/**/*.ts",
-        "packages/folio/src/core/layout-engine/**/*.tsx",
-        "packages/folio/src/core/__tests__/**/*.ts",
-        "packages/folio/src/core/__tests__/**/*.tsx",
-        "packages/folio/src/core/prosemirror/conversion/**/*.ts",
-        "packages/folio/src/core/prosemirror/conversion/**/*.tsx",
-        "packages/folio/src/core/prosemirror/commands/**/*.ts",
-        "packages/folio/src/core/prosemirror/commands/**/*.tsx",
-        "packages/folio/src/core/prosemirror/plugins/**/*.ts",
-        "packages/folio/src/core/prosemirror/plugins/**/*.tsx",
-        "packages/folio/src/core/prosemirror/*.ts",
-        "packages/folio/src/core/prosemirror/*.tsx",
-        "packages/folio/src/core/prosemirror/**/*.ts",
-        "packages/folio/src/core/prosemirror/**/*.tsx",
-        "packages/folio/src/core/managers/**/*.ts",
-        "packages/folio/src/core/managers/**/*.tsx",
-        "packages/folio/src/core/utils/**/*.ts",
-        "packages/folio/src/core/utils/**/*.tsx",
-        "packages/folio/src/core/types/**/*.ts",
-        "packages/folio/src/paged-editor/**/*.ts",
-        "packages/folio/src/paged-editor/**/*.tsx",
-      ],
-      rules: {
-        "typescript/no-unsafe-type-assertion": "off",
-        "typescript/no-unsafe-assignment": "off",
-        "typescript/no-unsafe-member-access": "off",
-        "typescript/strict-boolean-expressions": "off",
-        "typescript/no-non-null-assertion": "off",
-        "typescript/no-unnecessary-type-assertion": "off",
-        "typescript/prefer-nullish-coalescing": "off",
-
-        "eslint/no-eq-null": "off",
-        "eslint/eqeqeq": "off",
-        "no-useless-assignment": "off",
-        "typescript/consistent-return": "off",
-
-        "typescript/no-unsafe-return": "off",
-        "typescript/no-unsafe-call": "off",
-        "typescript/no-unsafe-argument": "off",
-
-        "typescript/no-deprecated": "off",
-        "typescript/promise-function-async": "off",
-      },
-    },
-    {
-      // OOXML parsers and serializers operate on fast-xml-parser node trees,
-      // slimdom nodes, and JSZip entries — all FFI boundaries that surface as
-      // any/Record<string, unknown>. OOXML attribute-string narrowing is now
-      // handled by Valibot picklists in parserEnums.ts (see narrowEnum), so
-      // typescript/no-unsafe-type-assertion is enforced here; only true FFI
-      // boundary files keep the rule off via the override below.
-      files: [
-        "packages/folio/src/core/docx/**/*.ts",
-        "packages/folio/src/core/docx/**/*.tsx",
-      ],
-      rules: {
-        "typescript/no-unsafe-assignment": "off",
-        "typescript/no-unsafe-member-access": "off",
-        "typescript/strict-boolean-expressions": "off",
-        "typescript/no-non-null-assertion": "off",
-        "typescript/no-unnecessary-type-assertion": "off",
-        "typescript/prefer-nullish-coalescing": "off",
-        "eslint/no-eq-null": "off",
-        "eslint/eqeqeq": "off",
-        "no-useless-assignment": "off",
-
-        "typescript/promise-function-async": "off",
-
-        "unicorn/no-array-for-each": "off",
-        "typescript/no-unnecessary-type-conversion": "off",
-        "typescript/no-duplicate-type-constituents": "off",
-
-        "eslint/no-control-regex": "off",
-        "typescript/no-deprecated": "off",
-        "typescript/consistent-return": "off",
-        "typescript/no-unsafe-return": "off",
-        "typescript/no-unsafe-call": "off",
-        "typescript/no-unsafe-argument": "off",
-
-        "unicorn/prefer-string-starts-ends-with": "off",
-        "typescript/prefer-string-starts-ends-with": "off",
-      },
-    },
-    {
-      // FFI-boundary files: fast-xml-parser returns Record<string, unknown>
-      // node trees and JSZip exposes _data via an undocumented internal
-      // property. The casts at this boundary widen library output back to the
-      // shape we know the library produces and cannot be replaced with
-      // structural narrowing without giving up the FFI entirely.
-      files: [
-        "packages/folio/src/core/docx/xmlParser.ts",
-        "packages/folio/src/core/docx/unzip.ts",
-      ],
-      rules: {
-        "typescript/no-unsafe-type-assertion": "off",
-      },
-    },
-    {
       // @stll/business-registries subpath types resolve as error in
       // type-aware linting because the workspace package dist isn't
       // always available during local lint runs.
@@ -1498,6 +1484,45 @@ export default defineConfig({
       rules: {
         "no-crypto-random-uuid/no-crypto-random-uuid": "error",
       },
+    },
+    {
+      // Module Side Effects (CLAUDE.md): known side-effecting singleton
+      // constructors (DB pools, auth, Redis/queue connections, S3 clients)
+      // must not run at module top level. Scoped to the backend and shared
+      // packages, where these constructors are actually imported.
+      files: [
+        "apps/api/src/**/*.{ts,tsx}",
+        "apps/legal-atlas-runner/src/**/*.{ts,tsx}",
+        "packages/**/*.{ts,tsx}",
+        ".oxlint-plugins/__fixtures__/no-eager-singleton.fixture.ts",
+      ],
+      excludeFiles: [
+        "apps/api/src/**/*.test.ts",
+        "apps/api/src/tests/**/*.ts",
+        "apps/legal-atlas-runner/src/**/*.test.ts",
+        "packages/**/*.test.{ts,tsx}",
+        "packages/**/__tests__/**/*.{ts,tsx}",
+      ],
+      rules: {
+        "no-eager-singleton/no-eager-singleton": "error",
+      },
+    },
+    {
+      // Canonical root DB module: constructs the process-wide root/RLS
+      // connection pools and drizzle handles at import time by design —
+      // it is the one designated singleton module every other DB access
+      // path imports from, so there is no non-deterministic import-order
+      // hazard to defer against. New singleton modules must use the lazy
+      // `getX()` pattern instead of adding to this exemption.
+      files: ["apps/api/src/db/root.ts"],
+      rules: { "no-eager-singleton/no-eager-singleton": "off" },
+    },
+    {
+      // Standalone CLI entrypoint (`bun run src/db/migrate.ts`), never
+      // imported by other application modules, so eager construction here
+      // carries no shared-import-order TDZ risk.
+      files: ["apps/api/src/db/migrate.ts"],
+      rules: { "no-eager-singleton/no-eager-singleton": "off" },
     },
     {
       files: ["apps/api/src/handlers/**/*.ts", "apps/api/src/lib/**/*.ts"],
@@ -1522,22 +1547,7 @@ export default defineConfig({
       files: ["apps/api/src/handlers/**/*.ts"],
       rules: {
         "no-body-ownership-ids/no-body-ownership-ids": "error",
-        "no-offset-pagination/no-offset-pagination": [
-          "error",
-          {
-            // Legacy offset-paginated list endpoints. New list endpoints must
-            // use cursor pagination and return Page<T>.
-            allowedFiles: [
-              "apps/api/src/handlers/billing-codes/read.ts",
-              "apps/api/src/handlers/expenses/read.ts",
-              "apps/api/src/handlers/invoices/read.ts",
-              "apps/api/src/handlers/rates/entries-read.ts",
-              "apps/api/src/handlers/rates/read.ts",
-              "apps/api/src/handlers/skills/list.ts",
-              "apps/api/src/handlers/time-entries/read.ts",
-            ],
-          },
-        ],
+        "no-offset-pagination/no-offset-pagination": "error",
         "no-raw-user-id-schema/no-raw-user-id-schema": "error",
         "no-untyped-updates/no-untyped-updates": "error",
         "security-guards/no-unscoped-user-query": "error",
@@ -1604,6 +1614,23 @@ export default defineConfig({
       ],
       rules: {
         "require-safe-route-handlers/require-safe-route-handlers": "error",
+        "no-inline-endpoint-in-routes/no-inline-endpoint-in-routes": "error",
+      },
+    },
+    {
+      // Grandfathered inline endpoint definitions (plan 046 Wave 0). These
+      // route files define endpoints inline via createSafe*Handler; the rule is
+      // enabled for new route files but these are not migrated in this pass.
+      files: [
+        "apps/api/src/handlers/case-law/routes.ts",
+        "apps/api/src/handlers/files/routes.ts",
+        "apps/api/src/handlers/search/routes.ts",
+        "apps/api/src/handlers/tasks/my-tasks-route.ts",
+        "apps/api/src/handlers/time-entries/routes.ts",
+        "apps/api/src/handlers/workspaces/routes.ts",
+      ],
+      rules: {
+        "no-inline-endpoint-in-routes/no-inline-endpoint-in-routes": "off",
       },
     },
     {
@@ -1664,6 +1691,7 @@ export default defineConfig({
         "apps/api/src/handlers/auth/ui-routes.ts",
         "apps/api/src/handlers/dev/routes.ts",
         "apps/api/src/handlers/entities/desktop-edit-sessions-route.ts",
+        "apps/api/src/handlers/feedback/routes.ts",
         "apps/api/src/handlers/folio-collab/routes.ts",
         "apps/api/src/handlers/health/routes.ts",
         "apps/api/src/handlers/mcp/routes.ts",
@@ -1724,8 +1752,8 @@ export default defineConfig({
         "security-guards/no-unscoped-user-query": "off",
         "vitest/no-focused-tests": "error",
         "vitest/prefer-importing-vitest-globals": "off",
-        // bun:test globals (describe/test/expect/it/…) resolve as `error` type
-        // when test files are excluded from the main tsconfig (packages/folio).
+        // bun:test globals (describe/test/expect/it/…) can resolve as `error`
+        // when test files are excluded from a package's main tsconfig.
         // Suppressing unsafe rules for test files avoids false positives that
         // would require modifying every test or adding a separate tsconfig.
         "typescript/no-unsafe-call": "off",
@@ -1737,13 +1765,44 @@ export default defineConfig({
       },
     },
     {
-      // Folio docx test fixtures cast XmlElement subtrees and ProseMirror
-      // mark.attrs values (typed as `any` at the library boundary) into the
-      // shapes the helpers need. Keep no-unsafe-type-assertion off only here
-      // so the rule stays live for product code in packages/folio/src/core/docx.
-      files: ["packages/folio/src/core/docx/__tests__/**/*.{ts,tsx}"],
+      // @stll/cli is published to npm and must run under plain Node: the `Bun`
+      // global is undefined there, so any `Bun.*` use in shipped source is a
+      // runtime crash (Bun itself runs `node:*` natively, so the dev workflow
+      // is unaffected). Ban the global in source that lands in `dist`; test
+      // files run only under `bun test` and may use it.
+      files: ["packages/cli/src/**/*.{ts,tsx}"],
+      excludeFiles: ["packages/cli/src/**/*.test.ts"],
       rules: {
-        "typescript/no-unsafe-type-assertion": "off",
+        "no-restricted-globals": [
+          "error",
+          {
+            name: "Bun",
+            message:
+              "@stll/cli is published to npm and must run under plain Node; use node:* APIs (node:fs/promises, node:crypto, node:http, node:child_process) instead of the Bun global.",
+          },
+        ],
+      },
+    },
+    {
+      // Bare localeCompare is locale-nondeterministic (runtime default) and
+      // rebuilds ICU tailoring per call; route through the cached collation
+      // helper. Scoped to apps/web and apps/api; the helper files themselves
+      // own the one legitimate bare call.
+      files: [
+        "apps/web/src/**/*.{ts,tsx}",
+        "apps/api/src/**/*.ts",
+        ".oxlint-plugins/__fixtures__/require-cached-collator.fixture.ts",
+      ],
+      rules: {
+        "require-cached-collator/require-cached-collator": [
+          "error",
+          {
+            allowedFiles: [
+              "apps/web/src/lib/collation.ts",
+              "apps/api/src/lib/collation.ts",
+            ],
+          },
+        ],
       },
     },
   ],

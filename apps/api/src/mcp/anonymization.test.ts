@@ -1,8 +1,9 @@
 import { describe, expect, mock, test } from "bun:test";
 
-import {
-  createPipelineContext,
-  DEFAULT_OPERATOR_CONFIG,
+import { createPipelineContext } from "@stll/anonymize-wasm";
+import type {
+  NativeAnonymizeBinding,
+  PipelineConfig,
 } from "@stll/anonymize-wasm";
 
 import type { ScopedDb } from "@/api/db";
@@ -53,26 +54,47 @@ describe("anonymizeTextFields", () => {
 
   test("injects name dictionaries into the API anonymization pipeline", async () => {
     let capturedDictionaries: unknown;
+    let gazetteerWorkspaceId: unknown;
     const loadNameDictionariesMock: AnonymizeTextFieldsDependencies["loadNameDictionaries"] =
       mock(async () => dictionaries);
-    const runPipelineMock: AnonymizeTextFieldsDependencies["runPipeline"] =
-      mock(async ({ config }) => {
+    // SAFETY: this test double never touches the actual binding
+    // value — it only exists to satisfy `createNativePipelineFromConfig`'s
+    // `binding` parameter before it is passed through unread.
+    // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- test double stands in for the real wasm binding
+    const fakeBinding = {} as NativeAnonymizeBinding;
+    const createNativePipelineFromConfigMock: AnonymizeTextFieldsDependencies["createNativePipelineFromConfig"] =
+      mock(async ({ config }: { config: PipelineConfig }) => {
         capturedDictionaries = config.dictionaries;
-        return [];
+        const pipeline = {
+          redactText: (fullText: string) => ({
+            resolvedEntities: [],
+            redaction: {
+              entityCount: 0,
+              operatorMap: new Map(),
+              redactionMap: new Map(),
+              redactedText: fullText,
+            },
+          }),
+        };
+        // SAFETY: only `redactText` is exercised by this test.
+        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- test double only implements `redactText`
+        return pipeline as unknown as Awaited<
+          ReturnType<
+            AnonymizeTextFieldsDependencies["createNativePipelineFromConfig"]
+          >
+        >;
       });
     const dependencies = {
+      getBinding: async () => fakeBinding,
+      createNativePipelineFromConfig: createNativePipelineFromConfigMock,
       createPipelineContext,
-      defaultOperatorConfig: DEFAULT_OPERATOR_CONFIG,
-      loadAnonymizationGazetteerEntries: async () => [],
+      deanonymise: (redactedText: string) => redactedText,
+      loadAnonymizationGazetteerEntries: async ({ workspaceId }) => {
+        gazetteerWorkspaceId = workspaceId;
+        return [];
+      },
       loadAnonymizationAllowlistCanonicals: async () => [],
       loadNameDictionaries: loadNameDictionariesMock,
-      redactText: (fullText: string) => ({
-        entityCount: 0,
-        operatorMap: new Map(),
-        redactionMap: new Map(),
-        redactedText: fullText,
-      }),
-      runPipeline: runPipelineMock,
     } satisfies AnonymizeTextFieldsDependencies;
     const scopedDb: ScopedDb = async () => {
       throw new Error("Expected gazetteer loader mock to avoid DB access");
@@ -87,7 +109,19 @@ describe("anonymizeTextFields", () => {
     });
 
     expect(loadNameDictionariesMock).toHaveBeenCalledTimes(1);
-    expect(runPipelineMock).toHaveBeenCalledTimes(1);
+    expect(gazetteerWorkspaceId).toBe("00000000-0000-4000-8000-000000000001");
+    expect(createNativePipelineFromConfigMock).toHaveBeenCalledTimes(1);
     expect(capturedDictionaries).toBe(dictionaries);
+
+    gazetteerWorkspaceId = "not-called";
+    await anonymizeTextFieldsWithDependencies({
+      dependencies,
+      fields: ["Alice Novak"],
+      organizationId: toSafeId<"organization">("org_test"),
+      scopedDb,
+      workspaceId: "org_test",
+    });
+
+    expect(gazetteerWorkspaceId).toBeUndefined();
   });
 });

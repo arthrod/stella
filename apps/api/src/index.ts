@@ -1,12 +1,16 @@
 import cors from "@elysiajs/cors";
 import { Elysia } from "elysia";
+import type { Context } from "elysia";
 import { rateLimit } from "elysia-rate-limit";
 
 import { env } from "@/api/env";
 import { aiAutocompleteRoute } from "@/api/handlers/ai-autocomplete/routes";
 import { aiConfigPublicRoute } from "@/api/handlers/ai-config/routes";
 import { auditLogsRoute } from "@/api/handlers/audit-logs/routes";
-import { authMetadataRoute } from "@/api/handlers/auth/routes";
+import {
+  authCapabilitiesRoute,
+  authMetadataRoute,
+} from "@/api/handlers/auth/routes";
 import { authUiRoute } from "@/api/handlers/auth/ui-routes";
 import { billingCodesRoute } from "@/api/handlers/billing-codes/routes";
 import { caseLawRoute } from "@/api/handlers/case-law/routes";
@@ -18,11 +22,13 @@ import {
 } from "@/api/handlers/clauses/routes";
 import { contactsRoute } from "@/api/handlers/contacts/routes";
 import { devPublicRoute, devRoute } from "@/api/handlers/dev/routes";
+import { documentTypesRoute } from "@/api/handlers/document-types/routes";
 import { desktopEditSessionsRoute } from "@/api/handlers/entities/desktop-edit-sessions-route";
 import { entitiesRoute } from "@/api/handlers/entities/routes";
 import { isUploadRateLimitedPath } from "@/api/handlers/entities/upload-rate-limit";
 import { expensesRoute } from "@/api/handlers/expenses/routes";
 import { externalPreviewRoute } from "@/api/handlers/external-preview/routes";
+import { feedbackPublicRoute } from "@/api/handlers/feedback/routes";
 import { fieldsRoute } from "@/api/handlers/fields/routes";
 import { filesRoute } from "@/api/handlers/files/routes";
 import { isFolioCollabRateLimitedPath } from "@/api/handlers/folio-collab/rate-limit";
@@ -37,10 +43,12 @@ import { mcpRoute } from "@/api/handlers/mcp/routes";
 import { meRoute } from "@/api/handlers/me/routes";
 import { organizationSettingsRoute } from "@/api/handlers/organization-settings/routes";
 import { playbooksRoute } from "@/api/handlers/playbooks/routes";
+import { playbookRunsRoute } from "@/api/handlers/playbooks/run-route";
 import { propertiesRoute } from "@/api/handlers/properties/routes";
 import { ratesRoute } from "@/api/handlers/rates/routes";
+import { initReportExportWorker } from "@/api/handlers/reports/report-export-queue";
+import { reportsRoute } from "@/api/handlers/reports/routes";
 import { searchRoute } from "@/api/handlers/search/routes";
-import { shortcutsRoute } from "@/api/handlers/shortcuts/routes";
 import { skillsRoute } from "@/api/handlers/skills/routes";
 import { smokeRoute } from "@/api/handlers/smoke/routes";
 import { myTasksRoute } from "@/api/handlers/tasks/my-tasks-route";
@@ -62,16 +70,27 @@ import { workspacesRoute } from "@/api/handlers/workspaces/routes";
 import { initAccountDeletionCleanupWorker } from "@/api/lib/account-deletion-cleanup-queue";
 import { captureRequestError, getAnalytics } from "@/api/lib/analytics";
 import { getAuth } from "@/api/lib/auth";
+import {
+  beginRequestQueryCounter,
+  currentQueryCount,
+  DB_QUERY_COUNT_HEADER,
+} from "@/api/lib/db-query-counter";
 import { assertMigrationsApplied } from "@/api/lib/db/assert-migrations-applied";
 import { DEV_INSPECTOR_ORIGINS, frontendOrigins } from "@/api/lib/dev-origins";
 import { httpError } from "@/api/lib/errors/http-error";
-import { errorTag } from "@/api/lib/errors/utils";
+import {
+  errorFingerprint,
+  errorTag,
+  unredactedErrorFields,
+} from "@/api/lib/errors/utils";
 import { initFileDerivativeWorker } from "@/api/lib/file-derivative-queue";
 import { API_RATE_LIMITS } from "@/api/lib/limits";
 import { logger } from "@/api/lib/observability/logger";
 import {
   getRequestContext,
+  getRequestId,
   initRequestContext,
+  REQUEST_ID_HEADER,
 } from "@/api/lib/observability/request-context";
 import {
   InMemoryRateLimitContext,
@@ -88,6 +107,10 @@ import { initWorkflowWorker } from "@/api/lib/workflow-queue";
 
 const HEALTH_PATH = "/health";
 const DEFAULT_API_PORT = 3001;
+// Emit the per-request query count in local/CI runs only, so the e2e guard
+// can assert per-route budgets without deployed environments paying any
+// per-query cost. Must match the logger gate in db/root.ts.
+const DB_QUERY_COUNTER_ENABLED = env.isDev;
 const SESSION_ID_HEADER = "x-posthog-session-id";
 const SESSION_ID_MAX_LENGTH = 64;
 const SESSION_ID_PATTERN = /^[\w-]+$/u;
@@ -101,7 +124,7 @@ const STATUS_BY_ELYSIA_CODE: Partial<Record<string, number>> = {
 };
 
 const getApiPort = () => {
-  const rawPort = process.env["STELLA_API_PORT"];
+  const rawPort = process.env["STELLA_API_PORT"] ?? process.env["PORT"];
   if (!rawPort) {
     return DEFAULT_API_PORT;
   }
@@ -116,6 +139,20 @@ const getApiPort = () => {
 
 const getRequestPath = (request: Request): string =>
   new URL(request.url).pathname;
+
+// Stamp the per-request query count onto the outgoing response. Reads the
+// active counter store, so it is a no-op when the store was never started
+// (production, or a request that bypassed `onRequest`).
+const setDbQueryCountHeader = (set: Context["set"]) => {
+  if (!DB_QUERY_COUNTER_ENABLED) {
+    return;
+  }
+  const queryCount = currentQueryCount();
+  if (queryCount === undefined) {
+    return;
+  }
+  set.headers[DB_QUERY_COUNT_HEADER] = String(queryCount);
+};
 
 const shouldLogRequest = (path: string): boolean => path !== HEALTH_PATH;
 
@@ -161,6 +198,10 @@ const buildRequestLogAttributes = ({
     attributes["error.type"] = errorType;
   }
 
+  if (reqCtx?.requestId) {
+    attributes["request.id"] = reqCtx.requestId;
+  }
+
   if (reqCtx?.posthogDistinctId) {
     attributes["posthogDistinctId"] = reqCtx.posthogDistinctId;
   }
@@ -178,6 +219,14 @@ const buildRequestLogAttributes = ({
 
 const api = new Elysia()
   .onRequest(({ request, set }) => {
+    // Start the per-request query counter before any handler (or better-auth
+    // session lookup) can issue a query, so those queries are attributed to
+    // this request. `enterWith` binds the store to this request's async
+    // context; each request enters its own context, so counts do not leak.
+    if (DB_QUERY_COUNTER_ENABLED) {
+      beginRequestQueryCounter();
+    }
+
     setSecurityHeaders(set);
 
     const rawSessionId = request.headers.get(SESSION_ID_HEADER);
@@ -189,6 +238,16 @@ const api = new Elysia()
         : undefined;
 
     initRequestContext(request, sessionId);
+
+    // Stamp the receipt on every response from the central header point, next
+    // to the security headers, so REST callers always get an `x-request-id`
+    // they can quote back (the MCP envelope + invoke payloads carry the same id
+    // through the ambient store). Set in `onRequest` so it survives error
+    // responses too, exactly like `setSecurityHeaders`.
+    const requestId = getRequestId(request);
+    if (requestId !== undefined) {
+      set.headers[REQUEST_ID_HEADER] = requestId;
+    }
   })
   .use(
     cors({
@@ -214,11 +273,16 @@ const api = new Elysia()
         "MCP-Protocol-Version",
         SESSION_ID_HEADER,
       ],
-      exposeHeaders: ["set-auth-token", "Content-Disposition"],
+      exposeHeaders: [
+        "set-auth-token",
+        "Content-Disposition",
+        REQUEST_ID_HEADER,
+      ],
     }),
   )
   .onError(({ error, set, code, request, route }) => {
     delete set.headers["X-Powered-By"];
+    setDbQueryCountHeader(set);
 
     const path = getRequestPath(request);
     const reqCtx = getRequestContext(request);
@@ -237,6 +301,10 @@ const api = new Elysia()
       });
 
       if (statusCode >= 500) {
+        Object.assign(attributes, errorFingerprint(error));
+        if (env.DEBUG_UNREDACTED_ERRORS) {
+          Object.assign(attributes, unredactedErrorFields(error));
+        }
         logger.error("request.failed", attributes);
       } else {
         logger.warn("request.failed", attributes);
@@ -269,6 +337,7 @@ const api = new Elysia()
   })
   .onAfterHandle(async ({ request, route, set }) => {
     delete set.headers["X-Powered-By"];
+    setDbQueryCountHeader(set);
 
     const path = getRequestPath(request);
     const reqCtx = getRequestContext(request);
@@ -310,6 +379,7 @@ const api = new Elysia()
   .use(hostedUsageWebhookRoute)
   .use(mcpRoute)
   .use(aiAutocompleteRoute)
+  .use(feedbackPublicRoute)
   .use(devPublicRoute)
   .use(smokeRoute)
   .mount(getAuth().handler)
@@ -324,6 +394,13 @@ const api = new Elysia()
           generator: scopedGenerator("api"),
           context: new InMemoryRateLimitContext(),
           skip: (req) => {
+            // The e2e route walk fires hundreds of /v1 requests per minute
+            // from one IP; abuse limits are not what those runs measure. The
+            // flag is dev-only by env validation and CI's e2e job already
+            // sets it for the API it boots.
+            if (env.E2E_DISABLE_AUTH_RATE_LIMIT) {
+              return true;
+            }
             // Endpoints with a dedicated rate-limit budget are excluded
             // from the shared `api` bucket so unrelated `/v1` traffic on
             // the same IP cannot drain their quota (see `upload` and
@@ -338,9 +415,13 @@ const api = new Elysia()
           },
         }),
       )
+      .use(authCapabilitiesRoute)
       .use(workspaceEventsRoute)
       .use(workspacesRoute)
       .use(playbooksRoute)
+      .use(playbookRunsRoute)
+      .use(reportsRoute)
+      .use(documentTypesRoute)
       .use(propertiesRoute)
       .use(filesRoute)
       .use(
@@ -352,6 +433,10 @@ const api = new Elysia()
               max: API_RATE_LIMITS.folioCollab.max,
               generator: scopedGenerator("folio-collab"),
               context: new InMemoryRateLimitContext(),
+              // Same e2e escape hatch as the shared `api` bucket above: the
+              // route walk opens the document editor repeatedly and would
+              // drain this 30/min budget across back-to-back runs.
+              skip: () => env.E2E_DISABLE_AUTH_RATE_LIMIT,
             }),
           )
           .use(folioCollabRoute),
@@ -385,7 +470,6 @@ const api = new Elysia()
       .use(userFilesRoute)
       .use(skillsRoute)
       .use(usageRoute)
-      .use(shortcutsRoute)
       .use(viewTemplatesRoute)
       .use(viewsRoute)
       .use(tasksRoute)
@@ -419,60 +503,77 @@ const startS3RefreshLoop = () => {
   timer.unref();
 };
 
-// Schema-drift fail-fast. If the runtime expects migrations
-// the database has not received, exit before serving any
-// request against a stale schema.
-await assertMigrationsApplied();
+// Booting (migration check, S3 warmup, BullMQ workers, bound port) runs
+// only when this module is the process entry point: `bun src/index.ts` in
+// dev and the `bun build --compile` binary in prod. Importing the module
+// instead — as the exact-mirror CI guard in
+// `apps/api/scripts/exact-mirror-guard.ts` does to build every route's
+// schema mirror — must yield the fully constructed `api` without any of
+// these side effects (no DB, no Redis, no listen).
+const startServer = async (): Promise<void> => {
+  // Schema-drift fail-fast. If the runtime expects migrations
+  // the database has not received, exit before serving any
+  // request against a stale schema.
+  await assertMigrationsApplied();
 
-await refreshS3();
-await refreshCorpusS3();
-startS3RefreshLoop();
+  await refreshS3();
+  await refreshCorpusS3();
+  startS3RefreshLoop();
 
-// BullMQ worker for asynchronous file derivatives.
-const fileDerivativeWorker = initFileDerivativeWorker();
+  // BullMQ worker for asynchronous file derivatives.
+  const fileDerivativeWorker = initFileDerivativeWorker();
 
-// BullMQ workflow worker for AI extraction.
-const workflowWorker = initWorkflowWorker();
+  // BullMQ workflow worker for AI extraction.
+  const workflowWorker = initWorkflowWorker();
 
-// BullMQ worker for durable account-deletion storage cleanup.
-const accountDeletionCleanupWorker = initAccountDeletionCleanupWorker();
+  // BullMQ worker for durable account-deletion storage cleanup.
+  const accountDeletionCleanupWorker = initAccountDeletionCleanupWorker();
 
-api.listen(getApiPort());
+  // BullMQ worker for queued view→report exports.
+  const reportExportWorker = initReportExportWorker();
 
-// Graceful shutdown: stop accepting HTTP requests, then drain the BullMQ
-// workers on SIGTERM/SIGINT (deploy, container stop, or a local
-// `bun --watch` restart) so an in-flight job is not abandoned mid-write.
-// An abandoned job strands its workflow lock and leaves cells stuck
-// `pending` until the next boot reconciles them; draining avoids creating
-// that orphan in the common case. Worker draining is bounded so a slow job
-// can't hang shutdown; anything still in flight past the timeout is
-// reclaimed by the next boot's reconciler.
-let shuttingDown = false;
-const shutdownWorkers = async (signal: string): Promise<void> => {
-  if (shuttingDown) {
-    return;
-  }
-  shuttingDown = true;
-  logger.info("api.shutdown_started", { signal });
-  await api.stop().catch((error: unknown) => {
-    logger.error("api.stop_failed", {
-      "error.type": errorTag(error),
+  api.listen(getApiPort());
+
+  // Graceful shutdown: stop accepting HTTP requests, then drain the BullMQ
+  // workers on SIGTERM/SIGINT (deploy, container stop, or a local
+  // `bun --watch` restart) so an in-flight job is not abandoned mid-write.
+  // An abandoned job strands its workflow lock and leaves cells stuck
+  // `pending` until the next boot reconciles them; draining avoids creating
+  // that orphan in the common case. Worker draining is bounded so a slow job
+  // can't hang shutdown; anything still in flight past the timeout is
+  // reclaimed by the next boot's reconciler.
+  let shuttingDown = false;
+  const shutdownWorkers = async (signal: string): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    logger.info("api.shutdown_started", { signal });
+    await api.stop().catch((error: unknown) => {
+      logger.error("api.stop_failed", {
+        "error.type": errorTag(error),
+      });
     });
+    await Promise.race([
+      Promise.allSettled([
+        workflowWorker.close(),
+        fileDerivativeWorker.close(),
+        accountDeletionCleanupWorker.close(),
+        reportExportWorker.close(),
+      ]),
+      Bun.sleep(WORKER_SHUTDOWN_TIMEOUT_MS),
+    ]);
+    logger.info("api.shutdown_complete", { signal });
+    process.exit(0);
+  };
+  process.once("SIGTERM", () => {
+    void shutdownWorkers("SIGTERM");
   });
-  await Promise.race([
-    Promise.allSettled([
-      workflowWorker.close(),
-      fileDerivativeWorker.close(),
-      accountDeletionCleanupWorker.close(),
-    ]),
-    Bun.sleep(WORKER_SHUTDOWN_TIMEOUT_MS),
-  ]);
-  logger.info("api.shutdown_complete", { signal });
-  process.exit(0);
+  process.once("SIGINT", () => {
+    void shutdownWorkers("SIGINT");
+  });
 };
-process.once("SIGTERM", () => {
-  void shutdownWorkers("SIGTERM");
-});
-process.once("SIGINT", () => {
-  void shutdownWorkers("SIGINT");
-});
+
+if (import.meta.main) {
+  await startServer();
+}

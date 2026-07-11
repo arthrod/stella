@@ -13,6 +13,7 @@ const paramsSchema = t.Object({
 const boeLawStructure = createSafeRootHandler(
   {
     permissions: { workspace: ["read"] },
+    mcp: { type: "covered", by: "search_legislation" },
     params: paramsSchema,
   },
   async function* ({ params: { lawId } }) {

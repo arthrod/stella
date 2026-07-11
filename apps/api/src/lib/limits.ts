@@ -20,8 +20,6 @@ export const LIMITS = {
   /** Worst-case file fields scanned across one entity's versions
    *  (versionsPerEntity * propertiesCount). */
   versionFieldsScanLimit: 20_000,
-  /** Cap for the deprecated/frozen prompt-shortcuts listing (team + own). */
-  promptShortcutsListMax: 500,
   calendarTasksMax: 200,
   /** Max tasks returned by the "my tasks" listing. */
   myTasksMax: 200,
@@ -36,7 +34,15 @@ export const LIMITS = {
   entitySummariesPageSize: 200,
   viewsCount: 20,
   viewTemplatesPerUser: 50,
-  playbooksCount: 50,
+  /** Per-org cap on saved playbook definitions. Per-playbook size is bounded
+   *  by the positions schema's maxItems (200). */
+  playbookDefinitionsCount: 100,
+  playbookDefinitionsPageSizeDefault: 50,
+  playbookDefinitionsPageSizeMax: 100,
+  /** Per-org cap on the editable document-type taxonomy. The taxonomy is
+   *  inherently bounded (a few dozen contract categories), so the list
+   *  endpoint returns a plain ordered array rather than a paginated page. */
+  documentTypesCount: 100,
   templatesCount: 50,
   clauseCategoriesCount: 100,
   templateCategoriesCount: 100,
@@ -83,6 +89,10 @@ export const LIMITS = {
   mcpCustomConnectorsPerOrgMax: 50,
   /** Max per-user MCP connection rows returned by the connections listing. */
   mcpConnectionsPageSizeMax: 100,
+  /** Max OAuth consent rows ("connected apps") returned by the user's
+   *  connections-settings listing. Naturally bounded per user (one row per
+   *  authorized client), but still capped defensively. */
+  oauthConnectionsPageSizeMax: 100,
   /** Default/max page sizes for the MCP `list_matters`-style list tools. */
   mcpListPageSizeDefault: 25,
   mcpListPageSizeMax: 100,
@@ -102,6 +112,11 @@ export const LIMITS = {
   clauseVersionsPerClause: 50,
   templateClausesPerTemplate: 50,
   templateVersionsPerTemplate: 50,
+  /** Approval-snapshot history per playbook (one row per `approve` call, never
+   *  trimmed). Mirrors `templateVersionsPerTemplate`; the listing is a plain
+   *  bounded array (newest first), not cursor-paginated — see
+   *  `list-versions.ts`. */
+  playbookDefinitionVersionsPerPlaybook: 50,
   rateTablesPerWorkspace: 50,
   rateTablesPageSizeDefault: 50,
   rateTablesPageSizeMax: 200,
@@ -118,6 +133,10 @@ export const LIMITS = {
   billingCodesPageSizeDefault: 500,
   billingCodesPageSizeMax: 1000,
   overviewRecentEntities: 10,
+  /** Initial number of mixed chat/entity rows shown beneath one matter in
+   *  persistent sidebar chrome. Additional rows are cursor-paginated. */
+  workspaceActivityPageSizeDefault: 3,
+  workspaceActivityPageSizeMax: 10,
   activeTimersPerUser: 1,
   timeEntryMaxAgeDays: 90,
   billingIncrementMinutes: 6,
@@ -126,6 +145,11 @@ export const LIMITS = {
   invoicesPageSizeMax: 100,
   exportRowLimit: 10_000,
   exportPdfRowLimit: 5000,
+  /** Hard cap on rows (contracts) a single view-to-report export may span.
+   *  A DD report drafts per-contract AI narrative, so the row count bounds
+   *  the metered model calls; exceeding it at enqueue/build time is a typed
+   *  error rather than a truncated report. */
+  reportExportMaxRows: 500,
   auditLogPageSizeDefault: 50,
   auditLogPageSizeMax: 200,
   contactsCount: 10_000,
@@ -133,6 +157,8 @@ export const LIMITS = {
   contactsPageSizeMax: 100,
   contactRelationshipsCount: 50,
   workspaceContactsCount: 100,
+  /** Better Auth organization member cap and full-org read bound. */
+  organizationMembersCount: 500,
   workspaceMembersCount: 500,
   practiceJurisdictionsPerOrganization: 12,
   entityNameMaxLength: 255,
@@ -183,6 +209,12 @@ export const LIMITS = {
   corpusIndexSearchScanLimit: 10_000,
   // Decisions pushed to corpus index per indexer batch.
   corpusIndexBatchSize: 50,
+  /** Wall-clock ceiling (ms) for a single corpus object read/write/delete.
+   *  Corpus payloads are individual court decisions or statute texts (a few
+   *  MB at most), so an operation that outlives this is a stalled socket, not
+   *  a slow-but-live transfer. Bounds every corpus S3 call so a wedged
+   *  transfer can never freeze a daemon loop. */
+  corpusObjectIoTimeoutMs: 60_000,
   infoSoudEventsMax: 200,
   infoSoudHearingsMax: 50,
   infoSoudRelatedCasesMax: 50,
@@ -210,16 +242,6 @@ export const LIMITS = {
    *  this so a send cannot load an unbounded history; sized well above the
    *  compaction trigger so a checkpointed thread's window is unaffected. */
   chatSendHistoryWindowMax: 500,
-  /** Max characters of TypeScript source the chat run-stella-query tool accepts. */
-  chatRunCodeMaxLength: 16_000,
-  /** Default page size for readonly chat execute functions. */
-  chatExecutePageSizeDefault: 50,
-  /** Max page size for readonly chat execute functions. */
-  chatExecutePageSizeMax: 500,
-  /** Max IDs accepted by readonly chat execute detail functions. */
-  chatExecuteDetailIdsMax: 100,
-  /** Max entity IDs accepted by readonly chat execute content functions. */
-  chatExecuteContentIdsMax: 20,
   /** Max DOCX size for stamp injection (bytes). */
   docxStampMaxBytes: 50 * 1024 * 1024,
   /** Max org-wide custom blacklist terms for anonymization. */

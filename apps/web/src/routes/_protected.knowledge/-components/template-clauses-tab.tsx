@@ -147,9 +147,7 @@ export const TemplateClausesTab = ({ templateId }: TemplateClausesTabProps) => {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center p-8">
-        <p className="text-muted-foreground text-sm">
-          {t("templates.discovering")}
-        </p>
+        <p className="text-muted-foreground text-sm">{t("common.loading")}</p>
       </div>
     );
   }
@@ -216,6 +214,9 @@ export const TemplateClausesTab = ({ templateId }: TemplateClausesTabProps) => {
         onLinked={invalidateLinks}
         onOpenChange={setLinkOpen}
         open={linkOpen}
+        // Deferred slot renames exist only in the Studio session; this
+        // standalone tab has none to reserve.
+        reservedSlotNames={[]}
         templateId={templateId}
       />
     </div>
@@ -314,7 +315,7 @@ const LinkedClauseRow = ({
             )}
             {link.clauseVersion && (
               <span>
-                {t("clauses.version", {
+                {t("common.versionLabel", {
                   version: String(link.clauseVersion.version),
                 })}
               </span>

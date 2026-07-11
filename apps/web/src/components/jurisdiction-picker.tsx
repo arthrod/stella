@@ -11,6 +11,7 @@ import {
 } from "@stll/ui/components/input-group";
 import { cn } from "@stll/ui/lib/utils";
 
+import { compareByLocale } from "@/lib/collation";
 import { createCountryOptions, removeJurisdiction } from "@/lib/jurisdictions";
 import type { PracticeJurisdiction } from "@/lib/jurisdictions";
 
@@ -22,12 +23,14 @@ type JurisdictionPickerProps = {
   selected: readonly PracticeJurisdiction[];
   suggestedCountryCodes?: readonly CountryCode[];
   onChange: (jurisdictions: PracticeJurisdiction[]) => void;
+  autoFocus?: boolean;
 };
 
 export const JurisdictionPicker = ({
   selected,
   suggestedCountryCodes = NO_SUGGESTED_COUNTRY_CODES,
   onChange,
+  autoFocus = false,
 }: JurisdictionPickerProps) => {
   const t = useTranslations();
   const locale = useLocale();
@@ -41,7 +44,15 @@ export const JurisdictionPicker = ({
 
   const filteredCountries = (() => {
     const normalizedQuery = query.trim().toLowerCase();
+    const compareName = compareByLocale(locale);
     const sorted = [...countryOptions].sort((a, b) => {
+      const aSelected = selectedSet.has(a.code);
+      const bSelected = selectedSet.has(b.code);
+
+      if (aSelected !== bSelected) {
+        return aSelected ? -1 : 1;
+      }
+
       const aSuggested = suggestedSet.has(a.code);
       const bSuggested = suggestedSet.has(b.code);
 
@@ -49,7 +60,7 @@ export const JurisdictionPicker = ({
         return aSuggested ? -1 : 1;
       }
 
-      return a.name.localeCompare(b.name, locale);
+      return compareName(a.name, b.name);
     });
 
     if (!normalizedQuery) {
@@ -99,6 +110,7 @@ export const JurisdictionPicker = ({
         </InputGroupAddon>
         <InputGroupInput
           aria-label={t("onboarding.jurisdictionSearchLabel")}
+          autoFocus={autoFocus}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={t("onboarding.jurisdictionSearchPlaceholder")}
           value={query}

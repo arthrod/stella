@@ -13,12 +13,6 @@ concurrency:
   group: deploy-staging
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  packages: write
-  id-token: write
-  attestations: write
-
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/stella-api
@@ -28,7 +22,16 @@ jobs:
     name: Build + deploy staging
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 75
+    # Headroom for a cache-miss image build (~15-25 min) plus the
+    # watcher budget below (45 min). Keep this strictly greater than
+    # build + watcher so the job's own timeout never guillotines the
+    # watcher before it can read the infra run's real conclusion.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Resolve synthetic ref
@@ -41,7 +44,7 @@ jobs:
           echo "short_sha=${short}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -95,7 +98,6 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: stella-infra
           permission-actions: write
-          permission-contents: read
 
       - name: Dispatch and watch staging promote
         env:
@@ -107,58 +109,105 @@ jobs:
         run: |
           dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           expected_title="Promote ${RELEASE_REF} → staging"
-          dispatch_output="$(
-            gh workflow run promote-release.yml \
-              --repo "$INFRA_REPO" \
-              --field release_ref="$RELEASE_REF" \
-              --field target_environment=staging \
-              --field image_digest="$IMAGE_DIGEST" \
-              --field git_sha="$GIT_SHA" \
-              --field run_migrations=true \
-              --field frontend=true 2>&1
-          )"
-          printf '%s\n' "$dispatch_output"
+          run_id=""
 
-          run_id="$(
-            printf '%s\n' "$dispatch_output" \
-              | sed -nE 's#.*https://github.com/[^/]+/[^/]+/actions/runs/([0-9]+).*#\1#p' \
-              | head -n 1
-          )"
+          find_dispatched_run() {
+            local attempt
+            local max_attempts="$1"
+            local run_list=""
 
-          for _ in {1..30}; do
-            if [[ -n "$run_id" ]]; then
-              break
-            fi
+            for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+              if ! run_list="$(
+                gh api \
+                  "/repos/${INFRA_REPO}/actions/workflows/promote-release.yml/runs?event=workflow_dispatch&per_page=10" \
+                  --jq ".workflow_runs[] | select(.created_at >= \"$dispatched_at\") | select(.display_title == \"$expected_title\") | .id" \
+                  2>&1
+              )"; then
+                printf '%s\n' "$run_list" >&2
+                echo "::warning::Could not list infra promotion runs yet." >&2
+                sleep 2
+                continue
+              fi
 
-            if ! run_list="$(
-              gh run list \
-                --repo "$INFRA_REPO" \
-                --workflow promote-release.yml \
-                --event workflow_dispatch \
-                --json databaseId,createdAt,displayTitle \
-                --jq ".[] | select(.createdAt >= \"$dispatched_at\") | select(.displayTitle == \"$expected_title\") | .databaseId" \
-                --limit 10 2>&1
+              run_id="$(printf '%s\n' "$run_list" | head -n 1)"
+              if [[ -n "$run_id" ]]; then
+                return 0
+              fi
+
+              sleep 2
+            done
+
+            return 1
+          }
+
+          # Call the dispatch endpoint directly: `gh workflow run` first looks
+          # up the workflow by filename and default branch, which adds read
+          # requests unrelated to dispatch and can fail under the narrowly
+          # scoped App token. A dispatch is also a remote state-changing call;
+          # if the client reports an error after GitHub accepted it, retrying
+          # immediately can create a duplicate run. Look for the uniquely
+          # titled run before retrying.
+          for dispatch_attempt in {1..3}; do
+            dispatch_output=""
+            if dispatch_output="$(
+              gh api --method POST \
+                "/repos/${INFRA_REPO}/actions/workflows/promote-release.yml/dispatches" \
+                -f "ref=main" \
+                -f "inputs[release_ref]=${RELEASE_REF}" \
+                -f "inputs[target_environment]=staging" \
+                -f "inputs[image_digest]=${IMAGE_DIGEST}" \
+                -f "inputs[git_sha]=${GIT_SHA}" \
+                -f "inputs[run_migrations]=true" \
+                -f "inputs[frontend]=true" \
+                2>&1
             )"; then
-              echo "::warning::Could not list infra promotion runs yet: ${run_list}" >&2
-              sleep 2
-              continue
-            fi
+              echo "Staging promotion dispatch accepted."
 
-            run_id="$(printf '%s\n' "$run_list" | head -n 1)"
+              if find_dispatched_run 30; then
+                break
+              fi
 
-            if [[ -z "$run_id" ]]; then
-              sleep 2
+              echo "::error::GitHub accepted the staging promotion dispatch, but its workflow run did not become visible." >&2
+              exit 1
+            else
+              dispatch_status=$?
+              printf '%s\n' "$dispatch_output" >&2
+              echo "::warning::Staging promotion dispatch attempt ${dispatch_attempt}/3 failed with exit code ${dispatch_status}." >&2
+
+              if find_dispatched_run 5; then
+                echo "Found the staging promotion run after the dispatch client reported an error."
+                break
+              fi
+
+              if (( dispatch_attempt < 3 )); then
+                sleep $((dispatch_attempt * 5))
+              fi
             fi
           done
 
           if [[ -z "$run_id" ]]; then
-            echo "Could not find the dispatched staging promotion workflow run." >&2
+            echo "::error::Could not dispatch or find the staging promotion workflow run after 3 attempts." >&2
             exit 1
           fi
 
           watch_run_with_retry() {
             local run_id="$1"
-            local max_attempts=180
+            # Budget is bounded by the GitHub App installation token's
+            # hard 1-hour lifetime: GH_TOKEN is minted in the prior step
+            # and `gh run view` against the infra repo needs it, so
+            # polling past ~1h starts hitting auth failures that this
+            # loop miscounts as transient errors and bails on after only
+            # ~2 min (max_consecutive_errors), masking the infra run's
+            # real status. Stay well under the hour: 270 x 10s = 45 min,
+            # which still covers a realistic promote (image import +
+            # migrate + terraform + a couple of ECS stabilize cycles run
+            # well under that) and far outlasts the old 30-min budget
+            # that gave up before a slow deploy could report its
+            # conclusion. A promote that hangs near the infra job's own
+            # 60-min timeout is surfaced as a watcher timeout here rather
+            # than chased past token expiry. Do NOT raise past ~55 min
+            # without first refreshing the App token inside the loop.
+            local max_attempts=270
             local sleep_seconds=10
             local max_consecutive_errors=12
             local consecutive_errors=0
@@ -214,13 +263,13 @@ jobs:
     name: Verify staging deploy
     needs: build-and-deploy
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -237,7 +286,7 @@ jobs:
       - name: Install Playwright browser
         run: cd apps/web && bunx playwright install --with-deps chromium
 
-      - name: Run staging smoke
+      - name: Run staging web smoke
         run: bun --filter @stll/web test:e2e:staging
         env:
           E2E_WEB_URL: https://staging.stll.app
@@ -245,6 +294,14 @@ jobs:
           SMOKE_SESSION_SECRET: ${{ secrets.SMOKE_SESSION_SECRET }}
           # Block the smoke until staging actually serves this commit,
           # so it doesn't race the ECS task rollover.
+          EXPECTED_COMMIT: ${{ github.sha }}
+
+      - name: Run staging API chat smoke
+        if: ${{ !cancelled() }}
+        run: bun apps/api/src/scripts/post-deploy-smoke.ts "$E2E_API_URL"
+        env:
+          E2E_API_URL: https://api-staging.stll.app
+          SMOKE_SESSION_SECRET: ${{ secrets.SMOKE_SESSION_SECRET }}
           EXPECTED_COMMIT: ${{ github.sha }}
 
       - name: Upload Playwright report

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
 import type { UseMutationResult } from "@tanstack/react-query";
 import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
@@ -8,7 +8,6 @@ import {
   FileTextIcon,
   FolderIcon,
   HistoryIcon,
-  LayersIcon,
   LandmarkIcon,
   LinkIcon,
   LoaderIcon,
@@ -43,6 +42,7 @@ import { stellaToast } from "@stll/ui/components/toast";
 import { contentDir } from "@stll/ui/hooks/use-content-dir";
 
 import { DatePickerPopover } from "@/components/date-picker-popover";
+import { MatterIcon } from "@/components/matter-icon";
 import { getChatHitRoute } from "@/components/search-dialog.logic";
 import {
   clearTime,
@@ -57,6 +57,8 @@ import type {
   TimeFilter,
 } from "@/components/search-filters.logic";
 import { UserAvatar } from "@/components/user-avatar";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { usePermissions } from "@/hooks/use-permissions";
 import {
   isPublicLawPreviewEnabled,
   usePublicLawPreviewEnabled,
@@ -68,7 +70,6 @@ import { api } from "@/lib/api";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { createCaseLawDecisionRouteParams } from "@/lib/case-law-route";
 import { toAPIError } from "@/lib/errors";
-import { resolveMatterColor } from "@/lib/matter-colors";
 import { toSafeId } from "@/lib/safe-id";
 import {
   searchFacetOptions,
@@ -117,7 +118,6 @@ const VIRTUAL_HIT_ESTIMATE_PX = 76;
 const VIRTUAL_HIT_OVERSCAN = 6;
 
 const KIND_ICONS = {
-  matter: LayersIcon,
   contact: UserIcon,
   "case-law": LandmarkIcon,
   document: FileTextIcon,
@@ -126,13 +126,16 @@ const KIND_ICONS = {
   message: MessageSquareIcon,
   link: LinkIcon,
   chat: MessagesSquareIcon,
-} as const satisfies Record<GlobalSearchResultType, typeof FileTextIcon>;
+} as const satisfies Record<
+  Exclude<GlobalSearchResultType, "matter">,
+  typeof FileTextIcon
+>;
 
 const KIND_TRANSLATION_KEYS = {
   matter: "search.kinds.matter",
   contact: "search.kinds.contact",
   "case-law": "search.kinds.caseLaw",
-  document: "search.kinds.document",
+  document: "common.document",
   folder: "search.kinds.folder",
   task: "search.kinds.task",
   message: "search.kinds.message",
@@ -254,6 +257,7 @@ type SearchDialogProps = {
   initialWorkspaceId?: string | undefined;
 };
 
+// eslint-disable-next-line react/react-compiler -- react-compiler skips this component: an API it uses returns functions that cannot be memoized, so the compiler bails out of the whole component (Compilation Skipped: incompatible library)
 export const SearchDialog = ({
   open,
   onOpenChange,
@@ -362,19 +366,26 @@ export const SearchDialog = ({
   });
   const virtualHits = hitVirtualizer.getVirtualItems();
 
-  // Refresh the recents snapshot from localStorage each time the dialog opens.
-  // The recents are also locally mutated by the result/search handlers, so this
-  // is a triggered read of an external store into shared state, not pure derived
-  // state: a render-time read would re-read on every render and clobber those
-  // local mutations.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- read localStorage recents into locally-mutated state on the open transition; render-time read would clobber in-session mutations
-  useEffect(() => {
-    if (!open) {
-      return;
+  // Refresh the recents snapshot from localStorage on the open transition (and
+  // if the scope changes while open). The recents are also locally mutated by
+  // the result/search handlers below, so this is guarded against the last-seen
+  // key rather than read unconditionally: an unguarded render-time read would
+  // re-run on every render and clobber those in-session mutations. SearchDialog
+  // itself never unmounts (both call sites render it unconditionally and
+  // control visibility via `open`), so there is no mount to hang this off of.
+  const recentsSnapshotKey = open
+    ? `${searchRecentsScope.organizationId}:${searchRecentsScope.userId}`
+    : null;
+  const [lastRecentsSnapshotKey, setLastRecentsSnapshotKey] = useState<
+    string | null
+  >(null);
+  if (recentsSnapshotKey !== lastRecentsSnapshotKey) {
+    setLastRecentsSnapshotKey(recentsSnapshotKey);
+    if (recentsSnapshotKey) {
+      setRecentSearches(readRecentSearches(searchRecentsScope));
+      setRecentFiles(readRecentFiles(searchRecentsScope));
     }
-    setRecentSearches(readRecentSearches(searchRecentsScope));
-    setRecentFiles(readRecentFiles(searchRecentsScope));
-  }, [open, searchRecentsScope]);
+  }
 
   const searchFilterParams = {
     workspaceIds: filters.workspaceIds,
@@ -392,6 +403,11 @@ export const SearchDialog = ({
   };
 
   const analytics = useAnalytics();
+  // summarizeSearchEndpoint (POST /search/summary) and the follow-up
+  // "Ask about these results" chat (POST /search/summary/chat) both
+  // require chat:create; hide the AI summary control for roles that
+  // lack it instead of surfacing a 403 on click.
+  const canSummarizeSearch = usePermissions({ chat: ["create"] });
 
   const summarizeSearchMutation = useMutation({
     mutationFn: async (params: SearchAISummaryParams) => {
@@ -727,17 +743,22 @@ export const SearchDialog = ({
   // debounced `searchQuery` updates asynchronously (no handler to co-locate
   // with) and the filter setters fan out across ~7 handlers, so there is no
   // single trigger site to relay the reset into.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset on debounced searchQuery/filter changes; no single event site (debounced query updates post-commit, filters set in many handlers)
-  useEffect(() => {
-    summarizeSearchMutation.reset();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset is the stable mutation method needed here
+  // The mutation observer is an external system, not render state, so
+  // resetting it belongs in a committed effect keyed on those values
+  // rather than during render (which can re-run for renders React discards
+  // and would double-fire under strict mode). `reset` is a stable
+  // function reference from the mutation observer, so listing it alongside
+  // `resetKey` still only fires this once per real search change.
+  const resetSummarizeSearch = summarizeSearchMutation.reset;
+  useExternalSyncEffect(() => {
+    resetSummarizeSearch();
   }, [
     filterEditorIdsKey,
     filterMimeTypesKey,
     filterTypesKey,
     filterWorkspaceIdsKey,
     filters.time,
-    summarizeSearchMutation.reset,
+    resetSummarizeSearch,
     searchQuery,
   ]);
 
@@ -952,6 +973,7 @@ export const SearchDialog = ({
               {hasTypedQuery && !hasResults && (!hasQuery || isLoading) && (
                 <div className="space-y-3 px-4 py-3">
                   {Array.from({ length: 4 }).map((_, i) => (
+                    // eslint-disable-next-line react/no-array-index-key -- static skeleton-loader placeholder, never reorders
                     <div className="space-y-2" key={`skeleton-${i}`}>
                       <Skeleton className="h-4 w-3/4" />
                       <Skeleton className="h-3 w-1/2" />
@@ -977,24 +999,26 @@ export const SearchDialog = ({
                       count: totalCount,
                     })}
                   </p>
-                  <SearchSummaryItem
-                    isOpeningChat={createSummaryChatMutation.isPending}
-                    onCitationClick={(citationId) => {
-                      const hit = allHits.find(
-                        (item) => item.id === citationId,
-                      );
-                      if (hit) {
-                        void handleResultClick(hit);
-                      }
-                    }}
-                    onClick={() => {
-                      handleSummarizeResults();
-                    }}
-                    onOpenChat={() => {
-                      handleOpenSummaryChat();
-                    }}
-                    summarizeMutation={summarizeSearchMutation}
-                  />
+                  {canSummarizeSearch && (
+                    <SearchSummaryItem
+                      isOpeningChat={createSummaryChatMutation.isPending}
+                      onCitationClick={(citationId) => {
+                        const hit = allHits.find(
+                          (item) => item.id === citationId,
+                        );
+                        if (hit) {
+                          void handleResultClick(hit);
+                        }
+                      }}
+                      onClick={() => {
+                        handleSummarizeResults();
+                      }}
+                      onOpenChat={() => {
+                        handleOpenSummaryChat();
+                      }}
+                      summarizeMutation={summarizeSearchMutation}
+                    />
+                  )}
                   <div
                     className="relative"
                     style={{ height: `${hitVirtualizer.getTotalSize()}px` }}
@@ -1545,12 +1569,14 @@ const SearchableFacetGroup = ({
   // Refs are intentionally mutated during render — they don't trigger
   // re-renders, and we want every label seen in the current render's
   // buckets to be available when computing `buckets` below.
+  /* eslint-disable react/react-compiler -- deliberate render-time label cache: mutating labelCacheRef here makes every label seen this render available to the missingSelected lookup below; refs don't trigger re-renders so this is safe */
   for (const bucket of defaultBuckets) {
     labelCacheRef.current[bucket.value] = resolveLabel(bucket);
   }
   for (const bucket of searchData?.buckets ?? []) {
     labelCacheRef.current[bucket.value] = resolveLabel(bucket);
   }
+  /* eslint-enable react/react-compiler */
 
   const sourceBuckets =
     isSearching && searchData ? searchData.buckets : defaultBuckets;
@@ -1563,6 +1589,7 @@ const SearchableFacetGroup = ({
   const present = new Set(visible.map((bucket) => bucket.value));
   const missingSelected: FacetBucket[] = selected
     .filter((id) => !present.has(id))
+    // eslint-disable-next-line react/react-compiler -- reads the deliberate render-time label cache mutated above; ref reads don't affect render correctness here
     .map((id) => ({
       value: id,
       label: labelCacheRef.current[id] ?? id,
@@ -1694,12 +1721,15 @@ const SearchHitIcon = ({ hit }: { hit: GlobalSearchHit }) => {
     );
   }
 
-  const Icon = KIND_ICONS[hit.type];
-
   if (hit.type === "matter") {
-    const color = resolveMatterColor(hit.workspaceId, hit.color);
-    return <Icon className="mt-0.5 size-4 shrink-0" style={{ color }} />;
+    return (
+      <MatterIcon
+        className="mt-0.5 size-4 shrink-0"
+        matter={{ id: hit.workspaceId, color: hit.color }}
+      />
+    );
   }
 
+  const Icon = KIND_ICONS[hit.type];
   return <Icon className="text-muted-foreground mt-0.5 size-4 shrink-0" />;
 };

@@ -1,73 +1,106 @@
 import { Result } from "better-result";
 import { and, eq } from "drizzle-orm";
 
-import { playbooks } from "@/api/db/schema";
+import { playbookDefinitions } from "@/api/db/schema";
+import { deriveAutoAsks } from "@/api/handlers/playbooks/derive-ask";
+import { assertPositionsValid } from "@/api/handlers/playbooks/positions-validation";
 import {
-  playbookBodySchema,
-  playbookParamsSchema,
+  playbookDefinitionBodySchema,
+  playbookDefinitionParamsSchema,
 } from "@/api/handlers/playbooks/schema";
-import {
-  hasDuplicateColumnNames,
-  validateTypeProperty,
-} from "@/api/handlers/playbooks/validate";
-import { createSafeHandler } from "@/api/lib/api-handlers";
+import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 
 const config = {
   permissions: { playbook: ["update"] },
-  params: playbookParamsSchema,
-  body: playbookBodySchema,
+  mcp: { type: "capability", reason: "knowledge_library_admin" },
+  params: playbookDefinitionParamsSchema,
+  body: playbookDefinitionBodySchema,
 } satisfies HandlerConfig;
 
-const updatePlaybookById = createSafeHandler(
+const updatePlaybookDefinition = createSafeRootHandler(
   config,
-  async function* ({ safeDb, workspaceId, params, body, recordAuditEvent }) {
-    if (hasDuplicateColumnNames(body.bundle)) {
-      return Result.err(
-        new HandlerError({
-          status: 400,
-          message: "Playbook columns must have unique names",
-        }),
+  async function* ({
+    safeDb,
+    session,
+    params,
+    body,
+    recordAuditEvent,
+    orgAIConfig,
+    promptCachingEnabled,
+  }) {
+    const organizationId = session.activeOrganizationId;
+
+    yield* Result.await(
+      assertPositionsValid({
+        safeDb,
+        organizationId,
+        positions: body.positions,
+      }),
+    );
+
+    // Derive auto-ASK questions from tier rules before persisting. A stored
+    // `derived` whose `rulesHash` still matches is reused (no LLM call); a
+    // failed derivation persists with `derived` absent.
+    const positions = await deriveAutoAsks(body.positions, {
+      organizationId,
+      orgAIConfig,
+      promptCachingEnabled,
+    });
+
+    const documentTypeKey = body.scope?.documentTypeKey;
+    if (documentTypeKey !== undefined) {
+      const documentType = yield* Result.await(
+        safeDb((tx) =>
+          tx.query.documentTypes.findFirst({
+            where: {
+              organizationId: { eq: organizationId },
+              key: { eq: documentTypeKey },
+            },
+            columns: { id: true },
+          }),
+        ),
       );
+
+      if (!documentType) {
+        return Result.err(
+          new HandlerError({
+            status: 400,
+            message: "Document type not found in this organization",
+          }),
+        );
+      }
     }
 
-    const txResult = yield* Result.await(
+    const updated = yield* Result.await(
       safeDb(async (tx) => {
-        const typeCheck = await validateTypeProperty({
-          tx,
-          workspaceId,
-          typePropertyId: body.typePropertyId,
-          typeValue: body.typeValue,
-        });
-        if (!typeCheck.ok) {
-          return typeCheck;
-        }
-
-        const updated = await tx
-          .update(playbooks)
+        const [row] = await tx
+          .update(playbookDefinitions)
           .set({
             name: body.name,
-            typePropertyId: body.typePropertyId,
-            typeValue: body.typeValue,
-            bundle: body.bundle,
+            description: body.description ?? null,
+            scope: body.scope ?? null,
+            positions,
+            // Any edit invalidates a prior approval, regardless of the
+            // definition's current status; clear the stale approval metadata
+            // so a draft never carries a prior approver/timestamp.
+            status: "draft",
+            approvedAt: null,
+            approvedBy: null,
             updatedAt: new Date(),
           })
           .where(
             and(
-              eq(playbooks.id, params.playbookId),
-              eq(playbooks.workspaceId, workspaceId),
+              eq(playbookDefinitions.id, params.playbookId),
+              eq(playbookDefinitions.organizationId, organizationId),
             ),
           )
-          .returning({ id: playbooks.id });
+          .returning({ id: playbookDefinitions.id });
 
-        if (updated.length === 0) {
-          return {
-            ok: false as const,
-            status: 404 as const,
-            message: "Playbook not found",
-          };
+        if (!row) {
+          return null;
         }
 
         await recordAuditEvent(tx, {
@@ -77,21 +110,18 @@ const updatePlaybookById = createSafeHandler(
           changes: {
             fields: {
               old: null,
-              new: ["name", "typePropertyId", "typeValue", "bundle"],
+              new: ["name", "description", "scope", "positions", "status"],
             },
           },
         });
 
-        return { ok: true as const };
+        return row;
       }),
     );
 
-    if (!txResult.ok) {
+    if (!updated) {
       return Result.err(
-        new HandlerError({
-          status: txResult.status,
-          message: txResult.message,
-        }),
+        new HandlerError({ status: 404, message: "Playbook not found" }),
       );
     }
 
@@ -99,4 +129,4 @@ const updatePlaybookById = createSafeHandler(
   },
 );
 
-export default updatePlaybookById;
+export default updatePlaybookDefinition;

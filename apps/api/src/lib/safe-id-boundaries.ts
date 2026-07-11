@@ -34,6 +34,10 @@ export const brandPersistedTemplateId = (
 export const brandPersistedEntityId = (entityId: string): SafeId<"entity"> =>
   toSafeId<"entity">(entityId);
 
+export const brandPersistedReportExportId = (
+  reportExportId: string,
+): SafeId<"reportExport"> => toSafeId<"reportExport">(reportExportId);
+
 export const brandPersistedFieldId = (fieldId: string): SafeId<"field"> =>
   toSafeId<"field">(fieldId);
 
@@ -48,6 +52,11 @@ export const brandPersistedPropertyId = (
 export const brandPersistedPlaybookId = (
   playbookId: string,
 ): SafeId<"playbook"> => toSafeId<"playbook">(playbookId);
+
+export const brandPersistedPlaybookDefinitionId = (
+  playbookDefinitionId: string,
+): SafeId<"playbookDefinition"> =>
+  toSafeId<"playbookDefinition">(playbookDefinitionId);
 
 export const brandPersistedUserFileId = (
   userFileId: string,
@@ -77,9 +86,22 @@ export const brandPersistedCaseLawSourceId = (
 export const brandPersistedContactId = (contactId: string): SafeId<"contact"> =>
   toSafeId<"contact">(contactId);
 
+export const brandPersistedWorkspaceContactId = (
+  workspaceContactId: string,
+): SafeId<"workspaceContact"> =>
+  toSafeId<"workspaceContact">(workspaceContactId);
+
+export const brandPersistedEntityLinkId = (
+  entityLinkId: string,
+): SafeId<"entityLink"> => toSafeId<"entityLink">(entityLinkId);
+
 export const brandPersistedAuditLogId = (
   auditLogId: string,
 ): SafeId<"auditLog"> => toSafeId<"auditLog">(auditLogId);
+
+export const brandPersistedAgentSkillId = (
+  agentSkillId: string,
+): SafeId<"agentSkill"> => toSafeId<"agentSkill">(agentSkillId);
 
 export const brandPersistedBillingCodeId = (
   billingCodeId: string,
@@ -87,6 +109,14 @@ export const brandPersistedBillingCodeId = (
 
 export const brandPersistedClauseId = (clauseId: string): SafeId<"clause"> =>
   toSafeId<"clause">(clauseId);
+
+export const brandPersistedClauseCategoryId = (
+  clauseCategoryId: string,
+): SafeId<"clauseCategory"> => toSafeId<"clauseCategory">(clauseCategoryId);
+
+export const brandPersistedClauseVersionId = (
+  clauseVersionId: string,
+): SafeId<"clauseVersion"> => toSafeId<"clauseVersion">(clauseVersionId);
 
 export const brandPersistedExpenseId = (expenseId: string): SafeId<"expense"> =>
   toSafeId<"expense">(expenseId);

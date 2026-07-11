@@ -11,6 +11,7 @@ import {
 
 const config = {
   permissions: { template: ["create"] },
+  mcp: { type: "capability", reason: "template_authoring_ui" },
   body: createTemplateRecipeBodySchema,
 } satisfies HandlerConfig;
 

@@ -1,4 +1,4 @@
-import { Fragment, useId } from "react";
+import { Fragment } from "react";
 
 import { Link, useMatches } from "@tanstack/react-router";
 import { useTranslations } from "use-intl";
@@ -10,9 +10,11 @@ import {
   BreadcrumbSeparator,
 } from "@stll/ui/components/breadcrumb";
 
+import { ChatBreadcrumb } from "@/components/breadcrumbs/chat-breadcrumb";
 import { ClausesBreadcrumb } from "@/components/breadcrumbs/clauses-breadcrumb";
 import { ContactBreadcrumb } from "@/components/breadcrumbs/contact-breadcrumb";
 import { PdfBreadcrumb } from "@/components/breadcrumbs/pdf-breadcrumb";
+import { PlaybooksBreadcrumb } from "@/components/breadcrumbs/playbooks-breadcrumb";
 import { BreadcrumbLink } from "@/components/breadcrumbs/shared";
 import { SkillBreadcrumb } from "@/components/breadcrumbs/skill-breadcrumb";
 import { TemplatesBreadcrumb } from "@/components/breadcrumbs/templates-breadcrumb";
@@ -54,6 +56,18 @@ const renderContactBreadcrumb = ({
   return <ContactBreadcrumb contactId={contactId} />;
 };
 
+const renderChatThreadBreadcrumb = ({
+  threadId,
+  workspaceId,
+}: Record<string, string | undefined>) => {
+  if (!threadId) {
+    return null;
+  }
+  // `workspaceId` is present only on the workspace-scoped chat route; it
+  // scopes the inline rename's PATCH the same way the thread query is scoped.
+  return <ChatBreadcrumb threadId={threadId} workspaceId={workspaceId} />;
+};
+
 const renderBreadcrumbEntry = (
   entry: BreadcrumbEntry,
   params: Record<string, string | undefined>,
@@ -71,7 +85,6 @@ const defineBreadcrumb = (
 export const AppBreadcrumbs = () => {
   const t = useTranslations();
   const matches = useMatches();
-  const id = useId();
 
   const breadcrumbDefinitions: BreadcrumbDefinition[] = [
     defineBreadcrumb(
@@ -111,6 +124,7 @@ export const AppBreadcrumbs = () => {
       </BreadcrumbLink>,
     ),
     defineBreadcrumb(["/knowledge/clauses"], <ClausesBreadcrumb />),
+    defineBreadcrumb(["/knowledge/playbooks"], <PlaybooksBreadcrumb />),
     defineBreadcrumb(["/contacts/$contactId"], renderContactBreadcrumb),
     defineBreadcrumb(
       ["/knowledge/prompts"],
@@ -130,7 +144,7 @@ export const AppBreadcrumbs = () => {
     defineBreadcrumb(
       ["/settings/account/profile"],
       <BreadcrumbLink to="/settings/account/profile">
-        {t("settings.account.profile")}
+        {t("common.profile")}
       </BreadcrumbLink>,
     ),
     defineBreadcrumb(
@@ -146,7 +160,7 @@ export const AppBreadcrumbs = () => {
     defineBreadcrumb(
       ["/settings/organization/members"],
       <BreadcrumbLink to="/settings/organization/members">
-        {t("navigation.members")}
+        {t("common.members")}
       </BreadcrumbLink>,
     ),
     defineBreadcrumb(
@@ -165,6 +179,10 @@ export const AppBreadcrumbs = () => {
       ["/chat"],
       <BreadcrumbLink to="/chat">{t("navigation.chat")}</BreadcrumbLink>,
     ),
+    defineBreadcrumb(
+      ["/chat/$threadId", "/chat/workspaces/$workspaceId/$threadId"],
+      renderChatThreadBreadcrumb,
+    ),
   ];
 
   const breadcrumbs = (() => {
@@ -182,14 +200,14 @@ export const AppBreadcrumbs = () => {
       }
     }
 
-    return [...results.values()];
+    return [...results.entries()];
   })();
 
   return (
     <Breadcrumb className="min-w-0">
       <BreadcrumbList className="flex-nowrap overflow-hidden">
-        {breadcrumbs.map((breadcrumb, index) => (
-          <Fragment key={`${id}-${index}`}>
+        {breadcrumbs.map(([key, breadcrumb], index) => (
+          <Fragment key={key}>
             {index !== 0 && <BreadcrumbSeparator className="shrink-0" />}
             {breadcrumb}
           </Fragment>

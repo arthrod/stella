@@ -4,9 +4,9 @@ import ThemeToggle from "../components/ThemeToggle.astro";
 import GitHubIcon from "../components/GitHubIcon.astro";
 import ProductShowcase from "../components/react/ProductShowcase";
 import { controlCapabilities } from "../data/capabilities";
-import { getChangelogReleases } from "../lib/changelog";
+import { getLatestFeatureRelease } from "../lib/changelog";
 
-const latestRelease = getChangelogReleases().at(0);
+const latestRelease = getLatestFeatureRelease();
 
 const appUrl = "https://my.stll.app";
 const discordUrl = "https://discord.gg/8dZjmVFjTK";
@@ -662,13 +662,13 @@ const selfHostingDocsUrl =
     })();
   </script>
 
-  <!--
+  {/*
     Web Animations API drives the illustration motion directly.
     CSS @keyframes get frozen by Chrome when prefers-reduced-motion
     is set; WAAPI does not, matching how Framer Motion behaves.
     Negative `delay` starts the animation already in progress so the
     staggered loops form a continuous cycle.
-  -->
+  */}
   <script is:inline>
     (function () {
       // Unified master breath shared by all three tiles. Same cycle length
@@ -697,7 +697,7 @@ const selfHostingDocsUrl =
 
         var lines = svg.querySelectorAll(".line");
         var count = lines.length;
-        lines.forEach(function (line, i) {
+        lines.forEach((line, i) => {
           var activate = (count > 1 ? i / (count - 1) : 0) * REVEAL_END;
           var before   = Math.max(0,    activate - 0.012);
           var after    = Math.min(0.99, activate + 0.012);
@@ -731,8 +731,8 @@ const selfHostingDocsUrl =
 
         // Clear any leftover animations from a prior IO activation and
         // reset inline styles.
-        words.forEach(function (el) {
-          el.getAnimations().forEach(function (a) { a.cancel(); });
+        words.forEach((el) => {
+          el.getAnimations().forEach((a) => { a.cancel(); });
           el.style.opacity = "0.9";
           el.style.stroke = "";
           el.style.filter = "";
@@ -789,7 +789,7 @@ const selfHostingDocsUrl =
         // ray is blue. Once the cursor passes a ray it settles to white-
         // bright (loaded) and stays that way through hold. Dim returns at
         // the fade.
-        rays.forEach(function (el, i) {
+        rays.forEach((el, i) => {
           var activate = (count > 1 ? i / (count - 1) : 0) * REVEAL_END;
           var before   = Math.max(0,     activate - 0.012);
           var blueIn   = Math.max(0.001, activate);
@@ -825,14 +825,14 @@ const selfHostingDocsUrl =
           tiles.forEach(activate);
           return;
         }
-        var io = new IntersectionObserver(function (entries) {
-          entries.forEach(function (entry) {
+        var io = new IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
             if (!entry.isIntersecting) return;
             activate(entry.target);
             io.unobserve(entry.target);
           });
         }, { rootMargin: "0px 0px -10% 0px", threshold: 0.1 });
-        tiles.forEach(function (t) { io.observe(t); });
+        tiles.forEach((t) => { io.observe(t); });
       }
 
       if (document.readyState === "loading") {

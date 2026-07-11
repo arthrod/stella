@@ -5,9 +5,8 @@ import { HealthCheckError } from "@/api/lib/errors/tagged-errors";
 import { createProbeCache } from "@/api/lib/health/probe-cache";
 import type { ProbeOutcome } from "@/api/lib/health/probe-cache";
 import { probeDatabase } from "@/api/lib/health/probe-database";
+import { APP_COMMIT_SHA, APP_VERSION } from "@/api/lib/version";
 
-const APP_VERSION = process.env["STELLA_VERSION"] ?? "dev";
-const APP_COMMIT_SHA = process.env["STELLA_COMMIT_SHA"] ?? "dev";
 const BUILD_METADATA = {
   version: APP_VERSION,
   commit: APP_COMMIT_SHA,

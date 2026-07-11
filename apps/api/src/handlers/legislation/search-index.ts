@@ -11,6 +11,7 @@ import type { DecisionSection } from "@/api/handlers/case-law/types";
 import { redistributableLegislationSource } from "@/api/handlers/legislation/redistribution";
 import { captureError } from "@/api/lib/analytics";
 import type { SafeId } from "@/api/lib/branded-types";
+import { setCorpusBackfillStatementTimeout } from "@/api/lib/legal-search/backfill-statement-timeout";
 import { logger } from "@/api/lib/observability/logger";
 
 /**
@@ -72,12 +73,12 @@ export const indexLegislationDocument = async (
   const fts = await resolveFtsConfig(document.language);
 
   const textExpr = fts.useUnaccent
-    ? sql`unaccent(coalesce(${document.title}, '') || ' ' || coalesce(${searchableText}, ''))`
-    : sql`coalesce(${document.title}, '') || ' ' || coalesce(${searchableText}, '')`;
+    ? sql`unaccent(arabic_normalize(coalesce(${document.title}, '') || ' ' || coalesce(${searchableText}, '')))`
+    : sql`arabic_normalize(coalesce(${document.title}, '') || ' ' || coalesce(${searchableText}, ''))`;
   const tsvExpr = sql`to_tsvector(${fts.regconfig}, ${textExpr})`;
 
   await scopedDb(async (tx) => {
-    await tx.execute(sql`SET LOCAL statement_timeout = '15min'`);
+    await setCorpusBackfillStatementTimeout(tx);
     await tx.execute(sql`
     INSERT INTO legislation_search_documents (
       document_id, title, searchable_text,
@@ -186,7 +187,7 @@ export const backfillLegislationSearchIndex = async (
   let indexed = 0;
   for (let i = 0; i < rows.length; i += SEARCH_INDEX_CONCURRENCY) {
     const chunk = rows.slice(i, i + SEARCH_INDEX_CONCURRENCY);
-    // oxlint-disable-next-line no-await-in-loop -- bounded concurrency: each SEARCH_INDEX_CONCURRENCY chunk drains before the next so tsvector upserts don't overwhelm Postgres
+    // oxlint-disable-next-line no-await-in-loop, no-db-await-in-loop/no-db-await-in-loop -- bounded concurrency: each SEARCH_INDEX_CONCURRENCY chunk drains before the next so tsvector upserts don't overwhelm Postgres
     const results = await Promise.all(chunk.map(indexRow));
     for (const result of results) {
       indexed += result;

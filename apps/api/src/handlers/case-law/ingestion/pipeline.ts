@@ -1,5 +1,5 @@
 import { Result, panic } from "better-result";
-import { and, eq, like, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import type { ScopedDb } from "@/api/db";
 import {
@@ -15,9 +15,9 @@ import {
 } from "@/api/handlers/case-law/consts";
 import { writeCorpusDocument } from "@/api/handlers/case-law/corpus-storage";
 import {
+  caseLawDecisionSlugCollisionFilter,
   createAvailableCaseLawDecisionSlug,
   createCaseLawDecisionSlug,
-  createCaseLawDecisionSlugCollisionScanPrefix,
 } from "@/api/handlers/case-law/decisions/slug";
 import { isDocumentAst } from "@/api/handlers/case-law/document-ast";
 import type { IngestionResult } from "@/api/handlers/case-law/ingestion/adapter";
@@ -36,8 +36,8 @@ import {
 import { segmentDecision } from "@/api/handlers/case-law/ingestion/segmenter";
 import { captureError } from "@/api/lib/analytics";
 import type { SafeId } from "@/api/lib/branded-types";
+import { TimeoutError } from "@/api/lib/errors/tagged-errors";
 import { errorTag } from "@/api/lib/errors/utils";
-import { escapeLike } from "@/api/lib/escape-like";
 import { LIMITS } from "@/api/lib/limits";
 import { logger } from "@/api/lib/observability/logger";
 import { getS3 } from "@/api/lib/s3";
@@ -83,6 +83,9 @@ type PipelineResult = {
   /** Non-null if the adapter was halted early due to repeated failures. */
   haltReason: string | null;
 };
+
+const databaseTimeoutHaltReason = (error: TimeoutError): string =>
+  `Database timeout; cursor held for retry: ${error.message.slice(0, 200)}`;
 
 type ProcessResult = {
   inserted: boolean;
@@ -447,14 +450,15 @@ export const processDecision = async (
     }
 
     const baseSlug = createCaseLawDecisionSlug(result.caseNumber);
-    const slugScanPrefix = createCaseLawDecisionSlugCollisionScanPrefix({
-      baseSlug,
-      maxSuffix: LIMITS.caseLawSlugCollisionScanLimit + 1,
-    });
     const existingSlugRows = await tx
       .select({ slug: caseLawDecisions.slug })
       .from(caseLawDecisions)
-      .where(like(caseLawDecisions.slug, `${escapeLike(slugScanPrefix)}%`))
+      .where(
+        caseLawDecisionSlugCollisionFilter({
+          baseSlug,
+          maxSuffix: LIMITS.caseLawSlugCollisionScanLimit + 1,
+        }),
+      )
       .limit(LIMITS.caseLawSlugCollisionScanLimit);
     const slug = createAvailableCaseLawDecisionSlug(
       baseSlug,
@@ -714,6 +718,11 @@ export const runIngestionPipeline = async ({
             cursor: cursor ?? "",
           });
 
+          if (error instanceof TimeoutError) {
+            haltReason = databaseTimeoutHaltReason(error);
+            break;
+          }
+
           // Persist failure for later analysis
           try {
             // oxlint-disable-next-line no-await-in-loop -- failure logged inline within the sequential decision loop
@@ -730,6 +739,11 @@ export const runIngestionPipeline = async ({
               sourceId: source.id,
               caseNumber: result.caseNumber,
             });
+
+            if (failureLogError instanceof TimeoutError) {
+              haltReason = databaseTimeoutHaltReason(failureLogError);
+              break;
+            }
           }
 
           skipped++;

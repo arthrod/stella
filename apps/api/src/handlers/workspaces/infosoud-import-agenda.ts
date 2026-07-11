@@ -20,6 +20,7 @@ import {
 const config = {
   body: infosoudLookupBodySchema,
   permissions: { entity: ["create"] },
+  mcp: { type: "internal", reason: "native_tool_ui" },
 } satisfies HandlerConfig;
 
 const infosoudImportAgenda = createSafeHandler(

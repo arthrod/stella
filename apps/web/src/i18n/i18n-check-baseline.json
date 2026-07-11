@@ -15,6 +15,7 @@
     "knowledge.agentSkills.formDescription",
     "knowledge.agentSkills.formName",
     "knowledge.agentSkills.renameFile",
+    "knowledge.playbooks.optionsLabel",
     "knowledge.skills.form.description",
     "knowledge.skills.form.name",
     "onboarding.stepTeam",
@@ -26,17 +27,200 @@
     "tasks.status",
     "tasks.statusValues.done",
     "tasks.statusValues.open",
-    "templates.conditionMatchAll",
+    "templates.conditionAnd",
+    "templates.conditionOr",
     "templates.fieldOptions",
-    "templates.inputTypes.date",
     "templates.studio.filledByPerson",
     "translate.settings.remove",
     "translate.settings.save",
-    "workspaces.playbooks.columnsLabel",
-    "workspaces.playbooks.contentType.date",
-    "workspaces.playbooks.nameLabel",
     "workspaces.properties.optionsLabel",
     "workspaces.views.filter"
+  ],
+  "duplicateValues": [
+    "account.sessions.currentSession",
+    "app.versionMismatch.dismiss",
+    "appearance.calendar",
+    "auth.continueWithEmail",
+    "billing.approve",
+    "billing.codes.active",
+    "billing.codes.codeLabelField",
+    "billing.codes.task",
+    "billing.expenses.categories.expert_witness",
+    "billing.expenses.categories.other",
+    "billing.invoices.dueDate",
+    "billing.invoices.statuses.draft",
+    "billing.invoices.statuses.paid",
+    "billing.selectedCount",
+    "billing.statuses.approved",
+    "billing.statuses.draft",
+    "billing.stopTimer",
+    "caseLaw.analysis.categories.reasoning",
+    "catalogue.cost.free",
+    "catalogue.cost.paid",
+    "catalogue.filter.skills",
+    "catalogue.packPartial",
+    "catalogue.sectionOthers",
+    "catalogue.setup.account",
+    "catalogue.setup.apiKey",
+    "chat.approval.deny",
+    "chat.contextMeter.tools",
+    "chat.createDocument.continue",
+    "chat.createDocument.created",
+    "chat.landing.prompts",
+    "chat.stopResponse",
+    "chat.suggestionStatus.rejected",
+    "chat.tool.delete_clause",
+    "chat.tool.delete_matter",
+    "chat.tool.run_playbook",
+    "chat.toolCall.field",
+    "clauses.body",
+    "clauses.deleteClause",
+    "clauses.versionRestored",
+    "consent.deny",
+    "contacts.customFields.value",
+    "contacts.customFields.valuePlaceholder",
+    "contacts.emailTypes.other",
+    "contacts.emailTypes.personal",
+    "contacts.phoneTypes.other",
+    "contacts.search",
+    "docxReview.applyTracked",
+    "docxReview.reject",
+    "docxReview.severityHigh",
+    "docxReview.severityLow",
+    "docxReview.severityMedium",
+    "docxReview.statusAccepted",
+    "docxReview.statusRejected",
+    "docxReview.wordShortcutPlaceholder",
+    "errors.failedToDeleteTemplate",
+    "errors.failedToSaveTemplate",
+    "fileDetail.current",
+    "fileDetail.label",
+    "fileDetail.redlinePreview",
+    "fileDetail.versionHistory",
+    "filters.contains",
+    "filters.eq",
+    "filters.neq",
+    "inspector.anonymization.deleteAction",
+    "inspector.anonymization.labelPickerAriaLabel",
+    "inspector.anonymization.labelPickerEmpty",
+    "inspector.anonymization.labelPickerPlaceholder",
+    "inspector.facet.anonymization",
+    "inspector.metadata.author",
+    "inspector.metadata.updatedAt",
+    "knowledge.agentSkills.newFolder",
+    "knowledge.playbooks.addOption",
+    "knowledge.playbooks.addRule",
+    "knowledge.playbooks.advanced",
+    "knowledge.playbooks.approval.approve",
+    "knowledge.playbooks.approval.statusApproved",
+    "knowledge.playbooks.approval.statusDraft",
+    "knowledge.playbooks.contentType.int",
+    "knowledge.playbooks.contentType.text",
+    "knowledge.playbooks.review.fixAccepted",
+    "knowledge.playbooks.review.reject",
+    "knowledge.playbooks.risk.riskLevel.high",
+    "knowledge.playbooks.risk.riskLevel.low",
+    "knowledge.playbooks.risk.riskLevel.medium",
+    "knowledge.playbooks.severity.high",
+    "knowledge.playbooks.severity.low",
+    "knowledge.playbooks.severity.medium",
+    "knowledge.playbooks.versions.restoredToast",
+    "knowledge.playbooks.versions.versionHistory",
+    "knowledge.sections.prompts.title",
+    "knowledge.sections.templates.title",
+    "knowledge.sections.tools.title",
+    "navigation.chat",
+    "navigation.myTodos",
+    "navigation.templates",
+    "onboarding.catalogueCommunityHeading",
+    "onboarding.catalogueDetailAuthor",
+    "onboarding.catalogueDetailJurisdictions",
+    "onboarding.cataloguePartial",
+    "onboarding.continue",
+    "onboarding.stepOrganization",
+    "organization.aiConfig.active",
+    "organization.aiConfig.apiKey",
+    "organization.aiConfig.defaultModelOption",
+    "organization.aiConfig.roles.chat",
+    "organization.aiConfig.roles.reasoning",
+    "organization.aiConfig.title",
+    "organization.invitations.statuses.accepted",
+    "organization.invitations.statuses.rejected",
+    "organization.matterNumber.description",
+    "organization.matterNumber.title",
+    "organization.members.noMembersFound",
+    "search.dateFrom",
+    "search.dateTo",
+    "search.kinds.chat",
+    "search.kinds.task",
+    "search.updatedWithin",
+    "search.updatedWithinOptions.month",
+    "search.updatedWithinOptions.week",
+    "selfhost.dismissUpdate",
+    "settings.account.desktop",
+    "settings.account.title",
+    "settings.account.wordEditShortcutPlaceholder",
+    "settings.organization.ai",
+    "settings.organization.anonymization.deleteAction",
+    "settings.organization.anonymization.labelPickerAriaLabel",
+    "settings.organization.anonymization.labelPickerEmpty",
+    "settings.organization.anonymization.labelPickerPlaceholder",
+    "settings.organization.anonymization.title",
+    "settings.organization.matterNumbering",
+    "settings.organization.matterNumberingDescription",
+    "settings.organization.practiceJurisdictions",
+    "settings.organization.usageStatusActive",
+    "settings.organization.usageStatusCancelled",
+    "success.documentCreated",
+    "tasks.dueDate",
+    "tasks.myTasksTitle",
+    "tasks.priorityValues.high",
+    "tasks.priorityValues.low",
+    "tasks.priorityValues.medium",
+    "tasks.statusValues.cancelled",
+    "templates.conditionField",
+    "templates.conditionOpContains",
+    "templates.conditionOpIs",
+    "templates.conditionOpIsNot",
+    "templates.conditionOpNotEquals",
+    "templates.conditionValue",
+    "templates.createDocument",
+    "templates.deleteFailed",
+    "templates.fieldLabel",
+    "templates.previewSectionBody",
+    "templates.saveFailed",
+    "templates.studio.conditionSourceRule",
+    "templates.studio.insertFormatDefault",
+    "templates.studio.slashEmpty",
+    "templates.tags",
+    "translate.settings.apiKeyLabel",
+    "translate.settings.tierFree",
+    "workspaces.deleteWorkspace",
+    "workspaces.fields.fieldValueLabel",
+    "workspaces.fields.numberLabel",
+    "workspaces.filesystem.author",
+    "workspaces.filters.date.last30d",
+    "workspaces.filters.date.last7d",
+    "workspaces.filters.from",
+    "workspaces.filters.noMatches",
+    "workspaces.filters.to",
+    "workspaces.members.noMembersFound",
+    "workspaces.newFolder",
+    "workspaces.ownerType.personal",
+    "workspaces.parties.partyRoles.expert_witness",
+    "workspaces.parties.partyRoles.other",
+    "workspaces.parties.personalLabel",
+    "workspaces.parties.searchContacts",
+    "workspaces.playbooks.run",
+    "workspaces.properties.addOption",
+    "workspaces.properties.chipMulti",
+    "workspaces.properties.chipNumber",
+    "workspaces.properties.chipText",
+    "workspaces.properties.text",
+    "workspaces.team",
+    "workspaces.views.advancedFilter",
+    "workspaces.views.fieldsSelected",
+    "workspaces.views.layouts.calendar"
   ],
   "identicalToSource": {
     "appearance.flexoki": [
@@ -126,17 +310,11 @@
     "catalogue.configuration": [
       "fr"
     ],
-    "chat.documentView.original": [
-      "de",
-      "es",
-      "fr",
-      "pt-BR"
+    "chat.contextMeter.tools": [
+      "de"
     ],
     "chat.folioCitationFallback": [
       "es",
-      "fr"
-    ],
-    "chat.mention.category.contacts": [
       "fr"
     ],
     "chat.pageNumber": [
@@ -145,16 +323,124 @@
     "chat.suggestionSeverity.style": [
       "fr"
     ],
+    "chat.tool.add_comment": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "chat.tool.compare_versions": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "chat.tool.find_text": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "chat.tool.read_changes": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "chat.tool.read_comments": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "chat.tool.read_document": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "chat.tool.reply_comment": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "chat.tool.resolve_comment": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "chat.webSearch.sources": [
       "fr"
     ],
     "clauses.variant": [
       "et",
       "sk"
-    ],
-    "clauses.version": [
-      "de",
-      "fr"
     ],
     "common.actions": [
       "fr"
@@ -190,6 +476,9 @@
     "common.details": [
       "de"
     ],
+    "common.document": [
+      "fr"
+    ],
     "common.documentation": [
       "fr"
     ],
@@ -198,6 +487,9 @@
     ],
     "common.filter": [
       "et"
+    ],
+    "common.formula": [
+      "lv"
     ],
     "common.metadata": [
       "cs"
@@ -237,6 +529,12 @@
       "pl",
       "pt-BR",
       "sk"
+    ],
+    "common.playbooks": [
+      "de",
+      "es",
+      "fr",
+      "pt-BR"
     ],
     "common.reference": [
       "cs"
@@ -278,6 +576,14 @@
     ],
     "common.urlIdentifierPlaceholder": [
       "ar"
+    ],
+    "common.version": [
+      "de",
+      "fr"
+    ],
+    "common.versionLabel": [
+      "de",
+      "fr"
     ],
     "contacts.communication.emailPlaceholder": [
       "ar",
@@ -357,12 +663,7 @@
       "pl",
       "pt-BR"
     ],
-    "fileDetail.version": [
-      "de",
-      "fr"
-    ],
     "filters.contains_all": [
-      "cs",
       "de",
       "es",
       "et",
@@ -375,7 +676,6 @@
       "sk"
     ],
     "filters.dateAfter": [
-      "cs",
       "de",
       "es",
       "et",
@@ -388,7 +688,6 @@
       "sk"
     ],
     "filters.dateBefore": [
-      "cs",
       "de",
       "es",
       "et",
@@ -401,7 +700,6 @@
       "sk"
     ],
     "filters.dateOnOrAfter": [
-      "cs",
       "de",
       "es",
       "et",
@@ -414,7 +712,6 @@
       "sk"
     ],
     "filters.dateOnOrBefore": [
-      "cs",
       "de",
       "es",
       "et",
@@ -427,7 +724,6 @@
       "sk"
     ],
     "filters.ends_with": [
-      "cs",
       "de",
       "es",
       "et",
@@ -440,7 +736,6 @@
       "sk"
     ],
     "filters.gt": [
-      "cs",
       "de",
       "es",
       "et",
@@ -453,7 +748,6 @@
       "sk"
     ],
     "filters.gte": [
-      "cs",
       "de",
       "es",
       "et",
@@ -466,7 +760,6 @@
       "sk"
     ],
     "filters.in": [
-      "cs",
       "de",
       "es",
       "et",
@@ -479,7 +772,6 @@
       "sk"
     ],
     "filters.is_not_empty": [
-      "cs",
       "de",
       "es",
       "et",
@@ -492,7 +784,6 @@
       "sk"
     ],
     "filters.lt": [
-      "cs",
       "de",
       "es",
       "et",
@@ -505,7 +796,6 @@
       "sk"
     ],
     "filters.lte": [
-      "cs",
       "de",
       "es",
       "et",
@@ -518,7 +808,6 @@
       "sk"
     ],
     "filters.not_contains": [
-      "cs",
       "de",
       "es",
       "et",
@@ -531,7 +820,6 @@
       "sk"
     ],
     "filters.starts_with": [
-      "cs",
       "de",
       "es",
       "et",
@@ -552,10 +840,6 @@
       "fr",
       "pt-BR"
     ],
-    "inspector.metadata.version": [
-      "de",
-      "fr"
-    ],
     "knowledge.agentSkills.coaching.publish": [
       "cs",
       "de",
@@ -569,18 +853,11 @@
       "pt-BR",
       "sk"
     ],
-    "knowledge.agentSkills.formBody": [
-      "fr"
-    ],
     "knowledge.agentSkills.formDescription": [
       "fr"
     ],
     "knowledge.agentSkills.formName": [
       "de"
-    ],
-    "knowledge.agentSkills.formVersion": [
-      "de",
-      "fr"
     ],
     "knowledge.agentSkills.howItRuns": [
       "cs",
@@ -659,6 +936,498 @@
       "sk"
     ],
     "knowledge.mcp.urlPlaceholder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.approval.approve": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.approval.approvedOn": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.approval.approvedToast": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.approval.approveFailed": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.approval.statusApproved": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.approval.statusDraft": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.askQuestionLabel": [
+      "fr"
+    ],
+    "knowledge.playbooks.contentType.text": [
+      "de"
+    ],
+    "knowledge.playbooks.extraction": [
+      "fr"
+    ],
+    "knowledge.playbooks.extractionManual": [
+      "es",
+      "pt-BR"
+    ],
+    "knowledge.playbooks.manageTypes": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.negotiation.addTalkingPoint": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.negotiation.escalationLabel": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.negotiation.escalationPlaceholder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.negotiation.rationaleLabel": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.negotiation.rationalePlaceholder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.negotiation.talkingPointPlaceholder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.negotiation.talkingPointsLabel": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.negotiation.title": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.optionsLabel": [
+      "fr"
+    ],
+    "knowledge.playbooks.review.playbookLabel": [
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.risk.flaggedCount": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.risk.riskLevel.critical": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.risk.riskLevel.high": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.risk.riskLevel.low": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.risk.riskLevel.medium": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.risk.riskLevel.none": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.risk.summaryTitle": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.risk.topIssuesTitle": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.starters.addedToast": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.starters.browseButton": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.starters.positionCount": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.starters.subtitle": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.starters.title": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.tier.acceptable": [
+      "fr"
+    ],
+    "knowledge.playbooks.versions.confirmRestore": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.versions.restore": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.versions.restoredToast": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.versions.restoreFailed": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "knowledge.playbooks.versions.versionHistory": [
       "ar",
       "cs",
       "de",
@@ -867,9 +1636,6 @@
     "knowledge.skills.form.name": [
       "de"
     ],
-    "knowledge.skills.form.prompt": [
-      "fr"
-    ],
     "markdownEditor.rawLabel": [
       "cs",
       "de",
@@ -922,9 +1688,6 @@
     "navigation.shortcutCategories.navigation": [
       "de",
       "fr"
-    ],
-    "onboarding.stepDesktop": [
-      "de"
     ],
     "onboarding.stepOrganization": [
       "de"
@@ -990,9 +1753,6 @@
     "search.kinds.contact": [
       "fr"
     ],
-    "search.kinds.document": [
-      "fr"
-    ],
     "search.kinds.folder": [
       "pl"
     ],
@@ -1008,6 +1768,90 @@
     "settings.account.desktop": [
       "de"
     ],
+    "settings.organization.documentTypes.addPlaceholder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "settings.organization.documentTypes.deleteFailed": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "settings.organization.documentTypes.description": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "settings.organization.documentTypes.labelAria": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "settings.organization.documentTypes.reorder": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "settings.organization.documentTypes.title": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "tasks.priorityValues.urgent": [
       "fr"
     ],
@@ -1016,15 +1860,106 @@
       "pl",
       "pt-BR"
     ],
+    "templates.conditionAddGroup": [
+      "ar",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "templates.conditionAnd": [
+      "ar",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "templates.conditionCount": [
       "fr"
+    ],
+    "templates.conditionFormulaPlaceholder": [
+      "ar",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
     ],
     "templates.conditionOperator": [
       "de",
       "pl"
     ],
+    "templates.conditionOr": [
+      "ar",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
     "templates.conditionsTitle": [
       "fr"
+    ],
+    "templates.conditionUseFieldInstead": [
+      "ar",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "templates.conditionUseFormula": [
+      "ar",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "templates.conditionWhen": [
+      "ar",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
     ],
     "templates.fieldFormulaExpression": [
       "fr"
@@ -1032,17 +1967,17 @@
     "templates.fieldOptions": [
       "fr"
     ],
-    "templates.inputTypes.date": [
-      "fr"
-    ],
-    "templates.inputTypes.text": [
-      "cs",
+    "templates.studio.conditionRuleFallbackLabel": [
+      "ar",
       "de",
-      "sk"
-    ],
-    "templates.studio.draftedByAi": [
-      "cs",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
       "pl",
+      "pt-BR",
       "sk"
     ],
     "templates.studio.expressionPlaceholder": [
@@ -1051,17 +1986,23 @@
     "templates.studio.filledByPerson": [
       "de"
     ],
-    "templates.studio.formula": [
-      "lv"
+    "templates.studio.insertConditionIntoTemplate": [
+      "ar",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
     ],
     "templates.studio.questions": [
       "fr"
     ],
     "templates.studio.scopeCondition": [
-      "fr"
-    ],
-    "templates.versionLabel": [
-      "de",
       "fr"
     ],
     "translate.settings.apiKeyPlaceholder": [
@@ -1105,11 +2046,35 @@
       "pt-BR",
       "sk"
     ],
-    "workspaces.files.defaultPropertyName": [
-      "fr"
-    ],
-    "workspaces.filesystem.version": [
+    "webSearch.settings.platformFallback": [
+      "ar",
+      "cs",
       "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "webSearch.settings.title": [
+      "ar",
+      "cs",
+      "de",
+      "es",
+      "et",
+      "fr",
+      "hu",
+      "lt",
+      "lv",
+      "pl",
+      "pt-BR",
+      "sk"
+    ],
+    "workspaces.files.defaultPropertyName": [
       "fr"
     ],
     "workspaces.filters.chips.lead": [
@@ -1178,286 +2143,6 @@
     ],
     "workspaces.parties.personalLabel": [
       "es"
-    ],
-    "workspaces.playbooks.action": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.addColumn": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.applied": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.apply": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.columnNamePlaceholder": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.columnsLabel": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.contentType.date": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.contentType.int": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.contentType.text": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.create": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.description": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.duplicateColumn": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.empty": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.incomplete": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.nameLabel": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.namePlaceholder": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.promptPlaceholder": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.summary": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.title": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
-    ],
-    "workspaces.playbooks.typeLabel": [
-      "ar",
-      "cs",
-      "de",
-      "es",
-      "et",
-      "fr",
-      "hu",
-      "lt",
-      "lv",
-      "pl",
-      "pt-BR",
-      "sk"
     ],
     "workspaces.properties.addCondition": [
       "cs",
@@ -1590,7 +2275,6 @@
       "sk"
     ],
     "workspaces.views.advancedFilter": [
-      "cs",
       "de",
       "es",
       "et",
@@ -1603,7 +2287,6 @@
       "sk"
     ],
     "workspaces.views.advancedFilterCount": [
-      "cs",
       "de",
       "es",
       "et",
@@ -1727,7 +2410,6 @@
       "sk"
     ],
     "workspaces.views.removeAdvancedFilter": [
-      "cs",
       "de",
       "es",
       "et",
@@ -1738,6 +2420,11 @@
       "pl",
       "pt-BR",
       "sk"
+    ],
+    "workspaces.views.reportExport.formatLabel": [
+      "de",
+      "fr",
+      "pl"
     ]
   }
 }

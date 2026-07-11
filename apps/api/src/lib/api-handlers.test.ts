@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { SafeDb, SafeDbError } from "@/api/db";
 import { env } from "@/api/env";
-import type { OrgAIConfig } from "@/api/lib/ai-models";
+import type { OrgAIConfig } from "@/api/lib/ai-config";
 import {
   createSafeRootHandler,
   resolveMeteringContext,
@@ -52,6 +52,7 @@ describe("createSafeRootHandler usage preflight", () => {
       const endpoint = createSafeRootHandler(
         {
           permissions: { workspace: ["read"] },
+          mcp: { type: "internal", reason: "health_infra" },
           requiresUsage: { actionType: "chat" },
         },
         async function* () {
@@ -71,7 +72,10 @@ describe("createSafeRootHandler usage preflight", () => {
         throw new Error("Expected usage preflight to return a status response");
       }
       expect(result.code).toBe(500);
-      expect(result.response).toEqual({ message: "Internal server error" });
+      expect(result.response).toEqual({
+        code: "internal_server_error",
+        message: "Internal server error",
+      });
     } finally {
       env.USAGE_ENFORCEMENT_ENABLED = previousEnforcement;
     }
@@ -86,6 +90,7 @@ describe("createSafeRootHandler usage preflight", () => {
       const endpoint = createSafeRootHandler(
         {
           permissions: { workspace: ["read"] },
+          mcp: { type: "internal", reason: "health_infra" },
           requiresUsage: { actionType: "chat" },
         },
         async function* () {
@@ -119,6 +124,7 @@ describe("createSafeRootHandler usage preflight", () => {
       const endpoint = createSafeRootHandler(
         {
           permissions: { workspace: ["read"] },
+          mcp: { type: "internal", reason: "health_infra" },
           requiresUsage: { actionType: "chat", modelRole: "fast" },
         },
         async function* () {
@@ -197,7 +203,10 @@ describe("createSafeRootHandler permission gate", () => {
   test("denies the handler when the member role lacks the permission", async () => {
     let bodyRan = false;
     const endpoint = createSafeRootHandler(
-      { permissions: { organization: ["delete"] } },
+      {
+        permissions: { organization: ["delete"] },
+        mcp: { type: "internal", reason: "health_infra" },
+      },
       async function* () {
         bodyRan = true;
         return Result.ok({ ok: true });
@@ -217,13 +226,19 @@ describe("createSafeRootHandler permission gate", () => {
       throw new Error("expected a status response");
     }
     expect(result.code).toBe(403);
-    expect(result.response).toEqual({ message: "Forbidden" });
+    expect(result.response).toEqual({
+      code: "forbidden",
+      message: "Forbidden",
+    });
   });
 
   test("runs the handler when the role holds the permission", async () => {
     let bodyRan = false;
     const endpoint = createSafeRootHandler(
-      { permissions: { organization: ["delete"] } },
+      {
+        permissions: { organization: ["delete"] },
+        mcp: { type: "internal", reason: "health_infra" },
+      },
       async function* () {
         bodyRan = true;
         return Result.ok({ ok: true });

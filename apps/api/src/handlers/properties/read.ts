@@ -7,6 +7,7 @@ import { deserializeAITool } from "@/api/lib/markdown/ai-tool";
 
 const config = {
   permissions: { workspace: ["read"] },
+  mcp: { type: "tool", name: "list_properties" },
 } satisfies HandlerConfig;
 
 const readProperties = createSafeHandler(
@@ -31,21 +32,57 @@ const readProperties = createSafeHandler(
     );
 
     return Result.ok(
-      propertiesResult.map(({ dependencies, ...property }) => ({
-        id: property.id,
-        workspaceId,
-        name: property.name,
-        status: property.status,
-        content: property.content,
-        tool:
-          property.tool.type === "ai-model"
-            ? deserializeAITool({
-                ...property.tool,
-                dependencies,
-              })
-            : property.tool,
-        createdAt: property.createdAt,
-      })),
+      propertiesResult.map(({ dependencies, ...property }) => {
+        if (property.tool.type === "ai-model") {
+          return {
+            id: property.id,
+            workspaceId,
+            name: property.name,
+            status: property.status,
+            content: property.content,
+            tool: deserializeAITool({
+              ...property.tool,
+              dependencies,
+            }),
+            role: property.role,
+            createdAt: property.createdAt,
+          };
+        }
+        if (property.tool.type === "manual-input") {
+          return {
+            id: property.id,
+            workspaceId,
+            name: property.name,
+            status: property.status,
+            content: property.content,
+            tool: { ...property.tool, dependencies },
+            role: property.role,
+            createdAt: property.createdAt,
+          };
+        }
+        // The only remaining tool type is the playbook verdict. The web
+        // client has first-class read-only support for it, pairing each
+        // verdict onto its ASK column via `tool.askPropertyId`; masking it as
+        // manual-input would render verdicts as editable single-select
+        // columns. The grading inputs (rule/severity/standard) stay
+        // server-side. The view-templates and update-by-id masking are
+        // separate contracts.
+        return {
+          id: property.id,
+          workspaceId,
+          name: property.name,
+          status: property.status,
+          content: property.content,
+          tool: {
+            version: property.tool.version,
+            type: property.tool.type,
+            askPropertyId: property.tool.askPropertyId,
+            dependencies,
+          },
+          role: property.role,
+          createdAt: property.createdAt,
+        };
+      }),
     );
   },
 );

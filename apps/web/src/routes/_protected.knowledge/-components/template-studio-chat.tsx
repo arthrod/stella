@@ -14,7 +14,6 @@
 
 import {
   Suspense,
-  useEffect,
   useEffectEvent,
   useLayoutEffect,
   useMemo,
@@ -29,25 +28,26 @@ import { Result } from "better-result";
 import { LoaderCircleIcon } from "lucide-react";
 import type { EditorView } from "prosemirror-view";
 import { useTranslations } from "use-intl";
+import { v7 as uuidv7 } from "uuid";
 
 import {
   applySuggestions,
   resolveSuggestionAnchor,
   setAISuggestionsMeta,
   setFocusedSuggestionMeta,
-} from "@stll/folio";
+} from "@stll/folio-react";
 import type {
   AISuggestion,
   AISuggestionPreset,
   DocxEditorRef,
   FolioAIEditSnapshot,
-} from "@stll/folio";
+} from "@stll/folio-react";
 import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
 import { stellaToast } from "@stll/ui/components/toast";
-import { cn } from "@stll/ui/lib/utils";
 
 import {
+  ChatThreadCard,
   PromptBar,
   scrollEditorToPos,
   SuggestionCard,
@@ -56,6 +56,7 @@ import {
 import type { PromptBarPresetScope } from "@/components/ai-suggestions/host";
 import { useChatEditor } from "@/components/chat-editor-provider";
 import { ChatApprovalContext } from "@/components/chat/chat-approval-context";
+import { ChatComposerDock } from "@/components/chat/chat-composer-dock";
 import { ChatMattersContext } from "@/components/chat/chat-matters-context";
 import { ChatThreadMessages } from "@/components/chat/chat-thread-messages";
 import { getActiveDocxEditApprovalPart } from "@/components/chat/chat-ui-tools";
@@ -69,14 +70,19 @@ import { getAnalytics } from "@/lib/analytics/provider";
 import { ChatAnonymizationLayer } from "@/lib/anonymize/use-chat-anonymization-layer";
 import { api } from "@/lib/api";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
+import {
+  getChatSendMode,
+  useChatAnonymized,
+} from "@/lib/chat-anonymized-store";
 import { toChatThreadId } from "@/lib/chat-thread-ref";
 import type { ChatThreadId, ChatThreadRef } from "@/lib/chat-thread-ref";
-import { useDevStore } from "@/lib/dev-store";
 import { toAPIError } from "@/lib/errors";
 import { toSafeId } from "@/lib/safe-id";
 import { inputTypeValueKind } from "@/lib/value-types";
 import { useChatSession } from "@/routes/_protected.chat/-hooks/use-chat-session";
+import { useChatThreadRuntime } from "@/routes/_protected.chat/-hooks/use-chat-thread-runtime";
 import { useChatUserContext } from "@/routes/_protected.chat/-hooks/use-chat-user-context";
+import { buildChatRequestMessage } from "@/routes/_protected.chat/-lib/build-chat-request-message";
 import {
   chatKeys,
   chatThreadOptions,
@@ -86,6 +92,7 @@ import {
 import type {
   ApplyActiveDocxEditsInput,
   ApplyActiveDocxEditsOutput,
+  ChatUserMessageInput,
 } from "@/routes/_protected.chat/-queries";
 import { useTemplateStudioStore } from "@/routes/_protected.knowledge/-components/template-studio-store";
 import {
@@ -155,6 +162,11 @@ export const TemplateStudioChat = (props: TemplateStudioChatProps) => (
 type ScopedPresetSend = {
   text: string;
 };
+
+const createTextChatMessage = (text: string): ChatUserMessageInput => ({
+  content: text,
+  id: toSafeId<"chatMessage">(uuidv7()),
+});
 
 const ResolvedTemplateStudioChat = (props: TemplateStudioChatProps) => {
   const t = useTranslations();
@@ -261,7 +273,7 @@ const TemplateStudioChatInner = ({
   });
   const userContext = useChatUserContext();
   const getUserContext = useEffectEvent(() => userContext);
-  const showToolCallDetails = useDevStore((s) => s.showToolCallDetails);
+  const showToolCallDetails = false;
   const upsertField = useTemplateStudioStore((s) => s.upsertField);
   const markDirty = useTemplateStudioStore((s) => s.markDirty);
 
@@ -270,6 +282,7 @@ const TemplateStudioChatInner = ({
   // where `createAIEditSnapshot()` still returns null. A send in that
   // window gives the model no editable blocks. Poll until the first
   // non-null snapshot, then stop (mirrors the file overlay).
+  // eslint-disable-next-line react/react-compiler -- mount-time seed of readiness from the imperative Folio editor instance; the ref read runs once in the useState initializer, and the poll below keeps it in sync
   const [editorReady, setEditorReady] = useState(() =>
     Boolean(editorRef.current?.createAIEditSnapshot()),
   );
@@ -311,6 +324,7 @@ const TemplateStudioChatInner = ({
   /** Snapshot most recently sent to the model — its block ids are the
    *  ones tool operations reference, so op→text resolution reads it. */
   const lastSentSnapshotRef = useRef<FolioAIEditSnapshot | null>(null);
+  const activeScopedPresetTurnMessageIdRef = useRef<string | null>(null);
   const getActiveTemplate = useEffectEvent(() => {
     const snapshot = editorRef.current?.createAIEditSnapshot() ?? null;
     lastSentSnapshotRef.current = snapshot;
@@ -563,22 +577,35 @@ const TemplateStudioChatInner = ({
     () => ({ scope: "global", threadId: chatThreadId }),
     [chatThreadId],
   );
+  // Shared per-thread send-mode source, same as every other chat
+  // surface: the dock's shield shows `useChatAnonymized(threadRef)`, the
+  // transport reads `getChatSendMode(threadRef)`, and the anonymization
+  // layer highlights the same value — one source, display equals send.
+  const anonymized = useChatAnonymized(threadRef);
+  const getSendMode = useEffectEvent(() => getChatSendMode(threadRef));
 
   // No `handleActiveDocxEditToolCall` in the context: the transport
   // never invokes it (the approve path below client-executes the tool),
   // and `getActiveTemplate` already keys the cache as "active-template".
+  const chatThreadContext = {
+    allowMissingThread: true,
+    getUserContext,
+    getSendMode,
+    getActiveTemplate: () => getActiveTemplate(),
+  };
   const { data } = useSuspenseQuery(
     chatThreadOptions({
       activeOrganizationId,
       key: threadRef,
-      context: {
-        allowMissingThread: true,
-        getUserContext,
-        getActiveTemplate: () => getActiveTemplate(),
-      },
+      context: chatThreadContext,
     }),
   );
-  const { chat } = data;
+  const chat = useChatThreadRuntime({
+    activeOrganizationId,
+    context: chatThreadContext,
+    data,
+    key: threadRef,
+  });
 
   const {
     error,
@@ -601,19 +628,19 @@ const TemplateStudioChatInner = ({
     handleOpenCreatedDocument,
     createDocumentMatters,
     isLoadingCreateDocumentMatters,
-    addToolOutput,
+    addToolResult,
     streamdownComponents,
     approvalPendingMessageId,
   } = useChatSession({
     chat,
     conversationId: threadRef.threadId,
+    getSendMode,
     initialOlderCursor: data.olderCursor,
     threadRef,
   });
   const { ensureAIAvailable, openIfAIUnavailable } = useAIKeyGate();
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (open AI-key gate on mount/dep change), move into handler
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     openIfAIUnavailable();
   }, [openIfAIUnavailable]);
 
@@ -645,10 +672,11 @@ const TemplateStudioChatInner = ({
       lastSentSnapshotRef.current =
         editorRef.current?.createAIEditSnapshot() ?? null;
       setPanelOpen(true);
-      void sendMessage(
-        { text: request.text },
-        { body: { toolScope: SUGGEST_TEMPLATE_FIELDS_TOOL_SCOPE } },
-      );
+      const message = createTextChatMessage(request.text);
+      activeScopedPresetTurnMessageIdRef.current = message.id;
+      void sendMessage(message, {
+        body: { toolScope: SUGGEST_TEMPLATE_FIELDS_TOOL_SCOPE },
+      });
       return;
     });
   });
@@ -879,18 +907,24 @@ const TemplateStudioChatInner = ({
       return;
     }
     for (const part of message.parts) {
-      if (part.type !== "tool-apply-active-docx-edits") {
+      if (
+        part.type !== "tool-call" ||
+        part.name !== "apply-active-docx-edits"
+      ) {
         continue;
       }
       if (part.state === "input-streaming") {
         const operations = extractCompletedStreamingOperations(part.input);
         if (operations.length > 0) {
-          placeStreamedOperations(part.toolCallId, operations);
+          placeStreamedOperations(part.id, operations);
         }
         continue;
       }
-      if (part.state === "output-denied") {
-        discardStreamedPlacements(part.toolCallId);
+      if (
+        part.state === "approval-responded" &&
+        part.approval?.approved === false
+      ) {
+        discardStreamedPlacements(part.id);
       }
     }
   }, [messages]);
@@ -990,7 +1024,7 @@ const TemplateStudioChatInner = ({
 
   // Approving an apply-active-docx-edits call client-executes it: the
   // operations become in-document suggestions and the queued/skipped
-  // summary goes back to the model via addToolOutput. (The approval
+  // summary goes back to the model via addToolResult. (The approval
   // card auto-approves DOCX edit batches; review happens per
   // suggestion in the document.)
   const handleApproveForTemplate = async (
@@ -1000,23 +1034,28 @@ const TemplateStudioChatInner = ({
     if (toolName === "apply-active-docx-edits") {
       const part = getActiveDocxEditApprovalPart(messages, approvalId);
       if (!part) {
-        handleApprove(approvalId, toolName);
+        await handleApprove(approvalId, toolName);
         return;
       }
-      handleApprove(approvalId, toolName);
-      const output = await handleActiveDocxEditToolCall(
-        part.input,
-        part.toolCallId,
+      const latestUserMessageId = getLatestUserMessageId(messages);
+      const scopedContinuationOptions =
+        latestUserMessageId === activeScopedPresetTurnMessageIdRef.current
+          ? { body: { toolScope: SUGGEST_TEMPLATE_FIELDS_TOOL_SCOPE } }
+          : undefined;
+      await handleApprove(approvalId, toolName, scopedContinuationOptions);
+      const output = await handleActiveDocxEditToolCall(part.input, part.id);
+      await addToolResult(
+        {
+          output,
+          tool: "apply-active-docx-edits",
+          toolCallId: part.id,
+        },
+        scopedContinuationOptions,
       );
-      await addToolOutput({
-        output,
-        tool: "apply-active-docx-edits",
-        toolCallId: part.toolCallId,
-      });
       return;
     }
 
-    handleApprove(approvalId, toolName);
+    await handleApprove(approvalId, toolName);
   };
 
   const canSubmitWithCurrentSnapshot = useEffectEvent(() => {
@@ -1036,14 +1075,45 @@ const TemplateStudioChatInner = ({
   const hasMessages = messages.length > 0;
   const hasThreadContent = hasMessages || error !== undefined;
   const lastMessageId = messages.at(-1)?.id ?? null;
-  // Auto-open the thread panel as soon as the first message lands so
-  // users see streaming without having to click the chevron.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- derived state (panel openness follows thread content), compute in render
-  useEffect(() => {
+  // Auto-open the thread panel as soon as the first message lands so users see
+  // streaming without having to click the chevron. Adjust-state-during-render on
+  // the hasThreadContent transition (not every render) so the user can still
+  // close the panel afterwards while content is present.
+  // Seeded false (not hasThreadContent) so mounting with an already-hydrated
+  // chat counts as a transition and auto-opens, matching the former effect.
+  const [prevHasThreadContent, setPrevHasThreadContent] = useState(false);
+  if (hasThreadContent !== prevHasThreadContent) {
+    setPrevHasThreadContent(hasThreadContent);
     if (hasThreadContent) {
       setPanelOpen(true);
     }
-  }, [hasThreadContent]);
+  }
+  // Escape collapses the open thread card (typically pressed while the
+  // composer is focused). Window-level listener gated on `panelOpen`,
+  // same idiom as the file-chat overlay; the card reopens automatically
+  // on the next send.
+  useExternalSyncEffect(() => {
+    if (!panelOpen) {
+      return undefined;
+    }
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPanelOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => {
+      window.removeEventListener("keydown", handler);
+    };
+  }, [panelOpen]);
+  // Dock new-chat handler: abort any live stream first — the rotation
+  // remount only swaps the surface, while the old Chat instance would
+  // keep streaming inside the query cache.
+  const startNewThread = () => {
+    stop();
+    setPanelOpen(false);
+    onNewThread();
+  };
   useLayoutEffect(() => {
     const scrollElement = threadScrollRef.current;
     if (!scrollElement) {
@@ -1074,82 +1144,66 @@ const TemplateStudioChatInner = ({
         }}
       >
         {threadVisible && (
-          <div
-            aria-label={t("chat.aiThread")}
-            className={cn(
-              "absolute start-1/2 bottom-[88px] z-40 flex max-h-[min(45dvh,380px)] min-h-0 w-[min(560px,calc(100%-2rem))] -translate-x-1/2 flex-col overflow-hidden rounded-2xl border",
-              "bg-popover/90 border-border text-popover-foreground",
-              "[backdrop-filter:blur(18px)_saturate(160%)] [-webkit-backdrop-filter:blur(18px)_saturate(160%)]",
-              "before:bg-foreground/[0.06] before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px",
-              "hover:bg-popover focus-within:bg-popover",
-              "transition-[background-color,border-color] duration-200 ease-out",
-              "shadow-[0_1px_2px_rgb(0_0_0/0.06),0_20px_64px_rgb(0_0_0/0.18)]",
-              "animate-in fade-in-0 zoom-in-95 slide-in-from-bottom-1",
-            )}
-            role="dialog"
+          <ChatThreadCard
+            onCollapse={() => setPanelOpen(false)}
+            scrollRef={threadScrollRef}
           >
-            <div
-              ref={threadScrollRef}
-              className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-3"
-              style={{ scrollbarGutter: "stable" }}
-            >
-              <ChatThreadMessages
-                approvalPendingMessageId={approvalPendingMessageId}
-                error={error}
-                isGenerating={isGenerating}
-                messages={messages}
-                onAskUserEditAndRerun={handleAskUserEditAndRerun}
-                onAskUserSubmit={handleAskUserSubmit}
-                onCreateDocumentResolve={handleCreateDocumentResolve}
-                onOpenCreatedDocument={handleOpenCreatedDocument}
-                onRemoveQueuedMessage={removeQueuedMessage}
-                onResend={resendLatestMessage}
-                queuedMessages={queuedMessages}
-                showThinkingIndicator
-                showToolCallDetails={showToolCallDetails}
-                streamdownComponents={streamdownComponents}
-              />
-              {suggestions.length > 0 && (
-                <div className="flex flex-col gap-2">
-                  {pendingCount > 1 && (
-                    <div className="flex items-center gap-1.5">
-                      <Button
-                        className="rounded-md"
-                        onClick={acceptAllPending}
-                        size="xs"
-                        type="button"
-                        variant="ghost"
-                      >
-                        {t("chat.acceptAllCount", {
-                          count: String(pendingCount),
-                        })}
-                      </Button>
-                      <Button
-                        className="rounded-md"
-                        onClick={rejectAllPending}
-                        size="xs"
-                        type="button"
-                        variant="ghost"
-                      >
-                        {t("docxReview.rejectAll")}
-                      </Button>
-                    </div>
-                  )}
-                  {suggestions.map((suggestion) => (
-                    <SuggestionCard
-                      focused={focusedId === suggestion.id}
-                      key={suggestion.id}
-                      onAccept={acceptOne}
-                      onFocus={focusSuggestion}
-                      onReject={rejectOne}
-                      showAcceptUI
-                      suggestion={suggestion}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
+            <ChatThreadMessages
+              approvalPendingMessageId={approvalPendingMessageId}
+              error={error}
+              isGenerating={isGenerating}
+              messages={messages}
+              onAskUserEditAndRerun={handleAskUserEditAndRerun}
+              onAskUserSubmit={handleAskUserSubmit}
+              onCreateDocumentResolve={handleCreateDocumentResolve}
+              onOpenCreatedDocument={handleOpenCreatedDocument}
+              onRemoveQueuedMessage={removeQueuedMessage}
+              onResend={resendLatestMessage}
+              queuedMessages={queuedMessages}
+              showThinkingIndicator
+              showToolCallDetails={showToolCallDetails}
+              streamdownComponents={streamdownComponents}
+            />
+            {suggestions.length > 0 && (
+              <div className="flex flex-col gap-2">
+                {pendingCount > 1 && (
+                  <div className="flex items-center gap-1.5">
+                    <Button
+                      className="rounded-md"
+                      onClick={acceptAllPending}
+                      size="xs"
+                      type="button"
+                      variant="ghost"
+                    >
+                      {t("chat.acceptAllCount", {
+                        count: String(pendingCount),
+                      })}
+                    </Button>
+                    <Button
+                      className="rounded-md"
+                      onClick={rejectAllPending}
+                      size="xs"
+                      type="button"
+                      variant="ghost"
+                    >
+                      {t("docxReview.rejectAll")}
+                    </Button>
+                  </div>
+                )}
+                {suggestions.map((suggestion) => (
+                  <SuggestionCard
+                    focused={focusedId === suggestion.id}
+                    key={suggestion.id}
+                    onAccept={acceptOne}
+                    onFocus={focusSuggestion}
+                    onReject={rejectOne}
+                    showAcceptUI
+                    suggestion={suggestion}
+                  />
+                ))}
+              </div>
+            )}
+          </ChatThreadCard>
         )}
 
         {!threadVisible && pendingCount > 0 && (
@@ -1164,10 +1218,11 @@ const TemplateStudioChatInner = ({
 
         <ChatAnonymizationLayer
           editor={editorController.editor}
-          enabled={false}
+          enabled={anonymized}
           workspaceId={threadRef.threadId}
         />
         <PromptBar
+          attachmentsEnabled
           canSubmitNow={canSubmitWithCurrentSnapshot}
           editorController={editorController}
           emptyPlaceholder={
@@ -1184,32 +1239,29 @@ const TemplateStudioChatInner = ({
             </span>
           }
           layout="floating"
-          newThreadLabel={t("chat.newChat")}
-          onNewThread={() => {
-            // Abort any live stream first: the rotation remount only
-            // swaps the surface, while the old Chat instance would
-            // keep streaming inside the query cache.
-            void stop();
-            setPanelOpen(false);
-            onNewThread();
-          }}
           onStop={() => {
-            void stop();
+            stop();
           }}
-          onSubmit={({ prompt }) => {
-            void ensureAIAvailable().then((available) => {
+          onSubmit={({ prompt, files }) => {
+            void ensureAIAvailable().then(async (available) => {
               if (!available) {
                 return;
               }
               // Always pop the thread open on send, even if the user
               // minimised it earlier.
               setPanelOpen(true);
-              void sendMessage({ text: prompt });
+              // The typed composer submit carries any (+) attachments
+              // (reference docs to lift clauses from); the scoped-preset
+              // path below stays text-only.
+              await sendMessage(
+                await buildChatRequestMessage({
+                  files,
+                  html: prompt,
+                }),
+              );
               return;
             });
           }}
-          onTogglePanel={() => setPanelOpen((v) => !v)}
-          panelOpen={panelOpen}
           pendingCount={pendingCount}
           presetScopeChooser={{
             appliesTo: (preset) => preset.id === SUGGEST_FIELDS_PRESET_ID,
@@ -1230,9 +1282,15 @@ const TemplateStudioChatInner = ({
           ]}
           queueWhileGenerating
           sendDisabledReason={editorReady ? undefined : "editor-loading"}
-          showThreadToggle={hasThreadContent}
           status={isGenerating ? "generating" : "idle"}
           threadHasMessages={hasMessages}
+          dock={
+            <ChatComposerDock
+              data={data}
+              onNewThread={hasMessages ? startNewThread : null}
+              threadRef={threadRef}
+            />
+          }
         />
       </ChatApprovalContext>
     </ChatMattersContext>
@@ -1278,6 +1336,59 @@ type PlaceOperationOptions = {
 // Tool-operation → spec helpers
 // ---------------------------------------------------------------------------
 
+type SuggestedTemplateFieldOutput = {
+  fieldPath: string;
+  inputType?: string | null | undefined;
+  label?: string | null | undefined;
+  aiPrompt?: string | null | undefined;
+};
+
+type SuggestedTemplateFieldsToolOutput = {
+  suggestions: SuggestedTemplateFieldOutput[];
+};
+
+const getLatestUserMessageId = (
+  messages: readonly PersistedChatMessage[],
+): string | null => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages.at(index);
+    if (message?.role === "user") {
+      return message.id;
+    }
+  }
+
+  return null;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+
+const isNullableString = (value: unknown): value is string | null | undefined =>
+  value === undefined || value === null || typeof value === "string";
+
+const isSuggestedTemplateFieldOutput = (
+  value: unknown,
+): value is SuggestedTemplateFieldOutput => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  return (
+    typeof value["fieldPath"] === "string" &&
+    isNullableString(value["inputType"]) &&
+    isNullableString(value["label"]) &&
+    isNullableString(value["aiPrompt"])
+  );
+};
+
+const isSuggestedTemplateFieldsToolOutput = (
+  value: unknown,
+): value is SuggestedTemplateFieldsToolOutput => {
+  if (!isRecord(value) || !Array.isArray(value["suggestions"])) {
+    return false;
+  }
+  return value["suggestions"].every(isSuggestedTemplateFieldOutput);
+};
+
 /**
  * Field metadata by path, joined from every `suggest_template_fields`
  * output in the thread (later outputs win). Lets an
@@ -1294,17 +1405,22 @@ const collectSuggestedFieldMeta = (
     }
     for (const part of message.parts) {
       if (
-        part.type !== "tool-suggest_template_fields" ||
-        part.state !== "output-available"
+        part.type !== "tool-call" ||
+        part.name !== "suggest_template_fields" ||
+        part.state !== "complete" ||
+        part.output === undefined
       ) {
+        continue;
+      }
+      if (!isSuggestedTemplateFieldsToolOutput(part.output)) {
         continue;
       }
       for (const suggested of part.output.suggestions) {
         byPath.set(suggested.fieldPath, {
           path: suggested.fieldPath,
-          inputType: suggested.inputType,
-          label: suggested.label,
-          aiPrompt: suggested.aiPrompt,
+          inputType: suggested.inputType ?? undefined,
+          label: suggested.label ?? undefined,
+          aiPrompt: suggested.aiPrompt ?? undefined,
         });
       }
     }

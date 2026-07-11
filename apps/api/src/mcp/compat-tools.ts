@@ -3,25 +3,30 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { entities, extractedContent, fields } from "@/api/db/schema";
 import { readEntityByIdHandler } from "@/api/handlers/entities/read-by-id";
-import { loadAnonymizationGazetteerEntries } from "@/api/lib/anonymization-blacklist";
 import { decryptContent } from "@/api/lib/content-encryption";
 import { LIMITS } from "@/api/lib/limits";
 import { brandPersistedEntityId } from "@/api/lib/safe-id-boundaries";
+import { decodeCursor } from "@/api/lib/search/cursor";
 import { getSearchProvider } from "@/api/lib/search/provider";
-import { anonymizeTextFields } from "@/api/mcp/anonymization";
 import type { McpRequestContext } from "@/api/mcp/context";
-import type { McpToolDefinition, McpToolHandler } from "@/api/mcp/tool-types";
+import type {
+  McpCompatSearchResult,
+  McpToolDefinition,
+  McpToolHandler,
+} from "@/api/mcp/tool-types";
+import { defineMcpToolSet } from "@/api/mcp/tool-types";
 import {
   buildDocumentUrl,
   buildMatterUrl,
   DEFAULT_COMPAT_SEARCH_LIMIT,
   ensureWorkspaceAccess,
   errorResult,
-  MAX_SEARCH_LIMIT,
-  normalizeTextField,
+  isToolErrorResult,
+  notFoundResult,
+  parseOptionalCursor,
   parseRequiredString,
   stringProp,
-  textResult,
+  structuredErrorResult,
 } from "@/api/mcp/tool-utils";
 
 type CompatToolName = "fetch" | "search";
@@ -29,13 +34,6 @@ type CompatToolName = "fetch" | "search";
 type FetchableEntity = {
   entityId: string;
   fieldId: string | null;
-  workspaceId: string;
-};
-
-type CompatSearchResult = {
-  id: string;
-  title: string;
-  url: string;
   workspaceId: string;
 };
 
@@ -47,7 +45,6 @@ type CompatFetchPayload = {
   workspaceId: string;
 };
 
-const ANONYMIZED_FIELD_MISSING_FALLBACK = "[REDACTED]";
 const COMPAT_FETCH_CONTENT_MAX_CHARS = 8000;
 
 const getFetchableEntityMap = async ({
@@ -107,116 +104,6 @@ const getFetchableEntityMap = async ({
   return fetchableEntityMap;
 };
 
-const anonymizeCompatSearchResults = async ({
-  context,
-  results,
-}: {
-  context: McpRequestContext;
-  results: CompatSearchResult[];
-}) => {
-  if (results.length === 0) {
-    return [];
-  }
-
-  const gazetteerEntries = await loadAnonymizationGazetteerEntries({
-    organizationId: context.organizationId,
-    scopedDb: context.scopedDb,
-  });
-
-  const byWorkspace = new Map<
-    string,
-    { indexes: number[]; titles: string[] }
-  >();
-  for (const [index, result] of results.entries()) {
-    const group = byWorkspace.get(result.workspaceId);
-    if (group) {
-      group.indexes.push(index);
-      group.titles.push(result.title);
-      continue;
-    }
-    byWorkspace.set(result.workspaceId, {
-      indexes: [index],
-      titles: [result.title],
-    });
-  }
-
-  const output: (Omit<CompatSearchResult, "workspaceId"> | undefined)[] =
-    Array.from({ length: results.length });
-
-  for (const [workspaceId, group] of byWorkspace) {
-    // oxlint-disable-next-line no-await-in-loop -- per-workspace anonymization bounds gazetteer/DB load across tenants
-    const anonymized = await anonymizeTextFields({
-      fields: group.titles,
-      gazetteerEntries,
-      organizationId: context.organizationId,
-      scopedDb: context.scopedDb,
-      workspaceId,
-    });
-
-    for (const [groupIndex, resultIndex] of group.indexes.entries()) {
-      const result = results[resultIndex];
-      if (result === undefined) {
-        continue;
-      }
-      output[resultIndex] = {
-        id: result.id,
-        title: normalizeTextField({
-          allowEmptyFallback: false,
-          fallback: result.title,
-          missingFallback: ANONYMIZED_FIELD_MISSING_FALLBACK,
-          value: anonymized.fields[groupIndex],
-        }),
-        url: result.url,
-      };
-    }
-  }
-
-  const normalizedResults: Omit<CompatSearchResult, "workspaceId">[] = [];
-  for (const result of output) {
-    if (result === undefined) {
-      continue;
-    }
-    normalizedResults.push(result);
-  }
-
-  return normalizedResults;
-};
-
-const anonymizeCompatFetchPayload = async ({
-  context,
-  text,
-  title,
-  workspaceId,
-}: {
-  context: McpRequestContext;
-  text: string;
-  title: string;
-  workspaceId: string;
-}) => {
-  const anonymized = await anonymizeTextFields({
-    fields: [title, text],
-    organizationId: context.organizationId,
-    scopedDb: context.scopedDb,
-    workspaceId,
-  });
-
-  return {
-    anonymizedEntityCount: anonymized.entityCount,
-    text: normalizeTextField({
-      allowEmptyFallback: false,
-      fallback: text,
-      missingFallback: ANONYMIZED_FIELD_MISSING_FALLBACK,
-      value: anonymized.fields[1],
-    }),
-    title: normalizeTextField({
-      allowEmptyFallback: false,
-      fallback: title,
-      missingFallback: ANONYMIZED_FIELD_MISSING_FALLBACK,
-      value: anonymized.fields[0],
-    }),
-  };
-};
-
 const getCompatSearchHits = (result: unknown): unknown[] => {
   if (typeof result !== "object" || result === null || !("hits" in result)) {
     return [];
@@ -242,7 +129,7 @@ const mapCompatSearchResults = ({
   fetchableMap: Map<string, FetchableEntity>;
   hits: unknown[];
 }) =>
-  hits.flatMap((hit): CompatSearchResult[] => {
+  hits.flatMap((hit): McpCompatSearchResult[] => {
     if (typeof hit !== "object" || hit === null) {
       return [];
     }
@@ -344,6 +231,14 @@ const getCompatFetchPayload = ({
 export const COMPAT_TOOL_DEFINITIONS = [
   {
     annotations: { readOnlyHint: true },
+    access: "read",
+    anonymized: {
+      exposure: "anonymize",
+      textFields: ["title"],
+      description:
+        "Search anonymized knowledge across accessible matters using the " +
+        "OpenAI-compatible search tool shape. Returns anonymized titles with ids and urls for follow-up fetch calls.",
+    },
     description:
       "Search knowledge across accessible matters using the OpenAI-compatible " +
       "search tool shape. Returns results with id, title, and url for follow-up fetch calls.",
@@ -353,6 +248,10 @@ export const COMPAT_TOOL_DEFINITIONS = [
         query: stringProp("Search query", {
           maxLength: LIMITS.searchQueryMaxLength,
         }),
+        cursor: stringProp(
+          "Opaque cursor from a previous search call to fetch the next page",
+          { maxLength: 512 },
+        ),
       },
       required: ["query"],
     },
@@ -361,13 +260,27 @@ export const COMPAT_TOOL_DEFINITIONS = [
   },
   {
     annotations: { readOnlyHint: true },
+    access: "read",
+    anonymized: {
+      exposure: "anonymize",
+      textFields: ["title", "text"],
+      description:
+        "Fetch anonymized document text by id using the OpenAI-compatible fetch " +
+        "tool shape. Use ids returned by the anonymized search tool. Long documents " +
+        "are returned in windows; pass the returned nextCursor back as cursor to read more.",
+    },
     description:
       "Fetch a knowledge document by id using the OpenAI-compatible fetch " +
-      "tool shape. Use ids returned by the search tool.",
+      "tool shape. Use ids returned by the search tool. Long documents are " +
+      "returned in windows; pass the returned nextCursor back as cursor to read more.",
     inputSchema: {
       type: "object",
       properties: {
         id: stringProp("Document/entity ID"),
+        cursor: stringProp(
+          "Opaque cursor from a previous fetch call to read the next window of text",
+          { maxLength: 512 },
+        ),
       },
       required: ["id"],
     },
@@ -376,46 +289,7 @@ export const COMPAT_TOOL_DEFINITIONS = [
   },
 ] as const satisfies readonly McpToolDefinition[];
 
-export const ANONYMIZED_COMPAT_TOOL_DEFINITIONS = [
-  {
-    annotations: { readOnlyHint: true },
-    description:
-      "Search anonymized knowledge across accessible matters using the " +
-      "OpenAI-compatible search tool shape. Returns anonymized titles with ids and urls for follow-up fetch calls.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: stringProp("Search query", {
-          maxLength: LIMITS.searchQueryMaxLength,
-        }),
-      },
-      required: ["query"],
-    },
-    name: "search",
-    scope: "stella:search_anonymized",
-  },
-  {
-    annotations: { readOnlyHint: true },
-    description:
-      "Fetch anonymized document text by id using the OpenAI-compatible fetch " +
-      "tool shape. Use ids returned by the anonymized search tool.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: stringProp("Document/entity ID"),
-      },
-      required: ["id"],
-    },
-    name: "fetch",
-    scope: "stella:read_anonymized",
-  },
-] as const satisfies readonly McpToolDefinition[];
-
-const handleCompatSearchTool: McpToolHandler = async ({
-  args,
-  context,
-  mode,
-}) => {
+const handleCompatSearchTool: McpToolHandler = async ({ args, context }) => {
   const query = parseRequiredString(args, "query", {
     maxLength: LIMITS.searchQueryMaxLength,
   });
@@ -423,13 +297,33 @@ const handleCompatSearchTool: McpToolHandler = async ({
     return query;
   }
 
-  const limit = DEFAULT_COMPAT_SEARCH_LIMIT;
-  const compatLimit = Math.min(limit * 2, MAX_SEARCH_LIMIT);
+  const cursor = parseOptionalCursor({ args, key: "cursor" });
+  if (isToolErrorResult(cursor)) {
+    return cursor;
+  }
+  // Reject an undecodable provider cursor instead of forwarding it: the
+  // provider treats a malformed cursor as no cursor and silently returns the
+  // first page, which would duplicate hits or loop a paginating client.
+  if (cursor !== undefined && decodeCursor(cursor) === null) {
+    return structuredErrorResult({
+      code: "validation_error",
+      message: "Invalid cursor",
+      issues: [{ path: "cursor", message: "Invalid cursor" }],
+      hint: "Pass the 'cursor' verbatim as returned by a previous call, or omit it for the first page.",
+    });
+  }
+
+  // Request exactly the page size and pass the provider cursor through so
+  // pagination stays correct: the keyset cursor tracks the provider's hit
+  // position, so over-fetching and post-filtering would desync it and skip
+  // results. Non-fetchable hits are dropped, so a page may be smaller than
+  // the page size; callers keep paging while `nextCursor` is non-null.
   const result = await getSearchProvider().search({
     query,
     organizationId: context.organizationId,
     workspaceIds: context.accessibleWorkspaceIds,
-    limit: compatLimit,
+    limit: DEFAULT_COMPAT_SEARCH_LIMIT,
+    ...(cursor === undefined ? {} : { cursor }),
   });
 
   const hits = getCompatSearchHits({
@@ -443,39 +337,32 @@ const handleCompatSearchTool: McpToolHandler = async ({
     context,
     entityIds: getCompatSearchEntityIds(hits),
   });
-  const limitedResults = mapCompatSearchResults({
+  const results = mapCompatSearchResults({
     fetchableMap,
     hits,
-  }).slice(0, limit);
-
-  if (mode === "anonymized") {
-    // MCP access is for authorized Stella users only. In anonymized
-    // mode we still search raw, non-anonymized indexed text so
-    // retrieval quality stays useful, then anonymize all returned
-    // corpus text before it leaves Stella for the AI client.
-    return textResult({
-      results: await anonymizeCompatSearchResults({
-        context,
-        results: limitedResults,
-      }),
-    });
-  }
-
-  return textResult({
-    results: limitedResults.map(({ workspaceId: _workspaceId, ...hit }) => hit),
   });
+
+  // Return the full per-workspace results (title included); the egress pipeline
+  // strips `workspaceId` in default mode and anonymizes titles in anonymized
+  // mode. The handler never branches on mode.
+  return {
+    egress: "compatSearch",
+    nextCursor: result.nextCursor,
+    results,
+  };
 };
 
-const handleCompatFetchTool: McpToolHandler = async ({
-  args,
-  context,
-  mode,
-}) => {
+const handleCompatFetchTool: McpToolHandler = async ({ args, context }) => {
   const rawEntityId = parseRequiredString(args, "id");
   if (typeof rawEntityId !== "string") {
     return rawEntityId;
   }
   const entityId = brandPersistedEntityId(rawEntityId);
+
+  const cursor = parseOptionalCursor({ args, key: "cursor" });
+  if (isToolErrorResult(cursor)) {
+    return cursor;
+  }
 
   if (context.accessibleWorkspaceIds.length === 0) {
     return errorResult("Document content is unavailable");
@@ -508,12 +395,15 @@ const handleCompatFetchTool: McpToolHandler = async ({
     row.ciphertext,
     row.iv,
   );
-  const truncated = text.length > COMPAT_FETCH_CONTENT_MAX_CHARS;
+  // Keep the full decrypted text here; windowing happens in the egress
+  // pipeline so anonymized fetches anonymize the whole document before slicing
+  // (slicing raw text first could split an entity name across the window
+  // boundary and leak its prefix).
   const result = {
     charCount: row.charCount,
     name: row.entity.name,
-    text: truncated ? text.slice(0, COMPAT_FETCH_CONTENT_MAX_CHARS) : text,
-    truncated,
+    text,
+    truncated: false,
     workspaceId: row.entity.workspaceId,
   };
 
@@ -527,7 +417,7 @@ const handleCompatFetchTool: McpToolHandler = async ({
     workspaceId: fetchPayload.workspaceId,
   });
   if (!workspaceAccess) {
-    return errorResult("Matter not found or not accessible");
+    return notFoundResult("Matter not found or not accessible");
   }
 
   const entityResult = await Result.gen(() =>
@@ -553,48 +443,26 @@ const handleCompatFetchTool: McpToolHandler = async ({
     }
   }
 
-  if (mode === "anonymized") {
-    // Same boundary as anonymized search: the user may fetch a raw
-    // document internally, but the AI client receives only the
-    // anonymized title/body generated below.
-    const anonymized = await anonymizeCompatFetchPayload({
-      context,
-      text: fetchPayload.text,
-      title: fetchPayload.title,
-      workspaceId: fetchPayload.workspaceId,
-    });
-
-    return textResult({
-      id: entityId,
-      title: anonymized.title,
-      text: anonymized.text,
-      url,
-      metadata: {
-        anonymized: true,
-        anonymizedEntityCount: anonymized.anonymizedEntityCount,
-        charCount: fetchPayload.charCount,
-        source: "stella",
-        truncated: fetchPayload.truncated,
-        workspaceId: fetchPayload.workspaceId,
-      },
-    });
-  }
-
-  return textResult({
+  // Hand the full document to the egress pipeline: it anonymizes title + text
+  // (anonymized mode) before windowing, then serializes. No mode branch here.
+  return {
+    egress: "compatFetch",
+    cursor,
     id: rawEntityId,
-    title: fetchPayload.title,
+    maxChars: COMPAT_FETCH_CONTENT_MAX_CHARS,
     text: fetchPayload.text,
+    title: fetchPayload.title,
     url,
-    metadata: {
-      charCount: fetchPayload.charCount,
-      source: "stella",
-      truncated: fetchPayload.truncated,
-      workspaceId: fetchPayload.workspaceId,
-    },
-  });
+    workspaceId: fetchPayload.workspaceId,
+  };
 };
 
 export const COMPAT_TOOL_HANDLERS = {
   fetch: handleCompatFetchTool,
   search: handleCompatSearchTool,
 } satisfies Record<CompatToolName, McpToolHandler>;
+
+export const COMPAT_TOOL_SET = defineMcpToolSet(
+  COMPAT_TOOL_DEFINITIONS,
+  COMPAT_TOOL_HANDLERS,
+);

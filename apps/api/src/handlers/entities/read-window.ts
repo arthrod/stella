@@ -41,6 +41,7 @@ const readEntitiesWindowBodySchema = t.Object({
 
 const config = {
   permissions: { workspace: ["read"] },
+  mcp: { type: "covered", by: "read_content_across_matters" },
   body: readEntitiesWindowBodySchema,
 } satisfies HandlerConfig;
 
@@ -68,7 +69,6 @@ const readEntitiesWindow = createSafeHandler(
         fieldIds: body.fieldIds ?? [],
         excludedKinds: body.excludedKinds ?? [],
         previewableForAi: body.previewableForAi ?? false,
-        includeTotalCount: false,
       }),
     );
 

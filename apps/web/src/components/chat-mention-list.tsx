@@ -9,7 +9,6 @@ import {
   FileTextIcon,
   FolderIcon,
   LandmarkIcon,
-  LayersIcon,
   LoaderIcon,
 } from "lucide-react";
 import { useTranslations } from "use-intl";
@@ -23,8 +22,8 @@ import type {
   ChatMentionOption,
   ChatReferenceCategory,
 } from "@/components/chat-mention-extension";
+import { MatterIcon } from "@/components/matter-icon";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
-import { getMatterColor } from "@/lib/matter-colors";
 import { DocumentIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/document-icon";
 
 export const ChatMentionList = ({
@@ -44,6 +43,7 @@ export const ChatMentionList = ({
   const lastClientRectRef = useRef<DOMRect | null>(null);
   const latestClientRect = clientRect?.() ?? null;
   if (latestClientRect) {
+    // eslint-disable-next-line react/react-compiler -- retains the last non-null caret rect so the Floating UI anchor keeps its position when clientRect() momentarily returns null
     lastClientRectRef.current = latestClientRect;
   }
   // Stable virtual-anchor identity for the Base UI positioner (Floating UI).
@@ -229,6 +229,7 @@ export const ChatMentionList = ({
   const groups = groupByCategory(activeItems);
   const hasMultipleCategories = groups.length > 1;
 
+  // eslint-disable-next-line react/react-compiler -- reads the retained last-known caret rect (written above from this render's clientRect) to gate the positioner; the ref persists the value across renders where clientRect() returns null
   if (!lastClientRectRef.current) {
     return null;
   }
@@ -257,7 +258,10 @@ export const ChatMentionList = ({
                 className="size-3.5 shrink-0"
                 icon={ArrowLeftIcon}
               />
-              <LayersIcon className="size-3.5 shrink-0" />
+              <MatterIcon
+                className="size-3.5 shrink-0"
+                matter={{ id: drillTarget.workspaceId, color: null }}
+              />
               <span className="truncate">{drillTarget.name}</span>
             </Button>
           )}
@@ -402,7 +406,10 @@ const useCategoryLabel = () => {
   };
 };
 
-const MentionIcon = ({
+/** Resolves the category/kind-appropriate glyph for a mention row. Exported
+ *  so the composer (+) menu's Context submenu can render byte-identical
+ *  icons for the same options the "@" popover lists. */
+export const MentionIcon = ({
   id,
   category,
   kind,
@@ -417,10 +424,7 @@ const MentionIcon = ({
 
   if (category === "workspace") {
     return (
-      <LayersIcon
-        className="size-3.5 shrink-0"
-        style={{ color: getMatterColor(id) }}
-      />
+      <MatterIcon className="size-3.5 shrink-0" matter={{ id, color: null }} />
     );
   }
 

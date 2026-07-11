@@ -9,6 +9,40 @@ const featureFlagSchema = v.optional(
   "false",
 );
 
+const hasAnySmtpTransportEnv = () =>
+  !!(
+    process.env["SMTP_HOST"] ||
+    process.env["SMTP_PORT"] ||
+    process.env["SMTP_USERNAME"] ||
+    process.env["SMTP_PASSWORD"]
+  );
+
+const inferEmailProvider = (provider: "ses" | "smtp" | undefined) => {
+  if (provider || !hasAnySmtpTransportEnv()) {
+    return provider;
+  }
+
+  return "smtp";
+};
+
+const hasRequiredEmailProviderEnv = (provider: "ses" | "smtp" | undefined) => {
+  if (provider === undefined) {
+    return true;
+  }
+
+  if (provider === "ses") {
+    return !!(
+      process.env["SES_REGION"] && process.env["TRANSACTIONAL_EMAIL_FROM"]
+    );
+  }
+
+  return !!(
+    process.env["SMTP_HOST"] &&
+    process.env["SMTP_PORT"] &&
+    process.env["TRANSACTIONAL_EMAIL_FROM"]
+  );
+};
+
 /**
  * API-specific environment variables. These are only required
  * when the full API server boots (auth, email, gotenberg, redis,
@@ -24,6 +58,7 @@ const envApi = createEnv({
         "openai",
         "azure_foundry",
         "anthropic",
+        "bedrock",
         "mistral",
         "openai_compatible",
         "huggingface",
@@ -36,17 +71,6 @@ const envApi = createEnv({
     AI_MODEL_CHAT: v.optional(v.string()),
     AI_MODEL_REASONING: v.optional(v.string()),
     AI_MODEL_PDF: v.optional(v.string()),
-    AI_DEVTOOLS_ENABLED: v.optional(
-      v.pipe(
-        v.string(),
-        v.parseBoolean(),
-        v.check(
-          (enabled) => !enabled || process.env.NODE_ENV === "development",
-          "AI_DEVTOOLS_ENABLED is local-only and requires NODE_ENV=development.",
-        ),
-      ),
-      "false",
-    ),
     GOOGLE_GENERATIVE_AI_API_KEY: v.optional(v.string()),
     OPENROUTER_API_KEY: v.optional(v.string()),
     OPENAI_API_KEY: v.optional(v.string()),
@@ -55,6 +79,7 @@ const envApi = createEnv({
     AZURE_BASE_URL: v.optional(v.pipe(v.string(), v.url())),
     AZURE_API_VERSION: v.optional(v.string()),
     ANTHROPIC_API_KEY: v.optional(v.string()),
+    BEDROCK_API_KEY: v.optional(v.string()),
     MISTRAL_API_KEY: v.optional(v.string()),
     GOOGLE_AI_API_KEY_EU: v.optional(v.string()),
     GOOGLE_AI_API_KEY_CH: v.optional(v.string()),
@@ -100,13 +125,12 @@ const envApi = createEnv({
      */
     SMOKE_SESSION_SECRET: v.optional(v.pipe(v.string(), v.minLength(32))),
     EMAIL_PROVIDER: v.pipe(
-      v.picklist(["ses", "smtp"]),
-      v.check((provider) => {
-        if (provider === "ses") {
-          return !!process.env["SES_REGION"];
-        }
-        return !!(process.env["SMTP_HOST"] && process.env["SMTP_PORT"]);
-      }, "Missing required env vars for the selected EMAIL_PROVIDER"),
+      v.optional(v.picklist(["ses", "smtp"])),
+      v.transform(inferEmailProvider),
+      v.check(
+        hasRequiredEmailProviderEnv,
+        "Missing required env vars for the selected EMAIL_PROVIDER",
+      ),
     ),
     SES_REGION: v.optional(v.string()),
     SES_ACCESS_KEY_ID: v.optional(v.string()),
@@ -125,7 +149,26 @@ const envApi = createEnv({
     ),
     SMTP_USERNAME: v.optional(v.string()),
     SMTP_PASSWORD: v.optional(v.string()),
-    TRANSACTIONAL_EMAIL_FROM: v.string(),
+    TRANSACTIONAL_EMAIL_FROM: v.optional(v.string()),
+    /**
+     * Destination address for the MCP `send_feedback` email channel. Optional:
+     * when unset the tool falls back to the github channel and refuses the
+     * email channel with a `feature_disabled` envelope. Requires a configured
+     * EMAIL_PROVIDER to actually deliver.
+     */
+    FEEDBACK_EMAIL_TO: v.optional(v.pipe(v.string(), v.email())),
+    /**
+     * Where the MCP `send_feedback` "stella" channel forwards approved,
+     * sanitized feedback: the hosted intake receiver. Defaults to Stella's
+     * hosted API (`https://api.stll.app/public/feedback`); a self-hosted
+     * deployment can point it at its own intake or a proxy. When the tool runs
+     * on the hosted instance this points back at itself, which is a normal
+     * round trip.
+     */
+    FEEDBACK_INTAKE_URL: v.optional(
+      v.pipe(v.string(), v.url()),
+      "https://api.stll.app/public/feedback",
+    ),
     FRONTEND_URL: v.pipe(v.string(), v.url()),
     PUBLIC_URL: v.optional(v.pipe(v.string(), v.url())),
     GOTENBERG_URL: v.pipe(v.string(), v.url()),
@@ -141,6 +184,15 @@ const envApi = createEnv({
       ),
     ),
     EXTENSION_ORIGIN: v.optional(v.pipe(v.string(), v.url())),
+
+    /**
+     * Self-host escape hatch for deployments without SMTP/OAuth. When enabled,
+     * Better Auth's email/password endpoints are available, but sign-up is
+     * limited to first-user bootstrap guarded by SELFHOST_BOOTSTRAP_TOKEN.
+     * Hosted deployments should leave this off.
+     */
+    SELFHOST_LOCAL_PASSWORD_AUTH: featureFlagSchema,
+    SELFHOST_BOOTSTRAP_TOKEN: v.optional(v.pipe(v.string(), v.minLength(32))),
 
     /**
      * Comma-separated CIDRs of proxies the API may trust to set
@@ -172,20 +224,25 @@ const envApi = createEnv({
     FEATURE_TODOS: featureFlagSchema,
     FEATURE_MCP: featureFlagSchema,
     FEATURE_DESKTOP_EDITING: featureFlagSchema,
+    FEATURE_TIME_BILLING: featureFlagSchema,
     FEATURE_WEB_SEARCH: featureFlagSchema,
 
     /**
      * Web search backend. Only Tavily is wired today; add a new
      * picklist entry alongside its WebSearchProvider implementation.
      * Leave unset to disable the tool even when FEATURE_WEB_SEARCH=true.
+     * TAVILY_API_KEY is the shared platform key; an org's own BYOK key
+     * (set in settings) takes precedence per request, so a BYOK-only
+     * deploy sets WEB_SEARCH_PROVIDER while leaving TAVILY_API_KEY unset.
      */
     WEB_SEARCH_PROVIDER: v.optional(v.picklist(["tavily"])),
     TAVILY_API_KEY: v.optional(v.string()),
 
     /**
      * URL-fetch backend used by the chat `fetch_url` tool. Jina Reader
-     * (r.jina.ai) is keyless at low volume; supply JINA_API_KEY to
-     * raise the rate limit.
+     * (r.jina.ai) is keyless at low volume; supply JINA_API_KEY (or an
+     * org BYOK key in settings, which takes precedence) to raise the
+     * rate limit.
      */
     WEB_FETCH_PROVIDER: v.optional(v.picklist(["jina"])),
     JINA_API_KEY: v.optional(v.string()),
@@ -250,6 +307,18 @@ const envApi = createEnv({
 
     /** Enables pre-flight usage-limit enforcement when true. */
     USAGE_ENFORCEMENT_ENABLED: featureFlagSchema,
+
+    /**
+     * Break-glass diagnostics. When true, 5xx responses additionally
+     * log the full `error.msg` and `error.stack` so a deployment can be
+     * made fully diagnosable by flipping one env var, no rebuild needed.
+     * Default false preserves the redacted-by-default behaviour: only
+     * the non-PII structural fingerprint (class, code, code-location
+     * frames) is logged. Enable transiently for an investigation, never
+     * as a standing default, since stacks/messages may carry client
+     * data.
+     */
+    DEBUG_UNREDACTED_ERRORS: featureFlagSchema,
 
     /**
      * Deployment-owned usage-policy seed list. JSON array of

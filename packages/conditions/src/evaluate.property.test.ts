@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import fc from "fast-check";
 import * as v from "valibot";
 
+import { propertyConfig } from "@stll/property-testing";
+
 import {
   type ConditionValue,
   evaluateCondition,
@@ -109,7 +111,10 @@ const makeResolver =
     if (operand.type === "kind") {
       return data["kind"];
     }
-    return data[operand.field];
+    if (operand.type === "builtin") {
+      return data[operand.field];
+    }
+    return undefined;
   };
 
 const negate = (child: ConditionNode): ConditionNode => ({
@@ -128,6 +133,7 @@ describe("evaluator invariants (property-based)", () => {
           "boolean",
         );
       }),
+      propertyConfig(),
     );
   });
 
@@ -147,6 +153,7 @@ describe("evaluator invariants (property-based)", () => {
           expect(evaluateCondition(group, resolve)).toBe(expected);
         },
       ),
+      propertyConfig(),
     );
   });
 
@@ -158,6 +165,7 @@ describe("evaluator invariants (property-based)", () => {
           evaluateCondition(node, resolve),
         );
       }),
+      propertyConfig(),
     );
   });
 
@@ -181,6 +189,7 @@ describe("evaluator invariants (property-based)", () => {
           !evaluateCondition(neqNode, resolve),
         );
       }),
+      propertyConfig(),
     );
   });
 
@@ -209,6 +218,7 @@ describe("evaluator invariants (property-based)", () => {
           );
         },
       ),
+      propertyConfig(),
     );
   });
 
@@ -230,6 +240,7 @@ describe("evaluator invariants (property-based)", () => {
           !evaluateCondition(notEmpty, resolve),
         );
       }),
+      propertyConfig(),
     );
   });
 
@@ -258,6 +269,7 @@ describe("evaluator invariants (property-based)", () => {
           expect(evaluateCondition(cmp("lt"), resolve)).toBe(false);
         },
       ),
+      propertyConfig(),
     );
   });
 
@@ -279,6 +291,7 @@ describe("evaluator invariants (property-based)", () => {
           expect(evaluateCondition(node, makeResolver({}))).toBe(false);
         },
       ),
+      propertyConfig(),
     );
   });
 });

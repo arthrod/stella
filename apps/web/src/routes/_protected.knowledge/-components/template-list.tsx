@@ -70,6 +70,7 @@ import { UserAvatar } from "@/components/user-avatar";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useI18nStore } from "@/i18n/i18n-store";
 import { api } from "@/lib/api";
+import { compareByLocale } from "@/lib/collation";
 import { DOCX_MIME, TOOLBAR_ROW_MIN_HEIGHT } from "@/lib/consts";
 import { userErrorMessage } from "@/lib/errors";
 import { formatRelativeTime } from "@/lib/relative-time";
@@ -140,6 +141,7 @@ export const TemplateList = ({
 }: TemplateListProps) => {
   const t = useTranslations();
   const format = useFormatter();
+  const lang = useI18nStore((s) => s.lang);
   const canCreateTemplate = usePermissions({ template: ["create"] });
   const assignCategory = useAssignTemplateCategory();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -255,7 +257,7 @@ export const TemplateList = ({
 
   const allTags = [
     ...new Set(templates.flatMap((template) => template.tags ?? [])),
-  ].sort((a, b) => a.localeCompare(b));
+  ].sort(compareByLocale(lang));
 
   const visibleTemplates = tagFilter
     ? templates.filter((template) => template.tags?.includes(tagFilter))
@@ -331,7 +333,7 @@ export const TemplateList = ({
                 >
                   <PlusIcon />
                   {discovering
-                    ? t("templates.discovering")
+                    ? t("common.loading")
                     : t("templates.newTemplate")}
                 </Button>
                 <input
@@ -585,6 +587,7 @@ const TemplateRow = ({
     null;
   const t = useTranslations();
   const lang = useI18nStore((s) => s.lang);
+  const canUseTemplate = usePermissions({ template: ["use"] });
   const canUpdateTemplate = usePermissions({ template: ["update"] });
   const canDeleteTemplate = usePermissions({ template: ["delete"] });
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -632,18 +635,20 @@ const TemplateRow = ({
       icon: <SquarePenIcon />,
       onClick: onSelect,
     },
-    {
+  ];
+  if (canUseTemplate) {
+    rowActions.push({
       label: t("templates.useTemplate"),
       icon: <WandSparklesIcon />,
       onClick: () => setUseOpen(true),
-    },
-    {
-      label: t("common.download"),
-      icon: <DownloadIcon />,
-      onClick: () =>
-        void downloadTemplateSource(template.id, t("common.unexpectedError")),
-    },
-  ];
+    });
+  }
+  rowActions.push({
+    label: t("common.download"),
+    icon: <DownloadIcon />,
+    onClick: () =>
+      void downloadTemplateSource(template.id, t("common.unexpectedError")),
+  });
   if (canUpdateTemplate) {
     const categorySubmenu: ContextMenuAction[] = [
       categoryAction(
@@ -662,7 +667,7 @@ const TemplateRow = ({
       );
     }
     categorySubmenu.push({
-      label: t("templates.createCategory"),
+      label: t("common.createCategory"),
       icon: <PlusIcon />,
       separatorBefore: true,
       onClick: () => setCreateCategoryOpen(true),
@@ -705,14 +710,16 @@ const TemplateRow = ({
   // mirroring the clause list; Use (fill) stays an explicit CTA.
   const actions = (
     <div className="relative z-10 flex shrink-0 items-center gap-2">
-      <Button
-        className="max-sm:hidden"
-        onClick={() => setUseOpen(true)}
-        size="xs"
-        variant="outline"
-      >
-        {t("templates.useTemplate")}
-      </Button>
+      {canUseTemplate && (
+        <Button
+          className="max-sm:hidden"
+          onClick={() => setUseOpen(true)}
+          size="xs"
+          variant="outline"
+        >
+          {t("templates.useTemplate")}
+        </Button>
+      )}
       <span className="hidden sm:inline-flex">
         <Tooltip
           content={template.authorName}
@@ -846,12 +853,14 @@ const TemplateRow = ({
         open={guidanceOpen}
         template={template}
       />
-      <UseTemplateDialog
-        onOpenChange={setUseOpen}
-        open={useOpen}
-        templateId={template.id}
-        templateName={template.name}
-      />
+      {canUseTemplate && (
+        <UseTemplateDialog
+          onOpenChange={setUseOpen}
+          open={useOpen}
+          templateId={template.id}
+          templateName={template.name}
+        />
+      )}
       <CategoryFormDialog
         onCreated={(category) =>
           void onAssignCategory(template.id, category.id)
@@ -1275,6 +1284,7 @@ const TemplateLanguagesField = ({
   const selectedCodes = new Set(languages);
   // Offer the full ISO 639-1 living-language list, minus already-picked codes,
   // sorted by the localized label so search and scanning are predictable.
+  const compareLabel = compareByLocale(lang);
   const options: LanguagePick[] = LANGUAGES.filter(
     (language) => !selectedCodes.has(language.code),
   )
@@ -1282,7 +1292,7 @@ const TemplateLanguagesField = ({
       code: language.code,
       label: languageDisplayName(language.code, lang),
     }))
-    .sort((a, b) => a.label.localeCompare(b.label, lang));
+    .sort((a, b) => compareLabel(a.label, b.label));
 
   const atLimit = languages.length >= MAX_TEMPLATE_LANGUAGES;
 

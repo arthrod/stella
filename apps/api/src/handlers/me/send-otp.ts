@@ -2,6 +2,7 @@ import { panic, Result } from "better-result";
 
 import { env } from "@/api/env";
 import { createSafeSessionHandler } from "@/api/lib/api-handlers";
+import type { SessionHandlerConfig } from "@/api/lib/api-handlers";
 import {
   checkUserOrganizationOwnership,
   createDeleteAccountOtp,
@@ -11,7 +12,9 @@ import { sendOTPEmail } from "@/api/lib/email";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { extractLangFromRequest } from "@/api/lib/locale";
 
-const config = {};
+const config = {
+  mcp: { type: "internal", reason: "account_lifecycle" },
+} satisfies SessionHandlerConfig;
 
 const deleteAccountSendOtp = createSafeSessionHandler(
   config,
@@ -30,6 +33,7 @@ const deleteAccountSendOtp = createSafeSessionHandler(
     if (ownershipCheck.isSoleOwner) {
       return Result.err(
         new HandlerError({
+          code: "account_deletion_sole_owner",
           status: 400,
           message: `Cannot delete account because you are the sole owner of organization "${ownershipCheck.orgName}". Please transfer ownership or delete the organization first.`,
         }),

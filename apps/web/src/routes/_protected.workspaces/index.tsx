@@ -11,7 +11,7 @@ import {
   PlusIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
-import { useTranslations } from "use-intl";
+import { useLocale, useTranslations } from "use-intl";
 import * as v from "valibot";
 import { useShallow } from "zustand/shallow";
 
@@ -44,6 +44,7 @@ import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { usePermissions } from "@/hooks/use-permissions";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
 import { pageTitle } from "@/lib/page-title";
+import { ensureRouteQueryData } from "@/lib/react-query";
 import { AlphabetIndex } from "@/routes/_protected.workspaces/-components/alphabet-index";
 import { ClientGroupHeader } from "@/routes/_protected.workspaces/-components/client-group-header";
 import { MatterCard } from "@/routes/_protected.workspaces/-components/matter-card";
@@ -56,7 +57,7 @@ import { useSortLabels } from "@/routes/_protected.workspaces/-hooks/use-sort-la
 import { getMatterOrganizationResetPatch } from "@/routes/_protected.workspaces/-organization-reset";
 import {
   workspacesKeys,
-  workspacesOptions,
+  workspacesRouteOptions,
 } from "@/routes/_protected.workspaces/-queries";
 import { useCreateMatterStore } from "@/routes/_protected.workspaces/-store/create-matter-store";
 import type {
@@ -79,6 +80,14 @@ const searchSchema = v.object({
 
 export const Route = createFileRoute("/_protected/workspaces/")({
   validateSearch: searchSchema,
+  loader: async ({ context }) => {
+    // Prime the workspaces query the page suspends on so the fetch starts
+    // during navigation instead of after the component mounts and suspends.
+    await ensureRouteQueryData(
+      context.queryClient,
+      workspacesRouteOptions(context.user.activeOrganizationId),
+    );
+  },
   head: () => ({
     meta: [{ title: pageTitle("common.matters") }],
   }),
@@ -90,12 +99,13 @@ const FOCUS_FLASH_MS = 1500;
 
 function RouteComponent() {
   const t = useTranslations();
+  const locale = useLocale();
   const queryClient = useQueryClient();
   const activeOrganizationId = Route.useRouteContext({
     select: (ctx) => ctx.user.activeOrganizationId,
   });
   const { data, isFetching } = useSuspenseQuery(
-    workspacesOptions(activeOrganizationId),
+    workspacesRouteOptions(activeOrganizationId),
   );
   const canCreateMatter = usePermissions({ workspace: ["create"] });
   const openCreateMatter = useCreateMatterStore((s) => s.openDialog);
@@ -159,11 +169,11 @@ function RouteComponent() {
   const filtered = applyMattersFilters(searched, filters);
 
   const sorted = filtered.toSorted((a, b) => {
-    const cmp = compareWorkspacesByKey(a, b, sortKey);
+    const cmp = compareWorkspacesByKey(a, b, sortKey, locale);
     return sortDesc ? -cmp : cmp;
   });
 
-  const groups = groupBy === "client" ? groupByClient(sorted) : null;
+  const groups = groupBy === "client" ? groupByClient(sorted, locale) : null;
 
   const collapsedSet = new Set(collapsedGroups);
   const displayed = groups
@@ -405,7 +415,7 @@ const MattersToolbarSkeleton = () => {
       </Button>
       <Button className="ms-auto" disabled size="xs">
         <PlusIcon />
-        {t("workspaces.newMatter")}
+        {t("common.newMatter")}
       </Button>
     </div>
   );

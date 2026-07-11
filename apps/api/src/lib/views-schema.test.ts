@@ -4,6 +4,7 @@ import fc from "fast-check";
 import * as v from "valibot";
 
 import { conditionNodeSchema } from "@stll/conditions";
+import { propertyConfig } from "@stll/property-testing";
 
 import { tConditionNode } from "@/api/lib/conditions/contract";
 import {
@@ -97,6 +98,36 @@ describe("parseViewLayoutSafe", () => {
     });
   });
 
+  test("drops a filter carrying a formula operand (no SQL transpilation)", () => {
+    // A formula operand is a valid AST node (it exists for template rules) but
+    // cannot compile to SQL, so a filter that smuggles one in is stripped.
+    const withFormula = {
+      version: 1,
+      type: "table",
+      filters: [
+        {
+          type: "group",
+          combinator: "and",
+          children: [
+            {
+              type: "compare",
+              left: { type: "formula", expr: "rent * 12" },
+              op: "lt",
+              right: { type: "literal", value: 100_000 },
+            },
+          ],
+        },
+      ],
+      sorts: [],
+      hiddenProperties: [],
+      columnOrder: ["name"],
+      columnPinning: [],
+    };
+
+    expect(parseViewLayout(withFormula).filters).toEqual([]);
+    expect(parseViewLayoutSafe(withFormula).filters).toEqual([]);
+  });
+
   test("falls back to a minimal layout for an unrecoverable value and never throws", () => {
     expect(parseViewLayoutSafe({ type: "garbage" })).toEqual({
       type: "filesystem",
@@ -119,6 +150,20 @@ describe("view template property validation", () => {
         name: "Summary",
         content: { version: 1, type: "text" },
         tool: { version: 1, type: "ai-model", prompt: "" },
+        createIfMissing: true,
+      }),
+    ).toBe(true);
+  });
+
+  test("accepts explicit role absence", () => {
+    expect(
+      Value.Check(tViewTemplatePropertySchema, {
+        version: 1,
+        sourceId: "source_document_type",
+        name: "Document Type",
+        content: { version: 1, type: "text" },
+        tool: { version: 1, type: "manual-input" },
+        role: null,
         createIfMissing: true,
       }),
     ).toBe(true);
@@ -300,6 +345,7 @@ describe("conditionNodeSchema — properties", () => {
         expect(v.is(conditionNodeSchema, filter)).toBe(true);
         expect(Value.Check(tConditionNode, filter)).toBe(true);
       }),
+      propertyConfig(),
     );
   });
 });
@@ -311,6 +357,7 @@ describe("viewLayoutSchema — properties", () => {
         expect(v.is(viewLayoutSchema, layout)).toBe(true);
         expect(Value.Check(tViewLayoutSchema, layout)).toBe(true);
       }),
+      propertyConfig(),
     );
   });
 
@@ -319,6 +366,7 @@ describe("viewLayoutSchema — properties", () => {
       fc.property(arbLayout, (layout) => {
         expect(parseViewLayout(layout)).toEqual(layout as ViewLayout);
       }),
+      propertyConfig(),
     );
   });
 
@@ -338,6 +386,7 @@ describe("viewLayoutSchema — properties", () => {
           expect(Value.Check(tViewLayoutSchema, polluted)).toBe(false);
         },
       ),
+      propertyConfig(),
     );
   });
 

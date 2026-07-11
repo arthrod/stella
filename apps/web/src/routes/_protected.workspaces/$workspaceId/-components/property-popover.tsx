@@ -156,7 +156,11 @@ export const PropertyPopover = ({
   // design — file columns are created by upload, not by user choice,
   // and the composer has no UI for them. Hiding the entry here keeps
   // a save from silently rewriting the file column as text/manual.
-  const canEditViaComposer = property.content.type !== "file";
+  // Verdict columns are system-computed (read-only), so they are not
+  // editable via the composer either.
+  const canEditViaComposer =
+    property.content.type !== "file" &&
+    property.tool.type !== "playbook-verdict";
 
   // `useOptimistic` mirrors the server `dependencies` while a save is
   // in flight so rapid successive edits compose against the latest
@@ -179,6 +183,7 @@ export const PropertyPopover = ({
   // Mirror the latest render value into the ref during render. Read
   // only from event handlers (replaceDependency), so this is the
   // sanctioned latest-value pattern.
+  // eslint-disable-next-line react/react-compiler -- sanctioned latest-value mirror; read only from event handlers (replaceDependency), never for rendered output
   latestDependenciesRef.current = displayedDependencies;
   const dependencyGenerationRef = useRef(0);
   const [, startDepsTransition] = useTransition();

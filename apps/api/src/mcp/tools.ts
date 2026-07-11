@@ -8,55 +8,33 @@ import {
   isExternalMcpToolName,
   isSkillToolName,
 } from "@/api/lib/mcp-upstream/namespace";
-import { COMPAT_TOOL_HANDLERS } from "@/api/mcp/compat-tools";
 import type { McpMode } from "@/api/mcp/constants";
 import type { McpRequestContext } from "@/api/mcp/context";
+import { finalizeMcpEgress } from "@/api/mcp/egress";
 import { dispatchGatewayToolCall } from "@/api/mcp/gateway/dispatch-call";
 import {
   getGatewayMcpToolDefinition,
+  isMcpToolFeatureEnabled,
   listGatewayMcpToolDefinitions,
   toMcpTools,
 } from "@/api/mcp/gateway/list-tools";
-import { getStaticMcpToolDefinition } from "@/api/mcp/static-tool-definitions";
-import { STELLA_TOOL_HANDLERS } from "@/api/mcp/stella-tools";
-import { TEMPLATE_TOOL_HANDLERS } from "@/api/mcp/template-tools";
+import {
+  DEFAULT_MCP_TOOL_SETS,
+  getStaticMcpToolDefinition,
+} from "@/api/mcp/static-tool-definitions";
 import type {
   McpToolDefinition,
   McpToolHandler,
   ToolScope,
 } from "@/api/mcp/tool-types";
-import { errorResult } from "@/api/mcp/tool-utils";
+import {
+  MCP_INTERNAL_ERROR_HINT,
+  structuredErrorResult,
+} from "@/api/mcp/tool-utils";
 
-const MCP_TOOL_HANDLERS = new Map<string, McpToolHandler>([
-  ["fetch", COMPAT_TOOL_HANDLERS.fetch],
-  ["search", COMPAT_TOOL_HANDLERS.search],
-  ["get_matter_overview", STELLA_TOOL_HANDLERS.get_matter_overview],
-  ["list_matters", STELLA_TOOL_HANDLERS.list_matters],
-  ["read_case_law_decision", STELLA_TOOL_HANDLERS.read_case_law_decision],
-  ["read_contact", STELLA_TOOL_HANDLERS.read_contact],
-  [
-    "read_content_across_matters",
-    STELLA_TOOL_HANDLERS.read_content_across_matters,
-  ],
-  ["search_case_law", STELLA_TOOL_HANDLERS.search_case_law],
-  ["search_across_matters", STELLA_TOOL_HANDLERS.search_across_matters],
-  [
-    "set_practice_jurisdictions",
-    STELLA_TOOL_HANDLERS.set_practice_jurisdictions,
-  ],
-  ["list_templates", TEMPLATE_TOOL_HANDLERS.list_templates],
-  ["describe_template", TEMPLATE_TOOL_HANDLERS.describe_template],
-  ["fill_template", TEMPLATE_TOOL_HANDLERS.fill_template],
-  ["create_template", TEMPLATE_TOOL_HANDLERS.create_template],
-  [
-    "configure_template_fields",
-    TEMPLATE_TOOL_HANDLERS.configure_template_fields,
-  ],
-  [
-    "template_marker_reference",
-    TEMPLATE_TOOL_HANDLERS.template_marker_reference,
-  ],
-]);
+const MCP_TOOL_HANDLERS = new Map<string, McpToolHandler>(
+  DEFAULT_MCP_TOOL_SETS.flatMap((toolSet) => Object.entries(toolSet.handlers)),
+);
 
 export const getMcpToolDefinition = async (
   toolName: string,
@@ -124,23 +102,65 @@ export const handleMcpToolCall = async ({
     return gatewayResult;
   }
 
-  if (!getStaticMcpToolDefinition(toolName, mode)) {
-    return errorResult(`Unknown tool: ${toolName}`);
+  const staticTool = getStaticMcpToolDefinition(toolName, mode);
+  if (!staticTool) {
+    return structuredErrorResult({
+      code: "unknown_tool",
+      message: `Unknown tool: ${toolName}`,
+      hint: "Call tools/list for the tools available to this session.",
+    });
+  }
+
+  // Reject a gated-off tool even when the caller names it directly: the list
+  // surface hides it, and this closes the guess-the-name bypass so the gate
+  // holds on both the advertisement and the dispatch path.
+  if (!isMcpToolFeatureEnabled(staticTool.feature)) {
+    return structuredErrorResult({
+      code: "feature_disabled",
+      message: "This feature is not enabled on this deployment",
+      hint: "This deployment or organization has this feature turned off; it cannot be enabled from the client.",
+    });
+  }
+
+  // Destructive-op guardrail (agent misuse protection): an irreversible tool
+  // (delete_*) must be called with `confirm: true`, set only after a human user
+  // approved the action. Runs before dispatch so the mutation never starts
+  // without the confirmation.
+  if (
+    staticTool.annotations?.destructiveHint === true &&
+    args["confirm"] !== true
+  ) {
+    return structuredErrorResult({
+      code: "confirmation_required",
+      message: `${toolName} is an irreversible operation and was called without confirmation`,
+      hint: "This operation is irreversible. Confirm with the human user, then retry with confirm: true.",
+    });
   }
 
   const handler = MCP_TOOL_HANDLERS.get(toolName);
   if (!handler) {
-    return errorResult(`Unknown tool: ${toolName}`);
+    return structuredErrorResult({
+      code: "unknown_tool",
+      message: `Unknown tool: ${toolName}`,
+      hint: "Call tools/list for the tools available to this session.",
+    });
   }
 
   try {
-    return await handler({
-      args,
-      context,
-      mode,
-    });
+    // Handlers never see the mode: they return either a finished result or an
+    // egress plan. The central pipeline applies anonymization (anonymized mode)
+    // before windowing, then serializes. Both steps run inside this try so an
+    // anonymization or windowing failure is captured like any handler failure.
+    const response = await handler({ args, context });
+    return await finalizeMcpEgress({ context, mode, response });
   } catch (error) {
     captureError(error, { source: "mcp", toolName });
-    return errorResult("Tool execution failed");
+    // Generic message: never leak internals to the caller. `captureError` keeps
+    // the real exception for observability.
+    return structuredErrorResult({
+      code: "internal_error",
+      message: "Tool execution failed",
+      hint: MCP_INTERNAL_ERROR_HINT,
+    });
   }
 };

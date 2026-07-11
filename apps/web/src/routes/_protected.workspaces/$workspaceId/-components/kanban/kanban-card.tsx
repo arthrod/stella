@@ -16,6 +16,7 @@ import { cn } from "@stll/ui/lib/utils";
 
 import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { useInlineRename } from "@/hooks/use-inline-rename";
+import { toSafeId } from "@/lib/safe-id";
 import { isFileDisplayable } from "@/lib/types";
 import type {
   WorkspaceEntity,
@@ -23,9 +24,10 @@ import type {
   WorkspaceProperty,
 } from "@/lib/types";
 import { ActiveEditBadge } from "@/routes/_protected.workspaces/$workspaceId/-components/active-edit-badge";
+import { useCellMetadataFlags } from "@/routes/_protected.workspaces/$workspaceId/-components/cell-metadata-flags";
 import { ENTITY_DRAG_TYPE } from "@/routes/_protected.workspaces/$workspaceId/-components/drag-constants";
+import { EditableField } from "@/routes/_protected.workspaces/$workspaceId/-components/editable-field";
 import { EntityKindIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/entity-kind-icon";
-import { FieldValue } from "@/routes/_protected.workspaces/$workspaceId/-components/field-value";
 import { InlineEdit } from "@/routes/_protected.workspaces/$workspaceId/-components/inline-edit";
 import { useInspectorStore } from "@/routes/_protected.workspaces/$workspaceId/-components/inspector/inspector-store";
 import {
@@ -162,16 +164,25 @@ export const KanbanCard = ({
 
   const isTask = entity.kind === "task";
   const visibleCardFields = cardFields ?? [];
-  const valueFields = visibleCardFields.filter(
-    (fieldId) =>
-      fieldId !== getInternalPropertyId("created-by") &&
-      fieldId !== getInternalPropertyId("updated-at") &&
-      fieldId !== getInternalPropertyId("version") &&
-      fieldId !== getInternalPropertyId("status") &&
-      fieldId !== getInternalPropertyId("priority") &&
-      fieldId !== getInternalPropertyId("due-date") &&
-      fieldId !== getInternalPropertyId("kind"),
-  );
+  const valueFields = visibleCardFields.filter((fieldId) => {
+    if (
+      fieldId === getInternalPropertyId("created-by") ||
+      fieldId === getInternalPropertyId("updated-at") ||
+      fieldId === getInternalPropertyId("version") ||
+      fieldId === getInternalPropertyId("status") ||
+      fieldId === getInternalPropertyId("priority") ||
+      fieldId === getInternalPropertyId("due-date") ||
+      fieldId === getInternalPropertyId("kind")
+    ) {
+      return false;
+    }
+    // Verdict tiers render as unlabeled compliant/deviation tags that clutter
+    // the card and can't be toggled off (verdict properties are excluded from
+    // the visibility menu). The tier is already conveyed by the column when
+    // grouping by a verdict, so keep verdict tiers off kanban cards.
+    const property = properties?.find((p) => p.id === fieldId);
+    return property?.tool.type !== "playbook-verdict";
+  });
   const showAuthor = visibleCardFields.includes(
     getInternalPropertyId("created-by"),
   );
@@ -215,16 +226,20 @@ export const KanbanCard = ({
       {properties && valueFields.length > 0 && (
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           {valueFields.map((fieldId) => {
-            const field = entity.fields[fieldId];
-            const property = properties.find((p) => p.id === fieldId);
+            const propertyId = toSafeId<"property">(fieldId);
+            const field = entity.fields[propertyId];
+            const property = properties.find((p) => p.id === propertyId);
             if (!property || !field || field.content.type === "file") {
               return null;
             }
             return (
               <KanbanCardFieldValue
                 content={field.content}
+                entity={entity}
+                fieldId={field.id}
                 key={fieldId}
                 property={property}
+                workspaceId={workspaceId}
               />
             );
           })}
@@ -273,6 +288,7 @@ export const KanbanCard = ({
             "bg-card relative block w-full cursor-pointer rounded-lg border p-3 text-start shadow-xs transition-shadow hover:shadow-md",
             isActiveTask && "ring-primary/30 ring-2",
           )}
+          // eslint-disable-next-line react/react-compiler -- containedHandler house pattern; cardRef is handed to the helper, not read for rendered output
           onClick={containedHandler(cardRef, () =>
             useInspectorStore.getState().openTask({
               taskId: entity.entityId,
@@ -308,6 +324,7 @@ export const KanbanCard = ({
             "bg-card relative block w-full cursor-pointer rounded-lg border p-3 text-start shadow-xs transition-shadow hover:shadow-md",
             isActivePeek && "ring-primary/30 ring-2",
           )}
+          // eslint-disable-next-line react/react-compiler -- containedHandler house pattern; cardRef is handed to the helper, not read for rendered output
           onClick={containedHandler(cardRef, () =>
             useInspectorStore.getState().openFile({
               id: file.fieldId,
@@ -471,15 +488,45 @@ const KanbanEntityMetadataBadges = ({
 
 type KanbanCardFieldValueProps = {
   content: WorkspaceFieldContent;
+  entity: WorkspaceEntity;
+  fieldId: string;
   property: WorkspaceProperty;
+  workspaceId: string;
 };
 
 const KanbanCardFieldValue = ({
   content,
+  entity,
+  fieldId,
   property,
-}: KanbanCardFieldValueProps) => (
-  <FieldValue content={content} property={property} variant="kanban" />
-);
+  workspaceId,
+}: KanbanCardFieldValueProps) => {
+  const { setLocked } = useCellMetadataFlags({
+    workspaceId,
+    entityId: entity.entityId,
+    propertyId: property.id,
+    metadata: entity.cellMetadata[property.id],
+  });
+  const manualSaveProps =
+    property.tool.type === "ai-model"
+      ? { onManualSave: () => setLocked(true) }
+      : {};
+
+  return (
+    <EditableField
+      content={content}
+      displayVariant="kanban"
+      entityId={entity.entityId}
+      entityKind={entity.kind}
+      fieldId={fieldId}
+      property={property}
+      propertyId={property.id}
+      readonly={entity.readOnly}
+      workspaceId={workspaceId}
+      {...manualSaveProps}
+    />
+  );
+};
 
 type KanbanCardFooterProps = {
   entity: WorkspaceEntity;
@@ -498,12 +545,15 @@ const KanbanCardFooter = ({
     return null;
   }
 
-  const authorInitials = entity.createdBy
-    ?.split(" ")
-    .map((part) => part.at(0))
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
+  const authorInitials =
+    entity.createdBy === null
+      ? ""
+      : entity.createdBy
+          .split(" ")
+          .map((part) => part.at(0))
+          .join("")
+          .slice(0, 2)
+          .toUpperCase();
 
   return (
     <div className="text-muted-foreground flex min-w-0 items-center gap-2 text-xs leading-none">

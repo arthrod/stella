@@ -1,11 +1,36 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  blockDirectiveLinePattern,
   classifyMarker,
   DIRECTIVE_KINDS,
   isBlockDirectiveKind,
+  isFieldPath,
+  isSafeFieldPath,
+  scanInvalidMarkers,
   scanMarkers,
 } from "./markers.js";
+
+describe("isSafeFieldPath", () => {
+  test("keeps valid dotted marker paths that cannot mutate prototypes", () => {
+    expect(isFieldPath("party.name")).toBe(true);
+    expect(isSafeFieldPath("party.name")).toBe(true);
+    expect(isSafeFieldPath("line-item.value_2")).toBe(true);
+  });
+
+  test("rejects prototype-polluting path segments", () => {
+    const unsafePaths = [
+      "__proto__.polluted",
+      "client.constructor.polluted",
+      "client.prototype.polluted",
+    ];
+
+    for (const path of unsafePaths) {
+      expect(isFieldPath(path)).toBe(true);
+      expect(isSafeFieldPath(path)).toBe(false);
+    }
+  });
+});
 
 describe("classifyMarker", () => {
   test("classifies each directive form", () => {
@@ -106,6 +131,57 @@ describe("scanMarkers", () => {
         meta: { kind: "placeholder", expr: "tenant.name" },
       },
     ]);
+  });
+});
+
+describe("scanInvalidMarkers", () => {
+  test("flags brace spans that look like markers but fail classification", () => {
+    const text = "Hi {{my field}} and {{@clause:}} but {{tenant.name}}.";
+    const invalid = scanInvalidMarkers(text);
+
+    expect(invalid.map((m) => m.raw)).toEqual(["{{my field}}", "{{@clause:}}"]);
+    // Offsets round-trip back to the exact source span.
+    for (const marker of invalid) {
+      expect(text.slice(marker.start, marker.end)).toBe(marker.raw);
+    }
+  });
+
+  test("ignores every recognized directive", () => {
+    const text =
+      "{{@num:scope}} {{#if a}} {{tenant.name}} {{/if}} {{@clause:X}}";
+    expect(scanInvalidMarkers(text)).toEqual([]);
+  });
+
+  test("trims the reported inner text", () => {
+    const [only] = scanInvalidMarkers("{{ has spaces }}");
+    expect(only?.raw).toBe("{{ has spaces }}");
+    expect(only?.inner).toBe("has spaces");
+  });
+
+  test("is the exact complement of scanMarkers", () => {
+    const text = "{{good}} {{not good}} {{@ref:k}} {{@bad:}}";
+    const recognized = scanMarkers(text).length;
+    const invalid = scanInvalidMarkers(text).length;
+    // Every `{{...}}` span lands in exactly one of the two scans.
+    expect(recognized + invalid).toBe(4);
+  });
+});
+
+describe("blockDirectiveLinePattern", () => {
+  test("captures a whole-line block directive tag and expression", () => {
+    const match = blockDirectiveLinePattern().exec(
+      "  {{ #if tenant.active }} ",
+    );
+
+    expect(match?.groups?.["tag"]).toBe("#if");
+    expect(match?.groups?.["expr"]?.trim()).toBe("tenant.active");
+    expect(match?.[1]).toBe("#if");
+  });
+
+  test("rejects directive prefixes that are not complete tokens", () => {
+    expect(blockDirectiveLinePattern().test("{{ #ifx tenant.active }}")).toBe(
+      false,
+    );
   });
 });
 

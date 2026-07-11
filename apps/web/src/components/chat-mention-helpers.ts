@@ -1,3 +1,5 @@
+import type { Editor } from "@tiptap/core";
+
 import type { ChatMentionOption } from "@/components/chat-mention-extension";
 import type { ConditionNode, WorkspaceEntity } from "@/lib/types";
 import {
@@ -37,7 +39,7 @@ export const buildWorkspaceMentionOptions = ({
   const items: ChatMentionOption[] = [];
   for (const workspace of workspaces) {
     const viewId = firstViewIdsByWorkspaceId?.[workspace.id];
-    if (!viewId) {
+    if (firstViewIdsByWorkspaceId !== undefined && !viewId) {
       continue;
     }
 
@@ -47,7 +49,7 @@ export const buildWorkspaceMentionOptions = ({
       category: "workspace",
       kind: "workspace",
       mimeType: null,
-      sourceViewId: viewId,
+      ...(viewId && { sourceViewId: viewId }),
     });
   }
 
@@ -78,4 +80,33 @@ export const buildEntityMentionOption = ({
     option.sourceWorkspaceId = sourceWorkspaceId;
   }
   return option;
+};
+
+/**
+ * Inserts a mention chip at the current cursor, followed by a trailing
+ * space. The single insertion path for every mention source (the "@"
+ * suggestion popover via `useChatEditor`'s `insertMention`, and the
+ * composer (+) menu's Context submenu) so chips stay byte-identical
+ * regardless of how they were picked.
+ */
+export const insertChatMention = (
+  editor: Editor,
+  mention: ChatMentionOption,
+): void => {
+  editor
+    .chain()
+    .focus()
+    .insertContent({
+      type: "mention",
+      attrs: {
+        id: mention.id,
+        label: mention.label,
+        category: mention.category,
+        kind: mention.kind,
+        mimeType: mention.mimeType,
+        sourceWorkspaceId: mention.sourceWorkspaceId,
+      },
+    })
+    .insertContent(" ")
+    .run();
 };

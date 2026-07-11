@@ -14,7 +14,7 @@ import type Messages from "@/i18n/langs/messages.gen";
 const previousApiUrl = process.env["VITE_API_URL"];
 process.env["VITE_API_URL"] = previousApiUrl ?? "https://api.example.test";
 
-const { ChatThreadMessages } =
+const { ChatThreadMessages, buildMessageTurns } =
   await import("@/components/chat/chat-thread-messages");
 
 afterAll(() => {
@@ -66,7 +66,7 @@ describe("chat thread messages", () => {
     const chatMessages: PersistedChatMessage[] = [
       {
         id: "message-A",
-        parts: [{ type: "text", text: "Draft answer" }],
+        parts: [{ type: "text", content: "Draft answer" }],
         role: "assistant",
       },
     ];
@@ -78,7 +78,6 @@ describe("chat thread messages", () => {
         onAskUserSubmit={() => {}}
         onCreateDocumentResolve={() => {}}
         onOpenCreatedDocument={() => {}}
-        showToolCalls={false}
         streamdownComponents={{
           a: ({ children, ...props }) => <a {...props}>{children}</a>,
         }}
@@ -90,13 +89,185 @@ describe("chat thread messages", () => {
     expect(html).toContain(">Copy</button>");
   });
 
+  test("renders assistant reasoning separately from the final answer", () => {
+    const chatMessages: PersistedChatMessage[] = [
+      {
+        id: "message-A",
+        metadata: {
+          usage: {
+            completionTokens: 20,
+            completionTokensDetails: { reasoningTokens: 12 },
+            promptTokens: 10,
+            totalTokens: 30,
+          },
+        },
+        parts: [
+          { type: "thinking", content: "Checked the contract timeline." },
+          { type: "text", content: "The deadline is Friday." },
+        ],
+        role: "assistant",
+      },
+    ];
+
+    const html = renderWithProviders(
+      <ChatThreadMessages
+        approvalPendingMessageId={null}
+        messages={chatMessages}
+        onAskUserSubmit={() => {}}
+        onCreateDocumentResolve={() => {}}
+        onOpenCreatedDocument={() => {}}
+        streamdownComponents={{
+          a: ({ children, ...props }) => <a {...props}>{children}</a>,
+        }}
+      />,
+    );
+
+    expect(html).toContain(">Reasoning trace<");
+    expect(html).toContain("<details");
+    expect(html).not.toContain('open=""');
+    expect(html).toContain("12 reasoning tokens");
+    expect(html).toContain("Checked the contract timeline.");
+    expect(html).toContain("The deadline is Friday.");
+    expect(html.match(/>Copy<\/button>/gu)?.length).toBe(1);
+  });
+
+  test("shows provider-reported reasoning tokens without a thinking part", () => {
+    const chatMessages: PersistedChatMessage[] = [
+      {
+        id: "message-A",
+        metadata: {
+          usage: {
+            completionTokens: 20,
+            completionTokensDetails: { reasoningTokens: 8 },
+            promptTokens: 10,
+            totalTokens: 30,
+          },
+        },
+        parts: [{ type: "text", content: "The answer is ready." }],
+        role: "assistant",
+      },
+    ];
+
+    const html = renderWithProviders(
+      <ChatThreadMessages
+        approvalPendingMessageId={null}
+        messages={chatMessages}
+        onAskUserSubmit={() => {}}
+        onCreateDocumentResolve={() => {}}
+        onOpenCreatedDocument={() => {}}
+        streamdownComponents={{
+          a: ({ children, ...props }) => <a {...props}>{children}</a>,
+        }}
+      />,
+    );
+
+    expect(html).toContain("8 reasoning tokens");
+    expect(html).toContain("The answer is ready.");
+  });
+
+  test("renders non-approval tool calls when tool details are enabled", () => {
+    const chatMessages: PersistedChatMessage[] = [
+      {
+        id: "message-A",
+        parts: [
+          {
+            type: "tool-call",
+            id: "tool-call-search",
+            name: "search-chat-history",
+            arguments: JSON.stringify({ query: "deadline" }),
+            state: "complete",
+            input: { query: "deadline" },
+            output: { query: "deadline", results: [] },
+          },
+        ],
+        role: "assistant",
+      },
+    ];
+
+    const html = renderWithProviders(
+      <ChatThreadMessages
+        approvalPendingMessageId={null}
+        messages={chatMessages}
+        onAskUserSubmit={() => {}}
+        onCreateDocumentResolve={() => {}}
+        onOpenCreatedDocument={() => {}}
+        showToolCalls
+        streamdownComponents={{
+          a: ({ children, ...props }) => <a {...props}>{children}</a>,
+        }}
+      />,
+    );
+
+    expect(html).toContain("Searching chat history");
+  });
+
+  test("keeps assistant reasoning visible while it is the only streaming content", () => {
+    const chatMessages: PersistedChatMessage[] = [
+      {
+        id: "message-A",
+        parts: [{ type: "thinking", content: "Reading cited documents." }],
+        role: "assistant",
+      },
+    ];
+
+    const html = renderWithProviders(
+      <ChatThreadMessages
+        approvalPendingMessageId={null}
+        isGenerating
+        messages={chatMessages}
+        onAskUserSubmit={() => {}}
+        onCreateDocumentResolve={() => {}}
+        onOpenCreatedDocument={() => {}}
+        streamdownComponents={{
+          a: ({ children, ...props }) => <a {...props}>{children}</a>,
+        }}
+      />,
+    );
+
+    expect(html).not.toContain("<details");
+    expect(html).toContain("Reading cited documents.");
+    expect(html).not.toContain("Working with context");
+  });
+
+  test("keeps assistant reasoning visible if streaming settles before answer text starts", () => {
+    const chatMessages: PersistedChatMessage[] = [
+      {
+        id: "message-A",
+        parts: [{ type: "thinking", content: "Checking cited filings." }],
+        role: "assistant",
+      },
+    ];
+
+    const html = renderWithProviders(
+      <ChatThreadMessages
+        approvalPendingMessageId={null}
+        messages={chatMessages}
+        onAskUserSubmit={() => {}}
+        onCreateDocumentResolve={() => {}}
+        onOpenCreatedDocument={() => {}}
+        streamdownComponents={{
+          a: ({ children, ...props }) => <a {...props}>{children}</a>,
+        }}
+      />,
+    );
+
+    expect(html).not.toContain("<details");
+    expect(html).toContain("Checking cited filings.");
+    expect(html).not.toContain("Working with context");
+  });
+
   test("uses generated thumbnail URLs for image attachments with placeholders", () => {
     const imagePart = {
-      type: "file",
-      filename: "evidence.png",
-      mediaType: "image/png",
-      placeholder: "data:image/png;base64,AAAA",
-      url: "stella://file::file_test123",
+      type: "image",
+      source: {
+        type: "url",
+        value: "stella://file::file_test123",
+        mimeType: "image/png",
+      },
+      metadata: {
+        filename: "evidence.png",
+        placeholder: "data:image/png;base64,AAAA",
+      },
     } as const;
     const chatMessages: PersistedChatMessage[] = [
       {
@@ -113,29 +284,30 @@ describe("chat thread messages", () => {
         onAskUserSubmit={() => {}}
         onCreateDocumentResolve={() => {}}
         onOpenCreatedDocument={() => {}}
-        showToolCalls={false}
         streamdownComponents={{
           a: ({ children, ...props }) => <a {...props}>{children}</a>,
         }}
       />,
     );
 
-    expect(html).toContain("/v1/user-files/file_test123/content");
     expect(html).toContain("/v1/user-files/file_test123/thumbnail");
     expect(html).toContain("background-image");
     expect(html).toContain("data:image/png;base64,AAAA");
+    expect(html).toContain('aria-label="Preview: evidence.png"');
+    expect(html).not.toContain('target="_blank"');
+    expect(html).not.toContain('href="/v1/user-files/file_test123/content"');
   });
 
   test("shows retry only on the latest assistant response", () => {
     const chatMessages: PersistedChatMessage[] = [
       {
         id: "message-A",
-        parts: [{ type: "text", text: "First answer" }],
+        parts: [{ type: "text", content: "First answer" }],
         role: "assistant",
       },
       {
         id: "message-B",
-        parts: [{ type: "text", text: "Second answer" }],
+        parts: [{ type: "text", content: "Second answer" }],
         role: "assistant",
       },
     ];
@@ -148,7 +320,6 @@ describe("chat thread messages", () => {
         onCreateDocumentResolve={() => {}}
         onOpenCreatedDocument={() => {}}
         onResend={() => {}}
-        showToolCalls={false}
         streamdownComponents={{
           a: ({ children, ...props }) => <a {...props}>{children}</a>,
         }}
@@ -165,12 +336,12 @@ describe("chat thread messages", () => {
     const chatMessages: PersistedChatMessage[] = [
       {
         id: "message-A",
-        parts: [{ type: "text", text: "Answer before retry" }],
+        parts: [{ type: "text", content: "Answer before retry" }],
         role: "assistant",
       },
       {
         id: "message-B",
-        parts: [{ type: "text", text: "Follow-up prompt" }],
+        parts: [{ type: "text", content: "Follow-up prompt" }],
         role: "user",
       },
     ];
@@ -183,7 +354,6 @@ describe("chat thread messages", () => {
         onCreateDocumentResolve={() => {}}
         onOpenCreatedDocument={() => {}}
         onResend={() => {}}
-        showToolCalls={false}
         streamdownComponents={{
           a: ({ children, ...props }) => <a {...props}>{children}</a>,
         }}
@@ -200,7 +370,7 @@ describe("chat thread messages", () => {
     const chatMessages: PersistedChatMessage[] = [
       {
         id: "message-A",
-        parts: [{ type: "text", text: "Streaming answer" }],
+        parts: [{ type: "text", content: "Streaming answer" }],
         role: "assistant",
       },
     ];
@@ -214,7 +384,6 @@ describe("chat thread messages", () => {
         onCreateDocumentResolve={() => {}}
         onOpenCreatedDocument={() => {}}
         onResend={() => {}}
-        showToolCalls={false}
         streamdownComponents={{
           a: ({ children, ...props }) => <a {...props}>{children}</a>,
         }}
@@ -236,7 +405,6 @@ describe("chat thread messages", () => {
         onCreateDocumentResolve={() => {}}
         onOpenCreatedDocument={() => {}}
         onResend={() => {}}
-        showToolCallDetails={false}
         streamdownComponents={{
           a: ({ children, ...props }) => <a {...props}>{children}</a>,
         }}
@@ -258,7 +426,6 @@ describe("chat thread messages", () => {
         onCreateDocumentResolve={() => {}}
         onOpenCreatedDocument={() => {}}
         onResend={() => {}}
-        showToolCallDetails={false}
         streamdownComponents={{
           a: ({ children, ...props }) => <a {...props}>{children}</a>,
         }}
@@ -289,7 +456,6 @@ describe("chat thread messages", () => {
         onOpenCreatedDocument={() => {}}
         onResend={() => {}}
         onSendWithoutAnonymization={() => {}}
-        showToolCallDetails={false}
         streamdownComponents={{
           a: ({ children, ...props }) => <a {...props}>{children}</a>,
         }}
@@ -299,5 +465,57 @@ describe("chat thread messages", () => {
     expect(html).toContain("stella could not anonymize one attachment");
     expect(html).toContain("Send without anonymization");
     expect(html).not.toContain("Cannot send this attachment");
+  });
+});
+
+describe("buildMessageTurns", () => {
+  const userMessage = (id: string): PersistedChatMessage => ({
+    id,
+    parts: [{ type: "text", content: id }],
+    role: "user",
+  });
+  const assistantMessage = (id: string): PersistedChatMessage => ({
+    id,
+    parts: [{ type: "text", content: id }],
+    role: "assistant",
+  });
+
+  test("opens a turn per user message and attaches following answers to it", () => {
+    const turns = buildMessageTurns([
+      userMessage("u1"),
+      assistantMessage("a1"),
+      assistantMessage("a2"),
+      userMessage("u2"),
+      assistantMessage("a3"),
+    ]);
+
+    expect(turns.map((turn) => turn.type)).toEqual(["user", "user"]);
+    const [first, second] = turns;
+    if (first?.type !== "user" || second?.type !== "user") {
+      throw new Error("expected two user-led turns");
+    }
+    expect(first.header.id).toBe("u1");
+    expect(first.index).toBe(0);
+    expect(first.body.map((item) => item.message.id)).toEqual(["a1", "a2"]);
+    // Flat indices are preserved so downstream restoration/retry lookups match.
+    expect(first.body.map((item) => item.index)).toEqual([1, 2]);
+    expect(second.header.id).toBe("u2");
+    expect(second.index).toBe(3);
+    expect(second.body.map((item) => item.index)).toEqual([4]);
+  });
+
+  test("groups assistant messages preceding any user message into an orphan turn", () => {
+    const turns = buildMessageTurns([
+      assistantMessage("a1"),
+      assistantMessage("a2"),
+      userMessage("u1"),
+    ]);
+
+    expect(turns.map((turn) => turn.type)).toEqual(["orphan", "user"]);
+    const [orphan] = turns;
+    if (orphan?.type !== "orphan") {
+      throw new Error("expected a leading orphan turn");
+    }
+    expect(orphan.body.map((item) => item.index)).toEqual([0, 1]);
   });
 });

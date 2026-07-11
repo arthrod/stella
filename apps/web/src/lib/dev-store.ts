@@ -8,9 +8,10 @@ type State = {
   tanstackDevtools: boolean;
   sourceInspector: boolean;
   chatModelId: string | null;
-  showToolCallDetails: boolean;
   reactGrab: boolean;
   publicLawPreview: boolean;
+  playbooksPreview: boolean;
+  timeBillingPreview: boolean;
   simulateSlowLoad: boolean;
 };
 
@@ -18,9 +19,10 @@ type Actions = {
   setTanstackDevtools: (value: boolean) => void;
   setSourceInspector: (value: boolean) => void;
   setChatModelId: (value: string | null) => void;
-  setShowToolCallDetails: (value: boolean) => void;
   setReactGrab: (value: boolean) => void;
   setPublicLawPreview: (value: boolean) => void;
+  setPlaybooksPreview: (value: boolean) => void;
+  setTimeBillingPreview: (value: boolean) => void;
   setSimulateSlowLoad: (value: boolean) => void;
 };
 
@@ -36,9 +38,10 @@ export const useDevStore = create<State & Actions>()(
       tanstackDevtools: false,
       sourceInspector: false,
       chatModelId: null,
-      showToolCallDetails: false,
       reactGrab: false,
       publicLawPreview: false,
+      playbooksPreview: false,
+      timeBillingPreview: false,
       simulateSlowLoad: false,
 
       setTanstackDevtools: (tanstackDevtools) => {
@@ -50,14 +53,17 @@ export const useDevStore = create<State & Actions>()(
       setChatModelId: (chatModelId) => {
         void set({ chatModelId });
       },
-      setShowToolCallDetails: (showToolCallDetails) => {
-        void set({ showToolCallDetails });
-      },
       setReactGrab: (reactGrab) => {
         void set({ reactGrab });
       },
       setPublicLawPreview: (publicLawPreview) => {
         void set({ publicLawPreview });
+      },
+      setPlaybooksPreview: (playbooksPreview) => {
+        void set({ playbooksPreview });
+      },
+      setTimeBillingPreview: (timeBillingPreview) => {
+        void set({ timeBillingPreview });
       },
       setSimulateSlowLoad: (simulateSlowLoad) => {
         void set({ simulateSlowLoad });

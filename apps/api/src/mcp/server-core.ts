@@ -2,25 +2,50 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
   CallToolRequestSchema,
+  ListResourcesRequestSchema,
   ListToolsRequestSchema,
+  ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type {
   CallToolResult,
   Tool as McpTool,
+  ReadResourceResult,
+  Resource,
 } from "@modelcontextprotocol/sdk/types.js";
 
 import type { McpSession } from "@/api/mcp/auth";
-import type { McpMode } from "@/api/mcp/constants";
+import {
+  STELLA_CLI_LATEST_HEADER,
+  STELLA_CLI_LATEST_VERSION,
+  type McpMode,
+} from "@/api/mcp/constants";
 import type { McpRequestContext } from "@/api/mcp/context";
 import {
   McpAuthenticationError,
   McpOrganizationAccessError,
 } from "@/api/mcp/errors";
+import { getMcpInstructions } from "@/api/mcp/instructions";
 import {
   createMcpCorsHeaders,
   getMcpWwwAuthenticateHeader,
 } from "@/api/mcp/metadata";
 import type { McpToolDefinition, ToolScope } from "@/api/mcp/tool-types";
+import { closestToolNames, structuredErrorResult } from "@/api/mcp/tool-utils";
+
+const MAX_TOOL_NAME_SUGGESTION_CHARS = 128;
+
+const formatUnknownToolName = (toolName: string): string =>
+  toolName.length <= MAX_TOOL_NAME_SUGGESTION_CHARS
+    ? toolName
+    : `${toolName.slice(0, MAX_TOOL_NAME_SUGGESTION_CHARS)}...`;
+
+/** `missing_scope` envelope: the granted scopes do not include `scope`. */
+const missingScopeResult = (scope: ToolScope): CallToolResult =>
+  structuredErrorResult({
+    code: "missing_scope",
+    message: `Insufficient permissions. Required scope: ${scope}`,
+    hint: `Grant the '${scope}' scope by re-running OAuth consent (CLI: 'stella auth login --scopes ${scope}'), then retry.`,
+  });
 
 type McpServerDependencies = {
   authenticateMcpRequest: (token: string, mode: McpMode) => Promise<McpSession>;
@@ -50,6 +75,8 @@ type McpServerDependencies = {
     mode?: McpMode,
     scopes?: readonly string[],
   ) => Promise<McpTool[]>;
+  listMcpResources: (mode: McpMode) => Resource[];
+  readMcpResource: (uri: string, mode: McpMode) => ReadResourceResult;
   resolveMcpSessionContext: (
     session: McpSession,
     options: { request: Request },
@@ -77,6 +104,9 @@ const withMcpCors = (response: Response) => {
       headers.set(key, value);
     }
   }
+  // Rides on every MCP response (incl. the CLI's tools/list fetch) to feed the
+  // @stll/cli update nudge; never touches the JSON-RPC payload.
+  headers.set(STELLA_CLI_LATEST_HEADER, STELLA_CLI_LATEST_VERSION);
 
   return new Response(response.body, {
     headers,
@@ -109,7 +139,9 @@ export const createMcpHttpRequestHandler = ({
   getMcpToolDefinition,
   getMcpToolScopeHint,
   handleMcpToolCall,
+  listMcpResources,
   listMcpTools,
+  readMcpResource,
   resolveMcpSessionContext,
 }: McpServerDependencies) => {
   const createMcpServer = async ({
@@ -124,52 +156,65 @@ export const createMcpHttpRequestHandler = ({
     const context = await resolveMcpSessionContext(session, { request });
 
     // The low-level Server API accepts JSON Schema directly, which keeps the
-    // MCP surface independent from the AI SDK tool generics used elsewhere.
-    // eslint-disable-next-line typescript-eslint/no-deprecated -- low-level Server is the intended "advanced use case" API per the SDK; McpServer would couple us to AI SDK tool generics
+    // MCP surface independent from the chat tool generics used elsewhere.
+    // eslint-disable-next-line typescript-eslint/no-deprecated -- low-level Server is the intended "advanced use case" API per the SDK; McpServer would couple us to chat tool generics
     const server = new Server(
       { name: getMcpServerName(mode), version: MCP_SERVER_VERSION },
-      { capabilities: { tools: {} } },
+      {
+        capabilities: { resources: {}, tools: {} },
+        instructions: getMcpInstructions(mode),
+      },
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: await listMcpTools(context, mode, session.scopes),
     }));
 
+    // Resources are static, public, tenant-independent documents (the template
+    // marker grammar today); the same set is served in both modes without a
+    // per-tool scope gate. Every request already carries a valid session token.
+    // The SDK accepts synchronous request handlers, and both resource reads are
+    // synchronous, so neither needs an async wrapper.
+    server.setRequestHandler(ListResourcesRequestSchema, () => ({
+      resources: listMcpResources(mode),
+    }));
+
+    server.setRequestHandler(ReadResourceRequestSchema, (resourceRequest) =>
+      readMcpResource(resourceRequest.params.uri, mode),
+    );
+
     server.setRequestHandler(CallToolRequestSchema, async (toolRequest) => {
       const toolName = toolRequest.params.name;
       const hintedScope = getMcpToolScopeHint(toolName, mode);
       if (hintedScope && !session.scopes.includes(hintedScope)) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Insufficient permissions. Required scope: ${hintedScope}`,
-            },
-          ],
-          isError: true,
-        };
+        return missingScopeResult(hintedScope);
       }
 
       const definition = await getMcpToolDefinition(toolName, context, mode);
       if (!definition) {
-        return {
-          content: [
-            { type: "text" as const, text: `Unknown tool: ${toolName}` },
-          ],
-          isError: true,
-        };
+        // Suggest the closest names the caller can actually see (scope-filtered
+        // list), so a typo resolves without leaking tools they lack access to.
+        const suggestions =
+          toolName.length <= MAX_TOOL_NAME_SUGGESTION_CHARS
+            ? closestToolNames(
+                toolName,
+                (await listMcpTools(context, mode, session.scopes)).map(
+                  (tool) => tool.name,
+                ),
+              )
+            : [];
+        return structuredErrorResult({
+          code: "unknown_tool",
+          message: `Unknown tool: ${formatUnknownToolName(toolName)}`,
+          hint:
+            suggestions.length > 0
+              ? `No such tool. Did you mean: ${suggestions.join(", ")}? Call tools/list for the full set.`
+              : "No such tool. Call tools/list for the tools available to this session.",
+        });
       }
 
       if (!session.scopes.includes(definition.scope)) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Insufficient permissions. Required scope: ${definition.scope}`,
-            },
-          ],
-          isError: true,
-        };
+        return missingScopeResult(definition.scope);
       }
 
       return await handleMcpToolCall({

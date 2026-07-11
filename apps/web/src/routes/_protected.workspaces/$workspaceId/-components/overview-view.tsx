@@ -298,7 +298,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
   // `today` forces a recompute at day rollover; getWeekStart reads the current
   // date itself, so the `today` dependency is intentional despite not being
   // referenced. `locale` drives the first weekday.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps, react/react-compiler -- `today` is an intentional extra dep to force recompute at day rollover; getWeekStart reads the current date itself
   const weekStart = useMemo(() => getWeekStart(locale), [today, locale]);
   const weekEnd = useMemo(() => {
     const end = new Date(weekStart);
@@ -806,6 +806,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
                           return (
                             <div
                               className="flex size-6 items-center justify-center sm:size-7"
+                              // eslint-disable-next-line react/no-array-index-key -- member.daily is a fixed 7-slot week array; dayIdx is the day-of-week itself (used to derive dayLabel), never reordered or resized.
                               key={dayIdx}
                             >
                               {cell}
@@ -816,6 +817,7 @@ export const OverviewView = ({ workspaceId }: OverviewViewProps) => {
                         return (
                           <div
                             className="flex size-6 items-center justify-center sm:size-7"
+                            // eslint-disable-next-line react/no-array-index-key -- member.daily is a fixed 7-slot week array; dayIdx is the day-of-week itself (used to derive dayLabel), never reordered or resized.
                             key={dayIdx}
                           >
                             <Popover>
@@ -1085,9 +1087,13 @@ const OverviewRow = ({ entity, workspaceId }: OverviewRowProps) => {
     const propertyKey = entity.propertyId ?? entity.fieldId;
     const fieldKey = entity.fieldId ?? propertyKey;
     if (propertyKey && fieldKey && entity.mimeType) {
-      fields[propertyKey] = {
-        id: fieldKey,
-        entityId: entity.entityId,
+      const entityId = toSafeId<"entity">(entity.entityId);
+      const fieldId = toSafeId<"field">(fieldKey);
+      const propertyId = toSafeId<"property">(propertyKey);
+      fields[propertyId] = {
+        id: fieldId,
+        entityId,
+        propertyId,
         content: {
           type: "file",
           version: 1,
@@ -1102,7 +1108,7 @@ const OverviewRow = ({ entity, workspaceId }: OverviewRowProps) => {
       };
     }
     return {
-      entityId: entity.entityId,
+      entityId: toSafeId<"entity">(entity.entityId),
       kind: entity.kind,
       name: entity.name,
       parentId: null,
@@ -1340,6 +1346,7 @@ const OverviewRow = ({ entity, workspaceId }: OverviewRowProps) => {
         "group/row hover:bg-muted/50 flex items-center gap-3 px-4 py-2.5",
         handleOpen && "w-full cursor-pointer text-start",
       )}
+      // eslint-disable-next-line react/react-compiler -- containedHandler house pattern; rowRef is handed to the helper, not read for rendered output
       onClick={containedHandler(rowRef, handleOpen)}
       onContextMenu={handleContextMenu}
       onKeyDown={handleKeyDown}

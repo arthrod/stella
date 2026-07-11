@@ -20,6 +20,7 @@ const THREAD_FILE_CLEANUP_BATCH_SIZE = 200;
 
 const config = {
   permissions: { chat: ["delete"] },
+  mcp: { type: "capability", reason: "assistant_chat" },
   params: t.Object({ threadId: tSafeId("chatThread") }),
   query: t.Object({
     workspaceId: t.Optional(tSafeId("workspace")),
@@ -79,6 +80,8 @@ const deleteThread = createSafeRootHandler(
       if (lastFileId !== null) {
         conditions.push(gt(userFiles.id, lastFileId));
       }
+      // SAFETY: sequential keyset pagination keeps each cleanup page bounded; the next page depends on this cursor.
+      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop
       const files = yield* Result.await(
         safeDb((tx) =>
           tx
@@ -124,6 +127,8 @@ const deleteThread = createSafeRootHandler(
         );
       }
 
+      // SAFETY: storage deletion must succeed before the corresponding bounded page of rows is removed.
+      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop
       yield* Result.await(
         // eslint-disable-next-line arrow-body-style -- block body holds the audit-skip directive
         safeDb((tx) => {

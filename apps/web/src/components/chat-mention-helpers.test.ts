@@ -5,9 +5,37 @@ import {
   buildWorkspaceMentionOptions,
   getMentionViewScope,
 } from "@/components/chat-mention-helpers";
+import { toSafeId } from "@/lib/safe-id";
 import type { WorkspaceEntity } from "@/lib/types";
 
 describe("buildWorkspaceMentionOptions", () => {
+  test("returns workspaces while first view ids are still loading", () => {
+    expect(
+      buildWorkspaceMentionOptions({
+        firstViewIdsByWorkspaceId: undefined,
+        workspaces: [
+          { id: "ws_alpha", name: "Alpha Matter" },
+          { id: "ws_beta", name: "Beta Matter" },
+        ],
+      }),
+    ).toEqual([
+      {
+        id: "ws_alpha",
+        label: "Alpha Matter",
+        category: "workspace",
+        kind: "workspace",
+        mimeType: null,
+      },
+      {
+        id: "ws_beta",
+        label: "Beta Matter",
+        category: "workspace",
+        kind: "workspace",
+        mimeType: null,
+      },
+    ]);
+  });
+
   test("includes only workspaces that have an openable view and preserves workspace ids", () => {
     expect(
       buildWorkspaceMentionOptions({
@@ -36,7 +64,7 @@ describe("buildWorkspaceMentionOptions", () => {
 describe("buildEntityMentionOption", () => {
   test("preserves source workspace context for cross-matter entity mentions", () => {
     const entity: WorkspaceEntity = {
-      entityId: "ent_1",
+      entityId: toSafeId<"entity">("ent_1"),
       kind: "document",
       name: "Closing Binder",
       parentId: null,
@@ -73,9 +101,10 @@ describe("buildEntityMentionOption", () => {
       activeEditBy: null,
       cellMetadata: {},
       fields: {
-        file: {
-          id: "field_1",
-          entityId: "ent_1",
+        [toSafeId<"property">("file")]: {
+          id: toSafeId<"field">("field_1"),
+          entityId: toSafeId<"entity">("ent_1"),
+          propertyId: toSafeId<"property">("file"),
           content: {
             version: 1,
             type: "file",

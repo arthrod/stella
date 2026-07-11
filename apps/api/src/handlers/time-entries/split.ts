@@ -28,6 +28,7 @@ const splitEntryBodySchema = t.Object({
 const splitEntry = createSafeHandler(
   {
     permissions: { timeEntry: ["update"] },
+    mcp: { type: "capability", reason: "billing_admin" },
     body: splitEntryBodySchema,
   },
   async function* ({ safeDb, workspaceId, body, recordAuditEvent }) {
@@ -85,28 +86,30 @@ const splitEntry = createSafeHandler(
       );
     }
 
-    // Validate all target matters exist
-    for (const split of body.splits) {
-      const matter = yield* Result.await(
-        safeDb((tx) =>
-          tx.query.entities.findFirst({
-            where: {
-              id: { eq: split.matterId },
-              workspaceId: { eq: workspaceId },
-            },
-            columns: { id: true },
-          }),
-        ),
+    const targetMatterIds = body.splits.map((split) => split.matterId);
+    const targetMatters = yield* Result.await(
+      safeDb((tx) =>
+        tx.query.entities.findMany({
+          where: {
+            id: { in: targetMatterIds },
+            workspaceId: { eq: workspaceId },
+          },
+          columns: { id: true },
+          limit: body.splits.length,
+        }),
+      ),
+    );
+    const foundMatterIds = new Set(targetMatters.map((matter) => matter.id));
+    const missingMatterId = targetMatterIds.find(
+      (matterId) => !foundMatterIds.has(matterId),
+    );
+    if (missingMatterId) {
+      return Result.err(
+        new HandlerError({
+          status: 400,
+          message: `Matter ${missingMatterId} not found`,
+        }),
       );
-
-      if (!matter) {
-        return Result.err(
-          new HandlerError({
-            status: 400,
-            message: `Matter ${split.matterId} not found`,
-          }),
-        );
-      }
     }
 
     const splitGroupId = createSafeId<"timeEntry">();
@@ -162,7 +165,7 @@ const splitEntry = createSafeHandler(
           }
           const billedMinutes = roundToIncrement(durationMinutes);
 
-          // oxlint-disable-next-line no-await-in-loop -- sequential inserts create ordered successor rows for the split entry
+          // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential inserts create ordered successor rows for the split entry
           const [entry] = await tx
             .insert(timeEntries)
             .values({

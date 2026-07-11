@@ -10,6 +10,7 @@ import type {
 
 import type { ScopedDb } from "@/api/db";
 import type { SafeId } from "@/api/lib/branded-types";
+import { brandPersistedWorkspaceId } from "@/api/lib/safe-id-boundaries";
 import { buildFieldMarkers } from "@/api/mcp/field-markers";
 
 export type AnonymizeTextFieldsInput = {
@@ -35,11 +36,10 @@ export type AnonymizeTextFieldsInput = {
    */
   entityId?: SafeId<"entity"> | undefined;
   /**
-   * Optional shared `PipelineContext`. When set, the placeholder
-   * counter continues across calls so independent batches don't
-   * collide on `[PERSON_1]`. Chat boundaries pass the same context
-   * for every user-message / tool-output / system-prompt pass so
-   * the cumulative redaction map stays internally consistent.
+   * Optional shared `PipelineContext`. It caches prepared native
+   * pipeline packages, but native placeholder numbering still starts
+   * fresh per redaction call. Chat boundaries rewrite placeholders
+   * after each call before merging them into their cumulative map.
    * Omitted callers (one-shot anonymizations) get a fresh context.
    */
   context?: PipelineContext | undefined;
@@ -49,6 +49,7 @@ export type AnonymizeTextFieldsDependencies = ChatAnonRuntime & {
   loadAnonymizationGazetteerEntries: (input: {
     organizationId: SafeId<"organization">;
     scopedDb: ScopedDb;
+    workspaceId?: SafeId<"workspace"> | undefined;
   }) => Promise<GazetteerEntry[]>;
   loadAnonymizationAllowlistCanonicals: (input: {
     organizationId: SafeId<"organization">;
@@ -142,6 +143,9 @@ export const anonymizeTextFieldsWithDependencies = async ({
     (await dependencies.loadAnonymizationGazetteerEntries({
       organizationId,
       scopedDb,
+      ...(workspaceId === organizationId
+        ? {}
+        : { workspaceId: brandPersistedWorkspaceId(workspaceId) }),
     }));
   const allowlist =
     excludedCanonicals ??

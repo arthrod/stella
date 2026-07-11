@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 
-import type { ChatPart } from "@/components/chat/chat-ui-tools";
 import {
   getChatToolTitleKey,
   getApprovalToolName,
@@ -9,10 +8,20 @@ import {
   hasApprovalResponseAwaitingModelStep,
   hasApprovedActiveDocxEditAwaitingClientOutput,
   hasRunningToolCallInLatestAssistantMessage,
+  isApprovalOnceChatToolName,
   isApprovalPart,
   isChatTurnInFlight,
+  isExternalInputChatToolName,
   isPublicOfficialChatToolName,
   isToolApprovedByGrant,
+  isUnresolvedFolioAgentDocToolCallPart,
+  sanitizeRunningToolCalls,
+  selectUnresolvedFolioAgentDocToolCallParts,
+  withParsedToolCallInputs,
+} from "@/components/chat/chat-ui-tools";
+import type {
+  ChatPart,
+  PersistedChatMessage,
 } from "@/components/chat/chat-ui-tools";
 
 describe("chat tool titles", () => {
@@ -41,6 +50,23 @@ describe("chat tool titles", () => {
     expect(getChatToolTitleKey("read-contact")).toBe("chat.tool.read-contact");
   });
 
+  test("maps the folio-agents comment/changes and version-compare tools", () => {
+    expect(getChatToolTitleKey("read_changes")).toBe("chat.tool.read_changes");
+    expect(getChatToolTitleKey("read_comments")).toBe(
+      "chat.tool.read_comments",
+    );
+    expect(getChatToolTitleKey("add_comment")).toBe("chat.tool.add_comment");
+    expect(getChatToolTitleKey("reply_comment")).toBe(
+      "chat.tool.reply_comment",
+    );
+    expect(getChatToolTitleKey("resolve_comment")).toBe(
+      "chat.tool.resolve_comment",
+    );
+    expect(getChatToolTitleKey("compare_versions")).toBe(
+      "chat.tool.compare_versions",
+    );
+  });
+
   test("uses the translated unknown fallback for unknown tools", () => {
     expect(getChatToolTitleKey("searchCaseLaw")).toBe("chat.tool.unknown");
   });
@@ -60,51 +86,61 @@ describe("isApprovalPart", () => {
     expect(isPublicOfficialChatToolName("ares_search_companies")).toBe(false);
   });
 
+  test("identifies built-in tools whose external request needs a preview", () => {
+    expect(isExternalInputChatToolName("web_search")).toBe(true);
+    expect(isExternalInputChatToolName("fetch_url")).toBe(true);
+    expect(isExternalInputChatToolName("boe_search_legislation")).toBe(true);
+    expect(isExternalInputChatToolName("boe_get_law")).toBe(false);
+  });
+
   test("treats active DOCX edit tools as approval parts", () => {
     const part = {
-      approval: { id: "approval-1" },
+      approval: { id: "approval-1", needsApproval: true },
+      arguments: JSON.stringify({ operations: [] }),
+      id: "tool-call-1",
       input: { operations: [] },
-      providerExecuted: false,
       state: "approval-requested",
-      toolCallId: "tool-call-1",
-      type: "tool-apply-active-docx-edits",
-    } as ChatPart;
+      name: "apply-active-docx-edits",
+      type: "tool-call",
+    } satisfies ChatPart;
 
     expect(isApprovalPart(part)).toBe(true);
   });
 
   test("treats external MCP tools as approval parts", () => {
     const part = {
-      approval: { id: "approval-1" },
+      approval: { id: "approval-1", needsApproval: true },
+      arguments: JSON.stringify({ query: "civil code" }),
+      id: "tool-call-1",
       input: { query: "civil code" },
-      providerExecuted: false,
       state: "approval-requested",
-      toolCallId: "tool-call-1",
-      type: "tool-mcp__salvia__search_decisions",
-    };
+      name: "mcp__salvia__search_decisions",
+      type: "tool-call",
+    } satisfies ChatPart;
 
     expect(isApprovalPart(part)).toBe(true);
   });
 
-  test("treats dynamic external MCP approval requests as approval parts", () => {
+  test("extracts approval tool names from external MCP approval requests", () => {
     const part = {
-      approval: { id: "approval-1" },
+      approval: { id: "approval-1", needsApproval: true },
+      arguments: JSON.stringify({ query: "protección de datos" }),
+      id: "tool-call-1",
       input: { query: "protección de datos" },
       state: "approval-requested",
-      toolCallId: "tool-call-1",
-      toolName: "mcp__legal-data-hunter__search",
-      type: "dynamic-tool",
-    };
+      name: "mcp__legal-data-hunter__search",
+      type: "tool-call",
+    } satisfies ChatPart;
 
     expect(isApprovalPart(part)).toBe(true);
     if (!isApprovalPart(part)) {
-      throw new Error("Expected dynamic MCP approval part");
+      throw new Error("Expected MCP approval part");
     }
 
     expect(getApprovalToolName(part)).toBe("mcp__legal-data-hunter__search");
   });
 
-  test("treats legacy external native API approval requests as approval parts", () => {
+  test("does not treat legacy dynamic tool parts as approval parts", () => {
     const part = {
       approval: { id: "approval-1" },
       input: { ico: "27082440" },
@@ -114,10 +150,10 @@ describe("isApprovalPart", () => {
       type: "tool-ares_lookup_company",
     };
 
-    expect(isApprovalPart(part)).toBe(true);
+    expect(isApprovalPart(part)).toBe(false);
   });
 
-  test("does not treat public ARES output as an approval part", () => {
+  test("does not treat legacy public ARES output as an approval part", () => {
     const part = {
       input: { ico: "27082440" },
       output: { ico: "27082440", name: "Alza.cz a.s." },
@@ -131,18 +167,27 @@ describe("isApprovalPart", () => {
 
   test("does not treat ask-user as an approval part", () => {
     const part = {
-      input: { questions: [] },
-      output: undefined,
-      state: "input-available",
-      toolCallId: "tool-call-1",
-      type: "tool-ask-user",
-    };
+      arguments: JSON.stringify({
+        analysis: "Need the user's answer.",
+        questions: [],
+      }),
+      id: "tool-call-1",
+      input: { analysis: "Need the user's answer.", questions: [] },
+      state: "input-complete",
+      name: "ask-user",
+      type: "tool-call",
+    } satisfies ChatPart;
 
     expect(isApprovalPart(part)).toBe(false);
   });
 });
 
 describe("tool approval grants", () => {
+  test("keeps organization management approvals per call", () => {
+    expect(isApprovalOnceChatToolName("manage_organization")).toBe(true);
+    expect(isApprovalOnceChatToolName("save_clause")).toBe(false);
+  });
+
   test("treats external MCP approvals as connector-level grants", () => {
     const grants = new Set([
       getToolApprovalGrant("mcp__salvia__search_decisions"),
@@ -166,13 +211,18 @@ describe("hasApprovedActiveDocxEditAwaitingClientOutput", () => {
             id: "message-1",
             parts: [
               {
-                approval: { approved: true, id: "approval-1" },
+                approval: {
+                  approved: true,
+                  id: "approval-1",
+                  needsApproval: true,
+                },
+                arguments: JSON.stringify({ operations: [] }),
+                id: "tool-call-1",
                 input: { operations: [] },
-                providerExecuted: false,
                 state: "approval-responded",
-                toolCallId: "tool-call-1",
-                type: "tool-apply-active-docx-edits",
-              } as ChatPart,
+                name: "apply-active-docx-edits",
+                type: "tool-call",
+              } satisfies ChatPart,
             ],
             role: "assistant",
           },
@@ -189,13 +239,18 @@ describe("hasApprovedActiveDocxEditAwaitingClientOutput", () => {
             id: "message-1",
             parts: [
               {
-                approval: { approved: false, id: "approval-1" },
+                approval: {
+                  approved: false,
+                  id: "approval-1",
+                  needsApproval: true,
+                },
+                arguments: JSON.stringify({ operations: [] }),
+                id: "tool-call-1",
                 input: { operations: [] },
-                providerExecuted: false,
                 state: "approval-responded",
-                toolCallId: "tool-call-1",
-                type: "tool-apply-active-docx-edits",
-              } as ChatPart,
+                name: "apply-active-docx-edits",
+                type: "tool-call",
+              } satisfies ChatPart,
             ],
             role: "assistant",
           },
@@ -214,13 +269,18 @@ describe("hasApprovalResponseAwaitingModelStep", () => {
             id: "message-1",
             parts: [
               {
-                approval: { approved: true, id: "approval-1" },
+                approval: {
+                  approved: true,
+                  id: "approval-1",
+                  needsApproval: true,
+                },
+                arguments: JSON.stringify({ query: "protección de datos" }),
+                id: "tool-call-1",
                 input: { query: "protección de datos" },
                 state: "approval-responded",
-                toolCallId: "tool-call-1",
-                toolName: "mcp__legal-data-hunter__search",
-                type: "dynamic-tool",
-              } as ChatPart,
+                name: "mcp__legal-data-hunter__search",
+                type: "tool-call",
+              } satisfies ChatPart,
             ],
             role: "assistant",
           },
@@ -237,11 +297,12 @@ describe("hasRunningToolCallInLatestAssistantMessage", () => {
         id: "message-1",
         parts: [
           {
+            arguments: JSON.stringify({ query: "consumer credit" }),
+            id: "tool-call-1",
             input: { query: "consumer credit" },
-            state: "input-available",
-            toolCallId: "tool-call-1",
-            toolName: "mcp__salvia__search_decisions",
-            type: "dynamic-tool",
+            state: "input-complete",
+            name: "mcp__salvia__search_decisions",
+            type: "tool-call",
           },
         ],
         role: "assistant",
@@ -259,12 +320,13 @@ describe("hasRunningToolCallInLatestAssistantMessage", () => {
         id: "message-1",
         parts: [
           {
+            arguments: JSON.stringify({ query: "consumer credit" }),
+            id: "tool-call-1",
             input: { query: "consumer credit" },
             output: { content: [] },
-            state: "output-available",
-            toolCallId: "tool-call-1",
-            toolName: "mcp__salvia__search_decisions",
-            type: "dynamic-tool",
+            state: "complete",
+            name: "mcp__salvia__search_decisions",
+            type: "tool-call",
           },
         ],
         role: "assistant",
@@ -284,10 +346,15 @@ describe("hasRunningToolCallInLatestAssistantMessage", () => {
         id: "message-1",
         parts: [
           {
+            arguments: JSON.stringify({
+              analysis: "Need the user's answer.",
+              questions: [],
+            }),
+            id: "tool-call-1",
             input: { analysis: "Need the user's answer.", questions: [] },
-            state: "input-available",
-            toolCallId: "tool-call-1",
-            type: "tool-ask-user",
+            state: "input-complete",
+            name: "ask-user",
+            type: "tool-call",
           },
         ],
         role: "assistant",
@@ -307,13 +374,18 @@ describe("hasRunningToolCallInLatestAssistantMessage", () => {
         id: "message-1",
         parts: [
           {
+            arguments: JSON.stringify({
+              name: "Engagement letter",
+              source: "@title Engagement letter",
+            }),
+            id: "tool-call-1",
             input: {
               name: "Engagement letter",
               source: "@title Engagement letter",
             },
-            state: "input-available",
-            toolCallId: "tool-call-1",
-            type: "tool-create-document",
+            state: "input-complete",
+            name: "create-document",
+            type: "tool-call",
           },
         ],
         role: "assistant",
@@ -333,18 +405,19 @@ describe("hasRunningToolCallInLatestAssistantMessage", () => {
         id: "message-1",
         parts: [
           {
+            arguments: JSON.stringify({ query: "consumer credit" }),
+            id: "tool-call-1",
             input: { query: "consumer credit" },
-            state: "input-available",
-            toolCallId: "tool-call-1",
-            toolName: "mcp__salvia__search_decisions",
-            type: "dynamic-tool",
+            state: "input-complete",
+            name: "mcp__salvia__search_decisions",
+            type: "tool-call",
           },
         ],
         role: "assistant",
       },
       {
         id: "message-2",
-        parts: [{ text: "new prompt", type: "text" }],
+        parts: [{ content: "new prompt", type: "text" }],
         role: "user",
       },
     ] satisfies Parameters<
@@ -357,17 +430,212 @@ describe("hasRunningToolCallInLatestAssistantMessage", () => {
   });
 });
 
+describe("isUnresolvedFolioAgentDocToolCallPart", () => {
+  test("matches a completed read_document call awaiting a result", () => {
+    const part = {
+      arguments: "{}",
+      id: "tool-call-1",
+      input: {},
+      state: "input-complete",
+      name: "read_document",
+      type: "tool-call",
+    };
+
+    expect(isUnresolvedFolioAgentDocToolCallPart(part)).toBe(true);
+  });
+
+  test("matches a completed find_text call awaiting a result", () => {
+    const part = {
+      arguments: JSON.stringify({ query: "termination" }),
+      id: "tool-call-2",
+      input: { query: "termination" },
+      state: "input-complete",
+      name: "find_text",
+      type: "tool-call",
+    };
+
+    expect(isUnresolvedFolioAgentDocToolCallPart(part)).toBe(true);
+  });
+
+  test("matches completed read_changes and read_comments calls (auto-run)", () => {
+    for (const name of ["read_changes", "read_comments"]) {
+      const part = {
+        arguments: "{}",
+        id: `tool-call-${name}`,
+        input: {},
+        state: "input-complete",
+        name,
+        type: "tool-call",
+      };
+      expect(isUnresolvedFolioAgentDocToolCallPart(part)).toBe(true);
+    }
+  });
+
+  test("ignores the comment-mutation tools (approval-gated, not auto-run)", () => {
+    for (const name of ["add_comment", "reply_comment", "resolve_comment"]) {
+      const part = {
+        arguments: "{}",
+        id: `tool-call-${name}`,
+        input: {},
+        state: "input-complete",
+        name,
+        type: "tool-call",
+      };
+      expect(isUnresolvedFolioAgentDocToolCallPart(part)).toBe(false);
+    }
+  });
+
+  test("ignores a read_document call still streaming its input", () => {
+    const part = {
+      arguments: "{",
+      id: "tool-call-1",
+      state: "input-streaming",
+      name: "read_document",
+      type: "tool-call",
+    };
+
+    expect(isUnresolvedFolioAgentDocToolCallPart(part)).toBe(false);
+  });
+
+  test("ignores an already-resolved read_document call", () => {
+    const part = {
+      arguments: "{}",
+      id: "tool-call-1",
+      input: {},
+      output: { ok: true, result: [] },
+      state: "complete",
+      name: "read_document",
+      type: "tool-call",
+    };
+
+    expect(isUnresolvedFolioAgentDocToolCallPart(part)).toBe(false);
+  });
+
+  test("ignores unrelated tool calls", () => {
+    const part = {
+      arguments: JSON.stringify({ query: "consumer credit" }),
+      id: "tool-call-1",
+      input: { query: "consumer credit" },
+      state: "input-complete",
+      name: "mcp__salvia__search_decisions",
+      type: "tool-call",
+    };
+
+    expect(isUnresolvedFolioAgentDocToolCallPart(part)).toBe(false);
+  });
+
+  test("ignores non-tool-call parts", () => {
+    expect(
+      isUnresolvedFolioAgentDocToolCallPart({
+        content: "hello",
+        type: "text",
+      }),
+    ).toBe(false);
+    expect(isUnresolvedFolioAgentDocToolCallPart(null)).toBe(false);
+    expect(isUnresolvedFolioAgentDocToolCallPart("read_document")).toBe(false);
+  });
+});
+
+describe("selectUnresolvedFolioAgentDocToolCallParts", () => {
+  // Core decision loop behind the file overlay's folio-agents doc-tool
+  // auto-run watcher (`file-chat-overlay.tsx`): given the latest
+  // assistant message's parts and the ids the watcher already dispatched
+  // itself, which parts still need a client-executed result.
+  const readDocumentPart = {
+    arguments: "{}",
+    id: "tool-call-read",
+    input: {},
+    state: "input-complete",
+    name: "read_document",
+    type: "tool-call",
+  } satisfies ChatPart;
+
+  const findTextPart = {
+    arguments: JSON.stringify({ query: "termination" }),
+    id: "tool-call-find",
+    input: { query: "termination" },
+    state: "input-complete",
+    name: "find_text",
+    type: "tool-call",
+  } satisfies ChatPart;
+
+  test("selects input-complete folio tool parts once", () => {
+    const result = selectUnresolvedFolioAgentDocToolCallParts(
+      [readDocumentPart, findTextPart],
+      new Set(),
+    );
+
+    expect(result.map((part) => part.id)).toEqual([
+      "tool-call-read",
+      "tool-call-find",
+    ]);
+  });
+
+  test("skips ids already recorded as executed", () => {
+    const result = selectUnresolvedFolioAgentDocToolCallParts(
+      [readDocumentPart, findTextPart],
+      new Set(["tool-call-read"]),
+    );
+
+    expect(result.map((part) => part.id)).toEqual(["tool-call-find"]);
+  });
+
+  test("skips other tools and non-input-complete states", () => {
+    const askUserPart = {
+      arguments: JSON.stringify({ analysis: "", questions: [] }),
+      id: "tool-call-ask",
+      input: { analysis: "", questions: [] },
+      state: "input-complete",
+      name: "ask-user",
+      type: "tool-call",
+    } satisfies ChatPart;
+    const streamingReadDocumentPart = {
+      arguments: "{",
+      id: "tool-call-streaming",
+      state: "input-streaming",
+      name: "read_document",
+      type: "tool-call",
+    } satisfies ChatPart;
+    const resolvedFindTextPart = {
+      arguments: JSON.stringify({ query: "termination" }),
+      id: "tool-call-resolved",
+      input: { query: "termination" },
+      output: { ok: true, matches: [] },
+      state: "complete",
+      name: "find_text",
+      type: "tool-call",
+    } satisfies ChatPart;
+
+    const result = selectUnresolvedFolioAgentDocToolCallParts(
+      [askUserPart, streamingReadDocumentPart, resolvedFindTextPart],
+      new Set(),
+    );
+
+    expect(result).toEqual([]);
+  });
+
+  // The Template Studio hang this watcher guards against never reaches
+  // this pure selector at all: `read_document` / `find_text` tool-call
+  // parts only ever appear in a message when the server registered the
+  // tools (gated by `hasActiveDocxFileClient`, file-overlay-only). That
+  // registration gate is server-side and is covered by
+  // `tool-schema.test.ts`'s "registers the folio-agents read_document/
+  // find_text tools only when the file-overlay docx client is active" —
+  // there is no meaningful client-only regression to exercise here.
+});
+
 describe("isChatTurnInFlight", () => {
   const messagesWithRunningToolCall = [
     {
       id: "message-1",
       parts: [
         {
+          arguments: JSON.stringify({ query: "consumer credit" }),
+          id: "tool-call-1",
           input: { query: "consumer credit" },
+          name: "mcp__salvia__search_decisions",
           state: "input-streaming",
-          toolCallId: "tool-call-1",
-          toolName: "mcp__salvia__search_decisions",
-          type: "dynamic-tool",
+          type: "tool-call",
         },
       ],
       role: "assistant",
@@ -419,23 +687,266 @@ describe("isChatTurnInFlight", () => {
   });
 });
 
+describe("sanitizeRunningToolCalls", () => {
+  const runningToolPart = {
+    arguments: JSON.stringify({ query: "consumer credit" }),
+    id: "tool-call-1",
+    input: { query: "consumer credit" },
+    name: "mcp__salvia__search_decisions",
+    state: "input-complete",
+    type: "tool-call",
+  } satisfies ChatPart;
+
+  test("rewrites a dead running tool call in the last assistant message to the terminal error state", () => {
+    const messages: PersistedChatMessage[] = [
+      { id: "message-1", parts: [runningToolPart], role: "assistant" },
+    ];
+
+    const sanitized = sanitizeRunningToolCalls(messages);
+    const part = sanitized[0]?.parts[0];
+    if (part?.type !== "tool-call") {
+      throw new Error("Expected a tool-call part");
+    }
+
+    expect(part.state).toBe("error");
+    // The wedge driver now reads the freshly loaded thread as idle.
+    expect(
+      hasRunningToolCallInLatestAssistantMessage({ messages: sanitized }),
+    ).toBe(false);
+  });
+
+  test("also sanitizes a dead running tool call in an earlier assistant message", () => {
+    const messages: PersistedChatMessage[] = [
+      { id: "message-1", parts: [runningToolPart], role: "assistant" },
+      {
+        id: "message-2",
+        parts: [{ content: "follow-up prompt", type: "text" }],
+        role: "user",
+      },
+    ];
+
+    const sanitized = sanitizeRunningToolCalls(messages);
+    const part = sanitized[0]?.parts[0];
+    if (part?.type !== "tool-call") {
+      throw new Error("Expected a tool-call part");
+    }
+
+    expect(part.state).toBe("error");
+    // The trailing user message is untouched (reference preserved).
+    expect(sanitized[1]).toBe(messages[1]);
+  });
+
+  test("leaves ask-user prompts awaiting a user answer untouched", () => {
+    const messages: PersistedChatMessage[] = [
+      {
+        id: "message-1",
+        parts: [
+          {
+            arguments: JSON.stringify({ analysis: "", questions: [] }),
+            id: "tool-call-1",
+            input: { analysis: "", questions: [] },
+            name: "ask-user",
+            state: "input-complete",
+            type: "tool-call",
+          } satisfies ChatPart,
+        ],
+        role: "assistant",
+      },
+    ];
+
+    // Long-lived by design: the message keeps its reference (no change).
+    expect(sanitizeRunningToolCalls(messages)[0]).toBe(messages[0]);
+  });
+
+  test("leaves an approval-requested tool call untouched", () => {
+    const messages: PersistedChatMessage[] = [
+      {
+        id: "message-1",
+        parts: [
+          {
+            approval: { id: "approval-1", needsApproval: true },
+            arguments: JSON.stringify({ query: "civil code" }),
+            id: "tool-call-1",
+            input: { query: "civil code" },
+            name: "mcp__salvia__search_decisions",
+            state: "approval-requested",
+            type: "tool-call",
+          } satisfies ChatPart,
+        ],
+        role: "assistant",
+      },
+    ];
+
+    expect(sanitizeRunningToolCalls(messages)[0]).toBe(messages[0]);
+  });
+
+  test("leaves a completed tool call untouched", () => {
+    const messages: PersistedChatMessage[] = [
+      {
+        id: "message-1",
+        parts: [
+          {
+            arguments: JSON.stringify({ query: "consumer credit" }),
+            id: "tool-call-1",
+            input: { query: "consumer credit" },
+            output: { content: [] },
+            name: "mcp__salvia__search_decisions",
+            state: "complete",
+            type: "tool-call",
+          } satisfies ChatPart,
+        ],
+        role: "assistant",
+      },
+    ];
+
+    expect(sanitizeRunningToolCalls(messages)[0]).toBe(messages[0]);
+  });
+
+  test("is a no-op for an empty thread or a user-last transcript", () => {
+    expect(sanitizeRunningToolCalls([])).toEqual([]);
+
+    const messages: PersistedChatMessage[] = [
+      {
+        id: "message-1",
+        parts: [{ content: "Assistant reply", type: "text" }],
+        role: "assistant",
+      },
+      {
+        id: "message-2",
+        parts: [{ content: "Latest prompt", type: "text" }],
+        role: "user",
+      },
+    ];
+
+    const sanitized = sanitizeRunningToolCalls(messages);
+    // Nothing running anywhere: every message keeps its reference.
+    expect(sanitized[0]).toBe(messages[0]);
+    expect(sanitized[1]).toBe(messages[1]);
+  });
+});
+
+describe("withParsedToolCallInputs", () => {
+  const askUserArguments = JSON.stringify({
+    analysis: "Which company did you mean?",
+    questions: [
+      {
+        default: "Alza.cz a.s.",
+        question: "Which entity should I look up?",
+        reason: "The lookup needs the exact legal entity.",
+        options: ["Alza.cz a.s.", "Alzashop.com"],
+      },
+    ],
+  });
+
+  const argumentsOnlyMessages = (part: ChatPart): PersistedChatMessage[] => [
+    { id: "message-1", parts: [part], role: "assistant" },
+  ];
+
+  test("derives input from arguments on an input-complete tool call", () => {
+    // Exactly the persisted/streamed shape TanStack produces: a valid
+    // `arguments` JSON string with no `input` field.
+    const part = {
+      arguments: askUserArguments,
+      id: "tool-call-1",
+      name: "ask-user",
+      state: "input-complete",
+      type: "tool-call",
+    } satisfies ChatPart;
+
+    const [message] = withParsedToolCallInputs(argumentsOnlyMessages(part));
+    const normalized = message?.parts[0];
+    if (normalized?.type !== "tool-call" || normalized.name !== "ask-user") {
+      throw new Error("Expected a normalized ask-user tool-call part");
+    }
+
+    expect(normalized.input).toEqual({
+      analysis: "Which company did you mean?",
+      questions: [
+        {
+          default: "Alza.cz a.s.",
+          question: "Which entity should I look up?",
+          reason: "The lookup needs the exact legal entity.",
+          options: ["Alza.cz a.s.", "Alzashop.com"],
+        },
+      ],
+    });
+  });
+
+  test("leaves input undefined for invalid JSON arguments without throwing", () => {
+    const part = {
+      arguments: '{"questions":[',
+      id: "tool-call-1",
+      name: "ask-user",
+      state: "input-complete",
+      type: "tool-call",
+    } satisfies ChatPart;
+
+    const [message] = withParsedToolCallInputs(argumentsOnlyMessages(part));
+    const normalized = message?.parts[0];
+    if (normalized?.type !== "tool-call") {
+      throw new Error("Expected a tool-call part");
+    }
+
+    expect(normalized.input).toBeUndefined();
+    // The part is unchanged, so its reference is preserved.
+    expect(normalized).toBe(part);
+  });
+
+  test("does not parse arguments while the tool call is still streaming", () => {
+    const part = {
+      arguments: '{"questions":[{"quest',
+      id: "tool-call-1",
+      name: "ask-user",
+      state: "input-streaming",
+      type: "tool-call",
+    } satisfies ChatPart;
+
+    const [message] = withParsedToolCallInputs(argumentsOnlyMessages(part));
+    const normalized = message?.parts[0];
+    if (normalized?.type !== "tool-call") {
+      throw new Error("Expected a tool-call part");
+    }
+
+    expect(normalized.input).toBeUndefined();
+    expect(normalized).toBe(part);
+  });
+
+  test("preserves an already-populated input and message identity", () => {
+    const part = {
+      arguments: JSON.stringify({ query: "consumer credit" }),
+      id: "tool-call-1",
+      input: { query: "consumer credit" },
+      name: "mcp__salvia__search_decisions",
+      state: "input-complete",
+      type: "tool-call",
+    } satisfies ChatPart;
+    const messages = argumentsOnlyMessages(part);
+
+    const result = withParsedToolCallInputs(messages);
+
+    // Nothing to fill: the message object keeps its reference so
+    // downstream memoization is not invalidated.
+    expect(result[0]).toBe(messages[0]);
+  });
+});
+
 describe("getUserMessageHtmlHistory", () => {
   test("returns user message HTML from newest to oldest", () => {
     expect(
       getUserMessageHtmlHistory([
         {
           id: "message-1",
-          parts: [{ text: "Older prompt", type: "text" }],
+          parts: [{ content: "Older prompt", type: "text" }],
           role: "user",
         },
         {
           id: "message-2",
-          parts: [{ text: "Assistant response", type: "text" }],
+          parts: [{ content: "Assistant response", type: "text" }],
           role: "assistant",
         },
         {
           id: "message-3",
-          parts: [{ text: "Latest prompt", type: "text" }],
+          parts: [{ content: "Latest prompt", type: "text" }],
           role: "user",
         },
       ]),
@@ -447,17 +958,20 @@ describe("getUserMessageHtmlHistory", () => {
       getUserMessageHtmlHistory([
         {
           id: "message-1",
-          parts: [{ text: "Reusable prompt", type: "text" }],
+          parts: [{ content: "Reusable prompt", type: "text" }],
           role: "user",
         },
         {
           id: "message-2",
           parts: [
             {
-              filename: "contract.pdf",
-              mediaType: "application/pdf",
-              type: "file",
-              url: "https://example.com/contract.pdf",
+              metadata: { filename: "contract.pdf" },
+              source: {
+                mimeType: "application/pdf",
+                type: "url",
+                value: "https://example.com/contract.pdf",
+              },
+              type: "document",
             },
           ],
           role: "user",
@@ -471,12 +985,12 @@ describe("getUserMessageHtmlHistory", () => {
       getUserMessageHtmlHistory([
         {
           id: "message-1",
-          parts: [{ text: "   ", type: "text" }],
+          parts: [{ content: "   ", type: "text" }],
           role: "user",
         },
         {
           id: "message-2",
-          parts: [{ text: "\n<p>Clean prompt</p>\n", type: "text" }],
+          parts: [{ content: "\n<p>Clean prompt</p>\n", type: "text" }],
           role: "user",
         },
       ]),

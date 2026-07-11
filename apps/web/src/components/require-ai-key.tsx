@@ -98,12 +98,17 @@ export function AIAvailabilityProvider({ children }: PropsWithChildren) {
     }
   }, [data, isFetching]);
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- force-closes the dialog whenever the availability query flips to available (e.g. keys configured elsewhere and refetched). `open` is independent user-controlled state set in several places, so it cannot be derived in render, and there is no single data handler that covers every way availability can become true.
-  useEffect(() => {
+  // Force-close the dialog whenever the availability query flips to available
+  // (e.g. keys configured elsewhere and refetched). Adjust-state-during-render on
+  // the availability transition rather than in an effect; `open` stays
+  // independent user-controlled state the rest of the time.
+  const [prevAvailable, setPrevAvailable] = useState(data?.available);
+  if (data?.available !== prevAvailable) {
+    setPrevAvailable(data?.available);
     if (data?.available) {
       setOpen(false);
     }
-  }, [data?.available]);
+  }
 
   const value = useMemo(
     () => ({
@@ -226,32 +231,43 @@ export function AIKeyRequiredDialog({
     createDefaultRoleModels,
   );
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- re-syncs the provider/role-model form drafts from `config` when the dialog opens, deliberately ignoring later `config` refetches so user edits survive. The setters are also driven by user edits, so this is not pure derived state; a key-based remount cannot replace it because the dialog is rendered in more than one place and remounting would also reset mutation state and re-suspend the config query.
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
+  // Re-syncs the provider/role-model form drafts from `config` when the
+  // dialog opens (or when `configured` flips while it's open), deliberately
+  // ignoring later `config` refetches so user edits survive. Storing
+  // `lastOpen`/`lastConfigured` from the previous render and comparing
+  // during render (rather than an effect) mirrors the exact dependency set
+  // the effect used to react to; the inequality guard makes the render-time
+  // setState calls loop-safe. A key-based remount cannot replace this
+  // because the dialog is rendered in more than one place and remounting
+  // would also reset mutation state and re-suspend the config query.
+  const [lastOpen, setLastOpen] = useState(open);
+  const [lastConfigured, setLastConfigured] = useState(config?.configured);
+  if (open !== lastOpen || config?.configured !== lastConfigured) {
+    setLastOpen(open);
+    setLastConfigured(config?.configured);
 
-    if (!config?.configured) {
-      const nextProviders = [createProviderCredentialDraft()];
-      setProviders(nextProviders);
-      setRoleModels(createDefaultRoleModels(getProviderValues(nextProviders)));
-      return;
+    if (open) {
+      if (config?.configured) {
+        const nextProviders = providerDraftsFromStoredProviders(
+          config.providers,
+        ).slice(0, 1);
+        const providerValues = getProviderValues(nextProviders);
+        setProviders(nextProviders);
+        setRoleModels(
+          roleModelsFromOverrideModels({
+            overrideModels: config.overrideModels,
+            providers: providerValues,
+          }),
+        );
+      } else {
+        const nextProviders = [createProviderCredentialDraft()];
+        setProviders(nextProviders);
+        setRoleModels(
+          createDefaultRoleModels(getProviderValues(nextProviders)),
+        );
+      }
     }
-
-    const nextProviders = providerDraftsFromStoredProviders(
-      config.providers,
-    ).slice(0, 1);
-    const providerValues = getProviderValues(nextProviders);
-    setProviders(nextProviders);
-    setRoleModels(
-      roleModelsFromOverrideModels({
-        overrideModels: config.overrideModels,
-        providers: providerValues,
-      }),
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-syncs only when the dialog opens or `configured` flips; depending on the full `config` identity would overwrite user edits on every refetch.
-  }, [open, config?.configured]);
+  }
 
   const updateProviders = (nextProviders: ProviderCredentialDraft[]) => {
     const providerValues = getProviderValues(nextProviders);

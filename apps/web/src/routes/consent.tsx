@@ -1,7 +1,12 @@
 import { useState } from "react";
 
 import { useQuery } from "@tanstack/react-query";
-import { createFileRoute, Link, redirect } from "@tanstack/react-router";
+import {
+  createFileRoute,
+  Link,
+  redirect,
+  useLocation,
+} from "@tanstack/react-router";
 import { useTranslations } from "use-intl";
 import * as v from "valibot";
 
@@ -15,14 +20,20 @@ import {
 } from "@stll/ui/components/frame";
 import { stellaToast } from "@stll/ui/components/toast";
 
-import type { TranslationKey } from "@/i18n/types";
 import { api } from "@/lib/api";
 import { authClient } from "@/lib/auth";
 import { toAPIError, toAuthClientError } from "@/lib/errors";
 import {
+  getOauthHashFragment,
   getOauthClientDisplayName,
   getOauthRedirectUrl,
+  getSignedOauthQueryFromHash,
 } from "@/lib/oauth-provider";
+import type { OAuthScopeDisplayEntry } from "@/lib/oauth-scopes";
+import {
+  toOAuthScopeDisplayEntries,
+  translateOAuthScopeEntry,
+} from "@/lib/oauth-scopes";
 import { pageTitle } from "@/lib/page-title";
 import { loadAuthContext } from "@/routes/-auth-context";
 import { roleOptions } from "@/routes/-queries";
@@ -37,8 +48,16 @@ export const Route = createFileRoute("/consent")({
   validateSearch: searchSchema,
   beforeLoad: async ({ context, location }) => {
     const authContext = await loadAuthContext(context.queryClient);
+    const bridgedQuery = getSignedOauthQueryFromHash(location.hash);
 
     if (!authContext.session) {
+      if (bridgedQuery) {
+        throw redirect({
+          href: `/auth#${getOauthHashFragment(bridgedQuery)}`,
+          replace: true,
+        });
+      }
+
       throw redirect({
         to: "/auth",
         search: {
@@ -56,32 +75,20 @@ export const Route = createFileRoute("/consent")({
   component: ConsentPage,
 });
 
-const SCOPE_LABELS = {
-  "stella:search": "consent.scopeSearch",
-  "stella:read": "consent.scopeRead",
-  "stella:templates": "consent.scopeTemplates",
-  "stella:skills": "consent.scopeSkills",
-  "stella:external_mcps": "consent.scopeExternalMcps",
-  "stella:search_anonymized": "consent.scopeSearchAnonymized",
-  "stella:read_anonymized": "consent.scopeReadAnonymized",
-  "stella:onboarding": "consent.scopeOnboarding",
-  email: "consent.scopeProfile",
-  openid: "consent.scopeProfile",
-  profile: "consent.scopeProfile",
-} as const satisfies Record<string, TranslationKey>;
-
-type ScopeKey = keyof typeof SCOPE_LABELS;
-
-const isScopeKey = (scope: string): scope is ScopeKey => scope in SCOPE_LABELS;
-
 function ConsentPage() {
   const t = useTranslations();
-  const clientId = Route.useSearch({
+  const bridgedQuery = useLocation({
+    select: (location) => getSignedOauthQueryFromHash(location.hash),
+  });
+  const bridgedParams = bridgedQuery ? new URLSearchParams(bridgedQuery) : null;
+  const searchClientId = Route.useSearch({
     select: (search) => search.client_id ?? null,
   });
-  const scope = Route.useSearch({
+  const searchScope = Route.useSearch({
     select: (search) => search.scope,
   });
+  const clientId = searchClientId ?? bridgedParams?.get("client_id") ?? null;
+  const scope = searchScope ?? bridgedParams?.get("scope") ?? undefined;
   const activeOrganizationId = Route.useRouteContext({
     select: (ctx) => ctx.session?.activeOrganizationId ?? null,
   });
@@ -143,17 +150,10 @@ function ConsentPage() {
       (organization) => organization.id === activeOrganizationId,
     )?.name ?? null;
 
-  const uniqueLabels = new Map<TranslationKey, string>();
-  for (const requestedScope of scopes) {
-    if (!isScopeKey(requestedScope)) {
-      continue;
-    }
-
-    const label = SCOPE_LABELS[requestedScope];
-    if (!uniqueLabels.has(label)) {
-      uniqueLabels.set(label, requestedScope);
-    }
-  }
+  // Every requested scope must be disclosed, even one the server never
+  // grants: unknown scopes fall back to the raw scope string instead of
+  // being silently skipped.
+  const scopeEntries = toOAuthScopeDisplayEntries(scopes);
 
   const handleConsent = async (accept: boolean) => {
     setIsPending(true);
@@ -202,26 +202,19 @@ function ConsentPage() {
               <p className="text-sm font-medium">{organizationName}</p>
             </div>
           ) : null}
-          {uniqueLabels.size > 0 ? (
+          {scopeEntries.length > 0 ? (
             <div className="flex flex-col gap-2">
               <p className="text-muted-foreground text-sm">
                 {t("consent.permissions")}
               </p>
               <ul className="flex flex-col gap-1.5">
-                {[...uniqueLabels.keys()].map((label) => (
+                {scopeEntries.map((entry) => (
                   <li
                     className="text-foreground flex items-start gap-2 text-sm"
-                    key={label}
+                    key={entry.type === "known" ? entry.label : entry.scope}
                   >
                     <span className="text-muted-foreground mt-0.5">&bull;</span>
-                    {/* SAFETY: SCOPE_LABELS `satisfies Record<string,
-                        TranslationKey>` enforces at compile time that every
-                        value is a valid key. The `as never` is required only
-                        because use-intl's `t()` overloads bind tighter for
-                        literal keys; a non-literal `TranslationKey` is
-                        rejected by the no-args overload. */}
-                    {/* eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion */}
-                    {t(label as never)}
+                    <ScopeLabel entry={entry} />
                   </li>
                 ))}
               </ul>
@@ -235,6 +228,8 @@ function ConsentPage() {
               <Link
                 className="text-primary text-sm font-medium hover:underline"
                 to="/settings/organization/members"
+                target="_blank"
+                rel="noopener noreferrer"
               >
                 {t("consent.completeSetup")}
               </Link>
@@ -271,4 +266,10 @@ function ConsentPage() {
       </Frame>
     </div>
   );
+}
+
+function ScopeLabel({ entry }: { entry: OAuthScopeDisplayEntry }) {
+  const t = useTranslations();
+
+  return translateOAuthScopeEntry(t, entry);
 }

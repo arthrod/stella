@@ -3,7 +3,7 @@ import { t } from "elysia";
 
 import { prepareTemplateFromDocument } from "@/api/handlers/templates/prepare-template";
 import { suggestTemplateFields } from "@/api/handlers/templates/suggest-template-fields";
-import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
+import { createTanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
@@ -15,7 +15,11 @@ const prepareBodySchema = t.Object({
 });
 
 const config = {
-  permissions: { workspace: ["read"] },
+  // Authoring an entire template from a document (AI-marks fields, rewrites the
+  // docx), so it needs `template: ["create"]` like `/create`, not bare workspace
+  // read; this also keeps a read-only role from spending org AI here.
+  permissions: { template: ["create"] },
+  mcp: { type: "capability", reason: "template_authoring_ui" },
   body: prepareBodySchema,
   requiresUsage: { actionType: "chat", modelRole: "fast" },
 } satisfies HandlerConfig;
@@ -41,7 +45,7 @@ const prepareTemplate = createSafeRootHandler(
       );
     }
 
-    const aiAnalytics = createAIAnalyticsCallbacks({
+    const aiAnalytics = createTanStackAIAnalyticsCallbacks({
       usageMetering: {
         actionType: "chat",
         organizationId,

@@ -18,6 +18,7 @@ const createRateTableBodySchema = t.Object({
 const createRateTable = createSafeHandler(
   {
     permissions: { rate: ["create"] },
+    mcp: { type: "capability", reason: "billing_admin" },
     body: createRateTableBodySchema,
   },
   async function* ({ safeDb, session, workspaceId, body, recordAuditEvent }) {

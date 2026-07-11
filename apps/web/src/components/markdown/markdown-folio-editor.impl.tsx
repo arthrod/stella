@@ -4,9 +4,9 @@ import { CodeIcon, PenLineIcon } from "lucide-react";
 import { useDebouncedCallback } from "use-debounce";
 import { useTranslations } from "use-intl";
 
-import "@stll/folio/editor.css";
-import { DocxEditor, fromMarkdown, toMarkdown } from "@stll/folio";
-import type { Document, DocxEditorRef, MarkdownOptions } from "@stll/folio";
+import "@stll/folio-react/editor.css";
+import { fromMarkdown, toMarkdown } from "@stll/folio-react";
+import type { Document, MarkdownOptions } from "@stll/folio-react";
 import { Button } from "@stll/ui/components/button";
 import { Textarea } from "@stll/ui/components/textarea";
 import { cn } from "@stll/ui/lib/utils";
@@ -16,6 +16,8 @@ import {
   useDocxFitZoom,
   useDocxWheelZoom,
 } from "@/components/docx-preview-zoom";
+import { DocxEditor } from "@/components/docx/app-docx-editor";
+import type { DocxEditorRef } from "@/components/docx/app-docx-editor";
 import { composeRefs } from "@/lib/slot";
 
 // Flatten Word constructs markdown can't carry so the emitted markdown stays

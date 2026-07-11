@@ -3,6 +3,9 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import fc from "fast-check";
 
 import type { ConditionNode } from "@stll/conditions";
+import { propertyConfig } from "@stll/property-testing";
+
+import { compareByLocale } from "@/api/lib/collation";
 
 import {
   applyFilters,
@@ -269,7 +272,7 @@ describe("applySorts (in-memory)", () => {
       makeEntity("2", "task", [["p1", "alpha"]]),
     ];
 
-    expect(applySorts(items, [])).toEqual(items);
+    expect(applySorts(items, [], "en")).toEqual(items);
   });
 
   test("sorts string values ascending", () => {
@@ -278,7 +281,7 @@ describe("applySorts (in-memory)", () => {
       makeEntity("2", "task", [["p1", "alpha"]]),
     ];
 
-    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }], "en");
 
     expect(sorted.map((item) => item.entityId)).toEqual(["2", "1"]);
   });
@@ -297,7 +300,7 @@ describe("applySorts (in-memory)", () => {
       },
     ];
 
-    const sorted = applySorts(items, [{ propertyId: "p1", desc: true }]);
+    const sorted = applySorts(items, [{ propertyId: "p1", desc: true }], "en");
 
     expect(sorted.map((item) => item.entityId)).toEqual(["2", "1"]);
   });
@@ -321,7 +324,7 @@ describe("applySorts (in-memory)", () => {
       },
     ];
 
-    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }], "en");
 
     expect(sorted.map((item) => item.entityId)).toEqual(["two", "nine", "ten"]);
   });
@@ -341,7 +344,7 @@ describe("applySorts (in-memory)", () => {
       },
     ];
 
-    const asc = applySorts(items, [{ propertyId: "p1", desc: false }]);
+    const asc = applySorts(items, [{ propertyId: "p1", desc: false }], "en");
     expect(asc.map((item) => item.entityId)).toEqual([
       "nine",
       "ten",
@@ -349,7 +352,7 @@ describe("applySorts (in-memory)", () => {
     ]);
 
     // Missing values bucket to the end regardless of direction.
-    const desc = applySorts(items, [{ propertyId: "p1", desc: true }]);
+    const desc = applySorts(items, [{ propertyId: "p1", desc: true }], "en");
     expect(desc.map((item) => item.entityId)).toEqual([
       "ten",
       "nine",
@@ -372,7 +375,7 @@ describe("applySorts (in-memory)", () => {
       },
     ];
 
-    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }], "en");
 
     expect(sorted.map((item) => item.entityId)).toEqual([
       "negative",
@@ -396,7 +399,7 @@ describe("applySorts (in-memory)", () => {
       },
     ];
 
-    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+    const sorted = applySorts(items, [{ propertyId: "p1", desc: false }], "en");
 
     expect(sorted.map((item) => item.entityId)).toEqual([
       "nine",
@@ -423,7 +426,11 @@ describe("applySorts (in-memory)", () => {
                 },
           );
 
-          const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+          const sorted = applySorts(
+            items,
+            [{ propertyId: "p1", desc: false }],
+            "en",
+          );
           const nums = sorted.map((item) => {
             const c = item.fields[0]?.content;
             return c?.type === "int" ? c.value : null;
@@ -443,6 +450,7 @@ describe("applySorts (in-memory)", () => {
           }
         },
       ),
+      propertyConfig(),
     );
   });
 
@@ -455,8 +463,15 @@ describe("applySorts (in-memory)", () => {
             makeEntity(String(index), "task", [["p1", value]]),
           );
 
-          const sorted = applySorts(items, [{ propertyId: "p1", desc: false }]);
+          const sorted = applySorts(
+            items,
+            [{ propertyId: "p1", desc: false }],
+            "en",
+          );
           const extracted = sorted.map((item) => item.fields[0]?.content.value);
+          // applySorts was called with the "en" locale above; compare with
+          // the same collator so this checks the actual invariant it upholds.
+          const compareText = compareByLocale("en");
 
           for (const [index, value] of extracted.entries()) {
             if (value === undefined) {
@@ -466,10 +481,11 @@ describe("applySorts (in-memory)", () => {
             if (next === undefined) {
               continue;
             }
-            expect(value.localeCompare(next)).toBeLessThanOrEqual(0);
+            expect(compareText(value, next)).toBeLessThanOrEqual(0);
           }
         },
       ),
+      propertyConfig(),
     );
   });
 
@@ -484,7 +500,11 @@ describe("applySorts (in-memory)", () => {
             fields: [makeIntField(String(index), "p1", value)],
           }));
 
-          const sorted = applySorts(items, [{ propertyId: "p1", desc: true }]);
+          const sorted = applySorts(
+            items,
+            [{ propertyId: "p1", desc: true }],
+            "en",
+          );
           const extracted = sorted.map((item) =>
             item.fields[0]?.content.type === "int"
               ? item.fields[0].content.value
@@ -494,6 +514,7 @@ describe("applySorts (in-memory)", () => {
           expect(extracted).toEqual([...extracted].toSorted((a, b) => b - a));
         },
       ),
+      propertyConfig(),
     );
   });
 });

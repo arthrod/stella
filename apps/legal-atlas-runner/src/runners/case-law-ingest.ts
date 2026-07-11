@@ -19,9 +19,7 @@
 
 import { panic } from "better-result";
 
-import { createIngestionDb } from "@/api/db";
-import { rootDb, rlsDb } from "@/api/db/root";
-import { caseLawIngestionEvents, caseLawSources } from "@/api/db/schema";
+import { caseLawIngestionEvents } from "@/api/db/schema";
 import { envBase } from "@/api/env-base";
 import { recomputeCitationAuthorityForAll } from "@/api/handlers/case-law/citation-authority";
 import { ADAPTER_KEYS, MAX_CYCLE_MS } from "@/api/handlers/case-law/consts";
@@ -31,6 +29,7 @@ import { runIngestionPipeline } from "@/api/handlers/case-law/ingestion/pipeline
 import { backfillSearchIndex } from "@/api/handlers/case-law/search-index";
 import { backfillLegislationCorpusIndex } from "@/api/handlers/legislation/corpus-index";
 import { backfillLegislationSearchIndex } from "@/api/handlers/legislation/search-index";
+import { TimeoutError } from "@/api/lib/errors/tagged-errors";
 import { errorTag } from "@/api/lib/errors/utils";
 import { corpusGeneration } from "@/api/lib/legal-search/corpus-family";
 import { LIMITS } from "@/api/lib/limits";
@@ -42,6 +41,12 @@ import {
   refreshS3,
 } from "@/api/lib/s3";
 
+import {
+  backfillDb,
+  createCaseLawSource,
+  findCaseLawSource,
+  ingestionDb,
+} from "../db";
 import { LEGAL_ATLAS_RUNNER_ENV } from "../env";
 
 const formatLogDetail = (detail: unknown): string => {
@@ -74,14 +79,6 @@ const logError = (message: string, detail?: unknown): void => {
   void Bun.write(Bun.stderr, `${line}\n`);
 };
 
-// Case-law ingestion writes the global corpus. The customer-scoped
-// `stella` role is read-only on case_law_* (see migration
-// 20260510140000); the daemon switches to `stella_ingestion`, which
-// has narrow writes on the corpus and nothing else. Any future code
-// path that strays outside case_law_* will hit a loud
-// `permission denied`.
-const ingestionDb = createIngestionDb(rlsDb);
-
 /**
  * Bun's native Postgres pool emits unhandled errors when the
  * server closes a connection (e.g. database failover or
@@ -90,20 +87,31 @@ const ingestionDb = createIngestionDb(rlsDb);
  * try/catch. Without this handler, the process crashes on
  * any connection drop.
  *
+ * A TimeoutError is the same failure class surfacing differently: a
+ * connection the server reaped silently never errors, so the bounded
+ * DB handle in `../db` rejects the wedged await. Both retry next cycle.
+ *
  * Adapter loops already retry on the next cycle, so the
  * daemon self-heals within CYCLE_DELAY_MS (5s).
  */
-const isTransientConnectionError = (msg: string): boolean =>
-  msg.includes("Connection closed") ||
-  msg.includes("ERR_POSTGRES_CONNECTION_CLOSED") ||
-  msg.includes("PostgresError");
+const isTransientConnectionError = (error: unknown): boolean => {
+  if (error instanceof TimeoutError) {
+    return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error);
+  return (
+    msg.includes("Connection closed") ||
+    msg.includes("ERR_POSTGRES_CONNECTION_CLOSED") ||
+    msg.includes("PostgresError")
+  );
+};
 
 /** Set to true once daemon mode starts; single-adapter mode exits on all errors. */
 let daemonMode = false;
 
 process.on("unhandledRejection", (reason) => {
   const message = reason instanceof Error ? reason.message : String(reason);
-  if (daemonMode && isTransientConnectionError(message)) {
+  if (daemonMode && isTransientConnectionError(reason)) {
     logError(`[daemon] DB connection lost (will retry): ${message}`);
     return;
   }
@@ -122,6 +130,7 @@ const HEALTH_INTERVAL_MS = 30_000;
 const SUSTAINED_FAILURE_THRESHOLD = 5;
 const SEARCH_INDEX_INTERVAL_MS = 10_000;
 const SEARCH_INDEX_BATCH_SIZE = 20;
+const SEARCH_INDEX_DRAIN_CONCURRENCY = 4;
 const CORPUS_INDEX_INTERVAL_MS = 15_000;
 // Citation authority decays slowly; a periodic full recompute keeps the
 // materialized ranking signal fresh without per-cycle cost.
@@ -154,6 +163,30 @@ const WATCHDOG_MAX_STARVED_TICKS = 3;
 // adapter. If a cycle outlives this ceiling — well above the longest adapter
 // maxCycleMs (30m) plus slack — the worker is wedged: exit so ECS relaunches.
 const CYCLE_HARD_DEADLINE_MS = 45 * 60 * 1000;
+const BACKFILL_DEADLINE_TRANSACTION_GRACE_MS = 60_000;
+
+// Hard wall-clock backstop for one backfill batch (the corpus-index and
+// search-index loops). Every external await inside a batch is individually
+// bounded — corpus S3 reads via the corpus-storage ceiling, the database via
+// the dedicated backfill transaction handle in ../db (statement_timeout +
+// wall-clock grace), the corpus-index engine via its own HTTP request
+// timeout — so this is a pure backstop: it guards against any FUTURE
+// unbounded await slipping into a batch, where the batch would never return
+// and the loop would stop making progress silently while the event loop
+// stays responsive (invisible to the lag watchdog). Sizing basis: the
+// realistic worst case of a fully-bounded batch is batch size × per-item
+// bounded I/O over the drain concurrency (e.g. 20 items drained 4 at a
+// time, reads bounded at a minute each) plus a handful of bounded DB
+// transactions. 45 minutes — matching the adapter cycle's ceiling — sits far
+// above that with headroom, so it never fires on a merely-slow batch while a
+// genuine wedge still exits within a bounded window.
+const BACKFILL_HARD_DEADLINE_MS = 45 * 60 * 1000;
+const SEARCH_INDEX_HARD_DEADLINE_MS = Math.max(
+  BACKFILL_HARD_DEADLINE_MS,
+  Math.ceil(SEARCH_INDEX_BATCH_SIZE / SEARCH_INDEX_DRAIN_CONCURRENCY) *
+    (LEGAL_ATLAS_RUNNER_ENV.dbBackfillTransactionTimeoutMs +
+      BACKFILL_DEADLINE_TRANSACTION_GRACE_MS),
+);
 
 type Semaphore = {
   acquire: (signal?: AbortSignal) => Promise<void>;
@@ -284,6 +317,35 @@ const startEventLoopWatchdog = (): void => {
   setTimeout(tick, WATCHDOG_TICK_MS).unref();
 };
 
+/**
+ * Run one loop iteration under a hard wall-clock backstop. The lag watchdog
+ * only catches a CPU-starved event loop; an await wedged on I/O-wait (a stalled
+ * socket that never settles) keeps the loop responsive yet parks the loop's
+ * forward progress forever. Bounding each iteration guarantees such a wedge
+ * eventually exits the task so ECS relaunches a healthy one, instead of a
+ * silent, indefinite freeze. The timer is unref'd so it never keeps the process
+ * alive on its own, and cleared once the iteration settles. This is the same
+ * mechanism the adapter cycle uses, shared so every daemon loop is covered.
+ */
+const runWithHardDeadline = async <T>(
+  label: string,
+  deadlineMs: number,
+  operation: () => Promise<T>,
+): Promise<T> => {
+  const deadline = setTimeout(() => {
+    logError(
+      `[${label}] iteration exceeded ${deadlineMs}ms hard deadline (wedged await); exiting for ECS restart`,
+    );
+    process.exit(1);
+  }, deadlineMs);
+  deadline.unref();
+  try {
+    return await operation();
+  } finally {
+    clearTimeout(deadline);
+  }
+};
+
 // Adapters to skip. Set DISABLED_ADAPTERS env var to a
 // comma-separated list of adapter keys (e.g. "sk-courts,pl-courts").
 const DISABLED_ADAPTER_KEYS = new Set(
@@ -343,23 +405,17 @@ const ensureSource = async (
   name: string,
   initialCursor: string | null,
 ) => {
-  const existing = await rootDb.query.caseLawSources.findFirst({
-    where: { adapterKey },
-  });
+  const existing = await findCaseLawSource(adapterKey);
 
   if (existing) {
     return existing;
   }
 
-  const [created] = await rootDb
-    .insert(caseLawSources)
-    .values({
-      adapterKey,
-      name,
-      syncCursor: initialCursor,
-      config: {},
-    })
-    .returning();
+  const created = await createCaseLawSource({
+    adapterKey,
+    name,
+    syncCursor: initialCursor,
+  });
 
   if (!created) {
     panic(`Failed to create source row for adapter "${adapterKey}"`);
@@ -525,22 +581,18 @@ const runAdapterLoop = async ({ adapterKey, name }: SourceDef) => {
       // Hard wall-clock backstop on the held slot. runOneCycle has awaits that
       // ignore the per-cycle abort signal (the source lookup before it is
       // created, the event write after the pipeline); if one wedges on a
-      // broken connection the cycle never returns, the finally never runs, and
-      // the slot parks every other adapter. The lag watchdog can't see an
-      // I/O-wait hang (the loop stays responsive), so bound it here: if a cycle
-      // outlives the ceiling, exit so ECS relaunches a healthy task.
-      const deadline = setTimeout(() => {
-        logError(
-          `[${adapterKey}] cycle exceeded ${CYCLE_HARD_DEADLINE_MS}ms hard deadline (wedged await); exiting for ECS restart`,
-        );
-        process.exit(1);
-      }, CYCLE_HARD_DEADLINE_MS);
-      deadline.unref();
+      // broken connection the cycle never returns and the slot parks every
+      // other adapter. The lag watchdog can't see an I/O-wait hang (the loop
+      // stays responsive), so bound it here: if a cycle outlives the ceiling,
+      // exit so ECS relaunches a healthy task.
       try {
         // oxlint-disable-next-line no-await-in-loop -- continuous daemon: one cycle at a time per adapter so the persisted cursor advances in order
-        cycle = await runOneCycle(adapterKey, name);
+        cycle = await runWithHardDeadline(
+          adapterKey,
+          CYCLE_HARD_DEADLINE_MS,
+          async () => await runOneCycle(adapterKey, name),
+        );
       } finally {
-        clearTimeout(deadline);
         cycleSemaphore.release();
       }
       const { outcome, inserted, pagesProcessed } = cycle;
@@ -582,7 +634,7 @@ const runAdapterLoop = async ({ adapterKey, name }: SourceDef) => {
       noProgressStreak++;
       backoffFailures++;
       const msg = error instanceof Error ? error.message : String(error);
-      if (isTransientConnectionError(msg)) {
+      if (isTransientConnectionError(error)) {
         logError(`[${adapterKey}] DB connection error (will retry): ${msg}`);
       } else {
         logError(`[${adapterKey}] Unexpected error:`, error);
@@ -598,9 +650,7 @@ const runAdapterLoop = async ({ adapterKey, name }: SourceDef) => {
       });
       // Reset to avoid flooding; backoffFailures stays high so the delay
       // doesn't collapse. The value is read again at the top of the next
-      // iteration (`noProgressStreak + 1`); the rule's forward-only liveness
-      // can't see the loop back-edge.
-      // oxlint-disable-next-line no-useless-assignment -- reset read on next loop iteration
+      // iteration (`noProgressStreak + 1`).
       noProgressStreak = 0;
     }
 
@@ -744,16 +794,18 @@ export const runCaseLawIngest = async (
       await Bun.sleep(SEARCH_INDEX_INTERVAL_MS);
       try {
         // oxlint-disable-next-line no-await-in-loop -- one bounded backfill batch per interval; the next poll only runs after this batch completes
-        const indexed = await backfillSearchIndex(
-          ingestionDb,
-          SEARCH_INDEX_BATCH_SIZE,
+        const indexed = await runWithHardDeadline(
+          "search-index",
+          SEARCH_INDEX_HARD_DEADLINE_MS,
+          async () =>
+            await backfillSearchIndex(backfillDb, SEARCH_INDEX_BATCH_SIZE),
         );
         if (indexed > 0) {
           logInfo(`[search-index] Indexed ${indexed} decisions (backfill)`);
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        if (isTransientConnectionError(msg)) {
+        if (isTransientConnectionError(error)) {
           logError(`[search-index] DB connection error (will retry): ${msg}`);
         } else {
           logError("[search-index] Backfill error:", error);
@@ -778,7 +830,7 @@ export const runCaseLawIngest = async (
         logInfo(`[citation-authority] Recomputed (${updated} cited decisions)`);
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        if (isTransientConnectionError(msg)) {
+        if (isTransientConnectionError(error)) {
           logError(
             `[citation-authority] DB connection error (will retry): ${msg}`,
           );
@@ -803,17 +855,22 @@ export const runCaseLawIngest = async (
       await Bun.sleep(CORPUS_INDEX_INTERVAL_MS);
       try {
         // oxlint-disable-next-line no-await-in-loop -- one bounded backfill batch per interval; the next poll only runs after this batch completes
-        const indexed = await backfillCorpusIndex(
-          ingestionDb,
-          LIMITS.corpusIndexBatchSize,
-          generation,
+        const indexed = await runWithHardDeadline(
+          "corpus-index",
+          BACKFILL_HARD_DEADLINE_MS,
+          async () =>
+            await backfillCorpusIndex(
+              backfillDb,
+              LIMITS.corpusIndexBatchSize,
+              generation,
+            ),
         );
         if (indexed > 0) {
           logInfo(`[corpus-index] Indexed ${indexed} decisions`);
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        if (isTransientConnectionError(msg)) {
+        if (isTransientConnectionError(error)) {
           logError(`[corpus-index] DB connection error (will retry): ${msg}`);
         } else {
           logError("[corpus-index] Backfill error:", error);
@@ -830,16 +887,21 @@ export const runCaseLawIngest = async (
       await Bun.sleep(SEARCH_INDEX_INTERVAL_MS);
       try {
         // oxlint-disable-next-line no-await-in-loop -- one bounded backfill batch per interval; the next poll only runs after this batch completes
-        const indexed = await backfillLegislationSearchIndex(
-          ingestionDb,
-          SEARCH_INDEX_BATCH_SIZE,
+        const indexed = await runWithHardDeadline(
+          "legislation-search-index",
+          SEARCH_INDEX_HARD_DEADLINE_MS,
+          async () =>
+            await backfillLegislationSearchIndex(
+              backfillDb,
+              SEARCH_INDEX_BATCH_SIZE,
+            ),
         );
         if (indexed > 0) {
           logInfo(`[legislation-search-index] Indexed ${indexed} documents`);
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        if (isTransientConnectionError(msg)) {
+        if (isTransientConnectionError(error)) {
           logError(
             `[legislation-search-index] DB connection error (will retry): ${msg}`,
           );
@@ -862,17 +924,22 @@ export const runCaseLawIngest = async (
       await Bun.sleep(CORPUS_INDEX_INTERVAL_MS);
       try {
         // oxlint-disable-next-line no-await-in-loop -- one bounded backfill batch per interval; the next poll only runs after this batch completes
-        const indexed = await backfillLegislationCorpusIndex(
-          ingestionDb,
-          LIMITS.corpusIndexBatchSize,
-          generation,
+        const indexed = await runWithHardDeadline(
+          "legislation-corpus-index",
+          BACKFILL_HARD_DEADLINE_MS,
+          async () =>
+            await backfillLegislationCorpusIndex(
+              backfillDb,
+              LIMITS.corpusIndexBatchSize,
+              generation,
+            ),
         );
         if (indexed > 0) {
           logInfo(`[legislation-corpus-index] Indexed ${indexed} documents`);
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        if (isTransientConnectionError(msg)) {
+        if (isTransientConnectionError(error)) {
           logError(
             `[legislation-corpus-index] DB connection error (will retry): ${msg}`,
           );

@@ -3,7 +3,7 @@ import { immer } from "zustand/middleware/immer";
 
 import type { BoundingBox } from "@stll/api/types";
 
-import type { WorkspaceJustification } from "@/lib/types";
+import type { JustificationId, WorkspaceJustification } from "@/lib/types";
 
 type ActiveJustification = {
   id: string;
@@ -38,7 +38,9 @@ type State = {
 type Actions = {
   syncJustifications: (justifications: WorkspaceJustification[]) => void;
   clearJustifications: () => void;
-  getJustifications: (justificationIds: string[]) => WorkspaceJustification[];
+  getJustifications: (
+    justificationIds: JustificationId[],
+  ) => WorkspaceJustification[];
   getExtractionPreview: (entityId: string, propertyId: string) => string | null;
   setExtractionPreview: (preview: {
     entityId: string;
@@ -79,6 +81,43 @@ const initialPdfViewerState = (): PdfViewerState => ({
 
 const extractionPreviewKey = (entityId: string, propertyId: string) =>
   `${entityId}:${propertyId}`;
+
+// One `fieldId -> justification` index per `justifications` array, memoized on
+// the array reference. Immer hands out a fresh `justifications` array only when
+// the collection actually changes, so the index is rebuilt once per change and
+// shared by every reader — instead of each of the (many) AI cells rescanning
+// the whole array on every store tick. The WeakMap lets a superseded array's
+// index be collected with it.
+const justificationByFieldCache = new WeakMap<
+  WorkspaceJustification[],
+  Map<string, WorkspaceJustification>
+>();
+
+/**
+ * O(1) justification-by-field lookup for store selectors. Returns a
+ * referentially stable justification (or `undefined`), so a selector built on
+ * it only re-renders when that field's justification changes. First match wins,
+ * matching the previous `justifications.find((j) => j.fieldId === id)`.
+ */
+export const selectJustificationByFieldId = (
+  justifications: WorkspaceJustification[],
+  fieldId: string | null | undefined,
+): WorkspaceJustification | undefined => {
+  if (fieldId === null || fieldId === undefined) {
+    return undefined;
+  }
+  let index = justificationByFieldCache.get(justifications);
+  if (index === undefined) {
+    index = new Map<string, WorkspaceJustification>();
+    for (const justification of justifications) {
+      if (!index.has(justification.fieldId)) {
+        index.set(justification.fieldId, justification);
+      }
+    }
+    justificationByFieldCache.set(justifications, index);
+  }
+  return index.get(fieldId);
+};
 
 export const useWorkspaceStore = create<State & Actions>()(
   immer((set, get) => ({

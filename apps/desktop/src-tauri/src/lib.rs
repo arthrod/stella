@@ -2,6 +2,8 @@ mod bridge;
 mod commands;
 mod config;
 mod deep_link;
+#[cfg(test)]
+mod e2e;
 mod i18n;
 mod keychain;
 mod session_manager;
@@ -293,6 +295,7 @@ pub fn run() {
       commands::retry_session,
       commands::respond_to_takeover,
       commands::takeover_dialog_respond,
+      commands::self_host_connect_dialog_respond,
       commands::copy_diagnostics,
       commands::email_support,
       commands::reveal_support_root,

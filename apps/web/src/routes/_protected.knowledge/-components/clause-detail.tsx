@@ -66,6 +66,7 @@ import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useI18nStore } from "@/i18n/i18n-store";
 import { api } from "@/lib/api";
+import { compareByLocale } from "@/lib/collation";
 import {
   toAPIError,
   userErrorFromThrown,
@@ -258,7 +259,7 @@ const DetailContent = ({
       />
 
       <p className="text-muted-foreground mt-2 text-sm">
-        {t("clauses.version", {
+        {t("common.versionLabel", {
           version: String(detail.currentVersion),
         })}
         {" \u00b7 "}
@@ -795,10 +796,11 @@ const ClauseLanguageField = ({
   const t = useTranslations();
   const lang = useI18nStore((s) => s.lang);
 
+  const compareLabel = compareByLocale(lang);
   const options: LanguagePick[] = LANGUAGES.map((language) => ({
     code: language.code,
     label: displayLanguageName(language.code, { displayLocale: lang }),
-  })).sort((a, b) => a.label.localeCompare(b.label, lang));
+  })).sort((a, b) => compareLabel(a.label, b.label));
 
   // Keep a legacy/out-of-enum stored value selectable rather than dropping it.
   const selected: LanguagePick | null =
@@ -1492,7 +1494,7 @@ const HistoryTab = ({
   if (versions.length === 0) {
     return (
       <p className="text-muted-foreground mt-4 py-4 text-center text-sm">
-        {t("clauses.noVersions")}
+        {t("common.noVersions")}
       </p>
     );
   }
@@ -1603,7 +1605,7 @@ const VersionRow = ({
         type="button"
       >
         <span className="font-medium">
-          {t("clauses.version", {
+          {t("common.versionLabel", {
             version: String(version.version),
           })}
         </span>

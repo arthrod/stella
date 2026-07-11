@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { Loader2Icon, SparklesIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
@@ -18,6 +18,7 @@ import {
 } from "@/features/case-law/components/case-viewer/analysis/types";
 import { useDecisionAnalysis } from "@/features/case-law/components/case-viewer/analysis/use-decision-analysis";
 import { DecisionText } from "@/features/case-law/components/case-viewer/decision-text";
+import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { useCaseSearchStore } from "@/lib/case-search-store";
 import type { SafeId } from "@/lib/safe-id";
 
@@ -191,16 +192,14 @@ export function DecisionWorkspace(props: DecisionWorkspaceProps) {
     return items;
   });
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (auto-kick AI analysis on derived idle state), move into handler / data-loading flow
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     if (aiEnabled && ast && analysisState.status === "idle") {
       void generate();
     }
   }, [aiEnabled, analysisState.status, ast, generate]);
 
   const reset = useCaseSearchStore((s) => s.reset);
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id store reset + derived search state, lift to key prop
-  useEffect(() => {
+  useExternalSyncEffect(() => {
     reset();
     if (initialSearchQuery) {
       setSearchQuery(initialSearchQuery);
@@ -386,6 +385,7 @@ function AnalysisLoader() {
         </span>
       </div>
       {[0.6, 0.8, 0.5, 0.7, 0.45, 0.65].map((width, index) => (
+        // eslint-disable-next-line react/no-array-index-key -- static skeleton-loader placeholder widths, never reorders
         <div className="flex flex-col gap-1.5" key={index}>
           <div
             className="bg-muted/60 h-2.5 animate-pulse rounded"

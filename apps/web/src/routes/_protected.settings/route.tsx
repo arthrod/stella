@@ -5,8 +5,10 @@ import {
   GaugeIcon,
   HashIcon,
   MonitorIcon,
+  PlugIcon,
   ShieldIcon,
   SparklesIcon,
+  TagsIcon,
   UserIcon,
   UsersIcon,
 } from "lucide-react";
@@ -31,9 +33,11 @@ export const Route = createFileRoute("/_protected/settings")({
 type NavTo =
   | "/settings/account/profile"
   | "/settings/account/desktop"
+  | "/settings/account/connections"
   | "/settings/account/beta"
   | "/settings/organization/members"
   | "/settings/organization/matter-numbering"
+  | "/settings/organization/document-types"
   | "/settings/organization/ai"
   | "/settings/organization/anonymization"
   | "/settings/organization/usage";
@@ -62,13 +66,18 @@ const ACCOUNT_SECTION = {
   items: [
     {
       to: "/settings/account/profile",
-      labelKey: "settings.account.profile",
+      labelKey: "common.profile",
       icon: UserIcon,
     },
     {
       to: "/settings/account/desktop",
       labelKey: "settings.account.desktop",
       icon: MonitorIcon,
+    },
+    {
+      to: "/settings/account/connections",
+      labelKey: "settings.connections.title",
+      icon: PlugIcon,
     },
     // Beta features: only on hosts where users may flip them (dev,
     // staging); appended conditionally in SettingsLayout.
@@ -81,13 +90,18 @@ const ORGANIZATION_SECTION = {
   items: [
     {
       to: "/settings/organization/members",
-      labelKey: "navigation.members",
+      labelKey: "common.members",
       icon: UsersIcon,
     },
     {
       to: "/settings/organization/matter-numbering",
       labelKey: "settings.organization.matterNumbering",
       icon: HashIcon,
+    },
+    {
+      to: "/settings/organization/document-types",
+      labelKey: "settings.organization.documentTypes.title",
+      icon: TagsIcon,
     },
     {
       to: "/settings/organization/ai",

@@ -27,7 +27,7 @@ const createEntityBodySchema = t.Object({
 
 type CreateEntityBodySchema = Static<typeof createEntityBodySchema>;
 
-type CreateEntitiesHandlerProps = {
+export type CreateEntitiesHandlerProps = {
   safeDb: SafeDb;
   workspaceId: SafeId<"workspace">;
   userId: SafeId<"user">;
@@ -61,7 +61,7 @@ const validateParentId = async (
   return null;
 };
 
-const createEntitiesHandler = async function* ({
+export const createEntitiesHandler = async function* ({
   safeDb,
   workspaceId,
   userId,
@@ -174,6 +174,7 @@ const createEntitiesHandler = async function* ({
 
 const config = {
   permissions: { entity: ["create"] },
+  mcp: { type: "tool", name: "save_document" },
   body: createEntityBodySchema,
 } satisfies HandlerConfig;
 

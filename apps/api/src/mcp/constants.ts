@@ -1,17 +1,27 @@
 import { env } from "@/api/env";
+import { REQUEST_ID_HEADER } from "@/api/lib/observability/request-context";
 
 export const MCP_DEFAULT_RESOURCE_SCOPES = [
   "stella:search",
   "stella:read",
   "stella:templates",
+  "stella:documents_write",
+  "stella:matters_write",
+  "stella:chat",
+  "stella:knowledge_write",
+  "stella:billing_write",
+  "stella:admin_read",
+  "stella:admin_write",
   "stella:onboarding",
   "stella:skills",
   "stella:external_mcps",
+  "stella:feedback",
 ] as const;
 
 export const MCP_ANONYMIZED_RESOURCE_SCOPES = [
   "stella:search_anonymized",
   "stella:read_anonymized",
+  "stella:templates_anonymized",
 ] as const;
 
 export const MCP_ALL_RESOURCE_SCOPES = [
@@ -23,8 +33,22 @@ export const MCP_OAUTH_SCOPES = [
   "openid",
   "profile",
   "email",
+  // Protocol scope (RFC 6749 / OIDC), not a stella resource scope: it must
+  // never leak into `MCP_ALL_RESOURCE_SCOPES` or the resource-metadata scope
+  // lists derived from it. Granting it is what makes
+  // `oauthProvider({ scopes: ... })` in `lib/auth.ts` issue a refresh token
+  // alongside the access token.
+  "offline_access",
   ...MCP_ALL_RESOURCE_SCOPES,
 ] as const;
+
+/**
+ * Every scope the OAuth provider can grant (see `oauthProvider({ scopes: ... })`
+ * in `lib/auth.ts`). The consent page types its scope-label map against this
+ * union so a newly added scope fails the build instead of silently rendering
+ * without a disclosure line.
+ */
+export type McpOAuthScope = (typeof MCP_OAUTH_SCOPES)[number];
 
 export const MCP_HTTP_PATH = "/mcp";
 export const MCP_ANONYMIZED_HTTP_PATH = "/mcp-anonymized";
@@ -44,7 +68,22 @@ export const MCP_ALLOWED_HEADERS = [
   "MCP-Protocol-Version",
 ] as const;
 
-export const MCP_EXPOSE_HEADERS = ["WWW-Authenticate"] as const;
+// Feeds the @stll/cli update nudge: the CLI reads `x-stella-cli-latest` off its
+// runtime `tools/list` fetch and, if this is newer than the running CLI, prints
+// one stderr hint. Bump this line when publishing a new @stll/cli. The header
+// name is mirrored (by design, no shared module) in
+// `packages/cli/src/cli-version-nudge.ts`.
+export const STELLA_CLI_LATEST_VERSION = "0.2.0";
+export const STELLA_CLI_LATEST_HEADER = "x-stella-cli-latest";
+
+export const MCP_EXPOSE_HEADERS = [
+  "WWW-Authenticate",
+  STELLA_CLI_LATEST_HEADER,
+  // The per-request receipt (also on the global CORS exposeHeaders list):
+  // browser-based MCP clients correlate a failed/successful call with server
+  // logs the same way REST callers do.
+  REQUEST_ID_HEADER,
+] as const;
 
 const MCP_MODE_CONFIG = {
   default: {

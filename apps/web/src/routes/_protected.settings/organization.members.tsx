@@ -12,7 +12,7 @@ import {
   EllipsisVerticalIcon,
   SearchIcon,
 } from "lucide-react";
-import { useTranslations } from "use-intl";
+import { useLocale, useTranslations } from "use-intl";
 
 import { BidiText } from "@stll/ui/components/bidi-text";
 import { Button } from "@stll/ui/components/button";
@@ -53,7 +53,9 @@ import { UserIdentity } from "@/components/user-avatar";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { authClient } from "@/lib/auth";
 import type { Role } from "@/lib/auth";
+import { compareByLocale } from "@/lib/collation";
 import { toAuthClientError } from "@/lib/errors";
+import { ensureRouteQueryData } from "@/lib/react-query";
 import { roleOptions } from "@/routes/-queries";
 import {
   getRoles,
@@ -141,10 +143,22 @@ export const Route = createFileRoute(
 )({
   component: Members,
   pendingComponent: MembersPendingComponent,
+  loader: async ({ context }) => {
+    // Prime the org + role queries the page suspends on so the fetch starts
+    // during navigation instead of after the component mounts and suspends.
+    await Promise.all([
+      ensureRouteQueryData(
+        context.queryClient,
+        organizationOptions(context.user.activeOrganizationId),
+      ),
+      ensureRouteQueryData(context.queryClient, roleOptions),
+    ]);
+  },
 });
 
 function Members() {
   const t = useTranslations();
+  const locale = useLocale();
   const activeOrganizationId = Route.useRouteContext({
     select: (ctx) => ctx.user.activeOrganizationId,
   });
@@ -177,10 +191,11 @@ function Members() {
         )
       : data.members;
 
+    const compareName = compareByLocale(locale);
     const sorted = [...filtered].sort((a, b) => {
       let cmp: number;
       if (sort.key === "name") {
-        cmp = a.user.name.localeCompare(b.user.name);
+        cmp = compareName(a.user.name, b.user.name);
       } else if (sort.key === "role") {
         cmp = rolePriority[a.role] - rolePriority[b.role];
       } else {
@@ -210,12 +225,12 @@ function Members() {
     <>
       <SettingsPageHeader
         description={t("settings.organization.membersDescription")}
-        title={t("navigation.members")}
+        title={t("common.members")}
       />
 
       <section className="flex flex-col gap-2">
         <h2 className="text-muted-foreground px-1 text-xs font-medium tracking-wide uppercase">
-          {t("settings.organization.profile")}
+          {t("common.profile")}
         </h2>
         <OrganizationProfileCard />
       </section>
@@ -280,7 +295,7 @@ function Members() {
                               onClick={() => removeMember.mutate(member.id)}
                               variant="destructive"
                             >
-                              {t("organization.members.removeMember")}
+                              {t("common.removeMember")}
                             </MenuItem>
                           </MenuPopup>
                         </Menu>
@@ -488,7 +503,15 @@ const RoleCell = ({
         >
           <SelectValue>{t(`organization.roles.${memberRole}`)}</SelectValue>
         </SelectTrigger>
-        <SelectPopup alignItemWithTrigger={false} className="min-w-72">
+        <SelectPopup
+          alignItemWithTrigger={false}
+          className="min-w-72"
+          collisionAvoidance={{
+            align: "shift",
+            fallbackAxisSide: "end",
+            side: "flip",
+          }}
+        >
           {ASSIGNABLE_ROLES.map((role) => {
             const item = roleData.find((r) => r.value === role);
             if (!item) {
@@ -710,12 +733,12 @@ function MembersPendingComponent() {
     <>
       <SettingsPageHeader
         description={t("settings.organization.membersDescription")}
-        title={t("navigation.members")}
+        title={t("common.members")}
       />
 
       <section className="flex flex-col gap-2">
         <h2 className="text-muted-foreground px-1 text-xs font-medium tracking-wide uppercase">
-          {t("settings.organization.profile")}
+          {t("common.profile")}
         </h2>
         <CardSkeletonPlaceholder />
       </section>

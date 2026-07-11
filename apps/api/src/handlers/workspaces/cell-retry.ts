@@ -11,6 +11,7 @@ import { isWorkflowRunning, startWorkflow } from "@/api/lib/workflow-queue";
 
 const config = {
   permissions: { workspace: ["update"] },
+  mcp: { type: "capability", reason: "workflow_orchestration" },
   body: t.Object({
     entityId: tSafeId("entity"),
     propertyId: tSafeId("property"),

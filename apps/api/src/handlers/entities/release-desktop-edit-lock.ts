@@ -16,6 +16,7 @@ import { broadcast } from "@/api/lib/sse";
 
 const config = {
   permissions: { entity: ["update"] },
+  mcp: { type: "internal", reason: "session_token_exchange" },
   body: t.Object({
     entityId: tSafeId("entity"),
     propertyId: tSafeId("property"),

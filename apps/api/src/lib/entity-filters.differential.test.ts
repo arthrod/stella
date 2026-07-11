@@ -1,4 +1,3 @@
-import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { pushSchema } from "drizzle-kit/api-postgres";
 import { and, eq, sql } from "drizzle-orm";
@@ -6,6 +5,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import fc from "fast-check";
 
 import type { ConditionNode } from "@stll/conditions";
+import { propertyConfig, propertyTestTimeout } from "@stll/property-testing";
 
 import * as authSchema from "@/api/db/auth-schema";
 import * as rlsExports from "@/api/db/rls";
@@ -14,6 +14,10 @@ import { entities, entityVersions, fields, properties } from "@/api/db/schema";
 import type { EntityKind, FieldContent } from "@/api/db/schema-validators";
 import { toSafeId } from "@/api/lib/branded-types";
 import { applyFilters, buildFilterConditions } from "@/api/lib/entity-filters";
+import {
+  createSchemaPglite,
+  installPgliteSchemaPrerequisites,
+} from "@/api/tests/pglite-schema";
 
 // ── Differential property test ──────────────────────────────
 //
@@ -29,7 +33,7 @@ const allSchema = { ...schema, ...authSchema, ...rlsExports };
 
 type RawDb = ReturnType<typeof drizzle>;
 
-let client: PGlite;
+let client: Awaited<ReturnType<typeof createSchemaPglite>> | undefined;
 let db: RawDb;
 
 const ORG_ID = toSafeId<"organization">(Bun.randomUUIDv7());
@@ -89,61 +93,67 @@ const ENTITY_KINDS: readonly EntityKind[] = [
   "link",
 ];
 
-beforeAll(async () => {
-  client = await PGlite.create();
-  db = drizzle({ client });
-  const pushDb = drizzle({ client });
+beforeAll(
+  async () => {
+    client = await createSchemaPglite();
+    db = drizzle({ client });
+    const pushDb = drizzle({ client });
 
-  await db.execute(sql.raw("CREATE ROLE stella NOLOGIN"));
-  await db.execute(sql.raw("CREATE ROLE stella_ingestion NOLOGIN"));
+    await db.execute(sql.raw("CREATE ROLE stella NOLOGIN"));
+    await db.execute(sql.raw("CREATE ROLE stella_ingestion NOLOGIN"));
+    await installPgliteSchemaPrerequisites(db);
 
-  const { sqlStatements } = await pushSchema(allSchema, pushDb);
-  // Schema DDL must apply in dependency order, so these run sequentially.
-  for (const statement of sqlStatements) {
-    // eslint-disable-next-line no-await-in-loop -- ordered DDL, can't parallelize
-    await db.execute(sql.raw(statement));
-  }
+    const { sqlStatements } = await pushSchema(allSchema, pushDb);
+    // Schema DDL must apply in dependency order, so these run sequentially.
+    for (const statement of sqlStatements) {
+      // eslint-disable-next-line no-await-in-loop -- ordered DDL, can't parallelize
+      await db.execute(sql.raw(statement));
+    }
 
-  await db.insert(authSchema.user).values({
-    id: "user_diff_test",
-    name: "Diff",
-    email: "diff@test.local",
-  });
-  await db.insert(authSchema.organization).values({
-    id: ORG_ID,
-    name: "Diff Org",
-    slug: "diff-org",
-    createdAt: new Date(),
-  });
-  await db.insert(schema.contacts).values({
-    id: CONTACT_ID,
-    organizationId: ORG_ID,
-    type: "person",
-    displayName: "Diff Contact",
-  });
-  await db.insert(schema.workspaces).values({
-    id: WS_ID,
-    organizationId: ORG_ID,
-    clientId: CONTACT_ID,
-    name: "Diff WS",
-    reference: "REF-DIFF",
-    status: "active",
-  });
+    await db.insert(authSchema.user).values({
+      id: "user_diff_test",
+      name: "Diff",
+      email: "diff@test.local",
+    });
+    await db.insert(authSchema.organization).values({
+      id: ORG_ID,
+      name: "Diff Org",
+      slug: "diff-org",
+      createdAt: new Date(),
+    });
+    await db.insert(schema.contacts).values({
+      id: CONTACT_ID,
+      organizationId: ORG_ID,
+      type: "person",
+      displayName: "Diff Contact",
+    });
+    await db.insert(schema.workspaces).values({
+      id: WS_ID,
+      organizationId: ORG_ID,
+      clientId: CONTACT_ID,
+      name: "Diff WS",
+      reference: "REF-DIFF",
+      status: "active",
+    });
 
-  await db.insert(properties).values(
-    PROP_KEYS.map((key) => ({
-      id: PROP[key],
-      workspaceId: WS_ID,
-      name: key,
-      content: propertyContent(key),
-      tool: PROP_TOOL,
-      status: "fresh" as const,
-    })),
-  );
-});
+    await db.insert(properties).values(
+      PROP_KEYS.map((key) => ({
+        id: PROP[key],
+        workspaceId: WS_ID,
+        name: key,
+        content: propertyContent(key),
+        tool: PROP_TOOL,
+        status: "fresh" as const,
+      })),
+    );
+  },
+  { timeout: 30_000 },
+);
 
 afterAll(async () => {
-  await client.close();
+  if (client !== undefined) {
+    await client.close();
+  }
 });
 
 // ── Generated row model ─────────────────────────────────────
@@ -507,8 +517,8 @@ test(
           await clearRows();
         }
       }),
-      { numRuns: 300 },
+      propertyConfig({ numRuns: 300 }),
     );
   },
-  { timeout: 60_000 },
+  { timeout: propertyTestTimeout(60_000) },
 );

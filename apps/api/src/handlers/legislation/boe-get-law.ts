@@ -20,6 +20,7 @@ const querySchema = t.Object({
 const boeGetLaw = createSafeRootHandler(
   {
     permissions: { workspace: ["read"] },
+    mcp: { type: "covered", by: "search_legislation" },
     params: paramsSchema,
     query: querySchema,
   },

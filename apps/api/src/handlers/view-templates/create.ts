@@ -27,6 +27,7 @@ const createViewTemplateBodySchema = t.Object(
 
 const config = {
   permissions: { view: ["create"] },
+  mcp: { type: "capability", reason: "workspace_schema" },
   body: createViewTemplateBodySchema,
 } satisfies HandlerConfig;
 
@@ -87,6 +88,7 @@ const createViewTemplate = createSafeHandler(
             content: true,
             tool: true,
             system: true,
+            role: true,
           },
           limit: LIMITS.propertiesCount,
         });

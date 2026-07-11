@@ -2,7 +2,7 @@ import { Result } from "better-result";
 import { t } from "elysia";
 
 import { suggestTemplateFields } from "@/api/handlers/templates/suggest-template-fields";
-import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
+import { createTanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
@@ -15,7 +15,11 @@ const suggestFieldsBodySchema = t.Object({
 });
 
 const config = {
-  permissions: { workspace: ["read"] },
+  // Authoring assistance (which literals should become {{fields}}) that spends
+  // org AI, so it takes the same `template: ["create"]` grant as its chat twin
+  // `suggest_template_fields`; a fill-only or read-only role must not reach it.
+  permissions: { template: ["create"] },
+  mcp: { type: "capability", reason: "template_authoring_ui" },
   body: suggestFieldsBodySchema,
   requiresUsage: { actionType: "chat", modelRole: "fast" },
 } satisfies HandlerConfig;
@@ -38,7 +42,7 @@ const suggestFields = createSafeRootHandler(
       return Result.ok({ suggestions: [] });
     }
 
-    const aiAnalytics = createAIAnalyticsCallbacks({
+    const aiAnalytics = createTanStackAIAnalyticsCallbacks({
       usageMetering: {
         actionType: "chat",
         organizationId,

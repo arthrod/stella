@@ -19,11 +19,11 @@ import { resolveAiFields } from "@/api/handlers/docx/resolve-ai-fields";
 import { readManifest } from "@/api/handlers/docx/template-manifest";
 import { isTemplateData, type TemplateData } from "@/api/handlers/docx/types";
 import { convertToPdf } from "@/api/handlers/files/gotenberg";
+import { isTemplateOutputValid } from "@/api/handlers/templates/validate-template-output";
+import type { OrgAIConfig } from "@/api/lib/ai-config";
 import { loadOrgAIConfig } from "@/api/lib/ai-config-loader";
-import { hasInstanceProvider } from "@/api/lib/ai-models";
-import type { OrgAIConfig } from "@/api/lib/ai-models";
 import { captureError } from "@/api/lib/analytics";
-import { createAIAnalyticsCallbacks } from "@/api/lib/analytics/ai";
+import { createTanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
 import {
   assertUsageAvailableForHandler,
   createSafeRootHandler,
@@ -34,6 +34,7 @@ import { contentDisposition } from "@/api/lib/content-disposition";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { FILE_SIZE_LIMITS } from "@/api/lib/limits";
 import { DOCX_EXT_RE, sanitizeFilename } from "@/api/lib/sanitize-filename";
+import { hasTanStackInstanceProvider } from "@/api/lib/tanstack-ai-models";
 import { isRecord } from "@/api/lib/type-guards";
 import { DOCX_MIME_TYPE, OCTET_STREAM_MIME_TYPE } from "@/api/mime-types";
 
@@ -116,10 +117,10 @@ export const assertTemplateFillUsage = async ({
 }: TemplateFillUsageArgs): Promise<HandlerError<402 | 500> | null> => {
   // Skip only when there is no AI field to bill, or no provider could run a
   // model at all. With an instance provider but no org BYOK, the fill still
-  // calls the fast model (getModelForRole resolves the instance provider), so
-  // the quota check must apply — a null org config is not "no model call". The
-  // metering layer prices the instance-provider call (non-BYOK rate).
-  if (!hasAiFields || (!orgAIConfig && !hasInstanceProvider())) {
+  // calls the fast model (the instance provider resolves it), so the quota
+  // check must apply — a null org config is not "no model call". The metering
+  // layer prices the instance-provider call (non-BYOK rate).
+  if (!hasAiFields || (!orgAIConfig && !hasTanStackInstanceProvider())) {
     return null;
   }
   return await assertUsageAvailableForHandler({
@@ -244,7 +245,7 @@ export const fillHandler = async ({
   }
 
   if (manifest && (hasAiDraftFields || hasAiAdaptFields)) {
-    const aiAnalytics = createAIAnalyticsCallbacks({
+    const aiAnalytics = createTanStackAIAnalyticsCallbacks({
       usageMetering: {
         actionType: "chat",
         organizationId,
@@ -348,6 +349,20 @@ export const fillHandler = async ({
   // PDF conversion via Gotenberg
   if (format === "pdf") {
     const docxBytes = new Uint8Array(result.buffer);
+    if (
+      !(await isTemplateOutputValid({
+        buffer: docxBytes,
+        fileName: sanitizeFilename(file.name),
+      }))
+    ) {
+      return new Response(
+        JSON.stringify({ error: "Template output invalid" }),
+        {
+          status: 422,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
     const pdfResult = await convertToPdf(
       docxBytes.buffer.slice(
         docxBytes.byteOffset,
@@ -408,7 +423,8 @@ export const fillHandler = async ({
 };
 
 const config = {
-  permissions: { template: ["create"] },
+  permissions: { template: ["use"] },
+  mcp: { type: "tool", name: "fill_template" },
   body: fillBodySchema,
   query: fillQuerySchema,
 } satisfies HandlerConfig;

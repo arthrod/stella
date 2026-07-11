@@ -1,12 +1,10 @@
 import { useDeferredValue, useMemo, useState } from "react";
 
-import type { ToolUIPart } from "ai";
 import {
   ArrowRightIcon,
   CheckIcon,
   ExternalLinkIcon,
   FilePlusIcon,
-  LayersIcon,
   LoaderIcon,
   SearchIcon,
 } from "lucide-react";
@@ -19,10 +17,16 @@ import { contentDir } from "@stll/ui/hooks/use-content-dir";
 import { cn } from "@stll/ui/lib/utils";
 
 import { useChatMatters } from "@/components/chat/chat-matters-context";
-import type { ChatUITools } from "@/components/chat/chat-ui-tools";
-import { resolveMatterColor } from "@/lib/matter-colors";
+import type {
+  ChatToolCallPart,
+  ChatUITools,
+} from "@/components/chat/chat-ui-tools";
+import { MatterIcon } from "@/components/matter-icon";
 
-type CreateDocumentPart = ToolUIPart<Pick<ChatUITools, "create-document">>;
+type CreateDocumentPart = Extract<
+  ChatToolCallPart,
+  { name: "create-document" }
+>;
 type CreateDocumentInput = ChatUITools["create-document"]["input"];
 type CreateDocumentOutput = ChatUITools["create-document"]["output"];
 type CreateDocumentSuccess = Extract<CreateDocumentOutput, { success: true }>;
@@ -55,28 +59,27 @@ export const NeedsMatterCard = ({
   } = useChatMatters();
   const t = useTranslations();
 
-  // Streaming-tolerant input read. While the AI is producing the
-  // tool call, AI SDK populates `part.input` as a DeepPartial; show
-  // whatever has arrived so far.
+  // Streaming-tolerant input read. `part.input` is derived from the
+  // part's `arguments` at the session boundary (see
+  // `withParsedToolCallInputs`) once the tool call reaches
+  // `input-complete`; show whatever has arrived so far.
   const partialInput =
     part.state === "input-streaming" ||
-    part.state === "input-available" ||
-    part.state === "output-available"
+    part.state === "input-complete" ||
+    part.state === "complete"
       ? normalizeCreateDocumentInput(part.input)
       : null;
   const name = partialInput?.name ?? "";
   const sourcePreview = partialInput?.source ?? "";
 
   const isStreaming = part.state === "input-streaming";
-  const isAwaitingMatter = part.state === "input-available";
+  const isAwaitingMatter =
+    part.state === "input-complete" && part.output === undefined;
+  const completedOutput = part.state === "complete" ? part.output : undefined;
   const successfulOutput =
-    part.state === "output-available" && part.output.success
-      ? part.output
-      : null;
+    completedOutput?.success === true ? completedOutput : null;
   const failedOutput =
-    part.state === "output-available" && !part.output.success
-      ? part.output
-      : null;
+    completedOutput?.success === false ? completedOutput : null;
 
   if (successfulOutput) {
     return (
@@ -116,7 +119,7 @@ export const NeedsMatterCard = ({
               name: partialInput.name ?? "Untitled",
               source: partialInput.source,
             };
-            await onResolve(part.toolCallId, matterId, fullInput);
+            await onResolve(part.id, matterId, fullInput);
           }}
         />
       )}
@@ -320,7 +323,6 @@ const MatterPickerSection = ({
             <div className="max-h-56 overflow-y-auto rounded-md border">
               {filtered.map((m) => {
                 const isSelected = m.id === selectedMatterId;
-                const swatch = resolveMatterColor(m.id, m.color);
                 return (
                   <button
                     className={cn(
@@ -334,12 +336,9 @@ const MatterPickerSection = ({
                     onClick={() => setSelectedMatterId(m.id)}
                     type="button"
                   >
-                    <LayersIcon
-                      aria-hidden="true"
+                    <MatterIcon
                       className="size-3.5 shrink-0"
-                      style={{
-                        color: isSelected ? undefined : swatch,
-                      }}
+                      matter={{ id: m.id, color: m.color }}
                     />
                     <BidiText as="span" className="min-w-0 flex-1 truncate">
                       {m.name}
