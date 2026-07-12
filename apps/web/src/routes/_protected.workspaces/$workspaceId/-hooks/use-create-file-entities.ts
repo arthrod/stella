@@ -13,6 +13,7 @@ import type { DroppedFileTree } from "@/hooks/external-file-drop.logic";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { ClientOperationError, toAPIError } from "@/lib/errors";
+import { fetchWithTimeout } from "@/lib/fetch";
 import { toSafeId } from "@/lib/safe-id";
 import { UploadQueue } from "@/lib/upload-queue";
 import {
@@ -29,6 +30,11 @@ import {
 import { workspacesKeys } from "@/routes/_protected.workspaces/-queries";
 
 const MAX_DISPLAYED_FAILURES = 5;
+// Matches the versions-sidebar PUT-to-S3 upload budget (same flow, uploaded
+// file can be arbitrarily large). This is a stall ceiling, not a target
+// duration: a healthy slow upload of a large file can legitimately take
+// several minutes.
+const UPLOAD_PUT_TIMEOUT_MS = 30 * 60 * 1000;
 
 const formatFailedFiles = (names: readonly string[]): string => {
   const shown = names.slice(0, MAX_DISPLAYED_FAILURES);
@@ -179,10 +185,19 @@ const abortUpload = async (
   // 24h and the daily prune cleans the row, so a failed abort is
   // not fatal. We swallow errors to avoid masking the original
   // cancellation/failure with a follow-up rejection.
-  await api
-    .uploads({ workspaceId: toSafeId<"workspace">(workspaceId) })({ uploadId })
-    .abort.post({})
-    .catch(() => undefined);
+  try {
+    // SAFETY: best-effort abort; the bucket lifecycle rule and daily
+    // prune already reclaim the tmp object and row within 24h, so a
+    // failed abort here is not fatal and has no user-facing outcome.
+    // eslint-disable-next-line require-eden-error-check/require-eden-error-check
+    await api
+      .uploads({ workspaceId: toSafeId<"workspace">(workspaceId) })({
+        uploadId,
+      })
+      .abort.post({});
+  } catch {
+    // Intentionally swallowed; see comment above.
+  }
 };
 
 type AbortPreparedUploadsForFilesOptions = {
@@ -301,11 +316,12 @@ const uploadPreparedFileEntity = async ({
   //    as the error message.
   let putResponse: Response;
   try {
-    putResponse = await fetch(url, {
+    putResponse = await fetchWithTimeout(url, {
       method: "PUT",
       headers,
       body: file,
       signal,
+      timeoutMs: UPLOAD_PUT_TIMEOUT_MS,
     });
   } catch (error) {
     await abortUpload(workspaceId, uploadId);
