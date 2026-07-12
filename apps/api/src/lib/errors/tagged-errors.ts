@@ -1,6 +1,13 @@
 import { TaggedError } from "better-result";
 
-export { FetchBoundaryError } from "@stll/errors";
+import type { UsageLimitExceededReason } from "@stll/errors";
+
+export {
+  FetchBoundaryError,
+  USAGE_LIMIT_EXCEEDED_REASONS,
+  UsageLimitExceededError,
+  type UsageLimitExceededReason,
+} from "@stll/errors";
 
 export type HandlerErrorStatusCode =
   | 400
@@ -90,24 +97,6 @@ export class ConfigurationError extends TaggedError("ConfigurationError")<{
 export class TelemetryError extends TaggedError("TelemetryError")<{
   message: string;
   cause?: unknown;
-}>() {}
-
-export const USAGE_LIMIT_EXCEEDED_REASONS = [
-  "no_entitlement",
-  "usage_limit_exceeded",
-  "entitlement_inactive",
-] as const;
-
-export type UsageLimitExceededReason =
-  (typeof USAGE_LIMIT_EXCEEDED_REASONS)[number];
-
-export class UsageLimitExceededError extends TaggedError(
-  "UsageLimitExceededError",
-)<{
-  message: string;
-  required: number;
-  available: number;
-  reason: UsageLimitExceededReason;
 }>() {}
 
 export class HealthCheckError extends TaggedError("HealthCheckError")<{

@@ -86,6 +86,23 @@ details unless they are already public in the repository.
   slices (own routes, components, handlers). New capabilities land in their own slice;
   existing code stays untouched.
 
+## Platform Kernel & Divergence Freeze
+
+Foundation packages under `packages/` (`@stll/errors`, `@stll/tenancy`,
+`@stll/backend-conformance`, and the rest of the kernel tier — see
+`docs/adr/0001-backend-platform-kernel-home-and-licensing.md`) are runtime-neutral:
+WinterTC-portable APIs only (`fetch`, WebCrypto, streams), no `Bun.*` or Node
+built-ins in kernel source (tests may use `bun:test`/`bun:sqlite`); runtime-specific
+code goes in a driver package.
+
+Divergence freeze (`docs/adr/0004-divergence-freeze.md`): do not introduce a new
+implementation of a primitive the kernel already provides (error classes/contract,
+pagination envelope, id minting, webhook verification, tenancy access, job
+definitions, logging contract) without an issue naming ADR-0004. If the kernel
+primitive is missing a capability, extend the kernel package instead of forking
+around it. Shared dependency pins (Better Auth, Drizzle, Zod, better-result) are
+governed by `PLATFORM_VERSIONS.md`.
+
 ## Scalability
 
 Never paint yourself into a corner. Architecture must support Magic Circle scale

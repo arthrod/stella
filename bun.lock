@@ -63,6 +63,7 @@
         "@stll/legal-ast": "workspace:*",
         "@stll/locales": "workspace:*",
         "@stll/money": "workspace:*",
+        "@stll/pagination": "workspace:*",
         "@stll/permissions": "workspace:*",
         "@stll/skills": "workspace:*",
         "@stll/template-conditions": "workspace:*",
@@ -351,6 +352,35 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/auth-kit": {
+      "name": "@stll/auth-kit",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stll/errors": "workspace:*",
+        "@stll/tenancy": "workspace:*",
+        "better-result": "catalog:",
+      },
+      "devDependencies": {
+        "@stll/typescript-config": "workspace:*",
+        "@types/bun": "catalog:",
+      },
+    },
+    "packages/backend-conformance": {
+      "name": "@stll/backend-conformance",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stll/errors": "workspace:*",
+        "@stll/tenancy": "workspace:*",
+        "better-result": "catalog:",
+      },
+      "devDependencies": {
+        "@electric-sql/pglite": "^0.5.3",
+        "@stll/storage": "workspace:*",
+        "@stll/typescript-config": "workspace:*",
+        "@stll/webhook-kit": "workspace:*",
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/boe": {
       "name": "@stll/boe",
       "version": "0.1.0",
@@ -459,12 +489,31 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/ids": {
+      "name": "@stll/ids",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@stll/typescript-config": "workspace:*",
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/infosoud": {
       "name": "@stll/infosoud",
       "version": "0.1.0",
       "bin": {
         "infosoud": "./dist/cli.js",
       },
+      "dependencies": {
+        "better-result": "catalog:",
+      },
+      "devDependencies": {
+        "@stll/typescript-config": "workspace:*",
+        "@types/bun": "catalog:",
+      },
+    },
+    "packages/jobs": {
+      "name": "@stll/jobs",
+      "version": "0.0.0",
       "dependencies": {
         "better-result": "catalog:",
       },
@@ -506,6 +555,22 @@
     },
     "packages/money": {
       "name": "@stll/money",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@stll/typescript-config": "workspace:*",
+        "@types/bun": "catalog:",
+      },
+    },
+    "packages/obs": {
+      "name": "@stll/obs",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@stll/typescript-config": "workspace:*",
+        "@types/bun": "catalog:",
+      },
+    },
+    "packages/pagination": {
+      "name": "@stll/pagination",
       "version": "0.0.0",
       "devDependencies": {
         "@stll/typescript-config": "workspace:*",
@@ -564,6 +629,17 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/storage": {
+      "name": "@stll/storage",
+      "version": "0.0.0",
+      "dependencies": {
+        "better-result": "catalog:",
+      },
+      "devDependencies": {
+        "@stll/typescript-config": "workspace:*",
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/template-conditions": {
       "name": "@stll/template-conditions",
       "version": "0.1.0",
@@ -577,6 +653,18 @@
         "@types/bun": "catalog:",
         "fast-check": "catalog:",
         "tsdown": "catalog:",
+      },
+    },
+    "packages/tenancy": {
+      "name": "@stll/tenancy",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stll/errors": "workspace:*",
+        "better-result": "catalog:",
+      },
+      "devDependencies": {
+        "@stll/typescript-config": "workspace:*",
+        "@types/bun": "catalog:",
       },
     },
     "packages/text-normalize": {
@@ -624,6 +712,19 @@
         "@types/bun": "catalog:",
         "@types/react": "catalog:react19",
         "tailwindcss": "catalog:",
+      },
+    },
+    "packages/webhook-kit": {
+      "name": "@stll/webhook-kit",
+      "version": "0.0.0",
+      "dependencies": {
+        "@stll/errors": "workspace:*",
+        "@stll/tenancy": "workspace:*",
+        "better-result": "catalog:",
+      },
+      "devDependencies": {
+        "@stll/typescript-config": "workspace:*",
+        "@types/bun": "catalog:",
       },
     },
   },
@@ -1684,6 +1785,10 @@
 
     "@stll/api": ["@stll/api@workspace:apps/api"],
 
+    "@stll/auth-kit": ["@stll/auth-kit@workspace:packages/auth-kit"],
+
+    "@stll/backend-conformance": ["@stll/backend-conformance@workspace:packages/backend-conformance"],
+
     "@stll/boe": ["@stll/boe@workspace:packages/boe"],
 
     "@stll/business-registries": ["@stll/business-registries@workspace:packages/business-registries"],
@@ -1712,7 +1817,11 @@
 
     "@stll/folio-react": ["@stll/folio-react@0.4.0", "", { "dependencies": { "@base-ui/react": "1.6.0", "@fontsource/arimo": "^5.2.8", "@fontsource/caladea": "^5.2.8", "@fontsource/carlito": "^5.2.8", "@fontsource/cousine": "^5.2.7", "@fontsource/noto-sans-arabic": "^5.2.7", "@fontsource/tinos": "^5.2.7", "@stll/folio-core": "^0.2.0", "better-result": "2.9.2", "lucide-react": "1.21.0", "prosemirror-history": "^1.5.0", "prosemirror-model": "^1.25.9", "prosemirror-state": "^1.4.4", "prosemirror-tables": "^1.8.5", "prosemirror-view": "^1.41.8", "yjs": "^13.6.31" }, "peerDependencies": { "react": "^19.0.0", "react-dom": "^19.0.0", "use-intl": ">=4.0.0" } }, "sha512-sow/vbC2tr4gRVsD7bXDkZFfxiDFi8tj8ltTgR6yD7EH2BChTQYQYto2JVBzGbN1zPjheDlP3eawuelJyB+N/Q=="],
 
+    "@stll/ids": ["@stll/ids@workspace:packages/ids"],
+
     "@stll/infosoud": ["@stll/infosoud@workspace:packages/infosoud"],
+
+    "@stll/jobs": ["@stll/jobs@workspace:packages/jobs"],
 
     "@stll/landing": ["@stll/landing@workspace:apps/landing"],
 
@@ -1726,7 +1835,11 @@
 
     "@stll/money": ["@stll/money@workspace:packages/money"],
 
+    "@stll/obs": ["@stll/obs@workspace:packages/obs"],
+
     "@stll/oxlint-config": ["@stll/oxlint-config@0.4.0", "", { "peerDependencies": { "oxlint": ">=1.70.0", "oxlint-tsgolint": ">=0.23.0" } }, "sha512-IpACzB0EX71F6ovmSlTbzALydEufAK7FIlwY3iTCOCVo0ChAgDqP6YBtRI0qMEFWuGm4qM4zxU8YxfWFHmW5sg=="],
+
+    "@stll/pagination": ["@stll/pagination@workspace:packages/pagination"],
 
     "@stll/permissions": ["@stll/permissions@workspace:packages/permissions"],
 
@@ -1740,7 +1853,11 @@
 
     "@stll/stdnum": ["@stll/stdnum@2.1.1", "", {}, "sha512-VV+9w+u3tLYjos2Z0idJBsl+iCmE171u4rhUNEh/QDqljPBjKETKyLkf81Z1sR0QeaAcn3rg+0Y4vauPVU566w=="],
 
+    "@stll/storage": ["@stll/storage@workspace:packages/storage"],
+
     "@stll/template-conditions": ["@stll/template-conditions@workspace:packages/template-conditions"],
+
+    "@stll/tenancy": ["@stll/tenancy@workspace:packages/tenancy"],
 
     "@stll/text-normalize": ["@stll/text-normalize@workspace:packages/text-normalize"],
 
@@ -1751,6 +1868,8 @@
     "@stll/ui": ["@stll/ui@workspace:packages/ui"],
 
     "@stll/web": ["@stll/web@workspace:apps/web"],
+
+    "@stll/webhook-kit": ["@stll/webhook-kit@workspace:packages/webhook-kit"],
 
     "@streamdown/cjk": ["@streamdown/cjk@1.0.3", "", { "dependencies": { "remark-cjk-friendly": "^2.0.1", "remark-cjk-friendly-gfm-strikethrough": "^2.0.1", "unist-util-visit": "^5.0.0" }, "peerDependencies": { "react": "^18.0.0 || ^19.0.0" } }, "sha512-WRg8HR/gHbBoTgsMd91OKFUClIoDcEFVofJvluvEAyjx3KpU0aGgD9tGDqHkHj14ShoMSkX0IYetWGegTcwIJw=="],
 
