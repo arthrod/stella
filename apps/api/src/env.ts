@@ -51,6 +51,8 @@ const hasRequiredEmailProviderEnv = (provider: "ses" | "smtp" | undefined) => {
  */
 const envApi = createEnv({
   server: {
+    PORT: v.optional(v.pipe(v.string(), v.digits())),
+    STELLA_API_PORT: v.optional(v.pipe(v.string(), v.digits())),
     AI_PROVIDER: v.optional(
       v.picklist([
         "google",
@@ -283,6 +285,24 @@ const envApi = createEnv({
         v.minLength(
           1,
           "COMPANIES_HOUSE_API_KEY must be a non-empty API key from https://developer.company-information.service.gov.uk — the API returns 401 without one.",
+        ),
+      ),
+    ),
+
+    /**
+     * API token for Mexico's INEGI DENUE
+     * (https://www.inegi.org.mx/servicios/api_denue.html). Required
+     * whenever the DENUE business-data adapter is exposed; without it
+     * the runtime marks the adapter unavailable instead of surfacing a
+     * registry tool that will fail.
+     */
+    INEGI_DENUE_API_TOKEN: v.optional(
+      v.pipe(
+        v.string(),
+        v.trim(),
+        v.minLength(
+          1,
+          "INEGI_DENUE_API_TOKEN must be a non-empty token from https://www.inegi.org.mx/app/api/denue/v1/tokenVerify.aspx.",
         ),
       ),
     ),

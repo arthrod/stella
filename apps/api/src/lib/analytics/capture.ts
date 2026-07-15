@@ -1,0 +1,102 @@
+import { getAnalytics } from "@/api/lib/analytics/client";
+import type { ExceptionProperties } from "@/api/lib/analytics/types";
+import { SERVER_ANALYTICS_EVENTS } from "@/api/lib/analytics/types";
+import {
+  errorFingerprint,
+  errorTag,
+  logDevError,
+} from "@/api/lib/errors/utils";
+import { getRequestContext } from "@/api/lib/observability/request-context";
+
+/**
+ * Capture an error for observability.
+ *
+ * - Dev: full error logged to `console.error` *and* appended to
+ *   `apps/api/.dev-logs/errors.jsonl` (with the same `context`
+ *   below) so headless tools can read it without holding the dev
+ *   tty. Both paths are dev-only.
+ * - Prod: only the structural error tag (class name), safe
+ *   caller-provided correlation context, and authenticated
+ *   request correlation IDs are sent to the analytics provider.
+ *   Error messages, causes, and stack traces are never sent;
+ *   they may contain privileged document content, file names,
+ *   or client data.
+ *
+ * Pass `context` with safe correlation IDs (entity IDs, request
+ * IDs) to make errors traceable without leaking content.
+ */
+type ErrorTelemetryContext = Record<string, string>;
+
+type CaptureErrorOptions = {
+  context?: ErrorTelemetryContext | undefined;
+  distinctId?: string | undefined;
+  organizationId?: string | undefined;
+  sessionId?: string | undefined;
+};
+
+type CaptureRequestErrorOptions = {
+  context?: ErrorTelemetryContext | undefined;
+  request: Request;
+};
+
+const SERVER_DISTINCT_ID = "server";
+
+const captureErrorWithOptions = (
+  error: unknown,
+  options: CaptureErrorOptions,
+) => {
+  const tag = errorTag(error);
+  // PostHog ingestion drops `$exception` events that lack `$exception_list`,
+  // so the entry is required even though we deliberately keep it empty —
+  // the redaction contract above forbids shipping the message or stack.
+  const properties: ExceptionProperties = {
+    $exception_level: "error",
+    $exception_list: [
+      {
+        mechanism: { handled: true, synthetic: false, type: "generic" },
+        type: tag,
+        value: "",
+      },
+    ],
+    $exception_type: tag,
+    // Non-PII structural fingerprint (class, stable code, top
+    // `file:line:col` frames). The redaction contract above still
+    // forbids the message and stack; a code location and class name
+    // carry no client data, so they make the exception actionable in
+    // the dashboard without violating it.
+    ...errorFingerprint(error),
+    ...options.context,
+    ...(options.organizationId
+      ? { organization_id: options.organizationId }
+      : {}),
+    ...(options.sessionId ? { session_id: options.sessionId } : {}),
+  };
+
+  logDevError(error, properties);
+
+  getAnalytics().capture({
+    distinctId: options.distinctId ?? SERVER_DISTINCT_ID,
+    event: SERVER_ANALYTICS_EVENTS.exception,
+    properties,
+  });
+};
+
+export const captureError = (
+  error: unknown,
+  context?: ErrorTelemetryContext,
+) => {
+  captureErrorWithOptions(error, { context });
+};
+
+export const captureRequestError = (
+  error: unknown,
+  { context, request }: CaptureRequestErrorOptions,
+) => {
+  const reqCtx = getRequestContext(request);
+  captureErrorWithOptions(error, {
+    context,
+    distinctId: reqCtx?.posthogDistinctId,
+    organizationId: reqCtx?.organizationId,
+    sessionId: reqCtx?.sessionId,
+  });
+};

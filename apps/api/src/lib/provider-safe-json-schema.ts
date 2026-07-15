@@ -1,4 +1,4 @@
-/**
+import { arrayOrEmpty } from "@/api/lib/array"; /**
  * Provider-safe JSON Schema projection.
  *
  * Chat tool JSON Schemas are handed to model providers verbatim by the
@@ -68,14 +68,22 @@ export type ProviderSafeJsonSchemaProjection = {
 };
 
 export type NullUnionStrategy = "json-schema" | "openapi";
+export type EnumValueStrategy = "json-schema" | "string-only";
 
 export type ProviderSafeJsonSchemaProjectionOptions = {
+  enumValueStrategy?: EnumValueStrategy;
   nullUnionStrategy?: NullUnionStrategy;
 };
 
-export const nullUnionStrategyForTanStackProvider = (
+export const providerSafeJsonSchemaOptionsForTanStackProvider = (
   provider: string,
-): NullUnionStrategy => (provider === "google" ? "openapi" : "json-schema");
+): ProviderSafeJsonSchemaProjectionOptions => ({
+  enumValueStrategy:
+    provider === "google" || provider === "openrouter"
+      ? "string-only"
+      : "json-schema",
+  nullUnionStrategy: provider === "google" ? "openapi" : "json-schema",
+});
 
 const isJsonObject = (value: unknown): value is JsonObject =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -110,6 +118,7 @@ const resolveLocalJsonPointer = (root: JsonObject, ref: string): unknown => {
 type ProjectionContext = {
   root: JsonObject;
   dropped: string[];
+  enumValueStrategy: EnumValueStrategy;
   nullUnionStrategy: NullUnionStrategy;
 };
 
@@ -169,6 +178,16 @@ const normalizeConstKeyword = ({
 
   const constValue = next["const"];
   delete next["const"];
+  const constType = typeof constValue;
+  if (
+    !("type" in next) &&
+    (constType === "boolean" ||
+      constType === "number" ||
+      constType === "string")
+  ) {
+    next["type"] = constType;
+  }
+
   if (constValue === null && !("enum" in next) && !("type" in next)) {
     if (context.nullUnionStrategy === "json-schema") {
       next["type"] = "null";
@@ -190,7 +209,7 @@ const normalizeConstKeyword = ({
   context.dropped.push(joinPath(path, "const"));
 };
 
-const filterOpenApiEnumValues = ({
+const filterEnumValues = ({
   context,
   next,
   path,
@@ -203,17 +222,17 @@ const filterOpenApiEnumValues = ({
     return;
   }
 
-  if (context.nullUnionStrategy === "json-schema") {
+  if (context.enumValueStrategy === "json-schema") {
     return;
   }
 
   const providerSafeValues: unknown[] = [];
   for (const [index, value] of next["enum"].entries()) {
-    if (typeof value === "string" || typeof value === "number") {
+    if (typeof value === "string") {
       providerSafeValues.push(value);
       continue;
     }
-    if (value === null) {
+    if (value === null && context.nullUnionStrategy === "openapi") {
       next["nullable"] = true;
       continue;
     }
@@ -238,7 +257,7 @@ const normalizeLiteralKeywords = ({
   path: string;
 }): void => {
   normalizeConstKeyword({ context, next, path });
-  filterOpenApiEnumValues({ context, next, path });
+  filterEnumValues({ context, next, path });
 };
 
 const stringArrayFrom = (value: unknown): string[] | null => {
@@ -272,7 +291,8 @@ const mergeRequired = (target: JsonObject, value: unknown): boolean => {
     return false;
   }
 
-  const existing = stringArrayFrom(target["required"]) ?? [];
+  const parsedExisting = stringArrayFrom(target["required"]);
+  const existing = arrayOrEmpty(parsedExisting);
   target["required"] = Array.from(new Set([...existing, ...required]));
   return true;
 };
@@ -891,10 +911,14 @@ export const projectToProviderSafeJsonSchema = (
   schema: Record<string, unknown>,
   options: ProviderSafeJsonSchemaProjectionOptions = {},
 ): ProviderSafeJsonSchemaProjection => {
+  const nullUnionStrategy = options.nullUnionStrategy ?? "json-schema";
   const context: ProjectionContext = {
     root: schema,
     dropped: [],
-    nullUnionStrategy: options.nullUnionStrategy ?? "json-schema",
+    enumValueStrategy:
+      options.enumValueStrategy ??
+      (nullUnionStrategy === "openapi" ? "string-only" : "json-schema"),
+    nullUnionStrategy,
   };
   const projected = projectNode({
     node: schema,

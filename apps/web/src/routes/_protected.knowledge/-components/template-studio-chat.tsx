@@ -12,14 +12,7 @@
  *     registers the field in the Studio session.
  */
 
-import {
-  Suspense,
-  useEffectEvent,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { Suspense, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
@@ -49,11 +42,11 @@ import { stellaToast } from "@stll/ui/components/toast";
 import {
   ChatThreadCard,
   PromptBar,
-  scrollEditorToPos,
   SuggestionCard,
   SuggestionStepper,
 } from "@/components/ai-suggestions/host";
 import type { PromptBarPresetScope } from "@/components/ai-suggestions/host";
+import { scrollEditorToPos } from "@/components/ai-suggestions/scroll-editor-to-pos";
 import { useChatEditor } from "@/components/chat-editor-provider";
 import { ChatApprovalContext } from "@/components/chat/chat-approval-context";
 import { ChatComposerDock } from "@/components/chat/chat-composer-dock";
@@ -66,6 +59,7 @@ import type {
 } from "@/components/chat/chat-ui-tools";
 import { useAIKeyGate } from "@/components/require-ai-key";
 import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { ChatAnonymizationLayer } from "@/lib/anonymize/use-chat-anonymization-layer";
 import { api } from "@/lib/api";
@@ -76,7 +70,7 @@ import {
 } from "@/lib/chat-anonymized-store";
 import { toChatThreadId } from "@/lib/chat-thread-ref";
 import type { ChatThreadId, ChatThreadRef } from "@/lib/chat-thread-ref";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
 import { toSafeId } from "@/lib/safe-id";
 import { inputTypeValueKind } from "@/lib/value-types";
 import { useChatSession } from "@/routes/_protected.chat/-hooks/use-chat-session";
@@ -94,6 +88,7 @@ import type {
   ApplyActiveDocxEditsOutput,
   ChatUserMessageInput,
 } from "@/routes/_protected.chat/-queries";
+import { isInputType } from "@/routes/_protected.knowledge/-components/template-field-manifest";
 import { useTemplateStudioStore } from "@/routes/_protected.knowledge/-components/template-studio-store";
 import {
   buildOperationSpecs,
@@ -110,11 +105,14 @@ import type {
   ReplacementSpec,
   SuggestedFieldMeta,
 } from "@/routes/_protected.knowledge/-components/template-studio-suggestions";
-import { isInputType } from "@/routes/_protected.knowledge/-components/template-wizard";
 
 const SUGGEST_FIELDS_PRESET_ID = "suggest-template-fields";
 
 const protectedRouteApi = getRouteApi("/_protected");
+
+const capturePromptSubmitError = (error: unknown): void => {
+  getAnalytics().captureError(error);
+};
 
 type TemplateStudioChatProps = {
   templateId: string;
@@ -272,7 +270,7 @@ const TemplateStudioChatInner = ({
     select: (ctx) => ctx.user.activeOrganizationId,
   });
   const userContext = useChatUserContext();
-  const getUserContext = useEffectEvent(() => userContext);
+  const getUserContext = useLatestCallback(() => userContext);
   const showToolCallDetails = false;
   const upsertField = useTemplateStudioStore((s) => s.upsertField);
   const markDirty = useTemplateStudioStore((s) => s.markDirty);
@@ -325,7 +323,7 @@ const TemplateStudioChatInner = ({
    *  ones tool operations reference, so op→text resolution reads it. */
   const lastSentSnapshotRef = useRef<FolioAIEditSnapshot | null>(null);
   const activeScopedPresetTurnMessageIdRef = useRef<string | null>(null);
-  const getActiveTemplate = useEffectEvent(() => {
+  const getActiveTemplate = useLatestCallback(() => {
     const snapshot = editorRef.current?.createAIEditSnapshot() ?? null;
     lastSentSnapshotRef.current = snapshot;
     return {
@@ -343,10 +341,12 @@ const TemplateStudioChatInner = ({
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   // Field metadata per suggestion id, consumed on accept (AISuggestion
-  // itself carries only text + range + display badges).
-  const fieldMetaRef = useRef(new Map<string, SuggestedFieldMeta>());
+  // itself carries only text + range + display badges). Created once and
+  // mutated in place (never reassigned), so a stable useState value works
+  // without the rebuild-every-render cost of `useRef(new Map())`.
+  const [fieldMetaMap] = useState(() => new Map<string, SuggestedFieldMeta>());
   // Accept side-effects per suggestion id (bilingual-mirror flow).
-  const mirrorAcceptRef = useRef(new Map<string, () => void>());
+  const [mirrorAcceptHandlers] = useState(() => new Map<string, () => void>());
 
   // The page queues bilingual-mirror proposals through the store; this
   // surface places them because it is the Studio's only suggestion
@@ -371,7 +371,7 @@ const TemplateStudioChatInner = ({
       registerMeta: (suggestionId: string) => {
         spec.registerMeta?.(suggestionId);
         if (onAccepted) {
-          mirrorAcceptRef.current.set(suggestionId, onAccepted);
+          mirrorAcceptHandlers.set(suggestionId, onAccepted);
         }
       },
     }));
@@ -383,7 +383,13 @@ const TemplateStudioChatInner = ({
       setSuggestions((prev) => [...prev, ...created]);
     }
     clearMirrorRequests();
-  }, [pendingMirrorRequests, editorView, getView, clearMirrorRequests]);
+  }, [
+    pendingMirrorRequests,
+    editorView,
+    getView,
+    clearMirrorRequests,
+    mirrorAcceptHandlers,
+  ]);
 
   // Push suggestion decorations into the live editor. This surface is
   // the only decoration writer in the Studio, so empty pushes (after
@@ -406,7 +412,7 @@ const TemplateStudioChatInner = ({
 
   // Clear this thread's decorations when the surface unmounts (leaving
   // the Studio or swapping to a new thread).
-  const getViewForCleanup = useEffectEvent(() => getView());
+  const getViewForCleanup = useLatestCallback(() => getView());
   useMountEffect(() => () => {
     const view = getViewForCleanup();
     if (!view || view.isDestroyed) {
@@ -419,7 +425,7 @@ const TemplateStudioChatInner = ({
   // ---- accept / dismiss -------------------------------------------------------
 
   const registerAcceptedField = (suggestionId: string) => {
-    const meta = fieldMetaRef.current.get(suggestionId);
+    const meta = fieldMetaMap.get(suggestionId);
     if (!meta) {
       return;
     }
@@ -467,7 +473,7 @@ const TemplateStudioChatInner = ({
     );
     for (const id of result.applied) {
       registerAcceptedField(id);
-      mirrorAcceptRef.current.get(id)?.();
+      mirrorAcceptHandlers.get(id)?.();
     }
     if (result.applied.length > 0) {
       markDirty();
@@ -582,7 +588,7 @@ const TemplateStudioChatInner = ({
   // transport reads `getChatSendMode(threadRef)`, and the anonymization
   // layer highlights the same value — one source, display equals send.
   const anonymized = useChatAnonymized(threadRef);
-  const getSendMode = useEffectEvent(() => getChatSendMode(threadRef));
+  const getSendMode = useLatestCallback(() => getChatSendMode(threadRef));
 
   // No `handleActiveDocxEditToolCall` in the context: the transport
   // never invokes it (the approve path below client-executes the tool),
@@ -652,36 +658,34 @@ const TemplateStudioChatInner = ({
   // effect invocation, which runs before the parent can commit the
   // cleared pending-send state.
   const presetSendDispatchedRef = useRef(false);
-  const dispatchPendingPresetSend = useEffectEvent(() => {
+  const dispatchPendingPresetSend = useLatestCallback(async () => {
     const request = pendingPresetSend;
     if (request === null || presetSendDispatchedRef.current) {
       return;
     }
     presetSendDispatchedRef.current = true;
     onPendingPresetSendHandled();
-    void ensureAIAvailable().then((available) => {
-      if (!available) {
-        return;
-      }
-      // This send bypasses the prompt bar's `canSubmitNow` (which
-      // normally records the sent snapshot), and after the rotate
-      // remount the transport's `getActiveTemplate` can be bound to a
-      // previous instance whose ref this one cannot see. Record the
-      // snapshot here so the apply path resolves the ops against the
-      // same blocks the model receives.
-      lastSentSnapshotRef.current =
-        editorRef.current?.createAIEditSnapshot() ?? null;
-      setPanelOpen(true);
-      const message = createTextChatMessage(request.text);
-      activeScopedPresetTurnMessageIdRef.current = message.id;
-      void sendMessage(message, {
-        body: { toolScope: SUGGEST_TEMPLATE_FIELDS_TOOL_SCOPE },
-      });
+    const available = await ensureAIAvailable();
+    if (!available) {
       return;
+    }
+    // This send bypasses the prompt bar's `canSubmitNow` (which
+    // normally records the sent snapshot), and after the rotate
+    // remount the transport's `getActiveTemplate` can be bound to a
+    // previous instance whose ref this one cannot see. Record the
+    // snapshot here so the apply path resolves the ops against the
+    // same blocks the model receives.
+    lastSentSnapshotRef.current =
+      editorRef.current?.createAIEditSnapshot() ?? null;
+    setPanelOpen(true);
+    const message = createTextChatMessage(request.text);
+    activeScopedPresetTurnMessageIdRef.current = message.id;
+    await sendMessage(message, {
+      body: { toolScope: SUGGEST_TEMPLATE_FIELDS_TOOL_SCOPE },
     });
   });
   useMountEffect(() => {
-    dispatchPendingPresetSend();
+    dispatchPendingPresetSend().catch(capturePromptSubmitError);
   });
 
   /**
@@ -733,11 +737,15 @@ const TemplateStudioChatInner = ({
   const collectOperationBlockTexts = (): Map<string, string> => {
     const blockTextById = new Map<string, string>();
     const freshSnapshot = editorRef.current?.createAIEditSnapshot() ?? null;
-    for (const block of freshSnapshot?.blocks ?? []) {
-      blockTextById.set(block.id, block.text);
+    if (freshSnapshot) {
+      for (const block of freshSnapshot.blocks) {
+        blockTextById.set(block.id, block.text);
+      }
     }
-    for (const block of lastSentSnapshotRef.current?.blocks ?? []) {
-      blockTextById.set(block.id, block.text);
+    if (lastSentSnapshotRef.current) {
+      for (const block of lastSentSnapshotRef.current.blocks) {
+        blockTextById.set(block.id, block.text);
+      }
     }
     return blockTextById;
   };
@@ -765,7 +773,7 @@ const TemplateStudioChatInner = ({
         buildSpecForReplace({
           ...args,
           fieldMetaByPath,
-          fieldMeta: fieldMetaRef.current,
+          fieldMeta: fieldMetaMap,
         }),
     });
     const skippedReason = skipped.at(0)?.reason;
@@ -819,15 +827,15 @@ const TemplateStudioChatInner = ({
       ),
     );
     for (const id of ids) {
-      fieldMetaRef.current.delete(id);
+      fieldMetaMap.delete(id);
     }
   };
 
   // Provisional placements per streaming tool call id. The executor
   // pass reconciles each record exactly once and deletes it; denied or
   // abandoned calls are cleaned up by the watcher below.
-  const streamingPlacementsRef = useRef(
-    new Map<string, StreamingPlacementRecord>(),
+  const [streamingPlacements] = useState(
+    () => new Map<string, StreamingPlacementRecord>(),
   );
 
   /**
@@ -837,9 +845,9 @@ const TemplateStudioChatInner = ({
    * most once (`outcomes` is contiguous from 0), so delta re-runs and
    * StrictMode double-invocations are no-ops.
    */
-  const placeStreamedOperations = useEffectEvent(
+  const placeStreamedOperations = useLatestCallback(
     (toolCallId: string, operations: readonly DocxEditOperation[]) => {
-      const record = streamingPlacementsRef.current.get(toolCallId) ?? {
+      const record = streamingPlacements.get(toolCallId) ?? {
         outcomes: new Map<number, OperationPlacementOutcome>(),
       };
       if (operations.length <= record.outcomes.size) {
@@ -854,12 +862,15 @@ const TemplateStudioChatInner = ({
         // Record nothing; the next input delta retries.
         return;
       }
-      streamingPlacementsRef.current.set(toolCallId, record);
+      streamingPlacements.set(toolCallId, record);
       const blockTextById = collectOperationBlockTexts();
       const fieldMetaByPath = collectSuggestedFieldMeta(messages);
-      const occupiedRanges = suggestions
-        .filter((suggestion) => suggestion.status === "pending")
-        .map((suggestion) => suggestion.range);
+      const occupiedRanges: (typeof suggestions)[number]["range"][] = [];
+      for (const suggestion of suggestions) {
+        if (suggestion.status === "pending") {
+          occupiedRanges.push(suggestion.range);
+        }
+      }
       for (
         let index = record.outcomes.size;
         index < operations.length;
@@ -885,12 +896,12 @@ const TemplateStudioChatInner = ({
   );
 
   /** Drop a tool call's provisional suggestions (denied call). */
-  const discardStreamedPlacements = useEffectEvent((toolCallId: string) => {
-    const record = streamingPlacementsRef.current.get(toolCallId);
+  const discardStreamedPlacements = useLatestCallback((toolCallId: string) => {
+    const record = streamingPlacements.get(toolCallId);
     if (!record) {
       return;
     }
-    streamingPlacementsRef.current.delete(toolCallId);
+    streamingPlacements.delete(toolCallId);
     const ids: string[] = [];
     for (const outcome of record.outcomes.values()) {
       ids.push(...outcome.suggestionIds);
@@ -927,7 +938,7 @@ const TemplateStudioChatInner = ({
         discardStreamedPlacements(part.id);
       }
     }
-  }, [messages]);
+  }, [messages, placeStreamedOperations, discardStreamedPlacements]);
 
   /**
    * Client executor for `apply-active-docx-edits`: convert the approved
@@ -937,13 +948,13 @@ const TemplateStudioChatInner = ({
    * finalized input are reused (no duplicate suggestions); drifted
    * provisional suggestions are removed and their ops re-placed.
    */
-  const handleActiveDocxEditToolCall = useEffectEvent(
+  const handleActiveDocxEditToolCall = useLatestCallback(
     async (
       input: ApplyActiveDocxEditsInput,
       toolCallId: string,
     ): Promise<ApplyActiveDocxEditsOutput> => {
-      const record = streamingPlacementsRef.current.get(toolCallId);
-      streamingPlacementsRef.current.delete(toolCallId);
+      const record = streamingPlacements.get(toolCallId);
+      streamingPlacements.delete(toolCallId);
 
       // Folio creates the editing view lazily; wait for it rather than
       // failing a doc the user never clicked into.
@@ -952,11 +963,14 @@ const TemplateStudioChatInner = ({
         // Provisional placements were made against a view that has
         // since gone away; drop them so nothing dangles unreported.
         const provisionalIds: string[] = [];
-        for (const outcome of record?.outcomes.values() ?? []) {
-          provisionalIds.push(...outcome.suggestionIds);
+        if (record) {
+          for (const outcome of record.outcomes.values()) {
+            provisionalIds.push(...outcome.suggestionIds);
+          }
         }
         removePendingSuggestions(provisionalIds);
         return {
+          version: 1,
           applied: [],
           queued: [],
           skipped: input.operations.map((operation, index) => ({
@@ -971,17 +985,19 @@ const TemplateStudioChatInner = ({
       // for re-placement.
       const reusable = new Map<number, OperationPlacementOutcome>();
       const driftedIds = new Set<string>();
-      for (const [index, prior] of record?.outcomes ?? []) {
-        const operation = input.operations.at(index);
-        if (
-          operation !== undefined &&
-          prior.fingerprint === operationFingerprint(operation)
-        ) {
-          reusable.set(index, prior);
-          continue;
-        }
-        for (const id of prior.suggestionIds) {
-          driftedIds.add(id);
+      if (record) {
+        for (const [index, prior] of record.outcomes) {
+          const operation = input.operations.at(index);
+          if (
+            operation !== undefined &&
+            prior.fingerprint === operationFingerprint(operation)
+          ) {
+            reusable.set(index, prior);
+            continue;
+          }
+          for (const id of prior.suggestionIds) {
+            driftedIds.add(id);
+          }
         }
       }
       if (driftedIds.size > 0) {
@@ -990,12 +1006,12 @@ const TemplateStudioChatInner = ({
 
       const blockTextById = collectOperationBlockTexts();
       const fieldMetaByPath = collectSuggestedFieldMeta(messages);
-      const occupiedRanges = suggestions
-        .filter(
-          (suggestion) =>
-            suggestion.status === "pending" && !driftedIds.has(suggestion.id),
-        )
-        .map((suggestion) => suggestion.range);
+      const occupiedRanges: (typeof suggestions)[number]["range"][] = [];
+      for (const suggestion of suggestions) {
+        if (suggestion.status === "pending" && !driftedIds.has(suggestion.id)) {
+          occupiedRanges.push(suggestion.range);
+        }
+      }
 
       const queued: { id: string }[] = [];
       const skipped: ApplyActiveDocxEditsOutput["skipped"] = [];
@@ -1018,7 +1034,7 @@ const TemplateStudioChatInner = ({
         }
       }
 
-      return { applied: [], queued, skipped };
+      return { version: 1, applied: [], queued, skipped };
     },
   );
 
@@ -1058,7 +1074,7 @@ const TemplateStudioChatInner = ({
     await handleApprove(approvalId, toolName);
   };
 
-  const canSubmitWithCurrentSnapshot = useEffectEvent(() => {
+  const canSubmitWithCurrentSnapshot = useLatestCallback(() => {
     const snapshot = editorRef.current?.createAIEditSnapshot() ?? null;
     if (snapshot) {
       lastSentSnapshotRef.current = snapshot;
@@ -1243,24 +1259,26 @@ const TemplateStudioChatInner = ({
             stop();
           }}
           onSubmit={({ prompt, files }) => {
-            void ensureAIAvailable().then(async (available) => {
-              if (!available) {
+            ensureAIAvailable()
+              .then(async (available) => {
+                if (!available) {
+                  return;
+                }
+                // Always pop the thread open on send, even if the user
+                // minimised it earlier.
+                setPanelOpen(true);
+                // The typed composer submit carries any (+) attachments
+                // (reference docs to lift clauses from); the scoped-preset
+                // path below stays text-only.
+                await sendMessage(
+                  await buildChatRequestMessage({
+                    files,
+                    html: prompt,
+                  }),
+                );
                 return;
-              }
-              // Always pop the thread open on send, even if the user
-              // minimised it earlier.
-              setPanelOpen(true);
-              // The typed composer submit carries any (+) attachments
-              // (reference docs to lift clauses from); the scoped-preset
-              // path below stays text-only.
-              await sendMessage(
-                await buildChatRequestMessage({
-                  files,
-                  html: prompt,
-                }),
-              );
-              return;
-            });
+              })
+              .catch(capturePromptSubmitError);
           }}
           pendingCount={pendingCount}
           presetScopeChooser={{

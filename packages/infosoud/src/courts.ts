@@ -138,7 +138,10 @@ const tokenizeCourtValue = (value: string): string[] => {
 const isTokenSubset = (
   queryTokens: readonly string[],
   candidateTokens: readonly string[],
-): boolean => queryTokens.every((token) => candidateTokens.includes(token));
+): boolean => {
+  const candidateSet = new Set(candidateTokens);
+  return queryTokens.every((token) => candidateSet.has(token));
+};
 
 export const resolveCourtCode = (
   query: string,

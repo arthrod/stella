@@ -1,6 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { panic, Result } from "better-result";
 import {
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -20,11 +21,9 @@ import { api } from "@/lib/api";
 import type { Citation } from "@/lib/citations";
 import { iterateJustificationCitations } from "@/lib/citations";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
-import { toAPIError } from "@/lib/errors";
-import {
-  getPDFPageIdByNumber,
-  useOptionalPDFStore,
-} from "@/lib/pdf/pdf-context";
+import { toAPIError } from "@/lib/errors/api";
+import { useOptionalPDFStore } from "@/lib/pdf/pdf-context";
+import { getPDFPageIdByNumber } from "@/lib/pdf/utils";
 import { renderJustificationContent } from "@/lib/render-justification-content";
 import { toSafeId } from "@/lib/safe-id";
 import { useSyncJustifications } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-sync-justifications";
@@ -99,11 +98,6 @@ export const DocumentAiSourceBar = ({
   const analytics = useAnalytics();
   const setScrollTo = useOptionalPDFStore((s) => s.setScrollTo);
   const pages = useOptionalPDFStore((s) => s.pages);
-  const [
-    stoppedBoundingBoxJustificationId,
-    setStoppedBoundingBoxJustificationId,
-  ] = useState<string | null>(null);
-
   const justificationId = justification?.id;
   const boundingBoxes = justification?.boundingBoxes;
   const activeDocumentJustificationContent = useMemo(
@@ -131,58 +125,55 @@ export const DocumentAiSourceBar = ({
     (citation) => citation.kind === "pdf-bates",
   );
 
-  const generateBoundingBoxes = useMutation({
-    mutationFn: async ({
-      justificationId: id,
-    }: {
-      justificationId: string;
-    }) => {
-      const response = await api
-        .workspaces({ workspaceId: toSafeId<"workspace">(workspaceId) })
-        ["bounding-boxes"].post({
-          justificationId: toSafeId<"justification">(id),
+  const shouldGenerateBoxes = Boolean(
+    justificationId && isActiveTab && hasBoundingBoxCitations && !boundingBoxes,
+  );
+  // oxlint-disable-next-line @tanstack/query/exhaustive-deps -- queryClient and analytics are stable runtime services, not request/cache identity
+  const generateBoundingBoxes = useQuery({
+    queryKey: [
+      ...workspaceKeys.justifications(workspaceId),
+      "generate-bounding-boxes",
+      justificationId,
+    ],
+    queryFn: async ({ signal }) => {
+      // `enabled` gates this query on `justificationId !== undefined`, so an
+      // undefined id here is an impossible invariant, not a runtime state.
+      if (justificationId === undefined) {
+        return panic("bounding-box generation ran without a justification id");
+      }
+      const result = await Result.tryPromise(async () => {
+        const response = await api
+          .workspaces({ workspaceId: toSafeId<"workspace">(workspaceId) })
+          ["bounding-boxes"].post(
+            {
+              justificationId: toSafeId<"justification">(justificationId),
+              queryKey: workspaceKeys.justifications(workspaceId),
+            },
+            { fetch: { signal } },
+          );
+        if (response.error) {
+          throw toAPIError(response.error);
+        }
+        await queryClient.invalidateQueries({
           queryKey: workspaceKeys.justifications(workspaceId),
         });
-
-      if (response.error) {
-        throw toAPIError(response.error);
-      }
-      return response.data;
-    },
-    onSuccess: async (data, variables) => {
-      await queryClient.invalidateQueries({
-        queryKey: workspaceKeys.justifications(workspaceId),
+        return response.data;
       });
-
-      if (data.boxes.length === 0) {
-        setStoppedBoundingBoxJustificationId(variables.justificationId);
+      if (Result.isError(result)) {
+        analytics.captureError(result.error);
+        throw result.error;
       }
+      return result.value;
     },
-    onError: (error, variables) => {
-      analytics.captureError(error);
-      setStoppedBoundingBoxJustificationId(variables.justificationId);
-    },
+    enabled: shouldGenerateBoxes && justificationId !== undefined,
+    retry: false,
+    staleTime: Infinity,
   });
-
-  const needsBoxes = Boolean(
-    justificationId &&
-    isActiveTab &&
-    hasBoundingBoxCitations &&
-    !boundingBoxes &&
-    stoppedBoundingBoxJustificationId !== justificationId,
-  );
-  const isGeneratingBoxes = generateBoundingBoxes.isPending;
-  const mutateBoundingBoxes = generateBoundingBoxes.mutate;
-  // Kick off the generation request when the justification bar
-  // mounts with missing bboxes. The mutation hook itself is the
-  // source of truth for `isPending`.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- kick off bbox generation once async-loaded state (query + store) satisfies needsBoxes. needsBoxes is derived from several async sources, not a single setter call, so there is no handler to fold this into; keep.
-  useEffect(() => {
-    if (!needsBoxes || !justificationId) {
-      return;
-    }
-    mutateBoundingBoxes({ justificationId });
-  }, [needsBoxes, justificationId, mutateBoundingBoxes]);
+  const generationStopped =
+    generateBoundingBoxes.isError ||
+    generateBoundingBoxes.data?.boxes.length === 0;
+  const needsBoxes = shouldGenerateBoxes && !generationStopped;
+  const isGeneratingBoxes = generateBoundingBoxes.isFetching;
 
   // Reset expansion when the field changes. setIsAnswerExpanded also backs the
   // toggle button, so this is not pure derived state; a key-reset belongs in
@@ -195,23 +186,24 @@ export const DocumentAiSourceBar = ({
     setIsAnswerExpanded(false);
   }
 
-  // Nudge the justifications cache every second while we still need
-  // bboxes. POST success doesn't guarantee the payload is in cache
-  // yet, so we keep polling until `needsBoxes` flips false.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- setInterval that invalidates the justifications cache while bboxes are still missing. The justifications query is owned by useSyncJustifications (outside this file), so refetchInterval cannot be set here; keep.
-  useEffect(() => {
-    if (!needsBoxes) {
-      return undefined;
-    }
-    const id = window.setInterval(() => {
-      void queryClient.invalidateQueries({
+  // oxlint-disable-next-line @tanstack/query/exhaustive-deps -- queryClient is a stable runtime service, not polling cache identity
+  useQuery({
+    queryKey: [
+      ...workspaceKeys.justifications(workspaceId),
+      "bounding-box-poll",
+      justificationId,
+    ],
+    queryFn: async () => {
+      await queryClient.invalidateQueries({
         queryKey: workspaceKeys.justifications(workspaceId),
       });
-    }, BBOX_POLL_INTERVAL_MS);
-    return () => {
-      window.clearInterval(id);
-    };
-  }, [needsBoxes, queryClient, workspaceId]);
+      return true;
+    },
+    enabled: needsBoxes,
+    initialData: true,
+    refetchInterval: BBOX_POLL_INTERVAL_MS,
+    staleTime: Infinity,
+  });
 
   const scrolledForJustificationRef = useRef<string | null>(null);
   useExternalSyncEffect(() => {
@@ -396,7 +388,6 @@ export const DocumentAiSourceBar = ({
           aria-expanded={isAnswerExpanded}
           className="min-w-0 flex-1 truncate text-start"
           onClick={() => setIsAnswerExpanded((expanded) => !expanded)}
-          title={shortAnswer ?? undefined}
           type="button"
         >
           {propertyName && (
@@ -629,7 +620,6 @@ const DocxSourceCitationChip = ({
       aria-label={tooltip}
       className={SOURCE_CITATION_CHIP_CLASS}
       onClick={onClick}
-      title={tooltip}
       type="button"
     >
       {label}

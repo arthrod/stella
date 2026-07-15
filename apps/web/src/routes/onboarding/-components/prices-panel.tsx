@@ -14,6 +14,7 @@ import type {
   RoleValue,
 } from "@/components/ai-config-role-models.logic";
 import { getProviderIcon } from "@/components/ai-provider-icons";
+import { optionalReadonlyArray } from "@/lib/arrays";
 
 // "Typical call" = one chat turn through an agent loop with tool
 // calls: large system prompt + tool schemas + a few intermediate
@@ -32,7 +33,8 @@ const modelOptionsForProvider = (
 ): readonly string[] => {
   const optionsByProvider: Partial<Record<ProviderValue, readonly string[]>> =
     MODEL_OPTIONS_BY_PROVIDER;
-  return optionsByProvider[provider] ?? [];
+  const options = optionsByProvider[provider];
+  return optionalReadonlyArray(options);
 };
 
 type IntlFormatter = ReturnType<typeof useFormatter>;
@@ -251,10 +253,7 @@ export const PricesPanel = ({ providers, roleModels }: PricesPanelProps) => {
                   key={row.role}
                   className="grid grid-cols-[1fr_4rem_4rem_4rem] gap-x-2 px-5 py-1.5 text-sm"
                 >
-                  <span
-                    className="text-foreground flex min-w-0 items-center gap-2 truncate"
-                    title={row.modelId}
-                  >
+                  <span className="text-foreground flex min-w-0 items-center gap-2 truncate">
                     <RoleProviderIcon className="text-foreground size-3.5 shrink-0" />
                     <span className="text-muted-foreground text-xs uppercase">
                       {tOrganization(`aiConfig.roles.${row.role}`)
@@ -319,7 +318,6 @@ export const PricesPanel = ({ providers, roleModels }: PricesPanelProps) => {
                           ? "text-foreground font-medium"
                           : "text-foreground"
                       }`}
-                      title={row.modelId}
                     >
                       {row.modelId}
                     </span>

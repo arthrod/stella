@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import {
   CheckIcon,
@@ -40,10 +40,7 @@ import { nativeToolLabelKey } from "@/components/catalogue/native-tool-label";
 import type { ContextMenuAction } from "@/components/context-menu";
 import { compareByLocale } from "@/lib/collation";
 import type { PracticeJurisdiction } from "@/lib/jurisdictions";
-import {
-  createCatalogueAutoSelectionPlan,
-  isCatalogueEntryAvailableDuringOnboarding,
-} from "@/routes/onboarding/-components/onboarding-catalogue-setup.logic";
+import { isCatalogueEntryAvailableDuringOnboarding } from "@/routes/onboarding/-components/onboarding-catalogue-setup.logic";
 
 const toRowDisplay = (entry: LoadedCatalogueEntry): CatalogueRowDisplay => ({
   slug: entry.slug,
@@ -61,10 +58,8 @@ const toRowDisplay = (entry: LoadedCatalogueEntry): CatalogueRowDisplay => ({
 type CatalogueStepProps = {
   practiceJurisdictions: readonly PracticeJurisdiction[];
   selectedSlugs: readonly string[];
-  removedSlugs: readonly string[];
   focusedSlug: string | null;
   onFocusChange: (slug: string | null) => void;
-  onChange: (slugs: readonly string[]) => void;
   onAdd: (slug: string) => void;
   onRemove: (slug: string) => void;
   onNext: () => void;
@@ -78,10 +73,8 @@ const PROPOSE_TOOL_URL =
 export const CatalogueStep = ({
   practiceJurisdictions,
   selectedSlugs,
-  removedSlugs,
   focusedSlug,
   onFocusChange,
-  onChange,
   onAdd,
   onRemove,
   onNext,
@@ -198,7 +191,7 @@ export const CatalogueStep = ({
         set.add(code);
       }
     }
-    return [...set].sort();
+    return Array.from(set).sort();
   })();
 
   // Clicking a row focuses it on the left and surfaces the iOS
@@ -213,23 +206,38 @@ export const CatalogueStep = ({
     onFocusChange(focusedSlug === entry.slug ? null : entry.slug);
   };
 
-  // Auto-select first-party recommended entries on first reach of
-  // this step. Third-party entries always require the per-entry
-  // acknowledgement via the detail panel and are never auto-added.
-  // Explicit removals are tracked by the parent wizard so remounting
-  // this step cannot re-add a recommendation the user removed.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reconciles recommended-entry auto-selection up to the parent whenever recommendedEntries (driven by async deploy-availability), selectedSlugs, or removedSlugs change; no single event to relocate into and a mount-only effect would miss the async availability update
-  useEffect(() => {
-    const autoSelectionPlan = createCatalogueAutoSelectionPlan({
-      recommendedEntries,
-      removedSlugs,
-      selectedSlugs,
-    });
+  const renderCatalogueRow = (entry: LoadedCatalogueEntry) => (
+    <OnboardingCatalogueRow
+      addLabel={t("common.add")}
+      entry={entry}
+      focused={focusedSlug === entry.slug}
+      key={`${entry.kind}-${entry.slug}`}
+      onClick={() => handleRowClick(entry)}
+      onToggleSelection={
+        pinnedSlugSet.has(entry.slug)
+          ? undefined
+          : () => {
+              if (selectedSet.has(entry.slug)) {
+                onRemove(entry.slug);
+              } else {
+                onAdd(entry.slug);
+              }
+            }
+      }
+      removeLabel={t("common.remove")}
+      selected={selectedSet.has(entry.slug)}
+    />
+  );
 
-    if (autoSelectionPlan.addedSlugs.length > 0) {
-      onChange(autoSelectionPlan.selectedSlugs);
+  const recommendedRows: React.ReactNode[] = [];
+  const otherRows: React.ReactNode[] = [];
+  for (const entry of filteredEntries) {
+    if (recommendedSet.has(entry.slug)) {
+      recommendedRows.push(renderCatalogueRow(entry));
+    } else {
+      otherRows.push(renderCatalogueRow(entry));
     }
-  }, [onChange, recommendedEntries, removedSlugs, selectedSlugs]);
+  }
 
   return (
     <>
@@ -287,7 +295,7 @@ export const CatalogueStep = ({
               <GlobeIcon className="size-3.5" />
               {jurisdictionFilter.size === 0
                 ? t("common.all")
-                : [...jurisdictionFilter].sort().join(", ")}
+                : Array.from(jurisdictionFilter).sort().join(", ")}
               <ChevronDownIcon className="size-3.5" />
             </PopoverTrigger>
             <PopoverPopup align="end" className="w-60" side="bottom">
@@ -407,67 +415,16 @@ export const CatalogueStep = ({
             </div>
           ) : (
             <>
-              {filteredEntries
-                .filter((entry) => recommendedSet.has(entry.slug))
-                .map((entry) => (
-                  <OnboardingCatalogueRow
-                    addLabel={t("common.add")}
-                    entry={entry}
-                    focused={focusedSlug === entry.slug}
-                    key={`${entry.kind}-${entry.slug}`}
-                    onClick={() => handleRowClick(entry)}
-                    onToggleSelection={
-                      pinnedSlugSet.has(entry.slug)
-                        ? undefined
-                        : () => {
-                            if (selectedSet.has(entry.slug)) {
-                              onRemove(entry.slug);
-                            } else {
-                              onAdd(entry.slug);
-                            }
-                          }
-                    }
-                    removeLabel={t("common.remove")}
-                    selected={selectedSet.has(entry.slug)}
-                  />
-                ))}
-              {filteredEntries.some(
-                (entry) => !recommendedSet.has(entry.slug),
-              ) &&
-                filteredEntries.some((entry) =>
-                  recommendedSet.has(entry.slug),
-                ) && (
-                  <TextSeparator
-                    className="my-2"
-                    labelClassName="text-[10px] font-medium tracking-wider uppercase"
-                  >
-                    {t("onboarding.catalogueCommunityHeading")}
-                  </TextSeparator>
-                )}
-              {filteredEntries
-                .filter((entry) => !recommendedSet.has(entry.slug))
-                .map((entry) => (
-                  <OnboardingCatalogueRow
-                    addLabel={t("common.add")}
-                    entry={entry}
-                    focused={focusedSlug === entry.slug}
-                    key={`${entry.kind}-${entry.slug}`}
-                    onClick={() => handleRowClick(entry)}
-                    onToggleSelection={
-                      pinnedSlugSet.has(entry.slug)
-                        ? undefined
-                        : () => {
-                            if (selectedSet.has(entry.slug)) {
-                              onRemove(entry.slug);
-                            } else {
-                              onAdd(entry.slug);
-                            }
-                          }
-                    }
-                    removeLabel={t("common.remove")}
-                    selected={selectedSet.has(entry.slug)}
-                  />
-                ))}
+              {recommendedRows}
+              {otherRows.length > 0 && recommendedRows.length > 0 && (
+                <TextSeparator
+                  className="my-2"
+                  labelClassName="text-[10px] font-medium tracking-wider uppercase"
+                >
+                  {t("onboarding.catalogueCommunityHeading")}
+                </TextSeparator>
+              )}
+              {otherRows}
               {jurisdictionFilter.size > 0 && (
                 <div className="flex justify-center py-2">
                   <Button

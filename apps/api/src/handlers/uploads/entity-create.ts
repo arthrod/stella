@@ -21,8 +21,9 @@
 import { Result, panic } from "better-result";
 import { and, count, eq, isNull, like, ne, or, sql } from "drizzle-orm";
 
-import type { SafeDb, Transaction } from "@/api/db";
 import { jsonField } from "@/api/db/json-utils";
+import type { Transaction } from "@/api/db/root";
+import type { SafeDb } from "@/api/db/safe-db";
 import type {
   PendingUploadFinalizedResult,
   PendingUploadPurposeData,
@@ -43,12 +44,13 @@ import { pdfDerivativeStateForFile } from "@/api/handlers/files/gotenberg";
 import { thumbnailDerivativeStateForFile } from "@/api/handlers/files/image-derivative";
 import { isEncryptedPdf } from "@/api/handlers/files/pdf-utils";
 import { createFileKey } from "@/api/handlers/files/utils";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { allocateEntityStamp } from "@/api/lib/document-counter";
+import { lockWorkspacesForEntityCap } from "@/api/lib/entity-cap-lock";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { escapeLike } from "@/api/lib/escape-like";
 import {
@@ -447,20 +449,16 @@ export const checkEntityCreateCapacityForInsert = async ({
     panic("Entity create insert count must be a positive integer");
   }
 
-  const workspaceRows = await tx
-    .select({ id: workspaces.id })
-    .from(workspaces)
-    .where(eq(workspaces.id, workspaceId))
-    .limit(1)
-    .for("update");
-  if (!workspaceRows.at(0)) {
-    panic("Workspace lock for entity create returned no rows");
-  }
+  // See `lockWorkspacesForEntityCap` for the canonical lock order
+  // every entity-creating path follows (issue #1139).
+
+  await lockWorkspacesForEntityCap(tx, [workspaceId]);
 
   const existingEntityCount = await tx.$count(
     entities,
     eq(entities.workspaceId, workspaceId),
   );
+
   const reservedEntityCount = await countActiveEntityCreateReservations({
     tx,
     workspaceId,
@@ -627,6 +625,7 @@ export const finalizeEntityCreate = async function* ({
       parentId,
       name: sanitizedName,
     });
+
     const entityStamp = await allocateEntityStamp(tx, workspaceId);
 
     await tx.insert(entities).values({

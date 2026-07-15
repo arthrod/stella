@@ -1,13 +1,11 @@
 import { useTranslations } from "use-intl";
 
-import type { BLOCK_DIRECTIVE_KINDS } from "@stll/template-conditions";
 import { scanMarkers } from "@stll/template-conditions";
 
-// ── Types ────────────────────────────────────────────
+import { CONDITIONAL_KINDS } from "@/routes/_protected.knowledge/-components/directive-kinds";
+import type { BlockDirectiveKind } from "@/routes/_protected.knowledge/-components/directive-kinds";
 
-// Block directives that wrap content (own paragraph). Derived from the shared
-// grammar so it cannot drift from the fill pipeline's directive kinds.
-export type BlockDirectiveKind = (typeof BLOCK_DIRECTIVE_KINDS)[number];
+// ── Types ────────────────────────────────────────────
 
 // ── Sub-components ───────────────────────────────────
 
@@ -46,13 +44,6 @@ export const HighlightedText = ({ text }: { text: string }) => {
   return parts;
 };
 
-export const CONDITIONAL_KINDS = new Set<BlockDirectiveKind>([
-  "if",
-  "elseif",
-  "else",
-  "endif",
-]);
-
 export const DirectiveLabel = ({
   kind,
   expression,
@@ -61,7 +52,7 @@ export const DirectiveLabel = ({
   expression: string;
 }) => {
   const t = useTranslations("templates");
-  const isConditional = CONDITIONAL_KINDS.has(kind);
+  const isConditional = CONDITIONAL_KINDS.includes(kind);
 
   const label = (() => {
     switch (kind) {

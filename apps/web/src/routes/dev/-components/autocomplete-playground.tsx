@@ -309,6 +309,7 @@ export function AutocompletePlayground() {
         }
         let firstToken = true;
         const streamError: { value: string | null } = { value: null };
+
         await consumeStream(response.body, {
           onToken: (text) => {
             const live = viewRef.current;

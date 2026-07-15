@@ -14,7 +14,7 @@ import { t } from "elysia";
 
 import type { ConditionNode } from "@stll/conditions";
 
-import type { SafeDb, SafeDbError } from "@/api/db";
+import type { SafeDb, SafeDbError } from "@/api/db/safe-db";
 import { cellMetadata, entities, properties } from "@/api/db/schema";
 import type { EntityKind } from "@/api/db/schema-validators";
 import {
@@ -33,6 +33,7 @@ import { HandlerError } from "@/api/lib/errors/tagged-errors";
 
 import {
   buildColumnFlagMutation,
+  buildColumnLockMutation,
   sortColumnFlagTargetsForLocking,
 } from "./mark-column-flag.logic";
 
@@ -41,7 +42,10 @@ const TABLE_COLUMN_FLAG_EXCLUDED_ENTITY_KINDS = [
   "task",
 ] satisfies EntityKind[];
 const COLUMN_FLAG_TARGET_BATCH_SIZE = 500;
-const VERIFIED_COLUMN_FLAG = "verified";
+const COLUMN_METADATA_FLAG = {
+  locked: "locked",
+  verified: "verified",
+} as const;
 
 const config = {
   permissions: {
@@ -50,7 +54,10 @@ const config = {
   mcp: { type: "capability", reason: "workspace_schema" },
   body: t.Object({
     propertyId: tSafeId("property"),
-    flag: t.Literal(VERIFIED_COLUMN_FLAG),
+    flag: t.UnionEnum([
+      COLUMN_METADATA_FLAG.verified,
+      COLUMN_METADATA_FLAG.locked,
+    ]),
     filters: t.Array(tConditionNode),
     set: t.Optional(t.Boolean()),
     // Undo of a prior mark: only remove flags stamped with this operation
@@ -82,7 +89,7 @@ type ProcessColumnFlagBatchArgs = {
   safeDb: SafeDb;
   workspaceId: SafeId<"workspace">;
   propertyId: SafeId<"property">;
-  flag: string;
+  flag: (typeof COLUMN_METADATA_FLAG)[keyof typeof COLUMN_METADATA_FLAG];
   set: boolean;
   onlyAddedAt: string | undefined;
   filters: ConditionNode[];
@@ -172,7 +179,7 @@ const processColumnFlagBatch = async ({
     }
 
     for (const target of targets) {
-      // oxlint-disable-next-line no-await-in-loop -- sequential lock acquisition in a deterministic order avoids deadlocks within the transaction
+      // oxlint-disable-next-line no-await-in-loop -- sequential by design: sequential lock acquisition in a deterministic order avoids deadlocks within the transaction
       await acquireCellLock({
         tx,
         entityVersionId: target.entityVersionId,
@@ -198,17 +205,23 @@ const processColumnFlagBatch = async ({
       )
       .for("update");
 
-    const mutation = buildColumnFlagMutation({
+    const mutationArgs = {
       workspaceId,
       propertyId: property.id,
-      flag,
       set,
       ...(onlyAddedAt !== undefined && { onlyAddedAt }),
       targets,
       existingRows,
       userId,
       addedAt,
-    });
+    };
+    const mutation =
+      flag === COLUMN_METADATA_FLAG.locked
+        ? buildColumnLockMutation(mutationArgs)
+        : buildColumnFlagMutation({
+            ...mutationArgs,
+            flag,
+          });
 
     if (mutation.insertValues.length > 0) {
       await tx

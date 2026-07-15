@@ -26,8 +26,13 @@ import { useInvalidateSession } from "@/hooks/use-invalidate-session";
 import { usePulse } from "@/hooks/use-pulse";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { authClient, HTTP_TOO_MANY_REQUESTS } from "@/lib/auth";
-import { toAuthClientError } from "@/lib/errors";
+import { toAuthClientError } from "@/lib/errors/auth";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import { COMMON_TIMEZONES } from "@/lib/timezones";
+
+const renderEmail = (chunks: ReactNode) => (
+  <BidiText direction="ltr">{chunks}</BidiText>
+);
 
 type OTPPanelProps = {
   className?: string;
@@ -86,7 +91,10 @@ export function OTPPanel({
           title:
             error.status === HTTP_TOO_MANY_REQUESTS
               ? t("auth.rateLimitExceeded")
-              : (error.message ?? t("errors.actionFailed")),
+              : userErrorFromThrown(
+                  toAuthClientError(error),
+                  t("errors.actionFailed"),
+                ),
           type: "error",
         });
         throw toAuthClientError(error);
@@ -211,9 +219,6 @@ function OTPPanelContent({
   onUseDifferentEmail: () => void;
 }) {
   const t = useTranslations();
-  const renderEmail = (chunks: ReactNode) => (
-    <BidiText direction="ltr">{chunks}</BidiText>
-  );
 
   const header = (
     <>

@@ -1,9 +1,9 @@
+import { CONDITIONAL_KINDS } from "@/routes/_protected.knowledge/-components/directive-kinds";
+import type { BlockDirectiveKind } from "@/routes/_protected.knowledge/-components/directive-kinds";
 import {
-  CONDITIONAL_KINDS,
   DirectiveLabel,
   HighlightedText,
 } from "@/routes/_protected.knowledge/-components/paragraph-rendering";
-import type { BlockDirectiveKind } from "@/routes/_protected.knowledge/-components/paragraph-rendering";
 
 // ── Types ────────────────────────────────────────────
 
@@ -60,10 +60,12 @@ const renderRows = (paragraphs: ClauseParagraph[]): React.ReactNode[] => {
     }
     if (p.listKind && !p.isDirective) {
       const built = buildListTree(paragraphs, i, p.listLevel ?? 0, p.listKind);
+
       rows.push(<ClauseList key={i} node={built.node} />);
       i += built.consumed;
       continue;
     }
+
     rows.push(<ClauseParagraphRow key={i} paragraph={p} />);
     i += 1;
   }
@@ -183,7 +185,7 @@ const ParagraphContent = ({ paragraph }: { paragraph: ClauseParagraph }) => {
 
 const ClauseParagraphRow = ({ paragraph }: { paragraph: ClauseParagraph }) => {
   if (paragraph.isDirective && paragraph.directiveKind) {
-    const isConditional = CONDITIONAL_KINDS.has(paragraph.directiveKind);
+    const isConditional = CONDITIONAL_KINDS.includes(paragraph.directiveKind);
 
     return (
       <div

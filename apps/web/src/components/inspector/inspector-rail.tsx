@@ -14,10 +14,8 @@ import { ScrollArea } from "@stll/ui/components/scroll-area";
 import { containedHandler } from "@stll/ui/hooks/use-contained-handler";
 import { cn } from "@stll/ui/lib/utils";
 
-import {
-  ExternalSourceLogo,
-  findMcpConnectorIconHref,
-} from "@/components/inspector/external-reference-panel";
+import { ExternalSourceLogo } from "@/components/inspector/external-reference-panel";
+import { findMcpConnectorIconHref } from "@/components/inspector/external-source-icon";
 import { getActiveSkillChatContext } from "@/components/inspector/inspector-active-skill";
 import {
   isGenericInspectorTab,
@@ -452,13 +450,16 @@ const VerticalTab = ({
       externalConnectorSlug !== undefined &&
       storedExternalIconHref === undefined,
   });
+  const availableConnectors = mcpConnectorsData
+    ? mcpConnectorsData.connectors
+    : [];
   const externalIconHref =
     storedExternalIconHref ??
     (externalConnectorSlug === undefined
       ? undefined
       : findMcpConnectorIconHref({
           connectorSlug: externalConnectorSlug,
-          connectors: mcpConnectorsData?.connectors ?? [],
+          connectors: availableConnectors,
         }));
 
   const contextMenu = useTabContextMenu({

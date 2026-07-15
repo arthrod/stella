@@ -101,6 +101,11 @@ run_typecheck() {
   # tsc processes are memory-hungry; serialize typecheck tasks so
   # parallel instances cannot exhaust memory on contributor machines.
   # CI runs lint and typecheck as separate jobs; results match.
+  # The typecheck-cost baseline guard (scripts/typecheck-baseline.ts) is
+  # deliberately NOT run here: like the bundle baseline, it re-runs full
+  # per-project typechecks and is too slow for the local loop. It runs in
+  # its own CI job (typecheck-baseline); its failures point at type-cost growth, not
+  # type errors, so a green verify still matches a green typecheck.
   if [[ -n "$affected_flag" ]]; then
     bun run typecheck -- --concurrency=1 "$affected_flag"
   else
@@ -109,8 +114,8 @@ run_typecheck() {
 }
 
 run_ratchet_guard() {
-  # Whole-repo convention metrics (as-casts, `?? []` fallbacks, barrel index
-  # files, direct error-message display) that may only ever decrease vs a
+  # Whole-repo convention metrics (see RATCHET_METRICS in scripts/ratchet.ts)
+  # that may only ever decrease vs a
   # committed baseline. A rise fails; a fall just prompts
   # `bun scripts/ratchet.ts --write`. The --self-test run
   # first proves each counter counts what it claims, so a broken guard cannot
@@ -193,6 +198,11 @@ run_step "Knip production deps" run_knip
 run_step "Test" run_test
 run_step "Bridge-version guard self-test" bash scripts/check-bridge-version.test.sh
 run_step "Release-channel self-test" bash scripts/release-channel.test.sh
+run_step "API release contract self-test" bun test \
+  --preload ./apps/api/src/tests/setup-env.ts \
+  scripts/check-api-cli-contract.test.ts \
+  scripts/check-api-deployment.test.ts \
+  scripts/check-production-freshness.test.ts
 run_step "Desktop-release-changes self-test" bash scripts/detect-desktop-release-changes.test.sh
 run_step "Bridge-version guard" bash scripts/check-bridge-version.sh
 

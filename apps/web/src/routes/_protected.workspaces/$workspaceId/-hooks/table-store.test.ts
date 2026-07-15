@@ -116,6 +116,7 @@ describe("Map serialization roundtrip", () => {
       },
       version: 0,
     };
+
     const wire: unknown = JSON.parse(JSON.stringify(data, replacer));
 
     expect(wire).toEqual({

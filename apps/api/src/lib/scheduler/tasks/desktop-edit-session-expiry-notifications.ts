@@ -65,9 +65,10 @@ export const publishDesktopEditSessionExpiryNotificationsWithRetry = async ({
   retryDelaysMs?: readonly number[];
   sleep?: (delayMs: number) => Promise<void>;
 }): Promise<void> => {
+  // oxlint-disable-next-line no-unreachable-loop -- failed attempts reach the loop tail after the catch and continue with the next backoff delay
   for (const retryDelayMs of retryDelaysMs) {
     try {
-      // oxlint-disable-next-line no-await-in-loop -- sequential retry: each attempt must complete before the next backoff
+      // oxlint-disable-next-line no-await-in-loop -- sequential retry: each attempt must complete (and fail) before the next backoff delay is scheduled
       await publishDesktopEditSessionExpiryNotifications({
         publisher,
         sessions,

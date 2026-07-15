@@ -16,6 +16,7 @@
  */
 
 import { eq, isNull, sql } from "drizzle-orm";
+import * as v from "valibot";
 
 import { rootDb } from "@/api/db/root";
 import {
@@ -24,6 +25,7 @@ import {
   caseLawPolarityRules,
 } from "@/api/db/schema";
 import { recomputeCitationAuthorityForAll } from "@/api/handlers/case-law/citation-authority";
+import { loadCourtWeightEntriesForSql } from "@/api/handlers/case-law/court-weights";
 import { extractContext } from "@/api/handlers/case-law/polarity/context";
 import { SEED_RULES } from "@/api/handlers/case-law/polarity/seed-rules";
 import type { SafeId } from "@/api/lib/branded-types";
@@ -139,9 +141,16 @@ const seedRules = async () => {
  * The only way to obtain this type is through `validateTemporalOrder`,
  * making temporally impossible citations a compile error at the update site.
  */
-type ValidCitedDecisionId = SafeId<"caseLawDecision"> & {
-  readonly __brand: "ValidCitedDecisionId";
-};
+const validCitedDecisionIdSchema = v.pipe(
+  v.custom<SafeId<"caseLawDecision">>((value) =>
+    typeof value === "string"
+      ? v.is(v.pipe(v.string(), v.uuid()), value)
+      : false,
+  ),
+  v.brand("ValidCitedDecisionId"),
+);
+
+type ValidCitedDecisionId = v.InferOutput<typeof validCitedDecisionIdSchema>;
 
 const validateTemporalOrder = (
   citingDate: string | null,
@@ -150,15 +159,11 @@ const validateTemporalOrder = (
 ): ValidCitedDecisionId | null => {
   // If either date is unknown, allow the match (can't validate)
   if (!citingDate || !citedDate) {
-    // SAFETY: branded-type constructor — date is missing so we can't disprove temporal order
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- branded-type construction at the validated temporal boundary
-    return matchedId as ValidCitedDecisionId;
+    return v.parse(validCitedDecisionIdSchema, matchedId);
   }
   // ISO dates sort lexicographically; citing must be on or after cited
   if (citingDate >= citedDate) {
-    // SAFETY: branded-type constructor — temporal order verified above
-    // eslint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- branded-type construction at the validated temporal boundary
-    return matchedId as ValidCitedDecisionId;
+    return v.parse(validCitedDecisionIdSchema, matchedId);
   }
   return null;
 };
@@ -693,8 +698,10 @@ if (!REPORT_ONLY) {
   // recomputing the citation-graph aggregate per query.
   if (!DRY_RUN) {
     console.log("\n=== RECOMPUTING CITATION AUTHORITY ===");
+    const courtWeightEntries = await loadCourtWeightEntriesForSql();
     const updated = await rootDb.transaction(
-      async (tx) => await recomputeCitationAuthorityForAll(tx),
+      async (tx) =>
+        await recomputeCitationAuthorityForAll(tx, { courtWeightEntries }),
     );
     console.log(`Citation authority refreshed for ${updated} cited decisions.`);
   }

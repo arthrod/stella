@@ -1,4 +1,5 @@
 import type { CellMetadata } from "@/api/db/schema-validators";
+import { arrayOrEmpty } from "@/api/lib/array";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { AuditEvent } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
@@ -42,6 +43,8 @@ type BuildColumnFlagMutationArgs = {
   addedAt: string;
 };
 
+type BuildColumnLockMutationArgs = Omit<BuildColumnFlagMutationArgs, "flag">;
+
 type ColumnFlagMutation = {
   auditEvents: AuditEvent[];
   insertValues: CellMetadataInsert[];
@@ -79,10 +82,13 @@ export const buildColumnFlagMutation = ({
 
   for (const target of targets) {
     const existing = existingByVersionId.get(target.entityVersionId);
-    const existingFlags = normalizeManualFlags(existing?.manualFlags ?? []);
+    const existingFlags = normalizeManualFlags(
+      arrayOrEmpty(existing?.manualFlags),
+    );
+    const existingFlagSet = new Set(existingFlags);
 
     if (set) {
-      if (existingFlags.includes(flag)) {
+      if (existingFlagSet.has(flag)) {
         continue;
       }
 
@@ -145,7 +151,7 @@ export const buildColumnFlagMutation = ({
       continue;
     }
 
-    if (!(existing && existingFlags.includes(flag))) {
+    if (!(existing && existingFlagSet.has(flag))) {
       continue;
     }
 
@@ -200,6 +206,84 @@ export const buildColumnFlagMutation = ({
       resourceId: `${target.entityVersionId}:${propertyId}`,
       changes: {
         manualFlags: { old: existingFlags, new: manualFlags },
+      },
+      metadata: {
+        entityId: target.entityId,
+        entityVersionId: target.entityVersionId,
+        propertyId,
+        bulk: true,
+      },
+    });
+  }
+
+  return {
+    auditEvents,
+    insertValues,
+    updatedCount: insertValues.length,
+  };
+};
+
+export const buildColumnLockMutation = ({
+  workspaceId,
+  propertyId,
+  set,
+  onlyAddedAt,
+  targets,
+  existingRows,
+  userId,
+  addedAt,
+}: BuildColumnLockMutationArgs): ColumnFlagMutation => {
+  const existingByVersionId = new Map(
+    existingRows.map((row) => [row.entityVersionId, row.metadata]),
+  );
+  const auditEvents: AuditEvent[] = [];
+  const insertValues: CellMetadataInsert[] = [];
+
+  for (const target of targets) {
+    const existing = existingByVersionId.get(target.entityVersionId);
+    const wasLocked = existing?.locked === true;
+    if (set === wasLocked) {
+      continue;
+    }
+    if (
+      !set &&
+      onlyAddedAt !== undefined &&
+      existing?.lockProvenance?.lockedAt !== onlyAddedAt
+    ) {
+      continue;
+    }
+
+    const manualFlags = normalizeManualFlags(
+      arrayOrEmpty(existing?.manualFlags),
+    );
+    const metadata: CellMetadata = {
+      version: CELL_METADATA_VERSION,
+      manualFlags,
+      flagProvenance: existing?.flagProvenance ?? {},
+      ...(set && { locked: true }),
+      ...(set && {
+        lockProvenance: {
+          lockedBy: userId,
+          lockedAt: addedAt,
+          reason: "explicit" as const,
+        },
+      }),
+    };
+
+    insertValues.push({
+      workspaceId,
+      entityVersionId: target.entityVersionId,
+      propertyId,
+      metadata,
+      createdBy: userId,
+      updatedBy: userId,
+    });
+    auditEvents.push({
+      action: AUDIT_ACTION.UPDATE,
+      resourceType: AUDIT_RESOURCE_TYPE.FIELD,
+      resourceId: `${target.entityVersionId}:${propertyId}`,
+      changes: {
+        locked: { old: wasLocked, new: set },
       },
       metadata: {
         entityId: target.entityId,

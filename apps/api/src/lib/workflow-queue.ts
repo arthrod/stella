@@ -4,9 +4,9 @@ import type { RedisClient } from "bun";
 import { sleep } from "bun";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
-import type { SafeDb, ScopedDb } from "@/api/db";
 import { jsonField } from "@/api/db/json-utils";
 import { rootDb } from "@/api/db/root";
+import type { SafeDb, ScopedDb } from "@/api/db/safe-db";
 import {
   cellMetadata,
   fields,
@@ -24,7 +24,7 @@ import {
   loadOrgAIConfig,
   loadPromptCachingPreference,
 } from "@/api/lib/ai-config-loader";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { acquireCellLocks } from "@/api/lib/cell-lock";
@@ -54,6 +54,10 @@ import {
   readFullWorkflowSnapshotCursor,
 } from "@/api/lib/workflow-target-queries";
 import { resolveWorkflowTargetEntityIds } from "@/api/lib/workflow-targets";
+import {
+  COMPLETE_ENTITY_SCRIPT,
+  parseEntityCompletionReply,
+} from "@/api/lib/workflow/completion-tracking";
 import { getBatchGenerator } from "@/api/lib/workflow/generate-batch-provider";
 import type {
   AIJustification,
@@ -376,16 +380,22 @@ const filterPlanByPropertyIds = (
   propertyIds: readonly SafeId<"property">[],
 ): ExecutionLevel[] => {
   const allowed = new Set<string>(propertyIds);
-  return plan
-    .map((level) =>
-      level
-        .map((batch) => ({
-          ...batch,
-          properties: batch.properties.filter((p) => allowed.has(p.id)),
-        }))
-        .filter((batch) => batch.properties.length > 0),
-    )
-    .filter((level) => level.length > 0);
+  const filteredPlan: ExecutionLevel[] = [];
+  for (const level of plan) {
+    const filteredLevel: ExecutionLevel = [];
+    for (const batch of level) {
+      const filteredProperties = batch.properties.filter((p) =>
+        allowed.has(p.id),
+      );
+      if (filteredProperties.length > 0) {
+        filteredLevel.push({ ...batch, properties: filteredProperties });
+      }
+    }
+    if (filteredLevel.length > 0) {
+      filteredPlan.push(filteredLevel);
+    }
+  }
+  return filteredPlan;
 };
 
 /**
@@ -709,7 +719,7 @@ const selectWorkspacesWithPendingCells = async (
             fields.workspaceId,
             workspaceIdBatch.map((id) => brandPersistedWorkspaceId(id)),
           );
-    // oxlint-disable-next-line no-await-in-loop -- sequential batched DB scan bounds the IN-list size per query
+    // oxlint-disable-next-line no-await-in-loop -- sequential batched DB scan bounds the IN-list size per query; workspace count is unbounded across tenants, so unbounded parallel fan-out risks DB pool exhaustion
     const rows = await rootDb
       .selectDistinct({ workspaceId: fields.workspaceId })
       .from(fields)
@@ -986,14 +996,12 @@ export const reconcileOrphanedWorkflows = async ({
     return;
   }
 
-  const currentRequestIds = await readWorkflowRequestIds(
-    redis,
-    orphanCandidates,
-  );
-  const currentRunningValues = await readWorkflowRunningValues(
-    redis,
-    orphanCandidates,
-  );
+  // Independent reads of two distinct Redis keys per workspace; neither
+  // depends on the other's result.
+  const [currentRequestIds, currentRunningValues] = await Promise.all([
+    readWorkflowRequestIds(redis, orphanCandidates),
+    readWorkflowRunningValues(redis, orphanCandidates),
+  ]);
   const recoveryWorkspaceIds = new Set<string>();
   for (const workspaceId of orphanCandidates) {
     if (currentRunningValues.get(workspaceId) === RECOVERY_LOCK_VALUE) {
@@ -1492,11 +1500,12 @@ const processOneBatch = async ({
         ),
       ),
   );
-  const lockedPropertyIds = new Set<string>(
-    lockedCellRows
-      .filter((row) => row.metadata.locked === true)
-      .map((row) => row.propertyId),
-  );
+  const lockedPropertyIds = new Set<string>();
+  for (const row of lockedCellRows) {
+    if (row.metadata.locked === true) {
+      lockedPropertyIds.add(row.propertyId);
+    }
+  }
 
   const batch = prepareBatch(
     rawBatch,
@@ -1716,11 +1725,12 @@ const processOneBatch = async ({
               )
               .for("update")
           : [];
-      const lockedAtWrite = new Set<string>(
-        lockedRowsAtWrite
-          .filter((row) => row.metadata.locked === true)
-          .map((row) => row.propertyId),
-      );
+      const lockedAtWrite = new Set<string>();
+      for (const row of lockedRowsAtWrite) {
+        if (row.metadata.locked === true) {
+          lockedAtWrite.add(row.propertyId);
+        }
+      }
       const allPropertyIds = candidatePropertyIds.filter(
         (id) => !lockedAtWrite.has(id),
       );
@@ -1736,37 +1746,45 @@ const processOneBatch = async ({
           );
       }
 
-      const fieldValues = [
-        ...processedFields.aiResults
-          .filter(({ propertyId }) => !lockedAtWrite.has(propertyId))
-          .map(({ fieldId, propertyId, content }) => ({
+      const fieldValues = [];
+      for (const {
+        fieldId,
+        propertyId,
+        content,
+      } of processedFields.aiResults) {
+        if (!lockedAtWrite.has(propertyId)) {
+          fieldValues.push({
             id: fieldId,
             workspaceId,
             propertyId,
             entityVersionId,
             content,
-          })),
-        ...processedFields.unsupportedPropertyIds
-          .filter((propertyId) => !lockedAtWrite.has(propertyId))
-          .map((propertyId) => ({
+          });
+        }
+      }
+      for (const propertyId of processedFields.unsupportedPropertyIds) {
+        if (!lockedAtWrite.has(propertyId)) {
+          fieldValues.push({
             id: createSafeId<"field">(),
             workspaceId,
             propertyId,
             entityVersionId,
             content: { type: "unsupported" as const, version: 1 as const },
-          })),
-      ];
+          });
+        }
+      }
 
       if (fieldValues.length > 0) {
         await tx.insert(fields).values(fieldValues);
       }
 
       if (processedFields.aiJustifications.length > 0) {
-        const aiResultFieldIdsForLockedProps = new Set(
-          processedFields.aiResults
-            .filter(({ propertyId }) => lockedAtWrite.has(propertyId))
-            .map(({ fieldId }) => fieldId),
-        );
+        const aiResultFieldIdsForLockedProps = new Set<string>();
+        for (const { fieldId, propertyId } of processedFields.aiResults) {
+          if (lockedAtWrite.has(propertyId)) {
+            aiResultFieldIdsForLockedProps.add(fieldId);
+          }
+        }
         const liveJustifications = processedFields.aiJustifications.filter(
           (j) => !aiResultFieldIdsForLockedProps.has(j.fieldId),
         );
@@ -1800,20 +1818,32 @@ const onEntityCompleted = async (
   requestId: string,
   runLockTtlSec: number,
 ) => {
-  const isCurrentRequest = await isCurrentWorkflowRequest({
+  const redis = getRedis();
+
+  // Atomically re-check that this job still belongs to the active
+  // workflow request AND increment the completed counter in the same
+  // Redis command (see `COMPLETE_ENTITY_SCRIPT`). A plain check-then-INCR
+  // (two round trips) leaves a window where a stale job's check can pass
+  // just before the run it belongs to finishes and a new run resets the
+  // counters — the stale job's INCR would then land on the new run's
+  // counter instead of being a no-op. Same idiom as
+  // `RESERVE_RECOVERY_LOCK_SCRIPT` above.
+  const reply: unknown = await redis.send("EVAL", [
+    COMPLETE_ENTITY_SCRIPT,
+    "4",
+    workflowKey(workspaceId, "request-id"),
+    workflowKey(workspaceId, "running"),
+    workflowKey(workspaceId, "completed"),
+    workflowKey(workspaceId, "total"),
     requestId,
-    workspaceId,
-  });
-  if (!isCurrentRequest) {
+    LEGACY_RUNNING_LOCK_VALUE,
+  ]);
+  const result = parseEntityCompletionReply(reply);
+  if (!result.matched) {
     return;
   }
 
-  const redis = getRedis();
-  const completed = await redis.incr(workflowKey(workspaceId, "completed"));
-  const totalStr = await redis.get(workflowKey(workspaceId, "total"));
-  const total = Number(totalStr ?? "0");
-
-  if (completed >= total) {
+  if (result.completed >= result.total) {
     await finishWorkflow(workspaceId, organizationId, userId, requestId);
     return;
   }
@@ -2079,11 +2109,12 @@ const setFieldsStatus = async ({
           inArray(cellMetadata.propertyId, propertyIds),
         ),
       );
-    const lockedNow = new Set<string>(
-      lockedRows
-        .filter((row) => row.metadata.locked === true)
-        .map((row) => row.propertyId),
-    );
+    const lockedNow = new Set<string>();
+    for (const row of lockedRows) {
+      if (row.metadata.locked === true) {
+        lockedNow.add(row.propertyId);
+      }
+    }
     const writablePropertyIds = propertyIds.filter((id) => !lockedNow.has(id));
 
     if (writablePropertyIds.length === 0) {

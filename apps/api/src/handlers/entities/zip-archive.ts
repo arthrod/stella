@@ -55,7 +55,7 @@ export const buildArchivePaths = ({
   nodes,
 }: BuildArchivePathsArgs): Map<string, string> => {
   const sanitizedRoot = sanitizeFilename(rootName);
-  const orderedNodes = [...nodes].sort(compareArchiveNode);
+  const orderedNodes = nodes.toSorted(compareArchiveNode);
 
   const nodeById = new Map<string, ArchiveNode>();
   for (const node of orderedNodes) {

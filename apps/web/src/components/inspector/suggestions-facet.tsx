@@ -20,7 +20,7 @@
  * suggestions without context-switching.
  */
 
-import { useEffect, useEffectEvent, useRef } from "react";
+import { useRef } from "react";
 
 import { useShallow } from "zustand/react/shallow";
 
@@ -32,6 +32,7 @@ import {
 } from "@/components/ai-suggestions/active-docx-store";
 import { ReviewPanel } from "@/components/ai-suggestions/review-panel";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 
 type SuggestionsFacetProps = {
   entityId: string;
@@ -64,7 +65,7 @@ export const SuggestionsFacet = ({
   // can no-op on.
   const fallbackEditorRef = useRef<DocxEditorRef | null>(null);
 
-  const dispatchMissingEditor = useEffectEvent(() => {
+  const dispatchMissingEditor = useLatestCallback(() => {
     onMissingEditor?.();
   });
   // Latch the dispatch itself: once we've kicked the caller for a
@@ -72,7 +73,8 @@ export const SuggestionsFacet = ({
   // unmounts or a registration appears. Without this guard the
   // parent's navigate triggers a re-render that re-enters the
   // effect and fires another navigate — an unstoppable loop.
-  const hasDispatchedRef = useRef(false);
+  const dispatchedTargetRef = useRef<string | null>(null);
+  const targetKey = `${entityId}:${fileFieldId}`;
 
   // Stable boolean: only flips when the callback transitions
   // present ↔ absent (i.e. when the inspector marks this tab as
@@ -82,25 +84,12 @@ export const SuggestionsFacet = ({
   // boolean we can safely depend on.
   const hasOnMissingEditor = onMissingEditor !== undefined;
 
-  // Inspector PDF tabs reuse the same component instance when
-  // the user navigates between documents (the store swaps
-  // `entityId` and content fields in place; see FileTab docs in
-  // inspector-store.ts). Reset the dispatch latch whenever the
-  // target document changes — that is either a new entity or a
-  // different file field of the same entity — so a previous
-  // document's "already redirected" state doesn't suppress the
-  // redirect for the new one. Per Codex review on PR #80.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id ref latch; can't key/remount: the inspector reuses this instance across documents by swapping entityId/fileFieldId in place (see comment above), so a key would discard the live editor/registration state
-  useEffect(() => {
-    hasDispatchedRef.current = false;
-  }, [entityId, fileFieldId]);
-
   useExternalSyncEffect(() => {
     if (registration !== undefined) {
-      hasDispatchedRef.current = false;
+      dispatchedTargetRef.current = null;
       return;
     }
-    if (hasDispatchedRef.current) {
+    if (dispatchedTargetRef.current === targetKey) {
       return;
     }
     if (!hasOnMissingEditor) {
@@ -111,9 +100,9 @@ export const SuggestionsFacet = ({
       // Per Codex review on PR #80.
       return;
     }
-    hasDispatchedRef.current = true;
+    dispatchedTargetRef.current = targetKey;
     dispatchMissingEditor();
-  }, [registration, hasOnMissingEditor, entityId, fileFieldId]);
+  }, [registration, hasOnMissingEditor, targetKey, dispatchMissingEditor]);
 
   return (
     <ReviewPanel

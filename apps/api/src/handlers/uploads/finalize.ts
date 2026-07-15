@@ -22,7 +22,7 @@ import type { Err } from "better-result";
 import { and, eq, sql } from "drizzle-orm";
 import { t } from "elysia";
 
-import type { SafeDb, SafeDbError } from "@/api/db";
+import type { SafeDb, SafeDbError } from "@/api/db/safe-db";
 import { pendingUploads } from "@/api/db/schema";
 import type { PendingUploadFinalizedResult } from "@/api/db/schema";
 import { finalizeAgentSkill } from "@/api/handlers/uploads/agent-skill";
@@ -40,7 +40,7 @@ import {
   authorizeUploadPurpose,
   uploadRoutePermission,
 } from "@/api/handlers/uploads/permissions";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import type { AuditRecorder } from "@/api/lib/audit-log";
@@ -331,7 +331,7 @@ const deleteStagedUploadObjects = async ({
   workspaceId,
 }: StagedUploadKeyProps & { stage: string }) => {
   for (const key of tmpUploadKeys({ organizationId, uploadId, workspaceId })) {
-    // oxlint-disable-next-line no-await-in-loop -- sequential S3 tmp-object cleanup after multipart finalize
+    // oxlint-disable-next-line no-await-in-loop -- sequential by design: S3 cleanup loop, not parallelized per rate-limit guidance
     await getS3()
       .delete(key)
       .catch((deleteError: unknown) =>
@@ -435,9 +435,12 @@ const runFinalize = async function* ({
     );
   }
   if (scanResult.value.verdict === "reject") {
-    const reasons = scanResult.value.findings
-      .filter((finding) => finding.severity === "reject")
-      .map((finding) => finding.message);
+    const reasons: string[] = [];
+    for (const finding of scanResult.value.findings) {
+      if (finding.severity === "reject") {
+        reasons.push(finding.message);
+      }
+    }
     return Result.err(
       new UploadFinalizeError({
         status: 422,
@@ -446,12 +449,15 @@ const runFinalize = async function* ({
       }),
     );
   }
-  const scanWarnings =
-    scanResult.value.verdict === "warn"
-      ? scanResult.value.findings
-          .filter((finding) => finding.severity === "warn")
-          .map((finding) => finding.message)
-      : undefined;
+  let scanWarnings: string[] | undefined;
+  if (scanResult.value.verdict === "warn") {
+    scanWarnings = [];
+    for (const finding of scanResult.value.findings) {
+      if (finding.severity === "warn") {
+        scanWarnings.push(finding.message);
+      }
+    }
+  }
 
   const promoteTmpObject = async (finalKey: string) => {
     const copyResult = await copyObject(tmpKey, finalKey);

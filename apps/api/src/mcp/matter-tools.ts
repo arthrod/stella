@@ -1058,6 +1058,7 @@ const readTaskDetail = async ({
           agendaKind: true,
         },
       });
+
       const assignees = await tx.query.taskAssignees.findMany({
         where: {
           entityId: { eq: taskId },
@@ -1076,6 +1077,7 @@ const readTaskDetail = async ({
         with: linkWith,
         limit: LIMITS.taskEntityLinksPerDirectionMax,
       });
+
       const incoming = await tx.query.entityLinks.findMany({
         where: {
           workspaceId: { eq: workspaceId },

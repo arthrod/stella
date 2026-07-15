@@ -1,7 +1,7 @@
 import { panic, Result } from "better-result";
 import { t } from "elysia";
 
-import type { SafeDbError } from "@/api/db";
+import type { SafeDbError } from "@/api/db/safe-db";
 import { estimateChatContextPromptTokens } from "@/api/handlers/chat/chat-prompt";
 import { resolveChatScope } from "@/api/handlers/chat/chat-scope";
 import { computeThreadContextUsage } from "@/api/handlers/chat/compaction";
@@ -139,6 +139,7 @@ const getMessages = createSafeRootHandler(
         // row read serves both the native-tool-override computation below
         // and web-search provider resolution — replacing a second,
         // independent read of the same organizationSettings row.
+
         const orgSettingsForChat =
           await tx.query.organizationSettings.findFirst({
             where: {

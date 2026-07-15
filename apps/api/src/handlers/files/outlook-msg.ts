@@ -556,6 +556,7 @@ const isDirectChildPath = (
   if (childPath.length !== parentPath.length + 1) {
     return false;
   }
+
   return parentPath.every((part, index) => childPath[index] === part);
 };
 

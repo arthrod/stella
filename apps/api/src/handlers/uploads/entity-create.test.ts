@@ -1,9 +1,10 @@
 import { Result } from "better-result";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
-import { eq, TransactionRollbackError } from "drizzle-orm";
+import { eq, sql, TransactionRollbackError } from "drizzle-orm";
 
-import type { SafeDb, Transaction } from "@/api/db";
 import { organization, user } from "@/api/db/auth-schema";
+import type { Transaction } from "@/api/db/root";
+import type { SafeDb } from "@/api/db/safe-db";
 import {
   entities,
   entityVersions,
@@ -41,9 +42,12 @@ const SHA_256_HEX = "a".repeat(64);
 
 let testDb: TestDatabase;
 
-beforeAll(async () => {
-  testDb = await getTestDb();
-});
+beforeAll(
+  async () => {
+    testDb = await getTestDb();
+  },
+  { timeout: 30_000 },
+);
 
 afterAll(async () => {
   await releaseTestDb();
@@ -115,19 +119,19 @@ const createCapacityInsertTx = (
   existingEntityCount: number,
   reservedUploadCount = 0,
 ) => {
-  const forUpdate = mock(async () => [{ id: workspaceId }]);
-  const limit = mock(() => ({ for: forUpdate }));
-  const where = mock(() => ({ limit }));
-  const from = mock(() => ({ where }));
-  const select = mock(() => ({ from }));
+  // `checkEntityCreateCapacityForInsert` acquires its workspace-row
+  // lock via the shared `lockWorkspacesForEntityCap` helper, which
+  // issues a raw `tx.execute(sql\`... FOR UPDATE\`)` per workspace id
+  // (see apps/api/src/lib/entity-cap-lock.ts).
+  const execute = mock(async () => [{ id: workspaceId }]);
   const countEntities = mock(async (table) =>
     table === pendingUploads ? reservedUploadCount : existingEntityCount,
   );
 
   return {
-    forUpdate,
+    execute,
     tx: {
-      select,
+      execute,
       $count: countEntities,
     },
   };
@@ -138,7 +142,7 @@ const runCapacityInsertCheck = async (
   reservedUploadCount = 0,
   excludeUploadId?: SafeId<"pendingUpload">,
 ) => {
-  const { forUpdate, tx } = createCapacityInsertTx(
+  const { execute, tx } = createCapacityInsertTx(
     existingEntityCount,
     reservedUploadCount,
   );
@@ -149,7 +153,7 @@ const runCapacityInsertCheck = async (
     excludeUploadId,
   });
 
-  return { forUpdate, result };
+  return { execute, result };
 };
 
 type RolledBackTxCallback<T> = (tx: TestDatabaseTransaction) => Promise<T>;
@@ -160,6 +164,7 @@ const runRolledBack = async <T>(
   let value: T | undefined;
   try {
     await testDb.transaction(async (tx) => {
+      await tx.execute(sql.raw("RESET ROLE"));
       // oxlint-disable-next-line node/callback-return -- must call tx.rollback() after capturing the value
       value = await callback(tx);
       tx.rollback();
@@ -427,12 +432,12 @@ describe("entity-create presigned upload validation", () => {
   });
 
   test("rejects finalization writes that no longer fit entity capacity", async () => {
-    const { forUpdate, result } = await runCapacityInsertCheck(
+    const { execute, result } = await runCapacityInsertCheck(
       LIMITS.entitiesCount,
     );
 
     expect(Result.isError(result)).toBe(true);
-    expect(forUpdate).toHaveBeenCalledWith("update");
+    expect(execute).toHaveBeenCalledTimes(1);
   });
 
   test("accepts finalization writes that exactly fit remaining capacity", async () => {
@@ -454,13 +459,13 @@ describe("entity-create presigned upload validation", () => {
     const result = await runRolledBack(async (tx) => {
       const seeded = await seedWorkspace(tx);
       const currentUploadId = toSafeId<"pendingUpload">(Bun.randomUUIDv7());
-      const now = new Date();
-      const future = new Date(now.getTime() + 60_000);
-      const past = new Date(now.getTime() - 60_000);
-      const recentClaim = new Date(now.getTime() - 1000);
-      const staleClaim = new Date(
-        now.getTime() - FINALIZE_CLAIM_TIMEOUT_MS - 1000,
-      );
+      const future = sql<Date>`NOW() + interval '1 minute'`;
+      const past = sql<Date>`NOW() - interval '1 minute'`;
+      const recentClaim = sql<Date>`NOW() - interval '1 second'`;
+      const staleClaimSeconds =
+        Math.floor(FINALIZE_CLAIM_TIMEOUT_MS / 1000) + 1;
+      const staleClaim = sql<Date>`NOW() - ${staleClaimSeconds} * interval '1 second'`;
+      const createdAt = sql<Date>`NOW()`;
 
       await tx.insert(pendingUploads).values([
         {
@@ -479,7 +484,7 @@ describe("entity-create presigned upload validation", () => {
           declaredSha256: SHA_256_HEX,
           status: "pending",
           expiresAt: future,
-          createdAt: now,
+          createdAt,
         },
         {
           id: toSafeId<"pendingUpload">(Bun.randomUUIDv7()),
@@ -498,7 +503,7 @@ describe("entity-create presigned upload validation", () => {
           status: "failed",
           expiresAt: future,
           claimedAt: recentClaim,
-          createdAt: now,
+          createdAt,
         },
         {
           id: toSafeId<"pendingUpload">(Bun.randomUUIDv7()),
@@ -517,7 +522,7 @@ describe("entity-create presigned upload validation", () => {
           status: "scanning",
           expiresAt: past,
           claimedAt: recentClaim,
-          createdAt: now,
+          createdAt,
         },
         {
           id: currentUploadId,
@@ -535,7 +540,7 @@ describe("entity-create presigned upload validation", () => {
           declaredSha256: SHA_256_HEX,
           status: "pending",
           expiresAt: future,
-          createdAt: now,
+          createdAt,
         },
         {
           id: toSafeId<"pendingUpload">(Bun.randomUUIDv7()),
@@ -553,7 +558,7 @@ describe("entity-create presigned upload validation", () => {
           declaredSha256: SHA_256_HEX,
           status: "pending",
           expiresAt: past,
-          createdAt: now,
+          createdAt,
         },
         {
           id: toSafeId<"pendingUpload">(Bun.randomUUIDv7()),
@@ -572,7 +577,7 @@ describe("entity-create presigned upload validation", () => {
           status: "scanning",
           expiresAt: past,
           claimedAt: staleClaim,
-          createdAt: now,
+          createdAt,
         },
         {
           id: toSafeId<"pendingUpload">(Bun.randomUUIDv7()),
@@ -590,7 +595,7 @@ describe("entity-create presigned upload validation", () => {
           declaredSha256: SHA_256_HEX,
           status: "pending",
           expiresAt: future,
-          createdAt: now,
+          createdAt,
         },
       ]);
 

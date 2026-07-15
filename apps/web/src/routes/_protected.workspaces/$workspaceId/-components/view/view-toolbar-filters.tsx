@@ -771,19 +771,17 @@ const useFilterFields = (properties: WorkspaceProperty[]): FieldOption[] => {
   ];
 
   for (const property of properties) {
-    if (property.content.type === "file") {
+    const content = property.content;
+    if (content.type === "file") {
       continue;
     }
-    if (
-      property.content.type === "single-select" ||
-      property.content.type === "multi-select"
-    ) {
+    if (content.type === "single-select" || content.type === "multi-select") {
       fields.push({
         operand: { type: "property", propertyId: property.id },
         label: property.name,
-        valueType: property.content.type,
-        type: property.content.type,
-        options: property.content.options.map((option) => ({
+        valueType: content.type,
+        type: content.type,
+        options: content.options.map((option) => ({
           value: option.value,
           label: option.value,
           color: option.color,
@@ -794,8 +792,8 @@ const useFilterFields = (properties: WorkspaceProperty[]): FieldOption[] => {
     fields.push({
       operand: { type: "property", propertyId: property.id },
       label: property.name,
-      valueType: property.content.type,
-      type: property.content.type,
+      valueType: content.type,
+      type: content.type,
     });
   }
 

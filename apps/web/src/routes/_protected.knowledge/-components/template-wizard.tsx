@@ -39,7 +39,8 @@ import { cn } from "@stll/ui/lib/utils";
 import Tooltip from "@/components/tooltip";
 import { LANG_ENDONYMS } from "@/i18n/i18n-store";
 import { api } from "@/lib/api";
-import { userErrorMessage } from "@/lib/errors";
+import { optionalArray } from "@/lib/arrays";
+import { userErrorMessage } from "@/lib/errors/user-safe";
 import { inputTypeValueKind, VALUE_TYPE_META } from "@/lib/value-types";
 
 import {
@@ -47,6 +48,12 @@ import {
   formatDateExample,
   type TemplateDateFormat,
 } from "./template-date-format";
+import {
+  defaultCompositeFormat,
+  isInputType,
+  type InputType,
+  type LookupRegistry,
+} from "./template-field-manifest";
 
 type DiscoverResponse = Awaited<ReturnType<typeof api.templates.discover.post>>;
 
@@ -62,19 +69,9 @@ export type StructureError = DiscoverData["structureErrors"][number];
 const DOCX_EXTENSION_RE = /\.docx$/iu;
 const REQUIRED_MARKER = "*";
 
-export const INPUT_TYPES = [
-  "text",
-  "number",
-  "boolean",
-  "date",
-  "select",
-] as const;
-
-type InputType = (typeof INPUT_TYPES)[number];
-
 /**
  * Input types offered when configuring a field. A UI-level list, not the
- * manifest's `INPUT_TYPES`:
+ * manifest's `InputType`:
  *
  * - "boolean" is omitted — yes/no fields are condition questions, created via
  *   conditions; existing boolean fields keep rendering and working, they are
@@ -86,7 +83,7 @@ type InputType = (typeof INPUT_TYPES)[number];
  */
 // "textarea" is intentionally absent: authors pick a single "text" type that
 // fills as an auto-growing input handling short and long values alike.
-export const FIELD_TYPE_CHOICES = [
+const FIELD_TYPE_CHOICES = [
   "text",
   "number",
   "date",
@@ -99,34 +96,9 @@ export const FIELD_TYPE_CHOICES = [
 const fieldTypeChoice = (field: TemplateEditableField): InputType | "company" =>
   field.lookup === undefined ? field.inputType : "company";
 
-export const PART_INPUT_TYPES = ["text", "select"] as const;
+const PART_INPUT_TYPES = ["text", "select"] as const;
 
 type PartInputType = (typeof PART_INPUT_TYPES)[number];
-
-/** Registries the lookup affordance offers; mirrors the manifest's supported
- *  set (`LOOKUP_REGISTRIES` in apps/api/src/handlers/docx/types.ts, itself the
- *  full `BUSINESS_REGISTRY_SLUGS`). Eden exposes types only, so the slugs are
- *  mirrored here — extend together with the API. */
-const LOOKUP_REGISTRIES = [
-  "ares",
-  "brreg",
-  "companies-house",
-  "edgar",
-  "gcis",
-  "krs",
-  "orsr",
-  "prh",
-  "recherche-entreprises",
-  "vies",
-] as const;
-
-type LookupRegistry = (typeof LOOKUP_REGISTRIES)[number];
-
-/** Narrows a manifest's raw lookup registry to a supported slug, so the Studio
- *  restores lookups for every offered registry — not just KRS — on reopen. */
-export const isLookupRegistry = (value: unknown): value is LookupRegistry =>
-  typeof value === "string" &&
-  LOOKUP_REGISTRIES.some((registry) => registry === value);
 
 /** One output format for a lookup field: the author enters the registry
  *  number once and addresses this rendering of the resolved hit by a marker.
@@ -233,8 +205,6 @@ export type FieldValidation = {
   maxItems?: number | undefined;
 };
 
-const INPUT_TYPE_SET: ReadonlySet<string> = new Set(INPUT_TYPES);
-
 /** Canonical icon + name for a field's value type (shared with the matter
  *  table's property chips via the value-type registry). */
 export const ValueTypeLabel = ({
@@ -253,9 +223,6 @@ export const ValueTypeLabel = ({
   );
 };
 
-export const isInputType = (value: string): value is InputType =>
-  INPUT_TYPE_SET.has(value);
-
 const inferInputType = (field: ResolvedField): InputType => {
   if (field.inputType && isInputType(field.inputType)) {
     return field.inputType;
@@ -269,7 +236,7 @@ const inferInputType = (field: ResolvedField): InputType => {
   return "text";
 };
 
-export const buildEditableFields = (
+const buildEditableFields = (
   fields: readonly ResolvedField[],
 ): TemplateEditableField[] =>
   fields.map((f) => ({
@@ -279,11 +246,11 @@ export const buildEditableFields = (
     hint: f.hint,
     inputType: inferInputType(f),
     required: f.required ?? false,
-    options: f.options ?? [],
+    options: optionalArray(f.options),
     parts: f.parts?.map((part) => ({
       key: part.key,
       inputType: part.inputType,
-      options: part.options ?? [],
+      options: optionalArray(part.options),
       label: part.label,
       pattern: part.pattern,
     })),
@@ -307,25 +274,11 @@ type CompositeManifestProps = {
   format: string | undefined;
 };
 
-/**
- * The manifest shape of a field's composite configuration: parts and format
- * are emitted together, or not at all (a half-configured composite — no parts
- * yet, or no format yet — saves as a plain field).
- */
-export const defaultCompositeFormat = (
-  parts: readonly EditablePart[],
-): string | undefined => {
-  const keys = parts.map((p) => p.key.trim()).filter((k) => k !== "");
-  if (keys.length === 0) {
-    return undefined;
-  }
-  return keys.map((k) => `{{${k}}}`).join(" ");
-};
-
-export const compositeManifestProps = (
+const compositeManifestProps = (
   field: TemplateEditableField,
 ): CompositeManifestProps => {
-  const parts = (field.parts ?? []).filter((part) => part.key.trim() !== "");
+  const fieldParts = optionalArray(field.parts);
+  const parts = fieldParts.filter((part) => part.key.trim() !== "");
   // An untyped format defaults to all parts joined by spaces, so a composite
   // never silently degrades to a plain field just because the author skipped
   // the format input.
@@ -360,7 +313,7 @@ export const compositeManifestProps = (
  * normalization, so the field falls back to a plain text field rather than an
  * invalid empty lookup.
  */
-export const lookupManifestProps = (
+const lookupManifestProps = (
   field: TemplateEditableField,
 ): EditableLookup | undefined => {
   if (
@@ -373,14 +326,16 @@ export const lookupManifestProps = (
   // Drop rows with an empty key or template, enforce the segment grammar and
   // caps. The order is preserved so the first surviving row stays the default.
   const formats = field.lookup.formats
-    .map((f) => ({ key: f.key.trim(), template: f.template.trim() }))
-    .filter(
-      (f) =>
-        f.key !== "" &&
-        f.template !== "" &&
-        LOOKUP_FORMAT_KEY_RE.test(f.key) &&
-        f.template.length <= LOOKUP_FORMAT_TEMPLATE_MAX_LENGTH,
-    )
+    .flatMap((f) => {
+      const key = f.key.trim();
+      const template = f.template.trim();
+      return key !== "" &&
+        template !== "" &&
+        LOOKUP_FORMAT_KEY_RE.test(key) &&
+        template.length <= LOOKUP_FORMAT_TEMPLATE_MAX_LENGTH
+        ? [{ key, template }]
+        : [];
+    })
     .slice(0, LOOKUP_FORMATS_MAX);
   if (formats.length === 0) {
     return undefined;
@@ -392,7 +347,7 @@ export const lookupManifestProps = (
  * The manifest shape of a field's fill hint: the trimmed text, with a blank
  * one normalized away. Kept short — the input enforces {@link HINT_MAX_LENGTH}.
  */
-export const hintManifestProps = (
+const hintManifestProps = (
   field: TemplateEditableField,
 ): string | undefined => {
   const hint = field.hint?.trim() ?? "";
@@ -404,7 +359,7 @@ export const hintManifestProps = (
  * "date" input (composite, formula, and lookup fields collect or derive a
  * different value).
  */
-export const dateFormatManifestProps = (
+const dateFormatManifestProps = (
   field: TemplateEditableField,
 ): TemplateDateFormat | undefined => {
   if (
@@ -424,7 +379,7 @@ export const dateFormatManifestProps = (
  * away. A formula field's value is derived, never user-entered, so a
  * composite configuration takes precedence and suppresses the formula.
  */
-export const formulaManifestProps = (
+const formulaManifestProps = (
   field: TemplateEditableField,
 ): string | undefined => {
   if (field.formula === undefined || field.parts !== undefined) {
@@ -472,7 +427,7 @@ export const ConfigureStep = ({
   // paths (`parties.name`) since the array itself holds objects, not values.
   const fieldPathChoices = discoveredFields.flatMap((f) =>
     f.kind === "array"
-      ? (f.itemFields ?? []).map((sub) => `${f.path}.${sub.path}`)
+      ? optionalArray(f.itemFields).map((sub) => `${f.path}.${sub.path}`)
       : [f.path],
   );
 
@@ -722,18 +677,22 @@ const OptionsTagInput = ({
           key={option}
         >
           {option}
-          <button
-            aria-label={t("common.remove")}
-            className="h-full shrink-0 cursor-pointer px-1.5 opacity-80 hover:opacity-100"
-            onClick={(e) => {
-              e.stopPropagation();
-              removeOption(i);
-            }}
-            title={t("common.remove")}
-            type="button"
-          >
-            <XIcon className="size-3.5" />
-          </button>
+          <Tooltip
+            content={t("common.remove")}
+            render={
+              <button
+                aria-label={t("common.remove")}
+                className="h-full shrink-0 cursor-pointer px-1.5 opacity-80 hover:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeOption(i);
+                }}
+                type="button"
+              >
+                <XIcon className="size-3.5" />
+              </button>
+            }
+          />
         </span>
       ))}
       <input
@@ -770,7 +729,7 @@ const CompositePartsEditor = ({
   onUpdate: (patch: Partial<TemplateEditableField>) => void;
 }) => {
   const t = useTranslations();
-  const parts = field.parts ?? [];
+  const parts = optionalArray(field.parts);
 
   const updatePart = (index: number, patch: Partial<EditablePart>) => {
     onUpdate({
@@ -781,8 +740,7 @@ const CompositePartsEditor = ({
   };
 
   const formatPlaceholder = parts
-    .filter((part) => part.key !== "")
-    .map((part) => `{{${part.key}}}`)
+    .flatMap((part) => (part.key !== "" ? [`{{${part.key}}}`] : []))
     .join(" ");
 
   const formatInputRef = useRef<HTMLInputElement | null>(null);
@@ -898,10 +856,12 @@ const CompositePartsEditor = ({
           }
         />
         <div className="flex flex-wrap items-center gap-1">
-          {parts
-            .map((part) => part.key.trim())
-            .filter((key) => key !== "")
-            .map((key) => (
+          {parts.flatMap((part) => {
+            const key = part.key.trim();
+            if (key === "") {
+              return [];
+            }
+            return [
               <Button
                 key={key}
                 onClick={() => insertPartToken(key)}
@@ -910,8 +870,9 @@ const CompositePartsEditor = ({
                 variant="outline"
               >
                 {key}
-              </Button>
-            ))}
+              </Button>,
+            ];
+          })}
         </div>
         <p className="text-muted-foreground text-xs">
           {t("templates.fieldFormatHint")}
@@ -1020,6 +981,7 @@ const LOOKUP_REGISTRY_OPTIONS: readonly LookupRegistryOption[] = [
     label: "United Kingdom — Companies House",
     country: "GB",
   },
+  { slug: "denue", label: "Mexico — INEGI DENUE", country: "MX" },
   { slug: "brreg", label: "Norway — Brønnøysund (BRREG)", country: "NO" },
   { slug: "prh", label: "Finland — PRH", country: "FI" },
   { slug: "recherche-entreprises", label: "France — RNE", country: "FR" },
@@ -1112,6 +1074,9 @@ const REGISTRY_RETURN_FIELDS: Record<LookupRegistry, readonly string[]> = {
     "registered on",
     "jurisdiction",
   ],
+  denue: REGISTRY_BASE_RETURN_FIELDS.filter(
+    (fieldName) => fieldName !== "legal form",
+  ),
   brreg: [...REGISTRY_BASE_RETURN_FIELDS, "registered on"],
   prh: [...REGISTRY_BASE_RETURN_FIELDS, "registered on"],
   "recherche-entreprises": [...REGISTRY_BASE_RETURN_FIELDS, "registered on"],
@@ -1130,6 +1095,7 @@ const REGISTRY_DEFAULT_FORMAT: Record<LookupRegistry, string> = {
   ares: GENERIC_DEFAULT_FORMAT,
   orsr: GENERIC_DEFAULT_FORMAT,
   "companies-house": GENERIC_DEFAULT_FORMAT,
+  denue: GENERIC_DEFAULT_FORMAT,
   brreg: GENERIC_DEFAULT_FORMAT,
   prh: GENERIC_DEFAULT_FORMAT,
   "recherche-entreprises": GENERIC_DEFAULT_FORMAT,
@@ -1200,7 +1166,7 @@ const CompanyLookupConfig = ({
   const t = useTranslations();
   const locale = useLocale();
   const registry = field.lookup?.registry ?? preferredRegistry(locale);
-  const formats = field.lookup?.formats ?? [];
+  const formats = optionalArray(field.lookup?.formats);
   const options = orderedRegistryOptions(locale);
   const selectedOption =
     options.find((option) => option.slug === registry) ?? null;

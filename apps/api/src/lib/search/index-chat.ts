@@ -6,7 +6,7 @@ import type {
   ChatMessageRole,
   PersistedChatMessageContent,
 } from "@/api/handlers/chat/types";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import type { SafeId } from "@/api/lib/branded-types";
 import { LIMITS } from "@/api/lib/limits";
 import { logger } from "@/api/lib/observability/logger";
@@ -28,7 +28,11 @@ const extractMessageSearchText = (
     }
   }
 
-  for (const sourceDocumentData of message.metadata.sourceDocuments ?? []) {
+  const sourceDocuments = message.metadata.sourceDocuments;
+  if (!sourceDocuments) {
+    return parts.join(" ");
+  }
+  for (const sourceDocumentData of sourceDocuments) {
     for (const value of [
       sourceDocumentData.title,
       sourceDocumentData.mention,
@@ -285,7 +289,7 @@ export const backfillChatThreadSearchIndex = async (): Promise<number> => {
 
     for (const row of batch) {
       try {
-        // oxlint-disable-next-line no-await-in-loop -- sequential per-thread backfill writes bound DB load
+        // oxlint-disable-next-line no-await-in-loop -- sequential by design: sequential per-thread backfill writes bound DB load
         await upsertChatThreadSearchDocument(row.id);
       } catch (error) {
         captureError(error, {

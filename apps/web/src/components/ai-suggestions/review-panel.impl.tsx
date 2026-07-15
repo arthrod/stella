@@ -10,6 +10,7 @@ import type { CSSProperties, RefObject } from "react";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouteContext } from "@tanstack/react-router";
+import { panic } from "better-result";
 import {
   ArrowRightIcon,
   CheckIcon,
@@ -53,9 +54,10 @@ import type {
   ReviewSuggestion,
   ReviewSuggestionPreview,
 } from "@/components/ai-suggestions/review-store";
+import Tooltip from "@/components/tooltip";
 import { authClient } from "@/lib/auth";
 import { compareByLocale } from "@/lib/collation";
-import { toAuthClientError } from "@/lib/errors";
+import { toAuthClientError } from "@/lib/errors/auth";
 import { sessionOptions } from "@/routes/-queries";
 import {
   getWordEditAuthorName,
@@ -63,6 +65,7 @@ import {
 } from "@/routes/_protected.chat/-hooks/use-chat-user-context";
 
 const EMPTY_SUGGESTIONS: readonly ReviewSuggestion[] = [];
+const DOCUMENT_OPERATION_CONTRACT_VERSION = 1 as const;
 
 type GroupAxis = "severity" | "area";
 
@@ -195,9 +198,7 @@ export const ReviewPanelImpl = ({
     if (groupAxis === "severity") {
       const buckets = new Map<ReviewSeverityKey, ReviewSuggestion[]>();
       for (const item of filtered) {
-        const list = buckets.get(item.severity) ?? [];
-        list.push(item);
-        buckets.set(item.severity, list);
+        appendToBucket({ buckets, item, key: item.severity });
       }
       return SEVERITY_ORDER.flatMap((sev) => {
         const list = buckets.get(sev);
@@ -216,9 +217,7 @@ export const ReviewPanelImpl = ({
 
     const buckets = new Map<string, ReviewSuggestion[]>();
     for (const item of filtered) {
-      const list = buckets.get(item.area) ?? [];
-      list.push(item);
-      buckets.set(item.area, list);
+      appendToBucket({ buckets, item, key: item.area });
     }
     const compareArea = compareByLocale(locale);
     const sortedKeys = [...buckets.keys()].toSorted((a, b) => {
@@ -231,7 +230,10 @@ export const ReviewPanelImpl = ({
       return compareArea(a, b);
     });
     return sortedKeys.map((area) => {
-      const items = buckets.get(area) ?? [];
+      const items = buckets.get(area);
+      if (!items) {
+        panic(`Missing review bucket for ${area}`);
+      }
       const label =
         area === REVIEW_UNSPECIFIED_AREA
           ? t("docxReview.areaUnspecified")
@@ -269,6 +271,7 @@ export const ReviewPanelImpl = ({
   ): {
     status: "accepted" | "skipped";
     revisionIds: readonly number[] | null;
+    undoHandle: ReviewSuggestion["undoHandle"];
     skipReason?: string;
   } => {
     const editor = docxEditorRef.current;
@@ -277,6 +280,7 @@ export const ReviewPanelImpl = ({
       return {
         status: "skipped",
         revisionIds: null,
+        undoHandle: null,
         skipReason: "documentNotEditable",
       };
     }
@@ -293,14 +297,18 @@ export const ReviewPanelImpl = ({
       return {
         status: "skipped",
         revisionIds: null,
+        undoHandle: null,
         skipReason: "documentNotEditable",
       };
     }
 
-    const result = editor.applyAIEditOperations({
-      mode: applyMode,
-      operations: [op],
+    const result = editor.applyDocumentOperations({
       snapshot,
+      batch: {
+        version: DOCUMENT_OPERATION_CONTRACT_VERSION,
+        mode: applyMode,
+        operations: [op],
+      },
       // Author the tracked-change marks as the user (their preferred
       // name from account settings) — they're reviewing and
       // accepting the AI's suggestion AS THEMSELVES, not as "AI".
@@ -313,12 +321,14 @@ export const ReviewPanelImpl = ({
       return {
         status: "accepted",
         revisionIds: applied.revisionIds ?? null,
+        undoHandle: result.undoHandle,
       };
     }
     const skipped = result.skipped.at(0);
     return {
       status: "skipped",
       revisionIds: null,
+      undoHandle: null,
       skipReason: skipped?.reason ?? "unsupportedBlock",
     };
   };
@@ -348,6 +358,7 @@ export const ReviewPanelImpl = ({
     updateSuggestion(entityId, item.id, {
       status: outcome.status,
       revisionIds: outcome.revisionIds,
+      undoHandle: outcome.undoHandle,
       applyMode: outcome.status === "accepted" ? applyMode : null,
       ...(outcome.skipReason !== undefined && {
         skipReason: outcome.skipReason,
@@ -371,25 +382,19 @@ export const ReviewPanelImpl = ({
     if (item.status === "pending") {
       return;
     }
-    // Tracked-change accepts produced revision ids we can ask
-    // Folio to roll back; rolling back restores the document to
-    // the pre-accept state. Direct accepts skipped the tracked-
-    // changes pipeline so we have no reversible handle — the doc
-    // change has been merged into history and we'd need a fresh
-    // edit op to undo it. Surface that asymmetry honestly: revert
-    // only flips the suggestion back to pending, the doc isn't
-    // touched (the user has already-committed text they can edit
-    // by hand if needed).
-    if (
-      item.status === "accepted" &&
-      item.revisionIds !== null &&
-      item.applyMode === "tracked-changes"
-    ) {
-      docxEditorRef.current?.rejectAIEditOperation(item.revisionIds);
+    if (item.status === "accepted" && item.undoHandle !== null) {
+      const undoResult = docxEditorRef.current?.undoDocumentOperations(
+        item.undoHandle,
+      );
+      if (undoResult?.status !== "undone") {
+        stellaToast.add({ title: t("errors.actionFailed"), type: "error" });
+        return;
+      }
     }
     updateSuggestion(entityId, item.id, {
       status: "pending",
       revisionIds: null,
+      undoHandle: null,
       applyMode: null,
       skipReason: undefined,
     });
@@ -433,6 +438,7 @@ export const ReviewPanelImpl = ({
       updateSuggestion(entityId, item.id, {
         status: outcome.status,
         revisionIds: outcome.revisionIds,
+        undoHandle: outcome.undoHandle,
         applyMode: outcome.status === "accepted" ? applyMode : null,
         ...(outcome.skipReason !== undefined && {
           skipReason: outcome.skipReason,
@@ -469,15 +475,19 @@ export const ReviewPanelImpl = ({
                 })}
               </p>
             </div>
-            <button
-              aria-label={t("docxReview.dismiss")}
-              title={t("docxReview.dismiss")}
-              className="text-muted-foreground hover:text-foreground rounded-md p-1"
-              onClick={() => dismissPanel(entityId)}
-              type="button"
+            <Tooltip
+              content={t("docxReview.dismiss")}
+              render={
+                <button
+                  aria-label={t("docxReview.dismiss")}
+                  className="text-muted-foreground hover:text-foreground rounded-md p-1"
+                  onClick={() => dismissPanel(entityId)}
+                  type="button"
+                />
+              }
             >
               <XIcon className="size-4" />
-            </button>
+            </Tooltip>
           </div>
         )}
 
@@ -651,6 +661,25 @@ export const ReviewPanelImpl = ({
       )}
     </div>
   );
+};
+
+type AppendToBucketOptions<TKey> = {
+  buckets: Map<TKey, ReviewSuggestion[]>;
+  item: ReviewSuggestion;
+  key: TKey;
+};
+
+const appendToBucket = <TKey,>({
+  buckets,
+  item,
+  key,
+}: AppendToBucketOptions<TKey>) => {
+  const existing = buckets.get(key);
+  if (existing) {
+    existing.push(item);
+    return;
+  }
+  buckets.set(key, [item]);
 };
 
 // -- Helpers --
@@ -922,6 +951,20 @@ const cssFontFamily = (fontFamily: string | undefined): string | undefined => {
   return `${first}, sans-serif`;
 };
 
+// Word-diff segments carry no id of their own (recomputed fresh from
+// `before`/`after` on every render), so keys derive from type + text plus an
+// occurrence counter so the same word appearing twice stays unique without
+// leaning on the array index.
+const withStableKeys = <T,>(items: readonly T[], base: (item: T) => string) => {
+  const counts = new Map<string, number>();
+  return items.map((item) => {
+    const b = base(item);
+    const n = counts.get(b) ?? 0;
+    counts.set(b, n + 1);
+    return { item, key: `${b}-${n}` };
+  });
+};
+
 const RedlinePreview = ({
   preview,
   srSummary,
@@ -979,28 +1022,25 @@ const RedlinePreview = ({
         </>
       );
     }
-    return segments.map((seg, i) => {
-      if (seg.type === "equal") {
-        // eslint-disable-next-line react/no-array-index-key -- segments is a read-only word-diff recomputed fresh from `before`/`after` on every render (whole-list replace); spans are non-interactive with no per-item state.
-        return <span key={i}>{seg.text}</span>;
-      }
-      return (
-        <span
-          className={seg.type === "del" ? delCls : insCls}
-          // eslint-disable-next-line react/no-array-index-key -- segments is a read-only word-diff recomputed fresh from `before`/`after` on every render (whole-list replace); spans are non-interactive with no per-item state.
-          key={i}
-        >
-          {seg.text}
-        </span>
-      );
-    });
+    return withStableKeys(segments, (seg) => `${seg.type}-${seg.text}`).map(
+      ({ item: seg, key }) => {
+        if (seg.type === "equal") {
+          return <span key={key}>{seg.text}</span>;
+        }
+        return (
+          <span className={seg.type === "del" ? delCls : insCls} key={key}>
+            {seg.text}
+          </span>
+        );
+      },
+    );
   };
 
   switch (preview.type) {
     case "replaceInBlock":
       if (isFormattedReplaceInBlockPreview(preview)) {
         return (
-          <p aria-label={srSummary} className={baseCls}>
+          <p aria-label={srSummary} className={baseCls} role="group">
             {renderFormattedRuns(
               slicePreviewRuns(
                 preview.sourceRuns,
@@ -1031,7 +1071,7 @@ const RedlinePreview = ({
         );
       }
       return (
-        <p aria-label={srSummary} className={baseCls}>
+        <p aria-label={srSummary} className={baseCls} role="group">
           {preview.contextBefore && (
             <span className={contextCls}>{preview.contextBefore}</span>
           )}
@@ -1044,7 +1084,7 @@ const RedlinePreview = ({
     case "replaceBlock":
       if (preview.sourceRuns !== undefined) {
         return (
-          <p aria-label={srSummary} className={baseCls}>
+          <p aria-label={srSummary} className={baseCls} role="group">
             {renderFormattedRuns(preview.sourceRuns, delCls)}
             {arrow}
             <span className={insCls}>{preview.after}</span>
@@ -1052,27 +1092,27 @@ const RedlinePreview = ({
         );
       }
       return (
-        <p aria-label={srSummary} className={baseCls}>
+        <p aria-label={srSummary} className={baseCls} role="group">
           {renderDiff(preview.before, preview.after)}
         </p>
       );
     case "deleteBlock":
       if (preview.sourceRuns !== undefined) {
         return (
-          <p aria-label={srSummary} className={baseCls}>
+          <p aria-label={srSummary} className={baseCls} role="group">
             {renderFormattedRuns(preview.sourceRuns, delCls)}
           </p>
         );
       }
       return (
-        <p aria-label={srSummary} className={baseCls}>
+        <p aria-label={srSummary} className={baseCls} role="group">
           <span className={delCls}>{preview.before}</span>
         </p>
       );
     case "insertBeforeBlock":
     case "insertAfterBlock":
       return (
-        <p aria-label={srSummary} className={baseCls}>
+        <p aria-label={srSummary} className={baseCls} role="group">
           {preview.anchorRuns !== undefined &&
             preview.anchorEnd !== undefined && (
               <>
@@ -1089,7 +1129,7 @@ const RedlinePreview = ({
     case "commentOnBlock":
       if (preview.anchorRuns !== undefined && preview.anchorEnd !== undefined) {
         return (
-          <p aria-label={srSummary} className={cn(baseCls, muted)}>
+          <p aria-label={srSummary} className={cn(baseCls, muted)} role="group">
             {renderFormattedRuns(
               slicePreviewRuns(preview.anchorRuns, 0, preview.anchorEnd),
             )}
@@ -1097,7 +1137,7 @@ const RedlinePreview = ({
         );
       }
       return (
-        <p aria-label={srSummary} className={cn(baseCls, muted)}>
+        <p aria-label={srSummary} className={cn(baseCls, muted)} role="group">
           {preview.anchor}
         </p>
       );
@@ -1108,11 +1148,10 @@ const RedlinePreview = ({
       // names captures the gist without recreating the full table
       // layout inside the panel card.
       const partyList = preview.parties
-        .map((party) => party.name)
-        .filter((name) => name.length > 0)
+        .flatMap((party) => (party.name.length > 0 ? [party.name] : []))
         .join("  |  ");
       return (
-        <p aria-label={srSummary} className={baseCls}>
+        <p aria-label={srSummary} className={baseCls} role="group">
           {preview.anchorRuns !== undefined &&
             preview.anchorEnd !== undefined && (
               <>

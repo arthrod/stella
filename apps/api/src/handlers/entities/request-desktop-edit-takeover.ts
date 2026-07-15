@@ -62,6 +62,7 @@ export default createSafeHandler(
         }
 
         const now = new Date();
+
         await tx
           .update(desktopEditSessions)
           .set({

@@ -32,7 +32,7 @@ const SHORT_NEUTRAL_EQUALITY_RE = /^[\t \u00A0()[\]{}.,;:/-]{1,3}$/u;
 const WORD_TOKEN_RE = /[\p{L}\p{N}_]+|[^\p{L}\p{N}_]+/gu;
 
 export const tokenize = (text: string): string[] =>
-  text.match(WORD_TOKEN_RE) ?? [];
+  Array.from(text.matchAll(WORD_TOKEN_RE), (match) => match[0]);
 
 const WORD_ONLY_RE = /[\p{L}\p{N}_]+/gu;
 
@@ -171,11 +171,12 @@ export const diffParagraphs = (
   const edits: DocxEdit[] = [];
   const skippedRewrites: number[] = [];
   const stats: DiffStats = { wordsAdded: 0, wordsRemoved: 0 };
+  const paragraphsByIndex = new Map(
+    extracted.paragraphs.map((p) => [p.index, p]),
+  );
 
   for (const rewrite of rewrites) {
-    const para = extracted.paragraphs.find(
-      (p) => p.index === rewrite.paragraphIndex,
-    );
+    const para = paragraphsByIndex.get(rewrite.paragraphIndex);
     if (!para) {
       skippedRewrites.push(rewrite.paragraphIndex);
       continue;

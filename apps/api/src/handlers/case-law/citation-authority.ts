@@ -2,8 +2,10 @@ import type { SQL } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 
 import { courtWeightSql } from "@/api/handlers/case-law/citation-score";
+import type { CourtWeightEntry } from "@/api/handlers/case-law/court-weights";
 import { redistributableCaseLawSourceSqlFor } from "@/api/handlers/case-law/redistribution";
 import { setCorpusBackfillStatementTimeout } from "@/api/lib/legal-search/backfill-statement-timeout";
+import { isRecord } from "@/api/lib/type-guards";
 
 /**
  * Materialize the citation-authority ranking signal onto
@@ -30,6 +32,13 @@ import { setCorpusBackfillStatementTimeout } from "@/api/lib/legal-search/backfi
  * (jurisdiction) scale this is cheap; at hundreds-of-millions scale it
  * should become incremental, keyed off `citation_authority_computed_at`
  * (the column exists for that future bound).
+ *
+ * Court weights are passed in via `courtWeightEntries` rather than
+ * loaded internally: this keeps the function a pure `tx`-in/count-out
+ * unit that is safe to exercise against a pglite fixture in tests.
+ * Production callers load the current DB-seeded weights themselves
+ * (`loadCourtWeightEntriesForSql()`) before calling in; omitting the
+ * option falls back to `courtWeightSql`'s legacy hardcoded tiers.
  */
 
 type CitationAuthorityTx = {
@@ -40,14 +49,19 @@ const SECONDS_PER_YEAR = 365.25 * 86_400;
 
 export const recomputeCitationAuthorityForAll = async (
   tx: CitationAuthorityTx,
-  options: { now?: Date } = {},
+  options: {
+    now?: Date;
+    courtWeightEntries?: CourtWeightEntry[] | undefined;
+  } = {},
 ): Promise<number> => {
   const nowExpr = options.now
     ? sql`${options.now.toISOString()}::timestamptz`
     : sql`now()`;
   // Court-authority weighting as a CASE expression over the citing
   // court name; mirrors the search SQL's `courtWeightSql`.
-  const courtWeightExpr = sql.raw(courtWeightSql("citing_d.court"));
+  const courtWeightExpr = sql.raw(
+    courtWeightSql("citing_d.court", options.courtWeightEntries),
+  );
 
   // The aggregate over (citation ⨝ citing decision) is LEFT JOINed onto
   // every decision so decisions with zero citations are reset to 0 too.
@@ -60,7 +74,12 @@ export const recomputeCitationAuthorityForAll = async (
       citation_authority = ln(1 + (
         agg.raw_sum / GREATEST(
           COALESCE(
-            extract(epoch FROM (${nowExpr} - d.decision_date)) / ${SECONDS_PER_YEAR},
+            extract(
+              epoch FROM (
+                ${nowExpr}
+                - (d.decision_date::timestamp AT TIME ZONE 'UTC')
+              )
+            ) / ${SECONDS_PER_YEAR},
             1.0
           ),
           1.0
@@ -75,7 +94,12 @@ export const recomputeCitationAuthorityForAll = async (
           CASE WHEN c.id IS NULL THEN 0 ELSE
             (${courtWeightExpr})
             * (1.0 / (1 + COALESCE(
-                extract(epoch FROM (${nowExpr} - citing_d.decision_date))
+                extract(
+                  epoch FROM (
+                    ${nowExpr}
+                    - (citing_d.decision_date::timestamp AT TIME ZONE 'UTC')
+                  )
+                )
                   / ${SECONDS_PER_YEAR},
                 1.0
               )))
@@ -99,9 +123,12 @@ export const recomputeCitationAuthorityForAll = async (
   const result: unknown = await tx.execute(
     sql`SELECT count(*)::int AS n FROM case_law_decisions WHERE citation_count > 0`,
   );
-  // SAFETY: `count(*)::int AS n` yields one row whose `n` is an integer;
-  // the driver may return the rows bare or wrapped, so guard for an array.
-  // eslint-disable-next-line typescript/no-unsafe-type-assertion -- known count() result shape
-  const rows = Array.isArray(result) ? (result as { n: number }[]) : [];
-  return Number(rows.at(0)?.n) || 0;
+  if (!Array.isArray(result)) {
+    return 0;
+  }
+  const firstRow: unknown = result.at(0);
+  if (!isRecord(firstRow) || typeof firstRow["n"] !== "number") {
+    return 0;
+  }
+  return firstRow["n"];
 };

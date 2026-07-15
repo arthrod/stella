@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useState } from "react";
 
 import { useHotkey } from "@tanstack/react-hotkeys";
 import type { QueryClient } from "@tanstack/react-query";
@@ -12,10 +12,11 @@ import {
 
 import { stellaToast } from "@stll/ui/components/toast";
 
+import { useMountEffect } from "@/hooks/use-effect";
 import { getTranslator } from "@/i18n/i18n-store";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
-import { APIError, toAPIError } from "@/lib/errors";
+import { APIError, toAPIError } from "@/lib/errors/api";
 import { HOTKEYS } from "@/lib/hotkeys";
 import { pageTitle, pageTitleLiteral } from "@/lib/page-title";
 import { ensureRouteQueryData, prefetchRouteQuery } from "@/lib/react-query";
@@ -157,8 +158,11 @@ function RouteComponent() {
   const workspaceId = Route.useParams({
     select: (p) => p.workspaceId,
   });
-  const previewClearTimersRef = useRef(
-    new Map<string, ReturnType<typeof setTimeout>>(),
+  // Lazy state singleton (mutated in place, identity stable): avoids both
+  // the render-scope ref write (React Compiler bailout) and per-render
+  // allocation.
+  const [previewClearTimers] = useState(
+    () => new Map<string, ReturnType<typeof setTimeout>>(),
   );
 
   const handleWorkspaceSSEEvent = ({
@@ -189,8 +193,9 @@ function RouteComponent() {
       return;
     }
 
+    const timers = previewClearTimers;
     const key = extractionPreviewKey(data.entityId, data.propertyId);
-    const previousTimer = previewClearTimersRef.current.get(key);
+    const previousTimer = timers.get(key);
     if (previousTimer !== undefined) {
       clearTimeout(previousTimer);
     }
@@ -205,9 +210,9 @@ function RouteComponent() {
       useWorkspaceStore
         .getState()
         .clearExtractionPreview(data.entityId, data.propertyId);
-      previewClearTimersRef.current.delete(key);
+      timers.delete(key);
     }, EXTRACTION_PREVIEW_CLIENT_TTL_MS);
-    previewClearTimersRef.current.set(key, nextTimer);
+    timers.set(key, nextTimer);
   };
 
   // Subscribe to workspace SSE events for real-time query invalidation.
@@ -219,30 +224,6 @@ function RouteComponent() {
   // automatically — entity mentions don't depend on the current
   // view, but the underlying query needs one to scope the fetch.
   useWorkspaceChatMentionRegistration(workspaceId);
-
-  // Reset workspace-bound visualisation state on matter switch
-  // (PDF viewer page state, justification overlays). Inspector
-  // tabs are intentionally NOT cleared — leaving them open lets
-  // the user pop back into a matter and find their tabs where
-  // they left them. PDF tabs from another matter will refetch
-  // with their own workspaceId; chat tabs are workspace-tagged
-  // so they only render under the matter they belong to.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reset-on-id: clears timers + workspace store on matter switch (cleanup re-runs per workspaceId, not just unmount). This is a route component, so it can't take a key from a parent, and useMountEffect would only clean up on unmount.
-  useEffect(
-    () => () => {
-      for (const timer of previewClearTimersRef.current.values()) {
-        clearTimeout(timer);
-      }
-      previewClearTimersRef.current.clear();
-
-      const workspaceStore = useWorkspaceStore.getState();
-      workspaceStore.clearJustifications();
-      workspaceStore.clearExtractionPreviews();
-      workspaceStore.setActiveJustification(null);
-      workspaceStore.resetPdfViewerState();
-    },
-    [workspaceId],
-  );
 
   const timesheetsMatch = useMatch({
     from: "/_protected/workspaces/$workspaceId/timesheets",
@@ -286,9 +267,33 @@ function RouteComponent() {
 
   return (
     <WorkflowStartConfirmationPromptProvider>
+      <WorkspaceLifecycleCleanup
+        key={workspaceId}
+        previewClearTimers={previewClearTimers}
+      />
       <WorkflowServiceTierPromptProvider>
         {content}
       </WorkflowServiceTierPromptProvider>
     </WorkflowStartConfirmationPromptProvider>
   );
 }
+
+const WorkspaceLifecycleCleanup = ({
+  previewClearTimers,
+}: {
+  previewClearTimers: Map<string, ReturnType<typeof setTimeout>>;
+}) => {
+  useMountEffect(() => () => {
+    for (const timer of previewClearTimers.values()) {
+      clearTimeout(timer);
+    }
+    previewClearTimers.clear();
+
+    const workspaceStore = useWorkspaceStore.getState();
+    workspaceStore.clearJustifications();
+    workspaceStore.clearExtractionPreviews();
+    workspaceStore.setActiveJustification(null);
+    workspaceStore.resetPdfViewerState();
+  });
+  return null;
+};

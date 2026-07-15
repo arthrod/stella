@@ -66,7 +66,7 @@ import { env } from "@/env";
 import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
 import { anonymizeChatTextInWorker } from "@/lib/anonymize/anonymize-chat-worker-client";
 import { folioUIComponents } from "@/lib/folio-ui-components";
-import { composeRefs } from "@/lib/slot";
+import { composeRefs } from "@/lib/utils";
 import { DocxLoadingShell } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-loading-shell";
 import { useDocxBlockScroll } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/use-docx-block-scroll";
 import { useFolioCollaborationSession } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/use-folio-collaboration-session";
@@ -230,15 +230,16 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
   const anonymizationTermsQuery = useQuery(
     anonymizationTermsOptions(workspaceId),
   );
-  const workspaceAnonymizationTerms = useMemo<AnonymizationTerm[]>(
-    () =>
-      anonymizationTermsQuery.data?.entries.map((entry) => ({
-        canonical: entry.canonical,
-        label: entry.label,
-        variants: entry.variants,
-      })) ?? [],
-    [anonymizationTermsQuery.data],
-  );
+  const workspaceAnonymizationTerms = useMemo<AnonymizationTerm[]>(() => {
+    if (!anonymizationTermsQuery.data) {
+      return [];
+    }
+    return anonymizationTermsQuery.data.entries.map((entry) => ({
+      canonical: entry.canonical,
+      label: entry.label,
+      variants: entry.variants,
+    }));
+  }, [anonymizationTermsQuery.data]);
   // Detected-entity highlights — runs the wasm anonymization
   // pipeline against the live doc text and exposes each detected
   // entity as a Folio decoration term. Combined with workspace
@@ -401,7 +402,10 @@ const DocxBrowserEditorContent = (props: DocxBrowserEditorProps) => {
     enabled: isAnonymizationActive,
   });
   const excludedCanonicalsSet = useMemo(
-    () => buildExcludedCanonicalsSet(allowlistQuery.data?.entries ?? []),
+    () =>
+      buildExcludedCanonicalsSet(
+        allowlistQuery.data ? allowlistQuery.data.entries : [],
+      ),
     [allowlistQuery.data],
   );
   // Hold the latest list in a ref so the chat-anon polling effect
@@ -1707,7 +1711,6 @@ const AutosaveIndicator = ({ status }: { status: AutosaveStatus }) => {
       aria-label={isSynced ? t("folio.synced") : t("folio.syncing")}
       className="text-foreground-ghost inline-flex h-8 w-8 items-center justify-center"
       role="status"
-      title={isSynced ? t("folio.synced") : t("folio.syncing")}
     >
       {(() => {
         if (isSynced) {
@@ -1735,9 +1738,9 @@ const DocxBrowserEditorPendingFallback = ({
 }: DocxBrowserEditorProps) => {
   const t = useTranslations();
   const toolbarExtra =
-    showActionBar || actionBarControls !== undefined ? (
-      <>{actionBarControls}</>
-    ) : undefined;
+    showActionBar || actionBarControls !== undefined
+      ? actionBarControls
+      : undefined;
 
   return (
     <DocxEditorLoadingFallback

@@ -3,20 +3,21 @@ import { eq } from "drizzle-orm";
 import { t } from "elysia";
 import type { Static } from "elysia";
 
-import type { SafeDb } from "@/api/db";
+import type { SafeDb } from "@/api/db/safe-db";
 import {
   entities,
   entityVersions,
   taskAssignees,
   workspaces,
 } from "@/api/db/schema";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tSafeId } from "@/api/lib/custom-schema";
+import { lockWorkspacesForEntityCap } from "@/api/lib/entity-cap-lock";
 import {
   AGENDA_ITEM_KIND,
   AGENDA_ITEM_KINDS,
@@ -131,6 +132,10 @@ export const createTaskEntityHandler = async function* ({
 
   const txResult = yield* Result.await(
     safeDb(async (tx) => {
+      // See `lockWorkspacesForEntityCap` for the canonical lock
+      // order every entity-creating path follows (issue #1139).
+      await lockWorkspacesForEntityCap(tx, [workspaceId]);
+
       const totalEntities = await tx.$count(
         entities,
         eq(entities.workspaceId, workspaceId),

@@ -1,12 +1,5 @@
 import type { PropsWithChildren } from "react";
-import {
-  createContext,
-  use,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { createContext, use, useCallback, useMemo, useState } from "react";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
@@ -45,10 +38,12 @@ import type {
   RoleValue,
 } from "@/components/ai-config-role-models.logic";
 import { useChromeQuery } from "@/hooks/use-chrome-query";
+import { useMountEffect } from "@/hooks/use-effect";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import {
   aiAvailabilityOptions,
   aiConfigOptions,
@@ -64,6 +59,7 @@ type AIAvailabilityContextValue = {
 const AIAvailabilityContext = createContext<AIAvailabilityContextValue | null>(
   null,
 );
+const AIUnavailableContext = createContext(false);
 
 export function AIAvailabilityProvider({ children }: PropsWithChildren) {
   const [open, setOpen] = useState(false);
@@ -97,6 +93,7 @@ export function AIAvailabilityProvider({ children }: PropsWithChildren) {
       setOpen(true);
     }
   }, [data, isFetching]);
+  const aiUnavailable = Boolean(data && !data.available && !isFetching);
 
   // Force-close the dialog whenever the availability query flips to available
   // (e.g. keys configured elsewhere and refetched). Adjust-state-during-render on
@@ -121,8 +118,10 @@ export function AIAvailabilityProvider({ children }: PropsWithChildren) {
 
   return (
     <AIAvailabilityContext value={value}>
-      {children}
-      <AIKeyRequiredDialog onOpenChange={setOpen} open={open} />
+      <AIUnavailableContext value={aiUnavailable}>
+        {children}
+        <AIKeyRequiredDialog onOpenChange={setOpen} open={open} />
+      </AIUnavailableContext>
     </AIAvailabilityContext>
   );
 }
@@ -135,6 +134,22 @@ export const useAIKeyGate = () => {
   }
 
   return context;
+};
+
+const OpenAIKeyDialogOnMount = ({ open }: { open: () => void }) => {
+  useMountEffect(() => {
+    open();
+  });
+  return null;
+};
+
+export const AIUnavailableDialogTrigger = () => {
+  const aiUnavailable = use(AIUnavailableContext);
+  const { openAIKeyDialog } = useAIKeyGate();
+  if (!aiUnavailable) {
+    return null;
+  }
+  return <OpenAIKeyDialogOnMount open={openAIKeyDialog} />;
 };
 
 /**
@@ -157,29 +172,28 @@ export function useAIAvailable(): boolean {
  * the org has not supplied their own. Send-time surfaces should
  * use `useAIKeyGate()` so every AI action opens the same dialog.
  */
-export function RequireAIKey({ children }: PropsWithChildren) {
+// Explicit ReactNode: returning bare `children` infers a type containing
+// React 19's Promise<AwaitedReactNode> member, which promise-function-async
+// would otherwise flag on this intentionally sync component.
+export function RequireAIKey({ children }: PropsWithChildren): React.ReactNode {
   const t = useTranslations();
   const activeOrganizationId = useAuthenticatedUser().activeOrganizationId;
   const { data, isFetching, isPending, isError } = useChromeQuery(
     aiAvailabilityOptions({ organizationId: activeOrganizationId }),
   );
-  const { openAIKeyDialog, openIfAIUnavailable } = useAIKeyGate();
-
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- opens the key dialog once the availability query resolves to unavailable; driven by query state, not a user event, so there is no handler call-site to fold it into
-  useEffect(() => {
-    openIfAIUnavailable();
-  }, [openIfAIUnavailable]);
+  const { openAIKeyDialog } = useAIKeyGate();
 
   if (isPending || (isFetching && data?.available === false)) {
     return null;
   }
 
   if (!isError && data.available) {
-    return <>{children}</>;
+    return children;
   }
 
   return (
     <div className="flex h-full w-full flex-1 items-center justify-center p-6">
+      <AIUnavailableDialogTrigger />
       <div className="border-border bg-card text-card-foreground flex max-w-md flex-col gap-4 rounded-lg border p-6 shadow-sm">
         <div className="flex flex-col gap-1">
           <h2 className="text-foreground text-lg font-semibold">
@@ -208,6 +222,12 @@ type AIKeyRequiredDialogProps = {
   open: boolean;
 };
 
+// A fresh, empty provider draft. No dependency on props/state, so it's built
+// once at module scope instead of on every render/dialog-open.
+const DEFAULT_PROVIDER_DRAFTS: ProviderCredentialDraft[] = [
+  createProviderCredentialDraft(),
+];
+
 export function AIKeyRequiredDialog({
   onOpenChange,
   open,
@@ -224,9 +244,9 @@ export function AIKeyRequiredDialog({
     ...aiConfigOptions({ organizationId: activeOrganizationId }),
     enabled: open,
   });
-  const [providers, setProviders] = useState<ProviderCredentialDraft[]>(() => [
-    createProviderCredentialDraft(),
-  ]);
+  const [providers, setProviders] = useState<ProviderCredentialDraft[]>(
+    DEFAULT_PROVIDER_DRAFTS,
+  );
   const [roleModels, setRoleModels] = useState<RoleModelSelections>(
     createDefaultRoleModels,
   );
@@ -260,7 +280,7 @@ export function AIKeyRequiredDialog({
           }),
         );
       } else {
-        const nextProviders = [createProviderCredentialDraft()];
+        const nextProviders = DEFAULT_PROVIDER_DRAFTS;
         setProviders(nextProviders);
         setRoleModels(
           createDefaultRoleModels(getProviderValues(nextProviders)),
@@ -343,7 +363,7 @@ export function AIKeyRequiredDialog({
     onError: (error) => {
       analytics.captureError(error);
       stellaToast.add({
-        title: error instanceof Error ? error.message : tErrors("actionFailed"),
+        title: userErrorFromThrown(error, tErrors("actionFailed")),
         type: "error",
       });
     },

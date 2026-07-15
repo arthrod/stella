@@ -1,7 +1,7 @@
 import { panic } from "better-result";
 import { and, asc, count, eq, gt, inArray, or, sql } from "drizzle-orm";
 
-import type { ScopedDb } from "@/api/db";
+import type { ScopedDb } from "@/api/db/safe-db";
 import { entities } from "@/api/db/schema";
 import type { SafeId } from "@/api/lib/branded-types";
 import { LIMITS } from "@/api/lib/limits";
@@ -40,7 +40,7 @@ export const fetchExplicitWorkflowTargetRows = async ({
 }): Promise<WorkflowTargetEntityRow[]> => {
   const entityRows: WorkflowTargetEntityRow[] = [];
   for (const chunk of chunkEntityIds(inputEntityIds)) {
-    // oxlint-disable-next-line no-await-in-loop -- sequential batched DB scan bounds the IN-list size per query
+    // oxlint-disable-next-line no-await-in-loop -- sequential by design: bounds connection-pool/DB load when the caller passes a large explicit entity selection
     const rows = await scopedDb((tx) =>
       tx
         .select({ id: entities.id, kind: entities.kind })

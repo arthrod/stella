@@ -1,4 +1,4 @@
-import { Result } from "better-result";
+import { panic, Result } from "better-result";
 import { and, count, eq, ilike, inArray, sql } from "drizzle-orm";
 import { t } from "elysia";
 
@@ -19,7 +19,7 @@ import {
 import type { FieldContent } from "@/api/db/schema-validators";
 import { THUMBNAIL_MIME_TYPE } from "@/api/handlers/files/image-derivative";
 import { createFileKey } from "@/api/handlers/files/utils";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
@@ -186,7 +186,9 @@ const collectUniqueFileCopies = (
   const fileCopiesBySourceId = new Map<string, FileCopy>();
 
   for (const entity of entitiesToCopy) {
-    for (const field of entity.currentVersion?.fields ?? []) {
+    const currentVersion =
+      entity.currentVersion ?? panic("Entity is missing its current version");
+    for (const field of currentVersion.fields) {
       for (const copy of collectFileCopies(field.content)) {
         if (fileCopiesBySourceId.has(copy.sourceFileId)) {
           continue;
@@ -252,7 +254,10 @@ const orderEntitiesForDuplicate = <
     }
     visited.add(entity.id);
     ordered.push(entity);
-    queue.push(...(childrenByParentId.get(entity.id) ?? []));
+    const children = childrenByParentId.get(entity.id);
+    if (children) {
+      queue.push(...children);
+    }
   }
 
   for (const entity of entitiesToOrder) {
@@ -316,7 +321,7 @@ const copyWorkspaceFiles = async ({
         return;
       }
 
-      // oxlint-disable-next-line no-await-in-loop -- worker drains the shared queue sequentially; bounded concurrency comes from running multiple copyNext workers
+      // oxlint-disable-next-line no-await-in-loop -- sequential by design: worker drains the shared queue sequentially; bounded concurrency comes from running multiple copyNext workers
       const key = await copyWorkspaceFile({
         copy,
         organizationId,
@@ -727,14 +732,14 @@ const duplicateWorkspace = createSafeHandler(
           const newVersionId = createSafeId<"entityVersion">();
           const entityStamp =
             source.kind === "document"
-              ? // oxlint-disable-next-line no-await-in-loop -- stamp allocation is a sequential per-workspace counter; must run in order within the transaction
+              ? // oxlint-disable-next-line no-await-in-loop -- sequential by design: stamp allocation is a sequential per-workspace counter; must run in order within the transaction
                 await allocateEntityStamp(tx, targetWorkspaceId)
               : null;
           const newParentId = source.parentId
             ? (entityIdMap.get(source.parentId) ?? null)
             : null;
 
-          // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential inserts; children reference parent IDs created in earlier iterations via entityIdMap
+          // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential by design: children reference parent IDs created in earlier iterations via entityIdMap; also the version insert and currentVersionId update just below depend on this row
           await tx.insert(entities).values({
             id: newEntityId,
             workspaceId: targetWorkspaceId,

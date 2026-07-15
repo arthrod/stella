@@ -136,6 +136,7 @@ export const EntityLink = ({
       ? rawId.slice(0, separator)
       : workspaceId;
   const id = separator !== -1 ? rawId.slice(separator + 1) : rawId;
+
   const label = typeof children === "string" ? children : "Reference";
 
   // Entity links without workspace context can't be resolved;

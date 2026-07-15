@@ -6,7 +6,7 @@
  * orphan; deleting a type in use is blocked by the API and surfaced here.
  */
 
-import { useEffectEvent, useState } from "react";
+import { useState } from "react";
 
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import {
@@ -26,9 +26,11 @@ import { stellaToast } from "@stll/ui/components/toast";
 import { cn } from "@stll/ui/lib/utils";
 
 import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import { toSafeId } from "@/lib/safe-id";
 import type { SafeId } from "@/lib/safe-id";
 import { documentTypesOptions } from "@/routes/_protected.knowledge/-queries";
@@ -57,7 +59,7 @@ export const DocumentTypesCard = () => {
   });
 
   const { data } = useQuery(documentTypesOptions(activeOrganizationId));
-  const items = data?.items ?? [];
+  const items = data ? data.items : [];
 
   const [newLabel, setNewLabel] = useState("");
 
@@ -79,7 +81,7 @@ export const DocumentTypesCard = () => {
       analytics.captureError(error);
       stellaToast.add({
         title: t("errors.actionFailed"),
-        description: error instanceof Error ? error.message : undefined,
+        description: userErrorFromThrown(error, t("errors.actionFailed")),
         type: "error",
       });
     },
@@ -184,7 +186,7 @@ const DocumentTypeRow = ({ type, onReorder }: DocumentTypeRowProps) => {
   const [gripRef, setGripRef] = useState<HTMLButtonElement | null>(null);
   const [isDropTarget, setIsDropTarget] = useState(false);
   const [draft, setDraft] = useState(type.label);
-  const handleReorder = useEffectEvent(onReorder);
+  const handleReorder = useLatestCallback(onReorder);
 
   // Resync the rename draft when the label changes upstream (a refetch after
   // this or another client renames the type); `type.label` is stable while the
@@ -236,7 +238,7 @@ const DocumentTypeRow = ({ type, onReorder }: DocumentTypeRowProps) => {
         },
       }),
     );
-  }, [rowRef, gripRef, type.id]);
+  }, [rowRef, gripRef, type.id, handleReorder]);
 
   const renameMutation = useMutation({
     mutationFn: async (label: string) => {
@@ -258,7 +260,7 @@ const DocumentTypeRow = ({ type, onReorder }: DocumentTypeRowProps) => {
       setDraft(type.label);
       stellaToast.add({
         title: t("errors.actionFailed"),
-        description: error instanceof Error ? error.message : undefined,
+        description: userErrorFromThrown(error, t("errors.actionFailed")),
         type: "error",
       });
     },
@@ -284,7 +286,7 @@ const DocumentTypeRow = ({ type, onReorder }: DocumentTypeRowProps) => {
       // Surfaces the API's "in use by N playbook(s)" guard message.
       stellaToast.add({
         title: t("settings.organization.documentTypes.deleteFailed"),
-        description: error instanceof Error ? error.message : undefined,
+        description: userErrorFromThrown(error, t("errors.actionFailed")),
         type: "error",
       });
     },

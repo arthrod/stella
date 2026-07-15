@@ -1,7 +1,6 @@
 import {
   createElement,
   useCallback,
-  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -42,11 +41,12 @@ import { openEntityInInspector } from "@/components/chat/entity-open";
 import type { NeedsMatterMatter } from "@/components/chat/needs-matter-card";
 import { StreamdownMentionLink } from "@/components/chat/streamdown-mention-link";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import type { ChatThreadRef } from "@/lib/chat-thread-ref";
-import { internalToolErrorMessage, toAPIError } from "@/lib/errors";
+import { internalToolErrorMessage, toAPIError } from "@/lib/errors/api";
 import { toSafeId } from "@/lib/safe-id";
 import { readStoredJson, writeStoredJson } from "@/lib/stored-json";
 import {
@@ -131,11 +131,15 @@ const describeQueuedMessage = (
     return { text: message.content, fileCount: 0 };
   }
 
+  const textParts: string[] = [];
+  for (const part of message.content) {
+    if (part.type === "text") {
+      textParts.push(part.content);
+    }
+  }
+
   return {
-    text: message.content
-      .filter((part) => part.type === "text")
-      .map((part) => part.content)
-      .join("\n\n"),
+    text: textParts.join("\n\n"),
     fileCount: message.content.filter((part) => part.type !== "text").length,
   };
 };
@@ -183,7 +187,7 @@ export const useChatSession = ({
     chat.getSnapshot,
   );
   const { error, sessionGenerating, status } = snapshot;
-  const notifyError = useEffectEvent((nextError: Error) => {
+  const notifyError = useLatestCallback((nextError: Error) => {
     onError?.(nextError);
   });
   // Latch for the error-transition effect below: `undefined` means "no
@@ -619,18 +623,19 @@ export const useChatSession = ({
   const { data: workspacesNavigation, isPending: isLoadingMatters } = useQuery(
     workspacesNavigationOptions(organizationId),
   );
-  const createDocumentMatters: readonly NeedsMatterMatter[] = useMemo(
-    () =>
-      workspacesNavigation?.workspaces.map((w) => ({
-        id: w.id,
-        name: w.name,
-        color: w.color,
-        client: w.client?.displayName
-          ? { displayName: w.client.displayName }
-          : null,
-      })) ?? [],
-    [workspacesNavigation],
-  );
+  const createDocumentMatters: readonly NeedsMatterMatter[] = useMemo(() => {
+    if (!workspacesNavigation) {
+      return [];
+    }
+    return workspacesNavigation.workspaces.map((w) => ({
+      id: w.id,
+      name: w.name,
+      color: w.color,
+      client: w.client?.displayName
+        ? { displayName: w.client.displayName }
+        : null,
+    }));
+  }, [workspacesNavigation]);
 
   const queryClient = useQueryClient();
   const handleCreateDocumentResolve = useCallback(
@@ -749,10 +754,11 @@ export const useChatSession = ({
     [messages],
   );
   const isGenerating =
-    status === "submitted" ||
-    status === "streaming" ||
-    sessionGenerating ||
-    hasRunningToolCall;
+    error === undefined &&
+    (status === "submitted" ||
+      status === "streaming" ||
+      sessionGenerating ||
+      hasRunningToolCall);
   useExternalSyncEffect(() => {
     isGeneratingRef.current = isGenerating;
   }, [isGenerating]);
@@ -764,8 +770,9 @@ export const useChatSession = ({
   // the same Error reference alive across renders until the turn is
   // retried or cleared, so a ref latch (not `useState`) distinguishes "the
   // same failed turn is still showing" from "a fresh failure just landed."
-  // The Effect Event reads the latest callback without making its changing
-  // identity a synchronization dependency.
+  // `notifyError` has a stable identity from `useLatestCallback` (it always
+  // reads the latest `onError`), so listing it below is a formality: it
+  // never changes and so never re-triggers this effect on its own.
   useExternalSyncEffect(() => {
     if (!error) {
       lastHandledErrorRef.current = undefined;
@@ -776,7 +783,7 @@ export const useChatSession = ({
     }
     lastHandledErrorRef.current = error;
     notifyError(error);
-  }, [error]);
+  }, [error, notifyError]);
 
   useExternalSyncEffect(() => {
     conversationIdRef.current = conversationId;

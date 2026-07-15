@@ -1,4 +1,4 @@
-import { useEffectEvent, useState } from "react";
+import { useState } from "react";
 
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import {
@@ -64,7 +64,9 @@ import { ConditionBuilder } from "@/components/conditions/condition-builder";
 import type { FieldOption } from "@/components/conditions/condition-builder-logic";
 import { Switch } from "@/components/switch";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import type { TranslationKey } from "@/i18n/types";
+import { optionalArray } from "@/lib/arrays";
 import {
   type DeterministicCheck,
   type FallbackEntry,
@@ -157,10 +159,10 @@ const EXPECTATION_LABEL_KEYS = {
 } as const satisfies Record<(typeof EXPECTATIONS)[number], TranslationKey>;
 
 const isAskContentType = (value: string): value is AskContentType =>
-  (ASK_CONTENT_TYPES as readonly string[]).includes(value);
+  ASK_CONTENT_TYPES.some((contentType) => contentType === value);
 
 const isSeverity = (value: string): value is PositionSeverity =>
-  (SEVERITIES as readonly string[]).includes(value);
+  SEVERITIES.some((severity) => severity === value);
 
 // ── Discriminated-union builders (explicit construction) ──
 
@@ -242,7 +244,7 @@ export const PositionEditor = ({
   const [gripRef, setGripRef] = useState<HTMLButtonElement | null>(null);
   const { sourceId } = position;
   const bodyId = `position-body-${sourceId}`;
-  const handleReorder = useEffectEvent(onReorder);
+  const handleReorder = useLatestCallback(onReorder);
 
   useExternalSyncEffect(() => {
     if (!cardRef || !gripRef) {
@@ -291,7 +293,7 @@ export const PositionEditor = ({
         },
       }),
     );
-  }, [cardRef, gripRef, sourceId]);
+  }, [cardRef, gripRef, sourceId, handleReorder]);
 
   const handleGripKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === "ArrowUp") {
@@ -1090,7 +1092,7 @@ const NegotiationSection = ({
   const t = useTranslations();
   const [open, setOpen] = useState(false);
   const { negotiation } = position;
-  const talkingPoints = negotiation?.talkingPoints ?? [];
+  const talkingPoints = optionalArray(negotiation?.talkingPoints);
 
   const setTalkingPoints = (points: string[]) =>
     onChange(updateNegotiation(position, { talkingPoints: points }));

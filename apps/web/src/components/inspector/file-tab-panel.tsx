@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useState } from "react";
 import type { Dispatch, MouseEvent, RefObject, SetStateAction } from "react";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -26,13 +26,13 @@ import { EmailHtmlViewer } from "@/components/inspector/email-html-viewer";
 import { EntityMetadataPanel } from "@/components/inspector/entity-metadata-panel";
 import { downloadTabOriginalFile } from "@/components/inspector/file-download-service";
 import {
-  FACETS,
-  FULLVIEW_FACETS,
   FullViewPreviewGuard,
   MetadataPanelSkeleton,
   TabFacetBar,
 } from "@/components/inspector/file-facets";
 import {
+  FACETS,
+  FULLVIEW_FACETS,
   getFileTabNativePreviewKind,
   getMarkdownDraftSyncDecision,
 } from "@/components/inspector/file-tab-panel.logic";
@@ -53,7 +53,8 @@ import { usePlaybooksPreviewEnabled } from "@/hooks/use-playbooks-preview";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { DOCX_MIME, MARKDOWN_MIME, TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import { toSafeId } from "@/lib/safe-id";
 import { DocxBrowserEditor } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-browser-editor";
 import type { DocxBrowserEditorActions } from "@/routes/_protected.workspaces/$workspaceId/-components/docx/docx-browser-editor";
@@ -187,9 +188,17 @@ export const FileTabPanel = ({
     enabled: isMarkdownDisplay,
   });
   const [markdownDraft, setMarkdownDraft] = useState("");
-  const markdownDraftSourceFieldIdRef = useRef<string | null>(null);
+  const [markdownDraftSourceFieldId, setMarkdownDraftSourceFieldId] = useState<
+    string | null
+  >(null);
   const markdownText = markdownTextQuery.data?.text ?? "";
   const markdownIsDirty = markdownDraft !== markdownText;
+  const [lastMarkdownSyncInput, setLastMarkdownSyncInput] = useState<{
+    fieldId: string;
+    isDirty: boolean;
+    isMarkdownDisplay: boolean;
+    serverText: string | undefined;
+  } | null>(null);
   const markdownSaveMutation = useMutation({
     mutationFn: async ({
       entityId,
@@ -243,38 +252,40 @@ export const FileTabPanel = ({
       analytics.captureError(error);
       stellaToast.add({
         title: t("workspaces.files.versionUploadFailed"),
-        description: error instanceof Error ? error.message : undefined,
+        description: userErrorFromThrown(error, t("errors.actionFailed")),
         type: "error",
       });
     },
   });
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reconciles the editable markdown draft (user-edited via setMarkdownDraft elsewhere) with server text, deliberately preserving a dirty draft for the same field; not pure derived state, and a key reset would clobber unsaved edits on every refetch, so kept
-  useEffect(() => {
-    if (!isMarkdownDisplay) {
-      markdownDraftSourceFieldIdRef.current = null;
-      return;
-    }
-
-    const decision = getMarkdownDraftSyncDecision({
-      fieldId: tab.id,
-      isDirty: markdownIsDirty,
-      isMarkdownDisplay,
-      lastSyncedFieldId: markdownDraftSourceFieldIdRef.current,
-      serverText: markdownTextQuery.data?.text,
-    });
-    if (decision.type === "skip") {
-      return;
-    }
-
-    markdownDraftSourceFieldIdRef.current = decision.fieldId;
-    setMarkdownDraft(decision.text);
-  }, [
+  const markdownSyncInput = {
+    fieldId: tab.id,
+    isDirty: markdownIsDirty,
     isMarkdownDisplay,
-    markdownIsDirty,
-    markdownTextQuery.data?.text,
-    tab.id,
-  ]);
+    serverText: markdownTextQuery.data?.text,
+  };
+  if (
+    lastMarkdownSyncInput === null ||
+    lastMarkdownSyncInput.fieldId !== markdownSyncInput.fieldId ||
+    lastMarkdownSyncInput.isDirty !== markdownSyncInput.isDirty ||
+    lastMarkdownSyncInput.isMarkdownDisplay !==
+      markdownSyncInput.isMarkdownDisplay ||
+    lastMarkdownSyncInput.serverText !== markdownSyncInput.serverText
+  ) {
+    setLastMarkdownSyncInput(markdownSyncInput);
+    if (!isMarkdownDisplay) {
+      setMarkdownDraftSourceFieldId(null);
+    } else {
+      const decision = getMarkdownDraftSyncDecision({
+        ...markdownSyncInput,
+        lastSyncedFieldId: markdownDraftSourceFieldId,
+      });
+      if (decision.type === "sync") {
+        setMarkdownDraftSourceFieldId(decision.fieldId);
+        setMarkdownDraft(decision.text);
+      }
+    }
+  }
 
   if (minimized) {
     return null;
@@ -360,27 +371,25 @@ export const FileTabPanel = ({
         />
         <InspectorTabHeader
           actions={
-            <>
-              <Tooltip
-                content={t("workspaces.pdf.backToPeek")}
-                render={
-                  <Button
-                    className={cn(
-                      "transition-[color,background-color,box-shadow]",
-                      flashingMinimizeTabId === tab.id &&
-                        "bg-primary/10 text-primary ring-primary/60 animate-pulse ring-2",
-                    )}
-                    onClick={() => {
-                      handleMinimizeFromFullView(tab);
-                    }}
-                    size="icon-xs"
-                    variant="ghost"
-                  >
-                    <Minimize2Icon className="size-3.5" />
-                  </Button>
-                }
-              />
-            </>
+            <Tooltip
+              content={t("workspaces.pdf.backToPeek")}
+              render={
+                <Button
+                  className={cn(
+                    "transition-[color,background-color,box-shadow]",
+                    flashingMinimizeTabId === tab.id &&
+                      "bg-primary/10 text-primary ring-primary/60 animate-pulse ring-2",
+                  )}
+                  onClick={() => {
+                    handleMinimizeFromFullView(tab);
+                  }}
+                  size="icon-xs"
+                  variant="ghost"
+                >
+                  <Minimize2Icon className="size-3.5" />
+                </Button>
+              }
+            />
           }
           label={stripExtension(tab.label)}
           matter={
@@ -540,40 +549,38 @@ export const FileTabPanel = ({
     }
 
     return (
-      <>
-        {markdownIsDirty && (
-          <>
-            <Button
-              disabled={markdownSaveMutation.isPending}
-              onClick={() => {
-                setMarkdownDraft(markdownText);
-              }}
-              size="xs"
-              variant="ghost"
-            >
-              <XIcon className="size-3.5" />
-              {t("common.cancel")}
-            </Button>
-            <Button
-              disabled={markdownSaveMutation.isPending}
-              onClick={() => {
-                markdownSaveMutation.mutate({
-                  entityId: tab.entityId,
-                  fieldId: tab.id,
-                  fileName: tab.fileName,
-                  propertyId: tab.propertyId,
-                  text: markdownDraft,
-                  workspaceId: tab.workspaceId,
-                });
-              }}
-              size="xs"
-            >
-              <CheckIcon className="size-3.5" />
-              {t("common.save")}
-            </Button>
-          </>
-        )}
-      </>
+      markdownIsDirty && (
+        <>
+          <Button
+            disabled={markdownSaveMutation.isPending}
+            onClick={() => {
+              setMarkdownDraft(markdownText);
+            }}
+            size="xs"
+            variant="ghost"
+          >
+            <XIcon className="size-3.5" />
+            {t("common.cancel")}
+          </Button>
+          <Button
+            disabled={markdownSaveMutation.isPending}
+            onClick={() => {
+              markdownSaveMutation.mutate({
+                entityId: tab.entityId,
+                fieldId: tab.id,
+                fileName: tab.fileName,
+                propertyId: tab.propertyId,
+                text: markdownDraft,
+                workspaceId: tab.workspaceId,
+              });
+            }}
+            size="xs"
+          >
+            <CheckIcon className="size-3.5" />
+            {t("common.save")}
+          </Button>
+        </>
+      )
     );
   })();
 

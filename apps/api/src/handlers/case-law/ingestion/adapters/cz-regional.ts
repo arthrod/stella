@@ -26,9 +26,10 @@ import {
   toOptionalValue,
 } from "@/api/handlers/case-law/ingestion/adapters/utils";
 import { parseRegionalDecision } from "@/api/handlers/case-law/ingestion/parsers/cz-regional";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { addUtcDays } from "@/api/lib/dates";
 import { AdapterFetchError } from "@/api/lib/errors/tagged-errors";
+import { fetchWithTimeout } from "@/api/lib/fetch";
 import { logger } from "@/api/lib/observability/logger";
 import { sanitizeUrl } from "@/api/lib/sanitize-url";
 import { isRecord } from "@/api/lib/type-guards";
@@ -58,6 +59,13 @@ const BASE_URL = "https://rozhodnuti.justice.cz/api";
  */
 const FINALDOC_CONCURRENCY = 15;
 const FINALDOC_BATCH_DELAY_MS = 50;
+
+const arrayOrEmpty = <T>(value: T[] | null | undefined): T[] => {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  return value;
+};
 const LIST_FETCH_RETRIES = 2;
 const LIST_FETCH_RETRY_DELAY_MS = 5000;
 
@@ -343,11 +351,11 @@ const fetchFinaldoc = async (
         decisionDate: item.decisionDate,
         decisionType,
         sourceUrl: item.sourceUrl,
-        header: doc.header ?? [],
-        verdict: doc.verdict ?? [],
-        justification: doc.justification ?? [],
-        information: doc.information ?? [],
-        styles: doc.styles ?? [],
+        header: arrayOrEmpty(doc.header),
+        verdict: arrayOrEmpty(doc.verdict),
+        justification: arrayOrEmpty(doc.justification),
+        information: arrayOrEmpty(doc.information),
+        styles: arrayOrEmpty(doc.styles),
         verdictText: verdictText ?? "",
         justificationText: justificationText ?? "",
       });
@@ -546,17 +554,13 @@ export const czRegionalAdapter: SourceAdapter = {
 
           try {
             // oxlint-disable-next-line no-await-in-loop -- sequential retry loop; each attempt awaits the previous attempt's outcome before retrying
-            response = await fetch(url, {
-              signal: signal
-                ? AbortSignal.any([
-                    signal,
-                    AbortSignal.timeout(ADAPTER_TIMEOUT.REQUEST),
-                  ])
-                : AbortSignal.timeout(ADAPTER_TIMEOUT.REQUEST),
+            response = await fetchWithTimeout(url, {
+              signal,
               headers: {
                 Accept: "application/json",
                 "User-Agent": INGESTION_USER_AGENT,
               },
+              timeoutMs: ADAPTER_TIMEOUT.REQUEST,
             });
           } catch (fetchError) {
             if (isTimeoutError(fetchError) && !signal?.aborted) {
@@ -643,7 +647,7 @@ export const czRegionalAdapter: SourceAdapter = {
             cursor,
           });
         }
-        const items = json.items ?? [];
+        const items = arrayOrEmpty(json.items);
 
         const decisions: IngestionResult[] = [];
         for (const item of items) {

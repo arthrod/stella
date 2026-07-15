@@ -28,6 +28,7 @@ import { AnonymizedSpan } from "@/components/chat/anonymized-span";
 import { AskUserCard } from "@/components/chat/ask-user-card";
 import { useChatApproval } from "@/components/chat/chat-approval-context";
 import { ChatImageAttachment } from "@/components/chat/chat-image-attachment";
+import { buildMessageTurns } from "@/components/chat/chat-thread-messages.logic";
 import type {
   AskUserOutput,
   ChatAnonRestoration,
@@ -88,6 +89,7 @@ export const ChatThreadMessages = ({
   // any downstream read. Memoized because this component bails out of React
   // Compiler (see below), so the manual memos here need a stable `messages`.
   const messages = useMemo(() => dedupeById(rawMessages), [rawMessages]);
+  const generationActive = error === undefined && isGenerating;
   // This component bails out of React Compiler (a suppression below), so its
   // manual memoization is kept (RC will not auto-memoize a bailed component).
   const retryableAssistantMessageId = useMemo(
@@ -192,7 +194,7 @@ export const ChatThreadMessages = ({
           <>
             <AssistantMessageParts
               activeOrganizationId={activeOrganizationId}
-              isGenerating={isGenerating}
+              isGenerating={generationActive}
               isLatestAssistantMessage={
                 message.id === retryableAssistantMessageId
               }
@@ -214,7 +216,7 @@ export const ChatThreadMessages = ({
               workspaceId={workspaceId}
             />
             <AssistantMessageActions
-              isGenerating={isGenerating}
+              isGenerating={generationActive}
               isLatestAssistantMessage={
                 message.id === retryableAssistantMessageId
               }
@@ -293,13 +295,13 @@ export const ChatThreadMessages = ({
       {error && (
         <ChatErrorMessage
           error={error}
-          isGenerating={isGenerating}
+          isGenerating={generationActive}
           onResend={onResend}
           onSendWithoutAnonymization={onSendWithoutAnonymization}
         />
       )}
       {showThinkingIndicator &&
-        isGenerating &&
+        generationActive &&
         !hasVisibleContent(messages) && <ThinkingIndicator />}
       {onRemoveQueuedMessage &&
         queuedMessages !== undefined &&
@@ -311,58 +313,6 @@ export const ChatThreadMessages = ({
         )}
     </>
   );
-};
-
-type TurnBodyItem = {
-  message: PersistedChatMessage;
-  /** Position in the flat `messages` list, kept so anon-restoration lookups
-   *  and retry targeting stay identical to the non-sticky layout. */
-  index: number;
-};
-
-/**
- * A transcript segment. `user` turns start with a user message that becomes
- * the sticky header; `orphan` turns hold assistant/system messages that
- * precede any user message (e.g. a greeting, or the tail of an older turn
- * pulled in by pagination) and render without a sticky header.
- */
-type MessageTurn =
-  | {
-      type: "user";
-      index: number;
-      header: PersistedChatMessage;
-      body: TurnBodyItem[];
-    }
-  | { type: "orphan"; body: TurnBodyItem[] };
-
-/**
- * Groups the flat message list into turns for the sticky layout: every user
- * message opens a new turn and the following non-user messages attach to it,
- * so each turn's height spans its whole answer. That height is what gives the
- * sticky header room to pin — a header can only stick within its own turn, so
- * the next turn's header pushes it out as it reaches the top.
- */
-export const buildMessageTurns = (
-  messages: readonly PersistedChatMessage[],
-): MessageTurn[] => {
-  const turns: MessageTurn[] = [];
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (!message) {
-      continue;
-    }
-    if (message.role === "user") {
-      turns.push({ type: "user", index, header: message, body: [] });
-      continue;
-    }
-    const last = turns.at(-1);
-    if (last) {
-      last.body.push({ message, index });
-      continue;
-    }
-    turns.push({ type: "orphan", body: [{ message, index }] });
-  }
-  return turns;
 };
 
 type StickyUserTurnProps = {
@@ -602,9 +552,12 @@ const collectAnonRestorations = (
   // single assistant message so the rehype plugin builds one
   // pattern per stream.
   const seen = new Map<string, string>();
-  for (const pair of message.metadata?.anonRestorations?.pairs ?? []) {
-    if (!seen.has(pair.placeholder)) {
-      seen.set(pair.placeholder, pair.original);
+  const restorationPairs = message.metadata?.anonRestorations?.pairs;
+  if (restorationPairs) {
+    for (const pair of restorationPairs) {
+      if (!seen.has(pair.placeholder)) {
+        seen.set(pair.placeholder, pair.original);
+      }
     }
   }
   return [...seen.entries()].map(([placeholder, original]) => ({
@@ -700,7 +653,79 @@ const normalizeUserMessageTextForDisplay = (text: string) => {
   return result;
 };
 
-const IMAGE_MEDIA_TYPES = new Set([
+const USER_MESSAGE_FALLBACK_BLOCK_TAGS = Object.freeze([
+  "blockquote",
+  "div",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "li",
+  "ol",
+  "p",
+  "pre",
+  "ul",
+]);
+
+/**
+ * The optimistic user message still contains TipTap HTML until the API returns
+ * its normalized Markdown copy. Streamdown is lazy-loaded, so its Suspense
+ * fallback needs a plain-text preview instead of briefly printing raw tags.
+ * This only produces text nodes; the original string still goes to Streamdown
+ * and the API, preserving formatting and mention validation.
+ */
+const userMessageFallbackText = (html: string): string => {
+  let output = "";
+  let cursor = 0;
+
+  while (cursor < html.length) {
+    const tagStart = html.indexOf("<", cursor);
+    if (tagStart === -1) {
+      output += html.slice(cursor);
+      break;
+    }
+
+    output += html.slice(cursor, tagStart);
+    const tagEnd = html.indexOf(">", tagStart + 1);
+    if (tagEnd === -1) {
+      output += html.slice(tagStart);
+      break;
+    }
+
+    const rawTag = html.slice(tagStart + 1, tagEnd).trimStart();
+    const closing = rawTag.startsWith("/");
+    const nameStart = closing ? 1 : 0;
+    let nameEnd = nameStart;
+    while (/[\dA-Za-z-]/u.test(rawTag.charAt(nameEnd))) {
+      nameEnd += 1;
+    }
+    const tagName = rawTag.slice(nameStart, nameEnd).toLowerCase();
+    if (
+      tagName === "br" ||
+      (closing &&
+        USER_MESSAGE_FALLBACK_BLOCK_TAGS.some(
+          (blockTagName) => blockTagName === tagName,
+        ))
+    ) {
+      output += "\n";
+    }
+    cursor = tagEnd + 1;
+  }
+
+  return output
+    .replaceAll("&nbsp;", " ")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&amp;", "&")
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
+};
+
+const IMAGE_MEDIA_TYPES = Object.freeze([
   "image/png",
   "image/jpeg",
   "image/webp",
@@ -745,7 +770,7 @@ const UserAttachments = ({
         const key = `${filename ?? "attachment"}-${index}`;
         const contentUrl = getUserFileContentUrl(url) ?? url;
         const fallbackLabel = t("chat.attachment");
-        if (IMAGE_MEDIA_TYPES.has(mimeType)) {
+        if (IMAGE_MEDIA_TYPES.includes(mimeType)) {
           // The backend sets `placeholder` (a blur data URL) only when a
           // thumbnail was generated, so its presence doubles as "serve the
           // smaller thumbnail instead of the full original."
@@ -1564,7 +1589,10 @@ const UserMessageText = ({
   );
   if (rehypePlugins === undefined) {
     return (
-      <MessageResponse components={USER_TEXT_STREAMDOWN_COMPONENTS}>
+      <MessageResponse
+        components={USER_TEXT_STREAMDOWN_COMPONENTS}
+        fallbackChildren={userMessageFallbackText(text)}
+      >
         {text}
       </MessageResponse>
     );
@@ -1572,6 +1600,7 @@ const UserMessageText = ({
   return (
     <MessageResponse
       components={USER_TEXT_STREAMDOWN_COMPONENTS}
+      fallbackChildren={userMessageFallbackText(text)}
       rehypePlugins={rehypePlugins}
     >
       {text}

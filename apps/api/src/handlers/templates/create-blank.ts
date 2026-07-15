@@ -1,8 +1,8 @@
+import { Result } from "better-result";
 import { t } from "elysia";
 
-import { createDocx, createEmptyDocument } from "@stll/folio-core/server";
-
-import type { SafeDb } from "@/api/db";
+import type { SafeDb } from "@/api/db/safe-db";
+import { createTemplateBuffer } from "@/api/handlers/templates/create-template-buffer";
 import {
   type CreatedTemplate,
   createStoredTemplate,
@@ -15,6 +15,7 @@ import type {
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { tDefaultVarchar, tSafeId } from "@/api/lib/custom-schema";
+import { HandlerError } from "@/api/lib/errors/tagged-errors";
 import { sanitizeFilename } from "@/api/lib/sanitize-filename";
 
 const createBlankTemplateBodySchema = t.Object({
@@ -40,11 +41,16 @@ const createBlankTemplateHandler = async function* ({
   body: { name, categoryId },
   recordAuditEvent,
 }: CreateBlankTemplateProps): SafeHandlerGenerator<CreatedTemplate> {
-  // A blank template starts from a Folio-native empty document: the user
-  // authors the body and adds {{fields}} in the Studio. There's no source
-  // filename, so derive one from the name to keep the stored DOCX scannable.
-  const buffer = Buffer.from(
-    new Uint8Array(await createDocx(createEmptyDocument())),
+  const buffer = yield* Result.await(
+    Result.tryPromise({
+      try: async () => await createTemplateBuffer({ type: "stella" }),
+      catch: (cause) =>
+        new HandlerError({
+          status: 500,
+          message: "Could not create the blank template.",
+          cause,
+        }),
+    }),
   );
 
   return yield* createStoredTemplate({
@@ -61,8 +67,7 @@ const createBlankTemplateHandler = async function* ({
 
 const config = {
   permissions: { template: ["create"] },
-  // Not reachable through save_template (which requires a DOCX on create);
-  // blank-template creation stays a tracked gap.
+  // Not reachable through save_template (which requires a DOCX on create).
   mcp: { type: "capability", reason: "template_authoring_ui" },
   body: createBlankTemplateBodySchema,
 } satisfies HandlerConfig;

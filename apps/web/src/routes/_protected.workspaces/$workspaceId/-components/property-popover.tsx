@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2Icon,
   EyeOffIcon,
+  LockIcon,
   PencilLineIcon,
   RefreshCwIcon,
 } from "lucide-react";
@@ -15,7 +16,8 @@ import { Separator } from "@stll/ui/components/separator";
 import { stellaToast } from "@stll/ui/components/toast";
 
 import { api } from "@/lib/api";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import { type SafeId, toSafeId } from "@/lib/safe-id";
 import type {
   ConditionNode,
@@ -27,12 +29,10 @@ import { DeleteProperty } from "@/routes/_protected.workspaces/$workspaceId/-com
 import { PinProperty } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/pin-property";
 import { PropertyConditions } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/property-conditions";
 import { PropertyPopoverTrigger } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/shared";
-import {
-  SortProperty,
-  toSortHint,
-} from "@/routes/_protected.workspaces/$workspaceId/-components/properties/sort-property";
+import { SortProperty } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/sort-property";
 import { useGroupScope } from "@/routes/_protected.workspaces/$workspaceId/-components/table/group-scope";
 import type { TableHeader } from "@/routes/_protected.workspaces/$workspaceId/-components/table/types";
+import { toSortHint } from "@/routes/_protected.workspaces/$workspaceId/-components/utils";
 import { useStartWorkflow } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-start-workflow";
 import { useUpdateProperty } from "@/routes/_protected.workspaces/$workspaceId/-mutations/properties";
 import { entitiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
@@ -48,7 +48,17 @@ type ReplaceAction = {
   next: PropertyDependency;
 };
 
-const VERIFIED_FLAG = "verified";
+const COLUMN_METADATA_ACTION = {
+  lock: "locked",
+  markReviewed: "verified",
+} as const;
+
+type ColumnMetadataBatchArgs = {
+  action: (typeof COLUMN_METADATA_ACTION)[keyof typeof COLUMN_METADATA_ACTION];
+  scoped: boolean;
+  set: boolean;
+  onlyAddedAt?: string;
+};
 
 export const PropertyPopover = ({
   property,
@@ -67,17 +77,14 @@ export const PropertyPopover = ({
   // `scoped` narrows the batch to the current grouped-view subtable (only
   // meaningful when a group scope is present); `set: false` removes the flag,
   // which powers the toast's Undo. `onlyAddedAt` (set on undo) reverts just the
-  // cells this mark added, never flags a human verified earlier.
-  const markReviewed = useMutation({
+  // cells this operation changed, never metadata a human set earlier.
+  const updateColumnMetadata = useMutation({
     mutationFn: async ({
+      action,
       scoped,
       set,
       onlyAddedAt,
-    }: {
-      scoped: boolean;
-      set: boolean;
-      onlyAddedAt?: string;
-    }) => {
+    }: ColumnMetadataBatchArgs) => {
       // The annotation keeps the narrowed grouping id from widening back to
       // `string` (an un-annotated object literal would); mirrors the
       // kanban-group / group-counts query builders.
@@ -106,7 +113,7 @@ export const PropertyPopover = ({
         ["metadata-batch"].patch({
           queryKey: entitiesKeys.all(workspaceId),
           propertyId: toSafeId<"property">(id),
-          flag: VERIFIED_FLAG,
+          flag: action,
           filters,
           set,
           ...(onlyAddedAt !== undefined && { onlyAddedAt }),
@@ -118,35 +125,42 @@ export const PropertyPopover = ({
       }
       return response.data;
     },
-    onSuccess: (data, { scoped, set }) => {
+    onSuccess: (data, { action, scoped, set }) => {
       void queryClient.invalidateQueries({
         queryKey: entitiesKeys.all(workspaceId),
       });
       setIsOpen(false);
-      if (set && data.updatedCount > 0) {
-        stellaToast.add({
-          title: t("workspaces.properties.markedAsReviewed", {
-            count: data.updatedCount,
-          }),
-          type: "success",
-          action: {
-            label: t("common.undo"),
-            onClick: () => {
-              markReviewed.mutate({
-                scoped,
-                set: false,
-                onlyAddedAt: data.addedAt,
-              });
-            },
-          },
-        });
+      if (!set || data.updatedCount === 0) {
+        return;
       }
+      const title =
+        action === COLUMN_METADATA_ACTION.lock
+          ? t("workspaces.properties.markedAsLocked", {
+              count: data.updatedCount,
+            })
+          : t("workspaces.properties.markedAsReviewed", {
+              count: data.updatedCount,
+            });
+      stellaToast.add({
+        title,
+        type: "success",
+        action: {
+          label: t("common.undo"),
+          onClick: () => {
+            updateColumnMetadata.mutate({
+              action,
+              scoped,
+              set: false,
+              onlyAddedAt: data.addedAt,
+            });
+          },
+        },
+      });
     },
     onError: (error) => {
       stellaToast.add({
         title: t("errors.actionFailed"),
-        description:
-          error instanceof Error ? error.message : t("common.unexpectedError"),
+        description: userErrorFromThrown(error, t("common.unexpectedError")),
         type: "error",
       });
     },
@@ -230,6 +244,39 @@ export const PropertyPopover = ({
     });
   };
 
+  const rerunProperty = async () => {
+    setIsOpen(false);
+    const result = await startWorkflow({ propertyIds: [id] });
+    if (!result) {
+      return;
+    }
+    if (result.status === "started") {
+      stellaToast.add({
+        title: t("workspaces.workflow.startedSuccessfully"),
+        type: "success",
+      });
+      return;
+    }
+    if (result.status === "already-running") {
+      stellaToast.add({
+        title: t("common.running"),
+        type: "info",
+      });
+      return;
+    }
+    if (result.status === "skipped") {
+      stellaToast.add({
+        title: t("workspaces.workflow.noFieldsToProcess"),
+        type: "info",
+      });
+      return;
+    }
+    stellaToast.add({
+      title: t("errors.failedToStartWorkflow"),
+      type: "error",
+    });
+  };
+
   return (
     <>
       <Popover modal onOpenChange={setIsOpen} open={isOpen}>
@@ -293,8 +340,7 @@ export const PropertyPopover = ({
                 <Button
                   className="justify-start gap-1.5 font-normal"
                   onClick={() => {
-                    setIsOpen(false);
-                    void startWorkflow({ propertyIds: [id] });
+                    void rerunProperty();
                   }}
                   size="sm"
                   variant="ghost"
@@ -306,9 +352,13 @@ export const PropertyPopover = ({
               {groupScope && (
                 <Button
                   className="justify-start gap-1.5 font-normal"
-                  disabled={markReviewed.isPending}
+                  disabled={updateColumnMetadata.isPending}
                   onClick={() => {
-                    markReviewed.mutate({ scoped: true, set: true });
+                    updateColumnMetadata.mutate({
+                      action: COLUMN_METADATA_ACTION.markReviewed,
+                      scoped: true,
+                      set: true,
+                    });
                   }}
                   size="sm"
                   variant="ghost"
@@ -319,15 +369,53 @@ export const PropertyPopover = ({
               )}
               <Button
                 className="justify-start gap-1.5 font-normal"
-                disabled={markReviewed.isPending}
+                disabled={updateColumnMetadata.isPending}
                 onClick={() => {
-                  markReviewed.mutate({ scoped: false, set: true });
+                  updateColumnMetadata.mutate({
+                    action: COLUMN_METADATA_ACTION.markReviewed,
+                    scoped: false,
+                    set: true,
+                  });
                 }}
                 size="sm"
                 variant="ghost"
               >
                 <CheckCircle2Icon />
                 {t("workspaces.properties.markAllAsReviewed")}
+              </Button>
+              {groupScope && (
+                <Button
+                  className="justify-start gap-1.5 font-normal"
+                  disabled={updateColumnMetadata.isPending}
+                  onClick={() => {
+                    updateColumnMetadata.mutate({
+                      action: COLUMN_METADATA_ACTION.lock,
+                      scoped: true,
+                      set: true,
+                    });
+                  }}
+                  size="sm"
+                  variant="ghost"
+                >
+                  <LockIcon />
+                  {t("workspaces.properties.markThisGroupAsLocked")}
+                </Button>
+              )}
+              <Button
+                className="justify-start gap-1.5 font-normal"
+                disabled={updateColumnMetadata.isPending}
+                onClick={() => {
+                  updateColumnMetadata.mutate({
+                    action: COLUMN_METADATA_ACTION.lock,
+                    scoped: false,
+                    set: true,
+                  });
+                }}
+                size="sm"
+                variant="ghost"
+              >
+                <LockIcon />
+                {t("workspaces.properties.markAllAsLocked")}
               </Button>
             </div>
             <Separator />

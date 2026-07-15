@@ -4,12 +4,13 @@ import { useTranslations } from "use-intl";
 import { cn } from "@stll/ui/lib/utils";
 
 import { getFormattingLocale } from "@/i18n/i18n-store";
+import { normalizeOptionalArray } from "@/lib/arrays";
 import { addDays } from "@/lib/dates";
+import { formatCurrencyCompact } from "@/routes/_protected.workspaces/$workspaceId/-components/billing/format-currency";
 import {
   formatDecimalHours,
   formatMinutes,
-} from "@/routes/_protected.workspaces/$workspaceId/-components/billing/duration-input";
-import { formatCurrencyCompact } from "@/routes/_protected.workspaces/$workspaceId/-components/billing/format-currency";
+} from "@/routes/_protected.workspaces/$workspaceId/-components/billing/format-duration";
 import { useMatterNameMap } from "@/routes/_protected.workspaces/$workspaceId/-components/billing/matter-name-map";
 import {
   summarizeBillableAmountByMatterAndCurrency,
@@ -142,8 +143,8 @@ export const TimesheetWeekView = ({
                 rowMinutes += data.minutes;
               }
             }
-            const rowAmountsByCurrency =
-              matterAmountsByCurrency.get(matterId) ?? [];
+            const storedAmounts = matterAmountsByCurrency.get(matterId);
+            const rowAmountsByCurrency = normalizeOptionalArray(storedAmounts);
 
             return (
               <tr className="hover:bg-muted/30 border-b" key={matterId}>

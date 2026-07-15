@@ -2,8 +2,7 @@ import {
   createContext,
   use,
   useCallback,
-  useEffect,
-  useEffectEvent,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -50,9 +49,10 @@ import {
   PromptSlash,
   type SlashItem,
 } from "@/components/chat/prompt-slash-extension";
-import { createPromptEditorDocument } from "@/components/prompt-editor";
+import { createPromptEditorDocument } from "@/components/prompt-editor.logic";
 import { useHasMounted } from "@/hooks/use-chrome-query";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import {
@@ -79,21 +79,22 @@ const TEXT_PLAIN_MIME_TYPE = "text/plain";
 const TEXT_CSV_MIME_TYPE = "text/csv";
 const TEXT_MARKDOWN_MIME_TYPE = "text/markdown";
 
-const ALLOWED_CHAT_FILE_MIME_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/gif",
-  "application/pdf",
-  DOCX_MIME_TYPE,
-  TEXT_PLAIN_MIME_TYPE,
-  TEXT_CSV_MIME_TYPE,
-  TEXT_MARKDOWN_MIME_TYPE,
-]);
+const ALLOWED_CHAT_FILE_MIME_TYPES = {
+  "image/png": true,
+  "image/jpeg": true,
+  "image/webp": true,
+  "image/gif": true,
+  "application/pdf": true,
+  [DOCX_MIME_TYPE]: true,
+  [TEXT_PLAIN_MIME_TYPE]: true,
+  [TEXT_CSV_MIME_TYPE]: true,
+  [TEXT_MARKDOWN_MIME_TYPE]: true,
+} as const;
 
 export const CHAT_FILE_INPUT_ACCEPT =
   ".png,.jpg,.jpeg,.webp,.gif,.pdf,.docx,.txt,.csv,.md";
 const EMPTY_ATTACHMENTS: ChatDraftAttachment[] = [];
+const EMPTY_SENT_MESSAGE_HISTORY: readonly string[] = [];
 const EMPTY_CHAT_DRAFT_DOC = createEmptyChatDraftDoc();
 
 // Wrap an interpolated value in Unicode directional isolates (FSI…PDI) so an
@@ -130,6 +131,8 @@ export type ChatInputMentionSource = {
   getItems: () => ChatMentionOption[] | Promise<ChatMentionOption[]>;
   searchItems?: ((query: string) => Promise<ChatMentionOption[]>) | undefined;
 };
+
+const EMPTY_MENTION_SOURCES: readonly ChatInputMentionSource[] = [];
 
 export type ChatInputPluginRegistration = {
   key: string | PluginKey;
@@ -251,15 +254,42 @@ const isSelectionAtStart = ({ selection }: EditorState) =>
 const isSelectionAtEnd = ({ doc, selection }: EditorState) =>
   selection.empty && selection.to >= doc.content.size - 1;
 
+const handleDragOver = (event: React.DragEvent) => {
+  event.preventDefault();
+};
+
+/** Lazily initializes a ref-held Map on first use instead of allocating a
+ *  fresh (and discarded) instance on every render. Module-scope so callers can
+ *  reference it inside memoized callbacks without listing it as a dependency. */
+const getOrCreateMap = <K, V>(ref: {
+  current: Map<K, V> | null;
+}): Map<K, V> => {
+  ref.current ??= new Map();
+  return ref.current;
+};
+
+/** Same lazy-init pattern as {@link getOrCreateMap}, for a ref-held WeakSet. */
+const getOrCreateWeakSet = <T extends object>(ref: {
+  current: WeakSet<T> | null;
+}): WeakSet<T> => {
+  ref.current ??= new WeakSet();
+  return ref.current;
+};
+
 export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
-  const registrationsRef = useRef(new Map<string, RegisteredExtension>());
+  const registrationsRef = useRef<Map<string, RegisteredExtension> | null>(
+    null,
+  );
   const activeEditorRef = useRef<ActiveChatEditorHandle | null>(null);
   const [extensionVersion, setExtensionVersion] = useState(0);
 
   const getMentionItems = useCallback(async () => {
     const items: ChatMentionOption[] = [];
-    const sources = Array.from(registrationsRef.current.values()).flatMap(
-      ({ registration }) => registration.mentionSources ?? [],
+    const sources = Array.from(
+      getOrCreateMap(registrationsRef).values(),
+    ).flatMap(
+      ({ registration }) =>
+        registration.mentionSources ?? EMPTY_MENTION_SOURCES,
     );
     const results = await Promise.all(
       sources.map(
@@ -282,7 +312,7 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
   const getPluginRegistrations = useCallback(() => {
     const plugins: ChatInputPluginRegistration[] = [];
 
-    for (const { registration } of registrationsRef.current.values()) {
+    for (const { registration } of getOrCreateMap(registrationsRef).values()) {
       if (!registration.plugins) {
         continue;
       }
@@ -298,8 +328,11 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
 
     // Mention sources are independent; query them in parallel and append
     // results in registration/source order (preserved by Promise.all).
-    const sources = Array.from(registrationsRef.current.values()).flatMap(
-      ({ registration }) => registration.mentionSources ?? [],
+    const sources = Array.from(
+      getOrCreateMap(registrationsRef).values(),
+    ).flatMap(
+      ({ registration }) =>
+        registration.mentionSources ?? EMPTY_MENTION_SOURCES,
     );
     const results = await Promise.all(
       sources.map(
@@ -326,19 +359,19 @@ export const ChatEditorProvider = ({ children }: React.PropsWithChildren) => {
   const registerExtension = useCallback(
     (id: string, registration: ChatInputExtensionRegistration) => {
       const token = Symbol(id);
-      registrationsRef.current.set(id, {
+      getOrCreateMap(registrationsRef).set(id, {
         registration,
         token,
       });
       setExtensionVersion((value) => value + 1);
 
       return () => {
-        const current = registrationsRef.current.get(id);
+        const current = getOrCreateMap(registrationsRef).get(id);
         if (current === undefined || current.token !== token) {
           return;
         }
 
-        registrationsRef.current.delete(id);
+        getOrCreateMap(registrationsRef).delete(id);
         setExtensionVersion((value) => value + 1);
       };
     },
@@ -569,14 +602,15 @@ export const useChatEditor = ({
   // switch resets this set (see the reset effect below). The stored draft for
   // the incoming thread was authored under the previous thread's set, so it
   // counts as external and gets restored into the editor.
-  const editorAuthoredDocsRef = useRef(new WeakSet<JSONContent>());
+  const editorAuthoredDocsRef = useRef<WeakSet<JSONContent> | null>(null);
   const isNavigatingHistoryRef = useRef(false);
   const draftStartedThreadKeyRef = useRef<string | null>(null);
   const sentMessageHistoryHtmlRef = useRef<readonly string[]>([]);
   const messageHistoryIndexRef = useRef<number | null>(null);
   const markDraftStartedRef = useRef<(() => void) | null>(null);
   // eslint-disable-next-line react/react-compiler -- latest-ref mirror: the message-history key handler reads this out-of-render, must reflect this render's prop
-  sentMessageHistoryHtmlRef.current = sentMessageHistoryHtml ?? [];
+  sentMessageHistoryHtmlRef.current =
+    sentMessageHistoryHtml ?? EMPTY_SENT_MESSAGE_HISTORY;
   const threadKey = getChatThreadKey(threadRef);
   const {
     getMentionItems,
@@ -614,24 +648,17 @@ export const useChatEditor = ({
   // eslint-disable-next-line react/react-compiler -- latest-ref mirror: editor plugins invoke markDraftStartedRef.current out-of-render, must point at this render's callback
   markDraftStartedRef.current = markDraftStarted;
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- ref reset on id change, not external-system sync
-  useEffect(() => {
+  const committedThreadKeyRef = useRef(threadKey);
+  useLayoutEffect(() => {
     messageHistoryIndexRef.current = null;
+    if (committedThreadKeyRef.current !== threadKey) {
+      // Authored marks are per-thread. Do not clear them when only sent history
+      // changes after a send: that could let draft synchronization revert an
+      // in-flight keystroke.
+      editorAuthoredDocsRef.current = new WeakSet();
+      committedThreadKeyRef.current = threadKey;
+    }
   }, [sentMessageHistoryHtml, threadKey]);
-
-  // Authored marks are per-thread; one mounted editor serves many threads, so a
-  // thread switch must forget the outgoing thread's docs. Reset the set here so
-  // the incoming thread's stored draft counts as external and is restored.
-  // Keyed on `threadKey` alone and declared before the draft-apply effect: it
-  // runs first in the same commit, so the reset lands before that effect reads
-  // membership. Deliberately not folded into the `messageHistoryIndexRef` reset
-  // above (which also fires on `sentMessageHistoryHtml`): clearing marks
-  // mid-thread right after a send could let the lagging draft-apply effect
-  // revert an in-flight keystroke, the exact loop this set prevents.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- ref reset on id change, not external-system sync
-  useEffect(() => {
-    editorAuthoredDocsRef.current = new WeakSet();
-  }, [threadKey]);
 
   const fetchWorkspaceEntities = useCallback(
     async (workspace: ChatMentionOption, query: string) => {
@@ -772,7 +799,7 @@ export const useChatEditor = ({
     [debouncedFetchWorkspaceEntities],
   );
 
-  const handleEditorUpdate = useEffectEvent((nextEditor: Editor) => {
+  const handleEditorUpdate = useLatestCallback((nextEditor: Editor) => {
     setIsEmpty(nextEditor.isEmpty);
 
     if (isApplyingStoredDraftRef.current) {
@@ -801,7 +828,7 @@ export const useChatEditor = ({
     // Mark this doc as editor-authored so the (lagging) draft-apply effect
     // never reverts the editor to it. `nextDraft.doc` is the exact object the
     // store will hand back as `draftDoc`, so identity membership is reliable.
-    editorAuthoredDocsRef.current.add(nextDraft.doc);
+    getOrCreateWeakSet(editorAuthoredDocsRef).add(nextDraft.doc);
     setDraft(threadKey, nextDraft);
 
     if (!nextEditor.isEmpty) {
@@ -1133,7 +1160,9 @@ export const useChatEditor = ({
     if (
       !shouldApplyStoredDraftToEditor({
         draftDoc,
-        editorAuthoredDraft: editorAuthoredDocsRef.current.has(draftDoc),
+        editorAuthoredDraft: getOrCreateWeakSet(editorAuthoredDocsRef).has(
+          draftDoc,
+        ),
         editorDoc: editor.getJSON(),
       })
     ) {
@@ -1237,7 +1266,7 @@ export const useChatEditor = ({
         }
 
         if (
-          !ALLOWED_CHAT_FILE_MIME_TYPES.has(file.type) ||
+          !Object.hasOwn(ALLOWED_CHAT_FILE_MIME_TYPES, file.type) ||
           file.size > CHAT_MAX_FILE_BYTES
         ) {
           continue;
@@ -1270,10 +1299,6 @@ export const useChatEditor = ({
     }
 
     addFiles(event.dataTransfer.files);
-  };
-
-  const handleDragOver = (event: React.DragEvent) => {
-    event.preventDefault();
   };
 
   const handlePaste = (event: React.ClipboardEvent) => {

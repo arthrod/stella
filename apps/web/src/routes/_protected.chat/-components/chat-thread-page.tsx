@@ -1,10 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useEffectEvent,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useRef, useState } from "react";
 
 import {
   useMutation,
@@ -18,7 +12,8 @@ import { Maximize2Icon, PlusIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
 import { CHAT_SEND_MODE } from "@stll/anonymize-chat";
-import { Button, buttonVariants } from "@stll/ui/components/button";
+import { Button } from "@stll/ui/components/button";
+import { buttonVariants } from "@stll/ui/components/button-variants";
 
 import {
   Conversation,
@@ -39,19 +34,25 @@ import { useAIKeyGate } from "@/components/require-ai-key";
 import Tooltip from "@/components/tooltip";
 import { UsageLimitModal } from "@/components/usage/usage-limit-modal";
 import { useUsageLimit } from "@/components/usage/use-usage-limit";
-import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { ChatAnonymizationLayer } from "@/lib/anonymize/use-chat-anonymization-layer";
 import { api } from "@/lib/api";
+import { optionalArray } from "@/lib/arrays";
 import {
   getChatSendMode,
   useChatAnonymized,
 } from "@/lib/chat-anonymized-store";
 import { useIsChatDraftEmpty } from "@/lib/chat-draft-store";
-import type { ChatThreadRef } from "@/lib/chat-thread-ref";
+import {
+  getChatThreadKey,
+  resolveChatContextMatterIds,
+  type ChatThreadRef,
+} from "@/lib/chat-thread-ref";
 import { useChatWebSearchPreferenceStore } from "@/lib/chat-web-search-store";
 import { ChromeHeaderActions } from "@/lib/chrome-header-actions";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
 import { useModelSelectorStore } from "@/lib/model-selector-store";
 import type { ChatPrompt } from "@/lib/prompts/types";
 import { useSavedPrompts } from "@/lib/prompts/use-saved-prompts";
@@ -83,6 +84,13 @@ type ChatThreadPageProps = {
 
 const protectedRouteApi = getRouteApi("/_protected");
 
+const WebSearchSeedLifecycle = ({ seed }: { seed: () => void }) => {
+  useMountEffect(() => {
+    seed();
+  });
+  return null;
+};
+
 export const ChatThreadPage = ({
   threadRef,
   workspaceId,
@@ -90,7 +98,7 @@ export const ChatThreadPage = ({
   const t = useTranslations();
   const { ensureAIAvailable } = useAIKeyGate();
   const userContext = useChatUserContext();
-  const getUserContext = useEffectEvent(() => userContext);
+  const getUserContext = useLatestCallback(() => userContext);
   const prompts = useSavedPrompts();
   const activeOrganizationId = protectedRouteApi.useRouteContext({
     select: (ctx) => ctx.user.activeOrganizationId,
@@ -117,12 +125,18 @@ export const ChatThreadPage = ({
   // Track which thread our local state was seeded for so we can
   // detect navigation between two `/chat/$threadId` routes inside
   // the same mounted component and reset before the next send.
-  const [seededForThreadId, setSeededForThreadId] = useState<string | null>(
+  const [seededForThreadKey, setSeededForThreadKey] = useState<string | null>(
     null,
   );
+  const threadKey = getChatThreadKey(threadRef);
   const anonymized = useChatAnonymized(threadRef);
-  const getContextMatterIds = useEffectEvent(() => contextMatterIds ?? []);
-  const getSendMode = useEffectEvent(() => getChatSendMode(threadRef));
+  const getContextMatterIds = useLatestCallback(() =>
+    resolveChatContextMatterIds(
+      threadRef,
+      seededForThreadKey === threadKey ? optionalArray(contextMatterIds) : [],
+    ),
+  );
+  const getSendMode = useLatestCallback(() => getChatSendMode(threadRef));
 
   // A thread can be opened (e.g. via "Move to main" from the inspector)
   // before its first message has reached the server, so the row may not
@@ -146,13 +160,21 @@ export const ChatThreadPage = ({
     data,
     key: threadRef,
   });
+  const selectedContextMatterIds = resolveChatContextMatterIds(
+    threadRef,
+    seededForThreadKey === threadKey
+      ? optionalArray(contextMatterIds)
+      : data.contextMatterIds,
+  );
   useExternalSyncEffect(() => {
-    if (seededForThreadId === threadRef.threadId) {
+    if (seededForThreadKey === threadKey) {
       return;
     }
-    setSeededForThreadId(threadRef.threadId);
-    setContextMatterIds(data.contextMatterIds);
-  }, [data.contextMatterIds, seededForThreadId, threadRef.threadId]);
+    setSeededForThreadKey(threadKey);
+    setContextMatterIds(
+      resolveChatContextMatterIds(threadRef, data.contextMatterIds),
+    );
+  }, [data.contextMatterIds, seededForThreadKey, threadKey, threadRef]);
 
   // Surface a 402 usage-limit response from the metered
   // chat handler as a usage-state modal instead of an inline
@@ -269,7 +291,9 @@ export const ChatThreadPage = ({
       threadRef,
     }),
   );
-  const suggestedFollowupPrompts = suggestedPromptsData?.prompts ?? [];
+  const suggestedFollowupPrompts = suggestedPromptsData
+    ? suggestedPromptsData.prompts
+    : [];
   const suggestedFollowupPrompt = suggestedFollowupPrompts.at(0) ?? undefined;
 
   // Seed brand-new (empty) threads from the persisted web-search
@@ -298,31 +322,23 @@ export const ChatThreadPage = ({
       }
     },
   });
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- PATCH-seed the web-search preference once a freshly-opened thread renders empty. The trigger is derived from async query data (data.webSearchAvailable/Enabled) plus store state, not a single setter or a discrete open handler in this file. Keep.
-  useEffect(() => {
+  const shouldSeedWebSearch =
+    messages.length === 0 &&
+    data.webSearchAvailable &&
+    !data.webSearchEnabled &&
+    enabledPreference;
+  const triggerWebSearchSeed = () => {
     if (seededWebSearchForThreadId.current === threadRef.threadId) {
       return;
     }
     if (seedingWebSearchForThreadId.current === threadRef.threadId) {
       return;
     }
-    if (
-      messages.length === 0 &&
-      data.webSearchAvailable &&
-      !data.webSearchEnabled &&
-      enabledPreference
-    ) {
+    if (shouldSeedWebSearch) {
       seedingWebSearchForThreadId.current = threadRef.threadId;
       seedWebSearch();
     }
-  }, [
-    threadRef.threadId,
-    messages.length,
-    data.webSearchAvailable,
-    data.webSearchEnabled,
-    enabledPreference,
-    seedWebSearch,
-  ]);
+  };
   const controller = useChatEditor({
     disableSlashSuggestion: true,
     reservedCommands: true,
@@ -358,7 +374,6 @@ export const ChatThreadPage = ({
   // caches are invalidated so the inspector doesn't read whichever
   // entry happens to predate the move.
   const moveToSide = () => {
-    const persistedContext = contextMatterIds ?? data.contextMatterIds;
     void invalidateChatThreadAcrossScopes({
       queryClient,
       threadId: threadRef.threadId,
@@ -367,7 +382,7 @@ export const ChatThreadPage = ({
       openInspectorChat({
         id: threadRef.threadId,
         workspaceId: threadRef.workspaceId,
-        contextMatterIds: persistedContext,
+        contextMatterIds: selectedContextMatterIds,
       });
       void navigate({
         to: "/workspaces/$workspaceId",
@@ -377,7 +392,7 @@ export const ChatThreadPage = ({
     }
     openInspectorChat({
       id: threadRef.threadId,
-      contextMatterIds: persistedContext,
+      contextMatterIds: selectedContextMatterIds,
     });
     void navigate({ to: "/chat" });
   };
@@ -386,7 +401,7 @@ export const ChatThreadPage = ({
     controller.setContent(prompt.body);
     controller.focus();
   };
-  const sendWithoutAnonymization = useEffectEvent(async () => {
+  const sendWithoutAnonymization = useLatestCallback(async () => {
     await resendLatestMessage({ sendMode: CHAT_SEND_MODE.rawOverride });
   });
 
@@ -440,6 +455,12 @@ export const ChatThreadPage = ({
         isLoadingCreateDocumentMatters,
       }}
     >
+      {shouldSeedWebSearch && (
+        <WebSearchSeedLifecycle
+          key={`${threadRef.threadId}:${messages.length}:${data.webSearchAvailable}:${data.webSearchEnabled}:${enabledPreference}`}
+          seed={triggerWebSearchSeed}
+        />
+      )}
       <ChatApprovalContext
         value={{
           activeOrganizationId,
@@ -610,12 +631,14 @@ export const ChatThreadPage = ({
                     <ChatComposerDock
                       data={data}
                       leadingContext={
-                        contextMatterIds !== null ? (
-                          <ChatMatterPicker
-                            matterIds={contextMatterIds}
-                            onChange={setContextMatterIds}
-                          />
-                        ) : undefined
+                        <ChatMatterPicker
+                          matterIds={selectedContextMatterIds}
+                          onChange={(matterIds) =>
+                            setContextMatterIds(
+                              resolveChatContextMatterIds(threadRef, matterIds),
+                            )
+                          }
+                        />
                       }
                       onNewThread={messages.length > 0 ? startNewThread : null}
                       threadRef={threadRef}

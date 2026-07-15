@@ -1,4 +1,5 @@
 import type { EntityKind } from "@/api/db/schema-validators";
+import { arrayOrEmpty } from "@/api/lib/array";
 import type { SafeId } from "@/api/lib/branded-types";
 
 export type WorkflowTargetEntityRow = {
@@ -33,16 +34,17 @@ export const resolveWorkflowTargetEntityIds = ({
   inputEntityIds,
   inputOrder,
 }: ResolveWorkflowTargetEntityIdsArgs) => {
-  const entityIdsByKind = {
-    documents: new Set(
-      entityRows
-        .filter((entity) => entity.kind === "document")
-        .map((entity) => entity.id),
-    ),
-    explicitTargets: new Set(
-      entityRows.filter(isExplicitWorkflowTarget).map((entity) => entity.id),
-    ),
-  };
+  const documents = new Set<SafeId<"entity">>();
+  const explicitTargets = new Set<SafeId<"entity">>();
+  for (const entity of entityRows) {
+    if (entity.kind === "document") {
+      documents.add(entity.id);
+    }
+    if (isExplicitWorkflowTarget(entity)) {
+      explicitTargets.add(entity.id);
+    }
+  }
+  const entityIdsByKind = { documents, explicitTargets };
 
   const targetIds =
     inputEntityIds && inputEntityIds.length > 0
@@ -54,7 +56,7 @@ export const resolveWorkflowTargetEntityIds = ({
       : [...entityIdsByKind.documents];
 
   const targetSet = new Set(targetIds);
-  const prioritized = dedupeEntityIds(inputOrder ?? []).filter((id) =>
+  const prioritized = dedupeEntityIds(arrayOrEmpty(inputOrder)).filter((id) =>
     targetSet.has(id),
   );
   const prioritizedSet = new Set(prioritized);

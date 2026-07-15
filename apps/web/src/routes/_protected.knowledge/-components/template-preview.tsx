@@ -5,12 +5,13 @@ import { useTranslations } from "use-intl";
 
 import { TextSeparator } from "@stll/ui/components/separator";
 
+import { optionalArray } from "@/lib/arrays";
+import { CONDITIONAL_KINDS } from "@/routes/_protected.knowledge/-components/directive-kinds";
+import type { BlockDirectiveKind } from "@/routes/_protected.knowledge/-components/directive-kinds";
 import {
-  CONDITIONAL_KINDS,
   DirectiveLabel,
   HighlightedText,
 } from "@/routes/_protected.knowledge/-components/paragraph-rendering";
-import type { BlockDirectiveKind } from "@/routes/_protected.knowledge/-components/paragraph-rendering";
 import { templatePreviewOptions } from "@/routes/_protected.knowledge/-queries";
 
 // ── Types ────────────────────────────────────────────────
@@ -47,8 +48,8 @@ type BlockSpan = {
   isConditional: boolean;
 };
 
-const OPENERS = new Set<BlockDirectiveKind>(["if", "each"]);
-const CLOSERS = new Set<BlockDirectiveKind>(["endif", "endeach"]);
+const OPENERS: ReadonlySet<BlockDirectiveKind> = new Set(["if", "each"]);
+const CLOSERS: ReadonlySet<BlockDirectiveKind> = new Set(["endif", "endeach"]);
 
 /**
  * Compute per-paragraph depths and block spans (for
@@ -196,7 +197,7 @@ const PreviewParagraph = ({
     : undefined;
 
   if (paragraph.isDirective && paragraph.directiveKind) {
-    const isConditional = CONDITIONAL_KINDS.has(paragraph.directiveKind);
+    const isConditional = CONDITIONAL_KINDS.includes(paragraph.directiveKind);
 
     return (
       <div className="relative">
@@ -322,7 +323,9 @@ export const TemplatePreview = ({ templateId }: { templateId: string }) => {
   );
 
   // Detect whether the response contains multiple sections
-  const sources = new Set(paragraphs.map((p) => p.source).filter(Boolean));
+  const sources = new Set(
+    paragraphs.flatMap((p) => (p.source ? [p.source] : [])),
+  );
   const hasMultipleSections = sources.size > 1;
 
   return (
@@ -345,11 +348,12 @@ export const TemplatePreview = ({ templateId }: { templateId: string }) => {
           return t("templates.previewSectionBody");
         })();
 
+        const storedActiveSpans = activeLines.get(i);
         return (
           <div key={p.index}>
             {showDivider && <SectionDivider label={sectionLabel} />}
             <PreviewParagraph
-              activeSpans={activeLines.get(i) ?? []}
+              activeSpans={optionalArray(storedActiveSpans)}
               depth={depths[i] ?? 0}
               error={errorsByIndex.get(p.index)}
               paragraph={p}

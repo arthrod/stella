@@ -13,14 +13,7 @@
  * extracts and renders accept/reject cards). That work is Phase E.
  */
 
-import {
-  Suspense,
-  useEffectEvent,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { Suspense, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
@@ -72,6 +65,7 @@ import type {
 import type { DocxComments } from "@/components/docx/app-docx-editor";
 import { useAIKeyGate } from "@/components/require-ai-key";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { getAnalytics } from "@/lib/analytics/provider";
 import { ChatAnonymizationLayer } from "@/lib/anonymize/use-chat-anonymization-layer";
 import {
@@ -155,16 +149,38 @@ const summarizeOperation = (
       const names = operation.parties.map((p) => p.name).join(", ");
       return `Insert signature table for ${names}`;
     }
+    case "replaceRange":
+      return `Replace selected text with “${operation.replace}”`;
+    case "commentOnRange":
+      return "Comment on selected text";
+    case "formatRange":
+      return "Format selected text";
     default:
       operation satisfies never;
       return "";
   }
 };
 
+/** The block a folio operation anchors to; range ops carry it on the handle. */
+const folioOperationBlockId = (operation: FolioAIEditOperation): string =>
+  operation.type === "replaceRange" ||
+  operation.type === "commentOnRange" ||
+  operation.type === "formatRange"
+    ? operation.range.blockId
+    : operation.blockId;
+
+const folioOperationComment = (operation: FolioAIEditOperation) =>
+  operation.type === "formatRange" ? undefined : operation.comment;
+
 type PreparedOperation = {
   folio: FolioAIEditOperation;
   input: ToolInputOperation;
+  /** Internal suggestion/operation id — always generated (uuid-based) so
+   *  review-store entries stay unique across batches. */
   id: string;
+  /** Id echoed to the model in `queued`/`skipped`: the model-supplied
+   *  operation id when present (folio contract), else {@link id}. */
+  reportId: string;
 };
 
 const getOperationComment = (
@@ -172,6 +188,7 @@ const getOperationComment = (
 ): { text: string } | undefined => {
   switch (operation.type) {
     case "replaceInBlock":
+    case "replaceRange":
     case "insertAfterBlock":
     case "insertBeforeBlock":
     case "replaceBlock":
@@ -179,6 +196,7 @@ const getOperationComment = (
     case "insertSignatureTable":
       return operation.comment ? { text: operation.comment.text } : undefined;
     case "commentOnBlock":
+    case "commentOnRange":
       return { text: operation.comment.text };
     default:
       operation satisfies never;
@@ -194,7 +212,7 @@ const getOperationComment = (
 // Trim a leading `@directive` token from a line. Pure string-walking
 // to avoid the regex backtracking warning the linter flags on
 // `\s*`-flanked patterns even when the alternatives are fixed.
-const DIRECTIVE_NAMES = new Set([
+const DIRECTIVE_NAMES: readonly string[] = Object.freeze([
   "pagebreak",
   "signature",
   "signatures",
@@ -226,7 +244,7 @@ const stripDirectivePrefix = (line: string): string => {
     return line;
   }
   const directive = trimmed.slice(1, nameEnd).toLowerCase();
-  if (!DIRECTIVE_NAMES.has(directive)) {
+  if (!DIRECTIVE_NAMES.includes(directive)) {
     return line;
   }
   // Require a word boundary (whitespace or end-of-line) right after
@@ -265,6 +283,43 @@ type PrepareOperationOptions = {
   operation: ToolInputOperation;
   id: string;
   comment: { text: string } | undefined;
+};
+
+type RangeOperationOptions = {
+  operation: Extract<
+    ToolInputOperation,
+    { type: "commentOnRange" | "replaceRange" }
+  >;
+  id: string;
+  comment: { text: string } | undefined;
+};
+
+// Range-addressed operations pass the `find_text` handle straight
+// through; the apply engine re-validates it against the live document
+// and skips with `staleRange` when the selection no longer matches.
+const toFolioRangeOperation = ({
+  operation,
+  id,
+  comment,
+}: RangeOperationOptions): FolioAIEditOperation => {
+  if (operation.type === "commentOnRange") {
+    return {
+      comment: { text: operation.comment.text },
+      id,
+      range: operation.range,
+      type: operation.type,
+    };
+  }
+  const next: FolioAIEditOperation = {
+    id,
+    range: operation.range,
+    replace: operation.replace,
+    type: operation.type,
+  };
+  if (comment) {
+    next.comment = comment;
+  }
+  return next;
 };
 
 const toFolioOperation = ({
@@ -383,6 +438,9 @@ const toFolioOperation = ({
       }
       return next;
     }
+    case "replaceRange":
+    case "commentOnRange":
+      return toFolioRangeOperation({ operation, id, comment });
     default:
       operation satisfies never;
       return null;
@@ -401,7 +459,12 @@ const prepareOperations = (
     if (folio === null) {
       continue;
     }
-    prepared.push({ folio, input: operation, id });
+    prepared.push({
+      folio,
+      input: operation,
+      id,
+      reportId: operation.id ?? id,
+    });
   }
 
   return prepared;
@@ -460,9 +523,60 @@ const buildPreview = (
   operation: FolioAIEditOperation,
   blocksById: Map<string, SnapshotBlock>,
 ): ReviewSuggestionPreview | null => {
-  const block = blocksById.get(operation.blockId);
+  const block = blocksById.get(folioOperationBlockId(operation));
   const blockText = block?.text ?? "";
   switch (operation.type) {
+    // `formatRange` is outside this tool's accepted subset (direct-only
+    // apply mode; the review flow is tracked-changes). Skip defensively
+    // if one ever appears on a stored suggestion.
+    case "formatRange":
+      return null;
+    // Range-addressed edits render with the replaceInBlock preview: the
+    // handle's offsets locate the replaced text inside the snapshot block
+    // the same way a `find` match does.
+    case "replaceRange": {
+      if (block === undefined) {
+        return null;
+      }
+      const start = operation.range.startOffset;
+      const end = Math.min(operation.range.endOffset, blockText.length);
+      if (start >= end) {
+        return null;
+      }
+      const contextStart = Math.max(0, start - PREVIEW_CONTEXT_CHARS);
+      const contextEnd = Math.min(
+        blockText.length,
+        end + PREVIEW_CONTEXT_CHARS,
+      );
+      return {
+        type: "replaceInBlock",
+        contextBefore: blockText.slice(contextStart, start),
+        before: blockText.slice(start, end),
+        after: operation.replace,
+        contextAfter: blockText.slice(end, contextEnd),
+        ...(block.previewRuns !== undefined && {
+          sourceRuns: block.previewRuns,
+          contextStart,
+          matchStart: start,
+          matchEnd: end,
+          contextEnd,
+        }),
+      };
+    }
+    // Anchored like commentOnBlock with a quote: the sliced range text is
+    // the anchor, so no anchorRuns (those render from the block start).
+    case "commentOnRange": {
+      if (block === undefined) {
+        return null;
+      }
+      const start = operation.range.startOffset;
+      const end = Math.min(operation.range.endOffset, blockText.length);
+      const anchor =
+        start < end
+          ? blockText.slice(start, end)
+          : blockText.slice(0, PREVIEW_ANCHOR_CHARS);
+      return { type: "commentOnBlock", anchor };
+    }
     case "replaceInBlock": {
       const idx = blockText.indexOf(operation.find);
       if (idx === -1) {
@@ -579,44 +693,48 @@ const queueReviewSuggestions = ({
   const queuedIds: string[] = [];
   const skipped: { id: string; reason: "noopOperation" | "missingBlock" }[] =
     [];
-  const items: ReviewSuggestion[] = prepared.flatMap(({ id, input, folio }) => {
-    // Drop true no-ops before they ever reach the panel: the model
-    // occasionally emits `find === replace` (or replaceBlock text
-    // identical to the source) as a side effect of running through
-    // every block. Showing them as "X → X" cards is noise.
-    if (isNoopReviewOperation(folio, blocksById)) {
-      skipped.push({ id, reason: "noopOperation" });
-      return [];
-    }
-    const preview = buildPreview(folio, blocksById);
-    if (!preview) {
-      skipped.push({ id, reason: "missingBlock" });
-      return [];
-    }
-    queuedIds.push(id);
-    const base: ReviewSuggestion = {
-      id,
-      blockId: folio.blockId,
-      type: folio.type,
-      summary: summarizeOperation(folio),
-      preview,
-      severity: inputOperationSeverity(input),
-      area: inputOperationArea(input),
-      status: "pending",
-      applyMode: null,
-      revisionIds: null,
-      pendingOperation: folio,
-      snapshot,
-    };
-    const label = labelsById.get(input.blockId);
-    if (label !== undefined) {
-      base.blockLabel = label;
-    }
-    if (folio.comment) {
-      base.comment = folio.comment.text;
-    }
-    return [base];
-  });
+  const items: ReviewSuggestion[] = prepared.flatMap(
+    ({ id, reportId, input, folio }) => {
+      // Drop true no-ops before they ever reach the panel: the model
+      // occasionally emits `find === replace` (or replaceBlock text
+      // identical to the source) as a side effect of running through
+      // every block. Showing them as "X → X" cards is noise.
+      if (isNoopReviewOperation(folio, blocksById)) {
+        skipped.push({ id: reportId, reason: "noopOperation" });
+        return [];
+      }
+      const preview = buildPreview(folio, blocksById);
+      if (!preview) {
+        skipped.push({ id: reportId, reason: "missingBlock" });
+        return [];
+      }
+      queuedIds.push(reportId);
+      const base: ReviewSuggestion = {
+        id,
+        blockId: folioOperationBlockId(folio),
+        type: folio.type,
+        summary: summarizeOperation(folio),
+        preview,
+        severity: inputOperationSeverity(input),
+        area: inputOperationArea(input),
+        status: "pending",
+        applyMode: null,
+        revisionIds: null,
+        undoHandle: null,
+        pendingOperation: folio,
+        snapshot,
+      };
+      const label = labelsById.get(folioOperationBlockId(folio));
+      if (label !== undefined) {
+        base.blockLabel = label;
+      }
+      const folioComment = folioOperationComment(folio);
+      if (folioComment) {
+        base.comment = folioComment.text;
+      }
+      return [base];
+    },
+  );
 
   useReviewStore.getState().appendSuggestions(entityId, items);
 
@@ -641,25 +759,31 @@ const queueReviewSuggestions = ({
 // edit requests on the active file (in favour of
 // apply-active-docx-edits); blocking it outright robbed users of
 // the legitimate "create a new document from this chat" flow.
-const ACTIVE_FILE_BLOCKED_APPROVAL_TOOLS = new Set<ApprovalToolName>();
-
 // The folio-agents comment MUTATION tools: client-executed against the live
 // editor bridge, but behind approval (unlike the auto-run read tools). After
 // the user approves, the overlay executes them via `executeFolioToolCall`, the
 // same shape as `apply-active-docx-edits`. Names mirror the server-side
 // registration in `folio-agent-tools.ts`; kept as local literals like the
 // other tool names this surface matches on.
-const FOLIO_AGENT_COMMENT_MUTATION_TOOL_NAMES = new Set<string>([
-  "add_comment",
-  "reply_comment",
-  "resolve_comment",
-]);
+const FOLIO_AGENT_COMMENT_MUTATION_TOOL_NAMES: readonly string[] =
+  Object.freeze(["add_comment", "reply_comment", "resolve_comment"]);
 
 // Stable empty context returned by `getContextMatterIds` before the picker
 // has seeded (its state is `string[] | null`). A named constant, not a `?? []`
 // literal: an unseeded thread has no selected matters, which is a real state,
 // not a structural invariant to panic on.
 const UNSEEDED_CONTEXT_MATTER_IDS: string[] = [];
+const EMPTY_DOCX_COMMENTS: DocxComments = [];
+const EMPTY_SNAPSHOT_BLOCKS: FolioAIEditSnapshot["blocks"] = [];
+
+const normalizeDocxComments = (
+  comments: DocxComments | null | undefined,
+): DocxComments => {
+  if (comments === null || comments === undefined) {
+    return EMPTY_DOCX_COMMENTS;
+  }
+  return comments;
+};
 
 type FileChatOverlayProps = {
   /** Workspace this viewer belongs to. Scopes the thread + mention sources. */
@@ -697,6 +821,15 @@ type FileChatOverlayProps = {
 
 const protectedRouteApi = getRouteApi("/_protected");
 
+const fallback = (
+  <div
+    aria-hidden="true"
+    className="pointer-events-none absolute inset-x-0 bottom-8 flex justify-center"
+  >
+    <LoaderCircleIcon className="text-muted-foreground size-4 animate-spin" />
+  </div>
+);
+
 export const FileChatOverlay = ({
   workspaceId,
   chatThreadId,
@@ -709,15 +842,6 @@ export const FileChatOverlay = ({
   onNewThread,
   requestDocxEditMode,
 }: FileChatOverlayProps) => {
-  const fallback = (
-    <div
-      aria-hidden="true"
-      className="pointer-events-none absolute inset-x-0 bottom-8 flex justify-center"
-    >
-      <LoaderCircleIcon className="text-muted-foreground size-4 animate-spin" />
-    </div>
-  );
-
   if (chatThreadId === undefined) {
     const fileFieldId = activeFile?.fileFieldId;
     if (
@@ -834,7 +958,7 @@ const FileChatOverlayInner = ({
     select: (ctx) => ctx.user.activeOrganizationId,
   });
   const userContext = useChatUserContext();
-  const getUserContext = useEffectEvent(() => userContext);
+  const getUserContext = useLatestCallback(() => userContext);
   const threadRef = useMemo<ChatThreadRef>(
     () =>
       workspaceId === undefined
@@ -855,7 +979,7 @@ const FileChatOverlayInner = ({
   // `getChatSendMode(threadRef)`, and `ChatAnonymizationLayer` drives the
   // in-editor highlight cue — one source, so display and send agree.
   const anonymized = useChatAnonymized(threadRef);
-  const getSendMode = useEffectEvent(() => getChatSendMode(threadRef));
+  const getSendMode = useLatestCallback(() => getChatSendMode(threadRef));
   // Context matters this file chat draws on. Same plumbing as the main
   // chat and inspector: local state is seeded from the server's persisted
   // set (or, for a fresh thread, the file's own matter), the picker mutates
@@ -868,13 +992,16 @@ const FileChatOverlayInner = ({
   const [seededContextForThreadId, setSeededContextForThreadId] = useState<
     string | null
   >(null);
-  const getContextMatterIds = useEffectEvent(
+  const getContextMatterIds = useLatestCallback(
     () => contextMatterIds ?? UNSEEDED_CONTEXT_MATTER_IDS,
   );
   const lastSentDocxEditSnapshotRef = useRef<FolioAIEditSnapshot | null>(null);
-  const latestDocxCommentsRef = useRef<DocxComments>(docxComments ?? []);
+  // Seeded with the shared empty constant instead of normalizing during
+  // render (the initializer would rebuild and discard the value every
+  // render); the layout effect below fills it before anything reads it.
+  const latestDocxCommentsRef = useRef<DocxComments>(EMPTY_DOCX_COMMENTS);
   useLayoutEffect(() => {
-    latestDocxCommentsRef.current = docxComments ?? [];
+    latestDocxCommentsRef.current = normalizeDocxComments(docxComments);
   }, [docxComments]);
   const hasDocxEditSurface =
     activeFile !== undefined && docxEditorRef !== undefined;
@@ -949,13 +1076,13 @@ const FileChatOverlayInner = ({
     // `createAIEditSnapshot` yet), unlock the input anyway —
     // `canSubmitWithCurrentDocxSnapshot` runs at submit time and re-checks
     // the snapshot, so a stale unlock can't send unanchored edits.
-    const fallback = window.setTimeout(() => {
+    const fallbackTimer = window.setTimeout(() => {
       window.clearInterval(id);
       setEditorReady(true);
     }, 3000);
     return () => {
       window.clearInterval(id);
-      window.clearTimeout(fallback);
+      window.clearTimeout(fallbackTimer);
     };
   }, [editorReady, hasDocxEditSurface, docxEditorRef]);
 
@@ -964,7 +1091,7 @@ const FileChatOverlayInner = ({
   const attentionPulseSeq = useReviewStore((state) =>
     activeFile ? state.chatInputPulse[activeFile.entityId] : undefined,
   );
-  const getActiveFile = useEffectEvent(() => {
+  const getActiveFile = useLatestCallback(() => {
     if (!activeFile) {
       lastSentDocxEditSnapshotRef.current = null;
       return undefined;
@@ -990,8 +1117,8 @@ const FileChatOverlayInner = ({
       supportsDocxEdits: true,
     };
   });
-  const getActiveExternal = useEffectEvent(() => activeExternal);
-  const handleActiveDocxEditToolCall = useEffectEvent(
+  const getActiveExternal = useLatestCallback(() => activeExternal);
+  const handleActiveDocxEditToolCall = useLatestCallback(
     (input: ApplyActiveDocxEditsInput): ApplyActiveDocxEditsOutput => {
       // All edit batches — single direct edits and structured
       // reviews alike — are queued for the user. The editor is not
@@ -1000,10 +1127,11 @@ const FileChatOverlayInner = ({
       // actually clicks Accept.
       if (!activeFile) {
         return {
+          version: 1,
           applied: [],
           queued: [],
           skipped: input.operations.map((operation, index) => ({
-            id: `ai-docx-${String(index + 1)}-${operation.blockId}`,
+            id: operation.id ?? `ai-docx-${String(index + 1)}`,
             reason: "documentNotEditable",
           })),
         };
@@ -1023,19 +1151,22 @@ const FileChatOverlayInner = ({
       const { queuedIds, skipped } = queueReviewSuggestions({
         entityId: activeFile.entityId,
         prepared,
-        snapshotBlocks: lastSnapshot?.blocks ?? [],
+        snapshotBlocks: lastSnapshot
+          ? lastSnapshot.blocks
+          : EMPTY_SNAPSHOT_BLOCKS,
         snapshot: lastSnapshot,
       });
       return {
+        version: 1,
         applied: [],
         queued: queuedIds.map((id) => ({ id })),
         skipped,
       };
     },
   );
-  const blockedApprovalTools = activeFile
-    ? ACTIVE_FILE_BLOCKED_APPROVAL_TOOLS
-    : undefined;
+  // Active-file mode currently adds no approval blocks. Leave the context
+  // value absent until a real blocked tool exists.
+  const blockedApprovalTools = undefined;
 
   const chatThreadContext = {
     allowMissingThread: true,
@@ -1123,7 +1254,7 @@ const FileChatOverlayInner = ({
   });
   const { ensureAIAvailable, openIfAIUnavailable } = useAIKeyGate();
   const [panelOpen, setPanelOpen] = useState(false);
-  const handlePromptSubmit = useEffectEvent(
+  const handlePromptSubmit = useLatestCallback(
     async ({
       prompt,
       files,
@@ -1194,7 +1325,9 @@ const FileChatOverlayInner = ({
       threadRef,
     }),
   );
-  const suggestedPrompts = suggestedPromptsData?.prompts ?? [];
+  const suggestedPrompts = suggestedPromptsData
+    ? suggestedPromptsData.prompts
+    : [];
   const suggestedFollowupPrompt = suggestedPrompts.at(0) ?? undefined;
 
   const editorController = useChatEditor({
@@ -1242,7 +1375,7 @@ const FileChatOverlayInner = ({
       cancelAnimationFrame(id);
     };
   }, [chatThreadId, editorInstance, focusController]);
-  const canSubmitWithCurrentDocxSnapshot = useEffectEvent(() => {
+  const canSubmitWithCurrentDocxSnapshot = useLatestCallback(() => {
     if (!hasDocxEditSurface) {
       return true;
     }
@@ -1265,7 +1398,7 @@ const FileChatOverlayInner = ({
   // write. Returns null before the editor view mounts. The comments ref is
   // updated synchronously on writes so back-to-back approved mutations compose
   // before React commits the parent controlled-state update.
-  const createFolioAgentBridge = useEffectEvent(() => {
+  const createFolioAgentBridge = useLatestCallback(() => {
     const ref = docxEditorRef?.current;
     if (!ref) {
       return null;
@@ -1343,12 +1476,13 @@ const FileChatOverlayInner = ({
     approve: () => Promise<void>;
     toolName: ApprovalToolName;
   }) => {
-    if (!FOLIO_AGENT_COMMENT_MUTATION_TOOL_NAMES.has(toolName)) {
+    if (!FOLIO_AGENT_COMMENT_MUTATION_TOOL_NAMES.includes(toolName)) {
       await approve();
       return;
     }
 
     const part = findFolioAgentApprovalPart(approvalId, toolName);
+
     await approve();
     if (!part) {
       return;
@@ -1387,7 +1521,7 @@ const FileChatOverlayInner = ({
     // the user approves, run the operation against the live editor bridge and
     // answer the tool call with its result (same shape as apply-active-docx-
     // edits). The read tools never reach here — they are auto-run, no approval.
-    if (FOLIO_AGENT_COMMENT_MUTATION_TOOL_NAMES.has(toolName)) {
+    if (FOLIO_AGENT_COMMENT_MUTATION_TOOL_NAMES.includes(toolName)) {
       await approveAndRunFolioAgentCommentMutation({
         approvalId,
         approve: async () => await handleApprove(approvalId, toolName),
@@ -1429,8 +1563,9 @@ const FileChatOverlayInner = ({
   // tracks which `toolCallId`s it has already dispatched itself. The comment
   // MUTATION tools are approval-gated and never flow through here (they are
   // excluded from `selectUnresolvedFolioAgentDocToolCallParts`).
-  const executedFolioAgentDocToolCallIdsRef = useRef<Set<string>>(new Set());
-  const runFolioAgentDocToolCall = useEffectEvent(
+  const executedFolioAgentDocToolCallIdsRef = useRef<Set<string> | null>(null);
+  executedFolioAgentDocToolCallIdsRef.current ??= new Set<string>();
+  const runFolioAgentDocToolCall = useLatestCallback(
     async (part: UnresolvedFolioAgentDocToolCallPart) => {
       try {
         // Read the ref fresh on every call rather than capturing it in a
@@ -1460,7 +1595,7 @@ const FileChatOverlayInner = ({
       } catch (toolCallError) {
         // Allow a retry: a later render of the same unresolved part should
         // be dispatched again instead of hanging forever.
-        executedFolioAgentDocToolCallIdsRef.current.delete(part.id);
+        executedFolioAgentDocToolCallIdsRef.current?.delete(part.id);
         getAnalytics().captureError(toolCallError);
         try {
           await addToolResult({
@@ -1486,15 +1621,20 @@ const FileChatOverlayInner = ({
       return;
     }
 
+    const executedIds = executedFolioAgentDocToolCallIdsRef.current;
+    if (!executedIds) {
+      return;
+    }
+
     const partsToRun = selectUnresolvedFolioAgentDocToolCallParts(
       message.parts,
-      executedFolioAgentDocToolCallIdsRef.current,
+      executedIds,
     );
     for (const part of partsToRun) {
-      executedFolioAgentDocToolCallIdsRef.current.add(part.id);
+      executedIds.add(part.id);
       void runFolioAgentDocToolCall(part);
     }
-  }, [messages]);
+  }, [messages, runFolioAgentDocToolCall]);
 
   const threadScrollRef = useRef<HTMLDivElement>(null);
   const hasMessages = messages.length > 0;
@@ -1691,9 +1831,8 @@ const FileChatOverlayInner = ({
                 // The matter control is a real picker on every surface, so
                 // the user can widen or narrow the file chat's context just
                 // like the main chat and inspector. Seeded (below) with the
-                // file's own matter by default. Legibility over the document
-                // comes from the veil behind the docked composer stack (see
-                // `DockedComposer`), not from per-control chrome.
+                // file's own matter by default. The opaque composer pill keeps
+                // the input legible without adding chrome behind this row.
                 contextMatterIds !== null ? (
                   <ChatMatterPicker
                     matterIds={contextMatterIds}

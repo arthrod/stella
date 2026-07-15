@@ -72,7 +72,8 @@ import { TableSkeletonRows } from "@/components/table-skeleton-rows";
 import Tooltip from "@/components/tooltip";
 import { usePermissions } from "@/hooks/use-permissions";
 import { api } from "@/lib/api";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import { pageTitle } from "@/lib/page-title";
 import { toSafeId } from "@/lib/safe-id";
 import { toFormErrors } from "@/lib/schema";
@@ -125,7 +126,7 @@ function ContactsPage() {
     }),
   );
 
-  const items: ContactItem[] = data?.items ?? [];
+  const items: ContactItem[] = data ? data.items : [];
   const isFirstUseEmpty =
     !isLoading &&
     items.length === 0 &&
@@ -404,8 +405,7 @@ const ContactRowActions = ({ contact }: { contact: ContactItem }) => {
         },
         onError: (error) => {
           stellaToast.add({
-            title:
-              error instanceof Error ? error.message : t("errors.actionFailed"),
+            title: userErrorFromThrown(error, t("errors.actionFailed")),
             type: "error",
           });
         },
@@ -615,6 +615,17 @@ type BusinessRegistryAddress = {
   textAddress: string | null;
 };
 
+const CREATE_CONTACT_DEFAULT_VALUES: v.InferInput<
+  ReturnType<typeof createContactSchema>
+> = {
+  type: "person",
+  displayName: "",
+  firstName: "",
+  lastName: "",
+  organizationName: "",
+  registrationNumber: "",
+};
+
 const normalizeIcoInput = (value: string) => value.replaceAll(/\D/gu, "");
 
 const toBillingAddress = (
@@ -662,14 +673,7 @@ const CreateContactDialog = ({
       ?.enabled ?? false;
 
   const form = useForm({
-    defaultValues: {
-      type: "person",
-      displayName: "",
-      firstName: "",
-      lastName: "",
-      organizationName: "",
-      registrationNumber: "",
-    },
+    defaultValues: CREATE_CONTACT_DEFAULT_VALUES,
     validators: { onDynamic: schema },
     onSubmit: async ({ value }) => {
       const result = v.safeParse(schema, value);
@@ -765,8 +769,7 @@ const CreateContactDialog = ({
       });
     } catch (error) {
       stellaToast.add({
-        title:
-          error instanceof Error ? error.message : t("errors.actionFailed"),
+        title: userErrorFromThrown(error, t("errors.actionFailed")),
         type: "error",
       });
     } finally {

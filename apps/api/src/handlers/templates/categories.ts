@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { status, t } from "elysia";
 import type { Static } from "elysia";
 
-import type { ScopedDb } from "@/api/db";
+import type { ScopedDb } from "@/api/db/safe-db";
 import { templateCategories } from "@/api/db/schema";
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
@@ -305,6 +305,7 @@ export const deleteTemplateCategoryHandler = async ({
     // null). Must happen before the delete; otherwise the
     // FK onDelete: "set null" would null children's
     // parentId instead of promoting to grandparent.
+
     await tx
       .update(templateCategories)
       .set({ parentId: existing.parentId ?? null })

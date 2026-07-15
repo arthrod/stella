@@ -16,8 +16,8 @@
 import { panic } from "better-result";
 import { and, eq } from "drizzle-orm";
 
-import type { Transaction } from "@/api/db";
 import { member } from "@/api/db/auth-schema";
+import type { Transaction } from "@/api/db/root";
 import { usagePolicies, usageEntitlements } from "@/api/db/schema";
 import type { UsageEntitlementStatus } from "@/api/db/schema";
 import type {
@@ -27,7 +27,8 @@ import type {
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
 import { recordWebhookAuditEvent } from "@/api/lib/hosted-usage-provider/webhook-store";
-import { allocateUsage } from "@/api/lib/usage";
+import { parseExternalOrganizationId } from "@/api/lib/safe-id-boundaries";
+import { allocateUsage } from "@/api/lib/usage/usage-ledger";
 
 export type DispatchOutcome =
   | { kind: "applied"; entitlementId: SafeId<"usageEntitlement"> }
@@ -300,14 +301,12 @@ export const handleHostedEntitlementUpsert = async ({
       if (metadataOrganizationId === null) {
         return { kind: "ignored", reason: "missing metadata.organization_id" };
       }
-      // SAFETY: organization_id reaches us via provider metadata that we
-      // ourselves set at hosted setup creation (create-hosted-setup.ts pulls
-      // it from ctx.session.activeOrganizationId). The webhook signature we
-      // verified covers the whole body including metadata, so this value is
-      // what we wrote. The FK on usage_entitlements.organization_id rejects a
-      // malformed value on insert rather than attaching to a non-existent org.
-      // eslint-disable-next-line typescript/no-unsafe-type-assertion
-      const organizationId = metadataOrganizationId as SafeId<"organization">;
+      const organizationId = parseExternalOrganizationId(
+        metadataOrganizationId,
+      );
+      if (organizationId === null) {
+        return { kind: "ignored", reason: "invalid metadata.organization_id" };
+      }
       ownerOrganizationId = organizationId;
       const inserted = await tx
         .insert(usageEntitlements)
@@ -462,16 +461,10 @@ export const handleHostedAllocation = async ({
   if (!organizationIdRaw) {
     return { kind: "ignored", reason: "missing metadata.organization_id" };
   }
-  // SAFETY: organization_id reaches us via provider metadata that we
-  // ourselves set at hosted setup creation (create-hosted-setup.ts pulls it
-  // from ctx.session.activeOrganizationId). The webhook signature
-  // we verified covers the whole body including metadata, so this
-  // value is what we wrote. The FK
-  // on usage_allocations.organization_id is the last line of defence:
-  // a malformed value rejects on insert rather than silently
-  // attributing units to a non-existent org.
-  // eslint-disable-next-line typescript/no-unsafe-type-assertion
-  const organizationId = organizationIdRaw as SafeId<"organization">;
+  const organizationId = parseExternalOrganizationId(organizationIdRaw);
+  if (organizationId === null) {
+    return { kind: "ignored", reason: "invalid metadata.organization_id" };
+  }
 
   const policy = await resolvePolicyByHostedPolicyRef(tx, payload.policy_ref);
   if (!policy) {

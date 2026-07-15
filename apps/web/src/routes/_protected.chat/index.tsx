@@ -1,4 +1,4 @@
-import { useEffectEvent, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 
 import {
@@ -37,6 +37,7 @@ import { useAIKeyGate } from "@/components/require-ai-key";
 import { StellaMark } from "@/components/stella-mark";
 import Tooltip from "@/components/tooltip";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { ChatAnonymizationLayer } from "@/lib/anonymize/use-chat-anonymization-layer";
@@ -50,7 +51,7 @@ import { createChatThreadId } from "@/lib/chat-thread-ref";
 import { isPlaceholderThreadTitle } from "@/lib/chat-thread-title";
 import { useChatWebSearchPreferenceStore } from "@/lib/chat-web-search-store";
 import { ChromeHeaderActions } from "@/lib/chrome-header-actions";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
 import { useModelSelectorStore } from "@/lib/model-selector-store";
 import { usePinnedStore } from "@/lib/pinned-store";
 import type { ChatPrompt } from "@/lib/prompts/types";
@@ -87,8 +88,9 @@ function ChatIndex() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const userContext = useChatUserContext();
-  const getUserContext = useEffectEvent(() => userContext);
-  const threadIdRef = useRef(createChatThreadId());
+  const getUserContext = useLatestCallback(() => userContext);
+  const threadIdRef = useRef<ChatThreadRef["threadId"] | null>(null);
+  threadIdRef.current ??= createChatThreadId();
   // `/new` rotates the ref above; bump a render so `threadRef` (and the
   // composer bound to it via `useChatEditor`) rebind to the fresh id instead
   // of staying on the abandoned draft.
@@ -123,10 +125,10 @@ function ChatIndex() {
     [groupedThreadPages?.pages],
   );
   const anonymized = useChatAnonymized(threadRef);
-  const getSendMode = useEffectEvent(() => getChatSendMode(threadRef));
+  const getSendMode = useLatestCallback(() => getChatSendMode(threadRef));
   const openInspectorChat = useInspectorStore((s) => s.openChat);
   const [contextMatterIds, setContextMatterIds] = useState<string[]>([]);
-  const getContextMatterIds = useEffectEvent(() => contextMatterIds);
+  const getContextMatterIds = useLatestCallback(() => contextMatterIds);
   // Standalone, non-suspense fetch of the draft thread metadata.
   // We deliberately don't reuse `chatThreadOptions` here because that
   // helper instantiates a stateful `Chat<>` inside its queryFn on
@@ -197,7 +199,11 @@ function ChatIndex() {
   const { mutate: seedDraftWebSearch } = useMutation({
     mutationFn: async () => {
       const response = await api.chat
-        .threads({ threadId: toSafeId<"chatThread">(threadIdRef.current) })
+        .threads({
+          threadId: toSafeId<"chatThread">(
+            threadIdRef.current ?? createChatThreadId(),
+          ),
+        })
         .patch({ webSearchEnabled: true }, { query: {} });
       if (response.error) {
         throw toAPIError(response.error);
@@ -259,14 +265,16 @@ function ChatIndex() {
 
   const pinnedMatters = useMemo(() => {
     const workspaceById = new Map<string, PinnedMatter>();
-    for (const workspace of workspaces ?? []) {
-      workspaceById.set(workspace.id, {
-        color: workspace.color,
-        id: workspace.id,
-        lastActivityAt: workspace.lastActivityAt,
-        name: workspace.name,
-        client: workspace.client,
-      });
+    if (workspaces) {
+      for (const workspace of workspaces) {
+        workspaceById.set(workspace.id, {
+          color: workspace.color,
+          id: workspace.id,
+          lastActivityAt: workspace.lastActivityAt,
+          name: workspace.name,
+          client: workspace.client,
+        });
+      }
     }
     const matters: PinnedMatter[] = [];
     for (const workspaceId of pinnedOrder) {
@@ -278,24 +286,25 @@ function ChatIndex() {
     return matters.slice(0, 5);
   }, [pinnedOrder, workspaces]);
 
-  const lastAccessedMatters = useMemo(
-    () =>
-      (workspaces ?? [])
-        .toSorted(
-          (left, right) =>
-            new Date(right.lastActivityAt).getTime() -
-            new Date(left.lastActivityAt).getTime(),
-        )
-        .slice(0, 5)
-        .map((workspace) => ({
-          color: workspace.color,
-          id: workspace.id,
-          lastActivityAt: workspace.lastActivityAt,
-          name: workspace.name,
-          client: workspace.client,
-        })),
-    [workspaces],
-  );
+  const lastAccessedMatters = useMemo(() => {
+    if (!workspaces) {
+      return [];
+    }
+    return workspaces
+      .toSorted(
+        (left, right) =>
+          new Date(right.lastActivityAt).getTime() -
+          new Date(left.lastActivityAt).getTime(),
+      )
+      .slice(0, 5)
+      .map((workspace) => ({
+        color: workspace.color,
+        id: workspace.id,
+        lastActivityAt: workspace.lastActivityAt,
+        name: workspace.name,
+        client: workspace.client,
+      }));
+  }, [workspaces]);
 
   const visibleMatters =
     pinnedMatters.length > 0 ? pinnedMatters : lastAccessedMatters;
@@ -342,7 +351,7 @@ function ChatIndex() {
 
   const moveToSide = () => {
     openInspectorChat({
-      id: threadIdRef.current,
+      id: threadIdRef.current ?? createChatThreadId(),
       contextMatterIds,
     });
     void navigate({ to: "/chat" });
@@ -495,7 +504,9 @@ function ChatIndex() {
 
                 await navigate({
                   to: "/chat/$threadId",
-                  params: { threadId: threadIdRef.current },
+                  params: {
+                    threadId: threadIdRef.current ?? createChatThreadId(),
+                  },
                 });
                 void invalidateGroupedChatThreads(queryClient);
               }}

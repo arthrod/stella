@@ -8,10 +8,11 @@
 import { panic, Result } from "better-result";
 import * as cheerio from "cheerio";
 import { count, eq } from "drizzle-orm";
+import * as v from "valibot";
 
 import type { SkillMetadata } from "@stll/skills";
 
-import type { SafeDb, SafeDbError } from "@/api/db";
+import type { SafeDb, SafeDbError } from "@/api/db/safe-db";
 import { caseLawDecisions, entities, workspaces } from "@/api/db/schema";
 import type { PracticeJurisdiction } from "@/api/db/schema";
 import { formatDecisionForPrompt } from "@/api/handlers/case-law/analysis/prompts/base";
@@ -55,6 +56,10 @@ const ACTIVE_SKILL_RESOURCE_LIST_MAX_COUNT = 100;
  * model's window; tune down if we ship larger documents.
  */
 const ACTIVE_DOCX_EDIT_BLOCKS_MAX_COUNT = 600;
+
+const REGION_DISPLAY_NAMES = new Intl.DisplayNames(["en"], {
+  type: "region",
+});
 
 type BuildPromptMentionExampleProps = {
   label: string;
@@ -148,23 +153,28 @@ type PromptSkillMetadata = SkillMetadata & {
   source?: "built-in" | "installed" | undefined;
 };
 
-declare const __chatPromptPartBrand: unique symbol;
+const chatCacheStablePrefixSchema = v.pipe(
+  v.string(),
+  v.brand("ChatCacheStablePrefix"),
+);
+const chatSafePromptSchema = v.pipe(v.string(), v.brand("ChatSafePrompt"));
+const chatUntrustedPromptSuffixSchema = v.pipe(
+  v.string(),
+  v.brand("ChatUntrustedPromptSuffix"),
+);
+const chatFullPromptSchema = v.pipe(v.string(), v.brand("ChatFullPrompt"));
 
-export type ChatCacheStablePrefix = string & {
-  readonly [__chatPromptPartBrand]: "cacheStablePrefix";
-};
+export type ChatCacheStablePrefix = v.InferOutput<
+  typeof chatCacheStablePrefixSchema
+>;
 
-export type ChatSafePrompt = string & {
-  readonly [__chatPromptPartBrand]: "safePrompt";
-};
+export type ChatSafePrompt = v.InferOutput<typeof chatSafePromptSchema>;
 
-export type ChatUntrustedPromptSuffix = string & {
-  readonly [__chatPromptPartBrand]: "untrustedSuffix";
-};
+export type ChatUntrustedPromptSuffix = v.InferOutput<
+  typeof chatUntrustedPromptSuffixSchema
+>;
 
-export type ChatFullPrompt = string & {
-  readonly [__chatPromptPartBrand]: "fullPrompt";
-};
+export type ChatFullPrompt = v.InferOutput<typeof chatFullPromptSchema>;
 
 export type ChatPromptParts = {
   cacheStablePrefix: ChatCacheStablePrefix;
@@ -194,26 +204,17 @@ export type ChatPromptParts = {
 };
 
 const brandChatCacheStablePrefix = (text: string): ChatCacheStablePrefix =>
-  // SAFETY: only this prompt assembler mints cache-stable prefixes.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
-  text as ChatCacheStablePrefix;
+  v.parse(chatCacheStablePrefixSchema, text);
 
 const brandChatSafePrompt = (text: string): ChatSafePrompt =>
-  // SAFETY: only this prompt assembler mints the trusted scaffold.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
-  text as ChatSafePrompt;
+  v.parse(chatSafePromptSchema, text);
 
 const brandChatUntrustedPromptSuffix = (
   text: string,
-): ChatUntrustedPromptSuffix =>
-  // SAFETY: only this prompt assembler mints the dynamic suffix.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
-  text as ChatUntrustedPromptSuffix;
+): ChatUntrustedPromptSuffix => v.parse(chatUntrustedPromptSuffixSchema, text);
 
 const brandChatFullPrompt = (text: string): ChatFullPrompt =>
-  // SAFETY: fullPrompt is derived from already-branded prompt parts.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
-  text as ChatFullPrompt;
+  v.parse(chatFullPromptSchema, text);
 
 const ANONYMIZED_MODE_SYSTEM_HINT = [
   "ANONYMIZED MODE: Names, organizations and other identifying entities the user mentions have been replaced with stable placeholders such as `[PERSON_1]`, `[ORGANIZATION_1]`, `[DATE_1]`. The same placeholder always refers to the same real entity within this conversation.",
@@ -1366,21 +1367,17 @@ const buildPracticeJurisdictionLine = (
   if (practiceJurisdictions.length === 0) {
     return "";
   }
-  const names = new Intl.DisplayNames(["en"], { type: "region" });
-  const ordered = [...practiceJurisdictions].sort((a, b) =>
-    (() => {
-      if (a.isPrimary === b.isPrimary) {
-        return 0;
-      }
-      if (a.isPrimary) {
-        return -1;
-      }
-      return 1;
-    })(),
-  );
+  const ordered = practiceJurisdictions.toSorted((a, b) => {
+    if (a.isPrimary === b.isPrimary) {
+      return 0;
+    }
+    return a.isPrimary ? -1 : 1;
+  });
   const annotatePrimary = ordered.length > 1;
   const formatted = ordered.map((jurisdiction) => {
-    const name = names.of(jurisdiction.countryCode) ?? jurisdiction.countryCode;
+    const name =
+      REGION_DISPLAY_NAMES.of(jurisdiction.countryCode) ??
+      jurisdiction.countryCode;
     return annotatePrimary && jurisdiction.isPrimary
       ? `${name} (primary)`
       : name;

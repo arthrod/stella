@@ -1,7 +1,7 @@
 import { Result } from "better-result";
 import { t } from "elysia";
 
-import type { SafeDb, ScopedDb } from "@/api/db";
+import type { SafeDb, ScopedDb } from "@/api/db/safe-db";
 import { templateFills } from "@/api/db/schema";
 import { adaptAiFields } from "@/api/handlers/docx/adapt-ai-fields";
 import {
@@ -22,7 +22,7 @@ import { convertToPdf } from "@/api/handlers/files/gotenberg";
 import { isTemplateOutputValid } from "@/api/handlers/templates/validate-template-output";
 import type { OrgAIConfig } from "@/api/lib/ai-config";
 import { loadOrgAIConfig } from "@/api/lib/ai-config-loader";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createTanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
 import {
   assertUsageAvailableForHandler,
@@ -180,7 +180,6 @@ export const fillHandler = async ({
     );
   }
 
-  const buffer = Buffer.from(await file.arrayBuffer());
   if (!isTemplateData(parsed)) {
     return new Response(
       JSON.stringify({
@@ -191,6 +190,8 @@ export const fillHandler = async ({
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
+
+  const buffer = Buffer.from(await file.arrayBuffer());
 
   // Draft any AI-fillable fields (manifest fields with an aiPrompt) before fill,
   // so an AI placeholder like "the scope of this power of attorney" is filled on

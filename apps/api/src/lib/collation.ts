@@ -13,6 +13,7 @@ export const getCollator = (locale: string): Intl.Collator => {
   if (cached) {
     return cached;
   }
+
   const collator = new Intl.Collator(locale);
   collators.set(locale, collator);
   return collator;

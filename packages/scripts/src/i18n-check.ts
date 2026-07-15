@@ -12,6 +12,8 @@
  *                    the current untranslated/duplicate debt so the gate
  *                    stays green while catching new regressions.
  */
+import { parse, TYPE } from "@formatjs/icu-messageformat-parser";
+import type { MessageFormatElement } from "@formatjs/icu-messageformat-parser";
 import path from "node:path";
 
 export type NestedMessages = {
@@ -237,32 +239,69 @@ const ALLOWED_IDENTICAL = new Set<string>([
   "Markdown",
 ]);
 
+// Parsing ICU is on the isTriviallyIdentical hot path, so memoize: every
+// unique string is parsed at most once. A parse failure (invalid ICU; already
+// reported separately by i18n-lint) is cached as null.
+const icuParseCache = new Map<string, MessageFormatElement[] | null>();
+const safeParseIcu = (value: string): MessageFormatElement[] | null => {
+  const cached = icuParseCache.get(value);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let result: MessageFormatElement[] | null;
+  try {
+    result = parse(value);
+  } catch {
+    result = null;
+  }
+  icuParseCache.set(value, result);
+  return result;
+};
+
+/**
+ * Literal, human-translatable text from an ICU MessageFormat AST: plain text
+ * and select/plural BRANCH TEXT count (e.g. "New " in
+ * `{layoutType, select, other {New {layout}}}`), since that text is real
+ * language content a translator must render. Argument placeholders
+ * (`{n}`, `{date, date, short}`), the select/plural variable name and
+ * category keywords (`other`, `one`, ...), and `#` are control syntax, not
+ * translatable text, and are dropped.
+ */
+const extractLiteralText = (elements: MessageFormatElement[]): string => {
+  let text = "";
+
+  for (const element of elements) {
+    switch (element.type) {
+      case TYPE.literal:
+        text += element.value;
+        break;
+      case TYPE.select:
+      case TYPE.plural:
+        for (const option of Object.values(element.options)) {
+          text += extractLiteralText(option.value);
+        }
+        break;
+      case TYPE.tag:
+        text += extractLiteralText(element.children);
+        break;
+      default:
+        // argument, number, date, time, pound: interpolated, not translatable text.
+        break;
+    }
+  }
+
+  return text;
+};
+
+/**
+ * Strip ICU MessageFormat control syntax from a value, keeping literal text
+ * (including select/plural branch text) so it can be checked for real
+ * language content. Falls back to the raw value when it does not parse as
+ * valid ICU (a syntax error there is reported separately by i18n-lint).
+ */
 const stripIcuPlaceholders = (value: string): string => {
-  const literal: string[] = [];
-  let placeholder: string[] | null = null;
-
-  for (const char of value) {
-    if (placeholder) {
-      placeholder.push(char);
-      if (char === "}") {
-        placeholder = null;
-      }
-      continue;
-    }
-
-    if (char === "{") {
-      placeholder = [char];
-      continue;
-    }
-
-    literal.push(char);
-  }
-
-  if (placeholder) {
-    literal.push(...placeholder);
-  }
-
-  return literal.join("");
+  const elements = safeParseIcu(value);
+  return elements === null ? value : extractLiteralText(elements);
 };
 
 /** A value that is expected to read identically in every language. */
@@ -287,6 +326,12 @@ export const findUntranslated = (
   baseline: CheckBaseline,
 ): string[] => {
   const offenders: string[] = [];
+  const identicalToSourceLocales = new Map(
+    Object.entries(baseline.identicalToSource).map(([key, locales]) => [
+      key,
+      new Set(locales),
+    ]),
+  );
 
   for (const key of flattenKeys(source)) {
     const sourceValue = getNestedValue(source, key);
@@ -297,7 +342,7 @@ export const findUntranslated = (
     if (isTriviallyIdentical(sourceValue)) {
       continue;
     }
-    if (baseline.identicalToSource[key]?.includes(locale)) {
+    if (identicalToSourceLocales.get(key)?.has(locale)) {
       continue;
     }
     offenders.push(key);
@@ -464,10 +509,14 @@ if (import.meta.main) {
   // Seed/refresh the baseline from the current state, then exit.
   if (shouldWriteBaseline) {
     const identicalToSource: Record<string, string[]> = {};
-    for (const file of localeFiles) {
+    const baselineLocaleMessages = await Promise.all(
+      localeFiles.map(async (file) => ({
+        file,
+        messages: await readLang(file),
+      })),
+    );
+    for (const { file, messages } of baselineLocaleMessages) {
       const locale = file.replace(/\.json$/u, "");
-      // oxlint-disable-next-line no-await-in-loop -- locales must be processed in sorted order so identicalToSource accumulates deterministically
-      const messages = await readLang(file);
       for (const key of findUntranslated(
         enMessages,
         messages,
@@ -551,10 +600,15 @@ if (import.meta.main) {
     }
   }
 
-  for (const file of localeFiles) {
+  const localeMessages = await Promise.all(
+    localeFiles.map(async (file) => ({
+      file,
+      messages: await readLang(file),
+    })),
+  );
+
+  for (const { file, messages } of localeMessages) {
     const locale = file.replace(/\.json$/u, "");
-    // oxlint-disable-next-line no-await-in-loop -- locales reported in sorted order; console output and sync writes must stay deterministic per file
-    const messages = await readLang(file);
     const langKeys = new Set(flattenKeys(messages));
 
     const missing = [...enKeys].filter((k) => !langKeys.has(k));
@@ -595,7 +649,7 @@ if (import.meta.main) {
 
     if (shouldSync) {
       const synced = syncMessages(enMessages, messages);
-      // oxlint-disable-next-line no-await-in-loop -- sequential per-locale file write paired with ordered console output
+      // oxlint-disable-next-line no-await-in-loop -- sequential by design: write must stay paired with this file's ordered console output
       await Bun.write(filePath, `${JSON.stringify(synced, null, 2)}\n`);
       console.log("  ✓ synced");
     }

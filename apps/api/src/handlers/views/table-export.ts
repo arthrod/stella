@@ -9,6 +9,7 @@ import { queryEntities } from "@/api/handlers/entities/query-entities";
 import type { QueryEntityResult } from "@/api/handlers/entities/query-entities";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
+import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 // eslint-disable-next-line no-restricted-imports -- export boundary: brands field ids returned by queryEntities (server-validated, workspace-scoped) to re-hydrate their justifications from Postgres
 import { toSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
@@ -21,6 +22,7 @@ import { extractFormattingLocale } from "@/api/lib/locale";
 import { sanitizeFilename } from "@/api/lib/sanitize-filename";
 import type { ViewLayout } from "@/api/lib/views-schema";
 import { parseViewLayout } from "@/api/lib/views-schema";
+import { DOCX_MIME_TYPE } from "@/api/mime-types";
 
 // Postgres caps bound parameters per statement; chunk the justification
 // lookup so an export at the row ceiling cannot overflow a single `IN (...)`.
@@ -205,7 +207,7 @@ const config = {
   mcp: { type: "capability", reason: "workspace_schema" },
   params: workspaceParams({ viewId: tSafeId("workspaceView") }),
   query: t.Object({
-    format: t.Union([t.Literal("csv"), t.Literal("xlsx")]),
+    format: t.Union([t.Literal("csv"), t.Literal("xlsx"), t.Literal("docx")]),
   }),
 } satisfies HandlerConfig;
 
@@ -223,36 +225,33 @@ export const buildExportColumns = (
     }
   }
 
-  const propertyColumns = properties
-    .filter(
-      (property) =>
-        !hiddenIds.has(property.id) && !verdictPropertyIds.has(property.id),
-    )
-    .map((property) => {
-      const column: Extract<ExportColumn, { type: "property" }> = {
-        type: "property",
-        id: property.id,
-        propertyId: property.id,
-        header: property.name,
-      };
+  const propertyColumns: Extract<ExportColumn, { type: "property" }>[] = [];
+  for (const property of properties) {
+    if (hiddenIds.has(property.id) || verdictPropertyIds.has(property.id)) {
+      continue;
+    }
+    const column: Extract<ExportColumn, { type: "property" }> = {
+      type: "property",
+      id: property.id,
+      propertyId: property.id,
+      header: property.name,
+    };
 
-      const verdict = verdictByAskPropertyId.get(property.id);
-      if (verdict) {
-        column.verdictPropertyId = verdict.id;
-        column.commentPropertyId = verdict.id;
-      } else if (property.tool.type === "ai-model") {
-        column.commentPropertyId = property.id;
-      }
+    const verdict = verdictByAskPropertyId.get(property.id);
+    if (verdict) {
+      column.verdictPropertyId = verdict.id;
+      column.commentPropertyId = verdict.id;
+    } else if (property.tool.type === "ai-model") {
+      column.commentPropertyId = property.id;
+    }
 
-      return column;
-    });
-  const metadataColumns = METADATA_COLUMNS.filter(
-    (column) => !hiddenIds.has(column.id),
-  ).map((column) => ({
-    type: "metadata" as const,
-    id: column.id,
-    header: column.header,
-  }));
+    propertyColumns.push(column);
+  }
+  const metadataColumns = METADATA_COLUMNS.flatMap((column) =>
+    hiddenIds.has(column.id)
+      ? []
+      : [{ type: "metadata" as const, id: column.id, header: column.header }],
+  );
   const defaultColumns: ExportColumn[] = [
     ...propertyColumns,
     ...metadataColumns,
@@ -276,18 +275,67 @@ export const buildExportColumns = (
   return [...ordered, ...byId.values()];
 };
 
+const exportDateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** `Intl.DateTimeFormat` for `locale`, cached per locale (bounded by the
+ *  app's supported locales) instead of rebuilt on every export row. */
+const getExportDateFormatter = (locale: string): Intl.DateTimeFormat => {
+  const formatter =
+    exportDateFormatters.get(locale) ??
+    new Intl.DateTimeFormat(locale, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  exportDateFormatters.set(locale, formatter);
+  return formatter;
+};
+
 export const formatExportDate = (value: string, locale: string): string => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
 
-  return new Intl.DateTimeFormat(locale, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  }).format(date);
+  return getExportDateFormatter(locale).format(date);
+};
+
+const exportNumberFormatters = new Map<string, Intl.NumberFormat>();
+
+/** `Intl.NumberFormat` for `locale` (no currency), cached per locale. */
+const getExportNumberFormatter = (locale: string): Intl.NumberFormat => {
+  const formatter =
+    exportNumberFormatters.get(locale) ?? new Intl.NumberFormat(locale);
+  exportNumberFormatters.set(locale, formatter);
+  return formatter;
+};
+
+const exportCurrencyFormatters = new Map<string, Intl.NumberFormat>();
+
+/** `Intl.NumberFormat` for `locale` + `currency`, cached per pair. Currency
+ *  construction can throw on an invalid ISO code, so callers get a `Result`. */
+const getExportCurrencyFormatter = (
+  locale: string,
+  currency: string,
+): Result<Intl.NumberFormat, unknown> => {
+  const key = `${locale}:${currency}`;
+  const cached = exportCurrencyFormatters.get(key);
+  if (cached) {
+    return Result.ok(cached);
+  }
+  const created = Result.try(
+    () =>
+      new Intl.NumberFormat(locale, {
+        style: "currency",
+        currency,
+        minimumFractionDigits: 0,
+      }),
+  );
+  if (!Result.isError(created)) {
+    exportCurrencyFormatters.set(key, created.value);
+  }
+  return created;
 };
 
 const formatExportNumber = (
@@ -296,21 +344,15 @@ const formatExportNumber = (
   locale: string,
 ): string => {
   if (!currency) {
-    return new Intl.NumberFormat(locale).format(value);
+    return getExportNumberFormatter(locale).format(value);
   }
 
-  const formattedCurrency = Result.try(() =>
-    new Intl.NumberFormat(locale, {
-      style: "currency",
-      currency,
-      minimumFractionDigits: 0,
-    }).format(value),
-  );
-  if (!Result.isError(formattedCurrency)) {
-    return formattedCurrency.value;
+  const formatter = getExportCurrencyFormatter(locale, currency);
+  if (!Result.isError(formatter)) {
+    return formatter.value.format(value);
   }
 
-  return `${new Intl.NumberFormat(locale).format(value)} ${currency}`;
+  return `${getExportNumberFormatter(locale).format(value)} ${currency}`;
 };
 
 export const formatFieldContent = (
@@ -600,6 +642,23 @@ export const buildCsvExport = ({ columns, rows }: ExportTable): string => {
   return lines.join("\n");
 };
 
+/** Builds a deliberately plain Word document whose only content is the visible
+ * table. Unlike report exports, this has no template or generated narrative. */
+export const buildDocxExport = async ({
+  columns,
+  rows,
+}: ExportTable): Promise<ArrayBuffer> => {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", docxContentTypesXml);
+  zip.file("_rels/.rels", docxRootRelationshipsXml);
+  zip.file("word/document.xml", buildDocxDocumentXml(columns, rows));
+
+  return await zip.generateAsync({
+    type: "arraybuffer",
+    compression: "DEFLATE",
+  });
+};
+
 type CellHyperlink = { ref: string; url: string; relId: string };
 type CellComment = { ref: string; text: string; row: number; column: number };
 
@@ -701,6 +760,7 @@ const exportTableView = createSafeHandler(
     user,
     session,
     request,
+    recordAuditEvent,
     params: { viewId },
     query,
   }) {
@@ -772,9 +832,9 @@ const exportTableView = createSafeHandler(
         loadedPropertyIds.add(column.verdictPropertyId);
       }
     }
-    const fieldIds = properties
-      .filter((property) => loadedPropertyIds.has(property.id))
-      .map((property) => property.id);
+    const fieldIds = properties.flatMap((property) =>
+      loadedPropertyIds.has(property.id) ? [property.id] : [],
+    );
 
     // Export the same persisted table shape the user sees: visible
     // columns in saved order, saved filters/sorts, and visible field
@@ -854,18 +914,39 @@ const exportTableView = createSafeHandler(
       justificationByFieldId,
     });
     const exportName = workspace?.name ?? view.name;
-    const body =
-      query.format === "csv"
-        ? buildCsvExport(table)
-        : await buildXlsxExport({ ...table, worksheetName: exportName });
+    let body: string | ArrayBuffer;
+    let contentType: string;
+    if (query.format === "csv") {
+      body = buildCsvExport(table);
+      contentType = "text/csv; charset=utf-8";
+    } else if (query.format === "docx") {
+      body = await buildDocxExport(table);
+      contentType = DOCX_MIME_TYPE;
+    } else {
+      body = await buildXlsxExport({ ...table, worksheetName: exportName });
+      contentType = XLSX_MIME_TYPE;
+    }
     const filename = sanitizeFilename(`${exportName}.${query.format}`);
+
+    yield* Result.await(
+      safeDb(async (tx) => {
+        await recordAuditEvent(tx, {
+          action: AUDIT_ACTION.DOWNLOAD,
+          resourceType: AUDIT_RESOURCE_TYPE.VIEW,
+          resourceId: view.id,
+          metadata: {
+            format: query.format,
+            rowCount: table.rows.length,
+          },
+        });
+      }),
+    );
 
     return Result.ok(
       new Response(body, {
         headers: {
           "Content-Disposition": contentDisposition(filename),
-          "Content-Type":
-            query.format === "csv" ? "text/csv; charset=utf-8" : XLSX_MIME_TYPE,
+          "Content-Type": contentType,
         },
       }),
     );
@@ -879,6 +960,88 @@ const escapeXml = (value: string): string =>
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+
+const docxContentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>`;
+
+const docxRootRelationshipsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+
+const sanitizeDocxText = (value: string): string =>
+  sanitizeSpreadsheetCell(value).replace(/\r\n?/gu, "\n");
+
+const buildDocxTextRuns = (value: string): string =>
+  sanitizeDocxText(value)
+    .split("\n")
+    .map(
+      (line, index) =>
+        `${index > 0 ? "<w:br/>" : ""}<w:t xml:space="preserve">${escapeXml(line)}</w:t>`,
+    )
+    .join("");
+
+const buildDocxCellXml = (value: string, header: boolean): string => {
+  const runProperties = header ? "<w:rPr><w:b/></w:rPr>" : "";
+  const cellProperties = header
+    ? '<w:tcPr><w:shd w:fill="E7E5E4"/></w:tcPr>'
+    : "<w:tcPr/>";
+  return `<w:tc>${cellProperties}<w:p><w:r>${runProperties}${buildDocxTextRuns(value)}</w:r></w:p></w:tc>`;
+};
+
+const buildDocxDocumentXml = (
+  columns: ExportColumn[],
+  rows: ExportRow[],
+): string => {
+  const headerRow = `<w:tr><w:trPr><w:tblHeader/></w:trPr>${columns
+    .map((column) =>
+      buildDocxCellXml(sanitizeSpreadsheetHeader(column.header), true),
+    )
+    .join("")}</w:tr>`;
+  const bodyRows = rows
+    .map(
+      (row) =>
+        `<w:tr>${row
+          .map((cell) => buildDocxCellXml(cellDisplayValue(cell), false))
+          .join("")}</w:tr>`,
+    )
+    .join("");
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:tbl>
+      <w:tblPr>
+        <w:tblW w:w="0" w:type="auto"/>
+        <w:tblLayout w:type="autofit"/>
+        <w:tblBorders>
+          <w:top w:val="single" w:sz="4" w:color="B8B8B8"/>
+          <w:left w:val="single" w:sz="4" w:color="B8B8B8"/>
+          <w:bottom w:val="single" w:sz="4" w:color="B8B8B8"/>
+          <w:right w:val="single" w:sz="4" w:color="B8B8B8"/>
+          <w:insideH w:val="single" w:sz="4" w:color="D6D3D1"/>
+          <w:insideV w:val="single" w:sz="4" w:color="D6D3D1"/>
+        </w:tblBorders>
+        <w:tblCellMar>
+          <w:top w:w="80" w:type="dxa"/>
+          <w:left w:w="100" w:type="dxa"/>
+          <w:bottom w:w="80" w:type="dxa"/>
+          <w:right w:w="100" w:type="dxa"/>
+        </w:tblCellMar>
+      </w:tblPr>
+      ${headerRow}${bodyRows}
+    </w:tbl>
+    <w:sectPr>
+      <w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>
+      <w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="360" w:footer="360" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>`;
+};
 
 const columnName = (index: number): string => {
   let n = index + 1;

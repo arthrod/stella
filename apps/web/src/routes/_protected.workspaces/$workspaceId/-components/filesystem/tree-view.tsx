@@ -2,8 +2,6 @@ import {
   Fragment,
   useCallback,
   useDeferredValue,
-  useEffect,
-  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -54,7 +52,9 @@ import {
 } from "@/components/drag-preview";
 import type { DragPreviewData } from "@/components/drag-preview";
 import { FileTreeNameCell } from "@/components/file-tree/file-tree";
+import Tooltip from "@/components/tooltip";
 import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { HOTKEYS } from "@/lib/hotkeys";
 import { toSafeId } from "@/lib/safe-id";
 import { readStoredJson, writeStoredJson } from "@/lib/stored-json";
@@ -535,20 +535,22 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
   };
 
   const setFolderState = useWorkspaceStore((s) => s.setFolderState);
-  const toggleVersion = useWorkspaceStore((s) => s.folderState.toggleVersion);
 
-  // Toggle all folders when the header button is clicked.
-  // Only react to `toggleVersion` changes; `toggleAll` is
-  // intentionally excluded to avoid an infinite loop
-  // (toggleAll → allExpanded → setFolderState → re-render).
-  const handleToggleAll = useEffectEvent(toggleAll);
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- event-relay (toggleVersion bump → toggleAll); the trigger is in ViewToolbar's FolderExpandToggle (separate file), but the toggle reads local expandedIds/allFolderIds here, so the action can't be lifted to the button without threading local state up
-  useEffect(() => {
-    if (toggleVersion === 0) {
-      return;
-    }
-    handleToggleAll();
-  }, [toggleVersion]);
+  const handleToggleAll = useLatestCallback(toggleAll);
+  useExternalSyncEffect(() => {
+    let previousToggleVersion =
+      useWorkspaceStore.getState().folderState.toggleVersion;
+    return useWorkspaceStore.subscribe((state) => {
+      const nextToggleVersion = state.folderState.toggleVersion;
+      if (nextToggleVersion === previousToggleVersion) {
+        return;
+      }
+      previousToggleVersion = nextToggleVersion;
+      if (nextToggleVersion > 0) {
+        handleToggleAll();
+      }
+    });
+  }, [handleToggleAll]);
 
   useExternalSyncEffect(() => {
     setFolderState({
@@ -674,7 +676,7 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
   const [isRootDropTarget, setIsRootDropTarget] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const rootBarRef = useRef<HTMLDivElement>(null);
-  const handleMoveEntitiesToRoot = useEffectEvent((entityIds: string[]) => {
+  const handleMoveEntitiesToRoot = useLatestCallback((entityIds: string[]) => {
     for (const entityId of entityIds) {
       moveEntity.mutate(
         { workspaceId, entityId, parentId: null },
@@ -736,7 +738,7 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
         handleMoveEntitiesToRoot(entityIds);
       },
     });
-  }, []);
+  }, [handleMoveEntitiesToRoot]);
 
   if (data.length === 0) {
     return (
@@ -770,17 +772,21 @@ export const FilesystemView = ({ workspaceId, view }: FilesystemViewProps) => {
             <Breadcrumb>
               <BreadcrumbList>
                 <BreadcrumbItem>
-                  <button
-                    aria-label={t("workspaces.copyToMatter.rootFolder")}
-                    className="text-muted-foreground hover:text-foreground text-xs"
-                    onClick={() => {
-                      void navigateToFolder();
-                    }}
-                    title={t("workspaces.copyToMatter.rootFolder")}
-                    type="button"
+                  <Tooltip
+                    content={t("workspaces.copyToMatter.rootFolder")}
+                    render={
+                      <button
+                        aria-label={t("workspaces.copyToMatter.rootFolder")}
+                        className="text-muted-foreground hover:text-foreground text-xs"
+                        onClick={() => {
+                          void navigateToFolder();
+                        }}
+                        type="button"
+                      />
+                    }
                   >
                     <FolderIcon className="size-3.5" />
-                  </button>
+                  </Tooltip>
                 </BreadcrumbItem>
                 {breadcrumbs.map((crumb, i) => {
                   const isLast = i === breadcrumbs.length - 1;
@@ -1240,24 +1246,24 @@ const FilesystemRow = ({
   const { isDropTarget: isExternalDropTarget, pendingDrop } =
     useVersionOrNewFileDrop({ entity: node, workspaceId, rowRef });
 
-  const isExpanded = useEffectEvent(() => expanded);
-  const isAncestor = useEffectEvent((entityId: string) =>
+  const isExpanded = useLatestCallback(() => expanded);
+  const isAncestor = useLatestCallback((entityId: string) =>
     ancestorIds.has(entityId),
   );
-  const getCurrentSelectedIds = useEffectEvent(() => selectedIds);
-  const getCurrentSelectedDragItems = useEffectEvent((ids: Set<string>) =>
+  const getCurrentSelectedIds = useLatestCallback(() => selectedIds);
+  const getCurrentSelectedDragItems = useLatestCallback((ids: Set<string>) =>
     getSelectedDragItems(ids),
   );
-  const getCurrentSelectedEntities = useEffectEvent((ids: Set<string>) =>
+  const getCurrentSelectedEntities = useLatestCallback((ids: Set<string>) =>
     getSelectedEntities(ids),
   );
-  const getCurrentAncestorIds = useEffectEvent((id: string) =>
+  const getCurrentAncestorIds = useLatestCallback((id: string) =>
     getAncestorIds(id),
   );
-  const toggleCurrentFolder = useEffectEvent(() => {
+  const toggleCurrentFolder = useLatestCallback(() => {
     onToggleFolder(node.entityId);
   });
-  const moveEntitiesToFolder = useEffectEvent((entityIds: string[]) => {
+  const moveEntitiesToFolder = useLatestCallback((entityIds: string[]) => {
     for (const entityId of entityIds) {
       if (isAncestor(entityId)) {
         continue;
@@ -1406,6 +1412,13 @@ const FilesystemRow = ({
     workspaceId,
     t,
     scheduleAutoExpand,
+    getCurrentSelectedDragItems,
+    getCurrentSelectedEntities,
+    isExpanded,
+    isAncestor,
+    getCurrentSelectedIds,
+    getCurrentAncestorIds,
+    moveEntitiesToFolder,
   ]);
 
   // Shared cells: Name + Type. The presentation (indent, guide lines, chevron,

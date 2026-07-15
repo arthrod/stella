@@ -10,7 +10,7 @@ import { useRouteContext } from "@tanstack/react-router";
 
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
 import { toSafeId } from "@/lib/safe-id";
 import type { WorkspaceJustification } from "@/lib/types";
 import { aiAvailabilityOptions } from "@/routes/_protected.organization/-ai-config-queries";
@@ -39,7 +39,9 @@ export const useCreateBBoxes = ({
   const pendingMutationsCount = useIsMutating({
     mutationKey: [CREATE_BBOXES_MUTATION_KEY],
   });
-  const inflightRef = useRef(new Set<string>());
+  const inflightSetRef = useRef<Set<string> | null>(null);
+  inflightSetRef.current ??= new Set<string>();
+  const inflight = inflightSetRef.current;
 
   const mutation = useMutation({
     scope: {
@@ -47,14 +49,11 @@ export const useCreateBBoxes = ({
     },
     mutationKey: [CREATE_BBOXES_MUTATION_KEY],
     mutationFn: async () => {
-      if (
-        justification.boundingBoxes ||
-        inflightRef.current.has(justification.id)
-      ) {
+      if (justification.boundingBoxes || inflight.has(justification.id)) {
         return undefined;
       }
 
-      inflightRef.current.add(justification.id);
+      inflight.add(justification.id);
 
       const response = await api
         .workspaces({ workspaceId: toSafeId<"workspace">(workspaceId) })
@@ -75,7 +74,7 @@ export const useCreateBBoxes = ({
       });
     },
     onSettled: () => {
-      inflightRef.current.delete(justification.id);
+      inflight.delete(justification.id);
     },
     onError: (error) => {
       analytics.captureError(error);

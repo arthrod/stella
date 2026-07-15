@@ -2,7 +2,10 @@ import * as cheerio from "cheerio";
 import { isTag, isText } from "domhandler";
 import type { AnyNode, Element } from "domhandler";
 
-const INLINE_ESCAPE = /(?<ch>[\\`*_~[\]<>])/g;
+// Includes `|` so table-cell pipes are escaped in the same pass as backslashes
+// (renders as a literal `|` in GFM/CommonMark), rather than a separate pipe
+// replace that would double-escape the backslashes escapeText already added.
+const INLINE_ESCAPE = /(?<ch>[\\`*_~[\]<>|])/g;
 
 const escapeText = (text: string): string =>
   text.replace(INLINE_ESCAPE, "\\$<ch>");
@@ -64,8 +67,8 @@ const wrapInlineCode = (text: string): string => {
     return "``";
   }
   let longestRun = 0;
-  for (const run of text.match(/`+/g) ?? []) {
-    longestRun = Math.max(longestRun, run.length);
+  for (const match of text.matchAll(/`+/g)) {
+    longestRun = Math.max(longestRun, match[0].length);
   }
   const fence = "`".repeat(longestRun + 1);
   const padded =
@@ -168,7 +171,9 @@ const renderList = (el: Element, ordered: boolean): string => {
 };
 
 const renderTableCell = (cell: Element): string =>
-  renderInline(cell.children).replace(/\|/g, "\\|").replace(/\n/g, " ");
+  // Pipes are escaped upstream by escapeText/INLINE_ESCAPE; here we only need to
+  // flatten embedded newlines so a cell stays on one table row.
+  renderInline(cell.children).replace(/\n/g, " ");
 
 const collectTableRows = (parent: Element): string[][] => {
   const rows: string[][] = [];

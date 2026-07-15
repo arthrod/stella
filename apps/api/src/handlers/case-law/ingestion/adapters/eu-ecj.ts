@@ -16,11 +16,12 @@ import {
   hashContent,
   stripHtml,
 } from "@/api/handlers/case-law/ingestion/adapters/utils";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import {
   AdapterFetchError,
   TelemetryError,
 } from "@/api/lib/errors/tagged-errors";
+import { fetchWithTimeout } from "@/api/lib/fetch";
 import { logger } from "@/api/lib/observability/logger";
 import { isRecord } from "@/api/lib/type-guards";
 
@@ -178,9 +179,10 @@ WHERE {
 ORDER BY ASC(?date) ASC(?celex)
 LIMIT ${SPARQL_LIMIT}`.trim();
 
-  const response = await fetch(SPARQL_URL, {
+  const response = await fetchWithTimeout(SPARQL_URL, {
     method: "POST",
     signal,
+    timeoutMs: ADAPTER_TIMEOUT.REQUEST,
     headers: {
       Accept: "application/sparql-results+json",
       "Content-Type": "application/x-www-form-urlencoded",
@@ -268,8 +270,9 @@ const fetchFulltext = async (
   signal: AbortSignal,
 ): Promise<string | undefined> => {
   try {
-    const response = await fetch(eurLexHtmlUrl(lang, celex), {
+    const response = await fetchWithTimeout(eurLexHtmlUrl(lang, celex), {
       signal,
+      timeoutMs: ADAPTER_TIMEOUT.REQUEST,
       headers: { "User-Agent": INGESTION_USER_AGENT },
     });
 
@@ -381,7 +384,7 @@ export const euEcjAdapter: SourceAdapter = {
 
           // 3. Fetch fulltext in each language
           for (const lang of ECJ_LANGUAGES) {
-            // oxlint-disable-next-line no-await-in-loop -- polite sequential fulltext fetch per language against EUR-Lex
+            // oxlint-disable-next-line no-await-in-loop -- rate-limited external call: EUR-Lex fulltext fetches are throttled (minRequestIntervalMs) per adapter, so per-language requests stay sequential rather than fanning out
             const fulltext = await fetchFulltext(
               celex,
               lang,

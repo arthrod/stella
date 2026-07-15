@@ -9,7 +9,9 @@ FROM base AS install-inputs
 COPY . .
 RUN mkdir -p /json && \
     cp bun.lock package.json /json/ && \
-    for f in bunfig.toml .npmrc; do [ ! -e "$f" ] || cp "$f" /json/; done && \
+    for input in bunfig.toml .npmrc patches; do \
+      [ ! -e "$input" ] || cp -a "$input" /json/; \
+    done && \
     find apps packages -mindepth 2 -maxdepth 2 -name package.json \
       -not -path '*/node_modules/*' \
       -exec cp --parents -t /json/ {} +
@@ -20,10 +22,10 @@ RUN bun install -g turbo@2.10.4
 COPY . .
 # The prune graph must contain every workspace package that bun.lock resolves
 # npm dependencies to: @stll/folio-core (npm) depends on @stll/docx-core,
-# @stll/docx-utils, and @stll/template-conditions, which the lockfile links to
-# their workspace copies. apps/web declares all three explicitly so the pruned
-# context carries their sources even if the transitive workspace graph
-# (@stll/web -> @stll/api -> ...) changes.
+# @stll/docx-utils, and @stll/template-conditions. The lockfile links the latter
+# two to their workspace copies; apps/web declares all three explicitly so the
+# pruned context carries the required sources and package manifests even if the
+# transitive workspace graph (@stll/web -> @stll/api -> ...) changes.
 RUN turbo prune @stll/web --docker
 
 FROM base AS deps

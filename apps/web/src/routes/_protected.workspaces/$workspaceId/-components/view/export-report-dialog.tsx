@@ -3,7 +3,6 @@ import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Result } from "better-result";
-import { FileOutputIcon } from "lucide-react";
 import { useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
@@ -32,7 +31,8 @@ import { useExternalSyncEffect } from "@/hooks/use-effect";
 import type { TranslationKey } from "@/i18n/types";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
-import { toAPIError, userErrorMessage } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
+import { userErrorMessage } from "@/lib/errors/user-safe";
 import { toSafeId } from "@/lib/safe-id";
 import type { WorkspaceView } from "@/lib/types";
 import { entitiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
@@ -66,18 +66,24 @@ type ActiveExport = {
 };
 
 type ExportReportControlProps = {
+  initialMode?: DeliveryMode;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
   view: Pick<WorkspaceView, "id">;
   workspaceId: string;
 };
 
 export const ExportReportControl = ({
+  initialMode: initialModeProp,
+  onOpenChange,
+  open,
   view,
   workspaceId,
 }: ExportReportControlProps) => {
+  const initialMode = initialModeProp ?? "workspace";
   const t = useTranslations();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const [open, setOpen] = useState(false);
   const [active, setActive] = useState<ActiveExport | null>(null);
   // Guards the terminal handler from firing twice for one export (the polling
   // query settles once, but the sync effect may re-run on unrelated deps).
@@ -187,33 +193,24 @@ export const ExportReportControl = ({
     const toastId = stellaToast.loading(t("common.preparing"));
     handledRef.current = null;
     setActive({ exportId, mode, toastId });
-    setOpen(false);
+    onOpenChange(false);
   };
 
   return (
-    <>
-      <Button
-        aria-label={t("workspaces.views.reportExport.action")}
-        onClick={() => setOpen(true)}
-        size="icon-xs"
-        title={t("workspaces.views.reportExport.action")}
-        variant="ghost"
-      >
-        <FileOutputIcon className="size-3.5" />
-      </Button>
-      <ExportReportDialog
-        onClose={() => setOpen(false)}
-        onOpenChange={setOpen}
-        onStarted={handleStarted}
-        open={open}
-        view={view}
-        workspaceId={workspaceId}
-      />
-    </>
+    <ExportReportDialog
+      initialMode={initialMode}
+      onClose={() => onOpenChange(false)}
+      onOpenChange={onOpenChange}
+      onStarted={handleStarted}
+      open={open}
+      view={view}
+      workspaceId={workspaceId}
+    />
   );
 };
 
 type ExportReportDialogProps = {
+  initialMode: DeliveryMode;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onClose: () => void;
@@ -223,6 +220,7 @@ type ExportReportDialogProps = {
 };
 
 const ExportReportDialog = ({
+  initialMode,
   open,
   onOpenChange,
   onClose,
@@ -235,6 +233,7 @@ const ExportReportDialog = ({
         the picker to the preselected built-in. */}
     {open ? (
       <ExportReportDialogBody
+        initialMode={initialMode}
         onClose={onClose}
         onStarted={onStarted}
         view={view}
@@ -271,12 +270,13 @@ const ExportReportDialogBody = ({
   onStarted,
   view,
   workspaceId,
+  initialMode,
 }: ExportReportDialogBodyProps) => {
   const t = useTranslations();
   const analytics = useAnalytics();
   const navigate = useNavigate();
   const [templateValue, setTemplateValue] = useState<string | null>(null);
-  const [mode, setMode] = useState<DeliveryMode>("workspace");
+  const [mode, setMode] = useState<DeliveryMode>(initialMode);
   const [format, setFormat] = useState<ReportFormat>("docx");
   // AI-drafted narrative (executive + per-contract summaries) is on by default;
   // turning it off skips every model call for a fast, deterministic export.
@@ -297,8 +297,8 @@ const ExportReportDialogBody = ({
     },
   });
 
-  const builtins = data?.builtins ?? [];
-  const stored = data?.stored ?? [];
+  const builtins = data ? data.builtins : [];
+  const stored = data ? data.stored : [];
   const hasTemplates = builtins.length + stored.length > 0;
 
   // Derive the selected value during render (Rule 1): default to the first

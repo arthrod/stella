@@ -14,6 +14,7 @@ import {
   SquarePenIcon,
   TagIcon,
   Trash2Icon,
+  UploadIcon,
   WandSparklesIcon,
   XIcon,
 } from "lucide-react";
@@ -70,9 +71,10 @@ import { UserAvatar } from "@/components/user-avatar";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useI18nStore } from "@/i18n/i18n-store";
 import { api } from "@/lib/api";
+import { optionalArray } from "@/lib/arrays";
 import { compareByLocale } from "@/lib/collation";
-import { DOCX_MIME, TOOLBAR_ROW_MIN_HEIGHT } from "@/lib/consts";
-import { userErrorMessage } from "@/lib/errors";
+import { DOCX_MIME, isDocxFile, TOOLBAR_ROW_MIN_HEIGHT } from "@/lib/consts";
+import { userErrorMessage } from "@/lib/errors/user-safe";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { toSafeId } from "@/lib/safe-id";
 import { CategoryMobileFilterBar } from "@/routes/_protected.knowledge/-components/category-sidebar";
@@ -121,12 +123,18 @@ type TemplateListProps = {
   onCategorySelect: (id: string | null) => void;
   onCategoriesChanged: () => void;
   onCreateBlank: () => void;
+  onCreateFromStyles: (file: File) => void;
   onDiscovered: (file: File, schema: DiscoverData) => void;
   onSelect: (template: TemplateItem) => void;
   onDeleted: () => void;
 };
 
 const protectedRouteApi = getRouteApi("/_protected");
+
+// Only the .docx file-drop affordance — NOT the internal template-row drag
+// (which carries TEMPLATE_DRAG_MIME, not files) — should light up the list.
+const isFileDrag = (e: React.DragEvent) =>
+  e.dataTransfer.types.includes("Files");
 
 export const TemplateList = ({
   templates,
@@ -135,6 +143,7 @@ export const TemplateList = ({
   onCategorySelect,
   onCategoriesChanged,
   onCreateBlank,
+  onCreateFromStyles,
   onDiscovered,
   onSelect,
   onDeleted,
@@ -145,6 +154,7 @@ export const TemplateList = ({
   const canCreateTemplate = usePermissions({ template: ["create"] });
   const assignCategory = useAssignTemplateCategory();
   const inputRef = useRef<HTMLInputElement>(null);
+  const styleInputRef = useRef<HTMLInputElement>(null);
   const [discovering, setDiscovering] = useState(false);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -203,10 +213,24 @@ export const TemplateList = ({
     e.target.value = "";
   };
 
-  // Only the .docx file-drop affordance — NOT the internal template-row drag
-  // (which carries TEMPLATE_DRAG_MIME, not files) — should light up the list.
-  const isFileDrag = (e: React.DragEvent) =>
-    e.dataTransfer.types.includes("Files");
+  const handleStyleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.item(0);
+    e.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    if (!isDocxFile(file)) {
+      stellaToast.add({
+        type: "error",
+        title: t("templates.invalidFileType"),
+      });
+      return;
+    }
+
+    onCreateFromStyles(file);
+  };
 
   const handleDragOver = (e: React.DragEvent) => {
     if (!canCreateTemplate || !isFileDrag(e)) {
@@ -250,13 +274,14 @@ export const TemplateList = ({
     return (
       <TemplateUpload
         onCreateBlank={onCreateBlank}
+        onCreateFromStyles={onCreateFromStyles}
         onDiscovered={onDiscovered}
       />
     );
   }
 
   const allTags = [
-    ...new Set(templates.flatMap((template) => template.tags ?? [])),
+    ...new Set(templates.flatMap((template) => optionalArray(template.tags))),
   ].sort(compareByLocale(lang));
 
   const visibleTemplates = tagFilter
@@ -308,15 +333,19 @@ export const TemplateList = ({
             {tagFilter && (
               <span className="bg-muted text-foreground flex items-center gap-1 rounded-full py-0.5 ps-2 pe-1 text-xs font-medium">
                 {tagFilter}
-                <button
-                  aria-label={t("common.remove")}
-                  title={t("common.remove")}
-                  className="text-muted-foreground hover:text-foreground rounded-full p-0.5"
-                  onClick={() => setTagFilter(null)}
-                  type="button"
+                <Tooltip
+                  content={t("common.remove")}
+                  render={
+                    <button
+                      aria-label={t("common.remove")}
+                      className="text-muted-foreground hover:text-foreground rounded-full p-0.5"
+                      onClick={() => setTagFilter(null)}
+                      type="button"
+                    />
+                  }
                 >
                   <XIcon className="size-3" />
-                </button>
+                </Tooltip>
               </span>
             )}
           </div>
@@ -324,8 +353,15 @@ export const TemplateList = ({
             <DensityToggle density={density} onChange={changeDensity} />
             {canCreateTemplate && (
               <>
-                {/* Primary action: create a blank template in the Studio. The
-                    hidden input stays for the drag-and-drop .docx import path. */}
+                <Button
+                  disabled={discovering}
+                  onClick={() => styleInputRef.current?.click()}
+                  size="sm"
+                  variant="outline"
+                >
+                  <UploadIcon />
+                  {t("templates.createFromStyles")}
+                </Button>
                 <Button
                   disabled={discovering}
                   onClick={onCreateBlank}
@@ -341,6 +377,13 @@ export const TemplateList = ({
                   className="hidden"
                   onChange={handleFileChange}
                   ref={inputRef}
+                  type="file"
+                />
+                <input
+                  accept=".docx"
+                  className="hidden"
+                  onChange={handleStyleFileChange}
+                  ref={styleInputRef}
                   type="file"
                 />
               </>
@@ -915,9 +958,10 @@ const RowStats = ({ template, lang }: RowStatsProps) => {
         <span className="flex items-center gap-1">
           {template.languages.map((tag) => (
             <span
+              aria-label={languageDisplayName(tag, lang)}
               className="bg-muted rounded px-1.5 py-0.5 text-[10px] font-medium uppercase"
               key={tag}
-              title={languageDisplayName(tag, lang)}
+              role="group"
             >
               {tag}
             </span>
@@ -1026,7 +1070,9 @@ const TemplateTagsDialogBody = ({
 }: Omit<TemplateTagsDialogProps, "open">) => {
   const t = useTranslations();
   const invalidateTemplates = useInvalidateTemplates();
-  const [tags, setTags] = useState<string[]>(template.tags ?? []);
+  const [tags, setTags] = useState<string[]>(() =>
+    optionalArray(template.tags),
+  );
   const [input, setInput] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -1085,17 +1131,21 @@ const TemplateTagsDialogBody = ({
                 key={tag}
               >
                 {tag}
-                <button
-                  aria-label={t("common.remove")}
-                  title={t("common.remove")}
-                  className="text-muted-foreground hover:text-foreground rounded-full p-0.5"
-                  onClick={() =>
-                    setTags((current) => current.filter((x) => x !== tag))
+                <Tooltip
+                  content={t("common.remove")}
+                  render={
+                    <button
+                      aria-label={t("common.remove")}
+                      className="text-muted-foreground hover:text-foreground rounded-full p-0.5"
+                      onClick={() =>
+                        setTags((current) => current.filter((x) => x !== tag))
+                      }
+                      type="button"
+                    />
                   }
-                  type="button"
                 >
                   <XIcon className="size-3" />
-                </button>
+                </Tooltip>
               </span>
             ))}
           </div>
@@ -1285,14 +1335,16 @@ const TemplateLanguagesField = ({
   // Offer the full ISO 639-1 living-language list, minus already-picked codes,
   // sorted by the localized label so search and scanning are predictable.
   const compareLabel = compareByLocale(lang);
-  const options: LanguagePick[] = LANGUAGES.filter(
-    (language) => !selectedCodes.has(language.code),
-  )
-    .map((language) => ({
-      code: language.code,
-      label: languageDisplayName(language.code, lang),
-    }))
-    .sort((a, b) => compareLabel(a.label, b.label));
+  const options: LanguagePick[] = LANGUAGES.flatMap((language) =>
+    selectedCodes.has(language.code)
+      ? []
+      : [
+          {
+            code: language.code,
+            label: languageDisplayName(language.code, lang),
+          },
+        ],
+  ).sort((a, b) => compareLabel(a.label, b.label));
 
   const atLimit = languages.length >= MAX_TEMPLATE_LANGUAGES;
 
@@ -1322,15 +1374,19 @@ const TemplateLanguagesField = ({
             >
               {languageDisplayName(tag, lang)}
               <span className="text-muted-foreground uppercase">{tag}</span>
-              <button
-                aria-label={t("common.remove")}
-                title={t("common.remove")}
-                className="text-muted-foreground hover:text-foreground rounded-full p-0.5"
-                onClick={() => onChange(languages.filter((x) => x !== tag))}
-                type="button"
+              <Tooltip
+                content={t("common.remove")}
+                render={
+                  <button
+                    aria-label={t("common.remove")}
+                    className="text-muted-foreground hover:text-foreground rounded-full p-0.5"
+                    onClick={() => onChange(languages.filter((x) => x !== tag))}
+                    type="button"
+                  />
+                }
               >
                 <XIcon className="size-3" />
-              </button>
+              </Tooltip>
             </span>
           ))}
         </div>

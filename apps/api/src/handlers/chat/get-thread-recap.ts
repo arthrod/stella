@@ -15,7 +15,7 @@ import {
   buildRecapMessageWindow,
   RECAP_RECENT_MESSAGE_LIMIT,
 } from "@/api/handlers/chat/thread-recap-window";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { tSafeId } from "@/api/lib/custom-schema";
@@ -124,6 +124,7 @@ const getThreadRecap = createSafeRootHandler(
           orderBy: { createdAt: "asc" },
           limit: 1,
         });
+
         const recentMessagesDesc = await tx.query.chatMessages.findMany({
           where: {
             threadId: { eq: threadId },

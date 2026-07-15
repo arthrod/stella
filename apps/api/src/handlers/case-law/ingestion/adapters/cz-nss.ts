@@ -1,6 +1,10 @@
 import { panic, Result } from "better-result";
 
-import { ADAPTER_KEYS, PARSER_VERSION } from "@/api/handlers/case-law/consts";
+import {
+  ADAPTER_KEYS,
+  ADAPTER_TIMEOUT,
+  PARSER_VERSION,
+} from "@/api/handlers/case-law/consts";
 import type { DocumentAst } from "@/api/handlers/case-law/document-ast";
 import { EMPTY_AST } from "@/api/handlers/case-law/ingestion/adapter";
 import type {
@@ -18,6 +22,7 @@ import {
 import { parseNssDecisionHtml } from "@/api/handlers/case-law/ingestion/parsers/cz-nss";
 import { addUtcDays } from "@/api/lib/dates";
 import { AdapterFetchError } from "@/api/lib/errors/tagged-errors";
+import { fetchWithTimeout } from "@/api/lib/fetch";
 import { logger } from "@/api/lib/observability/logger";
 
 /**
@@ -222,6 +227,7 @@ const parseResultRows = (html: string): ParsedRow[] => {
 
   while ((tbodyMatch = tbodyPattern.exec(html)) !== null) {
     const block = tbodyMatch.groups?.["block"];
+
     if (!block?.includes("Citace")) {
       continue;
     }
@@ -311,7 +317,7 @@ const fetchDecisionContent = async (
 ): Promise<DecisionContent> => {
   // Try rich HTML first
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${BASE_URL}/DokumentOriginal/Html/${documentId}`,
       {
         signal,
@@ -319,6 +325,7 @@ const fetchDecisionContent = async (
           ...COMMON_HEADERS,
           Cookie: session.cookies,
         },
+        timeoutMs: ADAPTER_TIMEOUT.REQUEST,
       },
     );
 
@@ -359,7 +366,7 @@ const fetchDecisionContent = async (
 
   // Fallback: plain text from /Text/{id}
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${BASE_URL}/DokumentOriginal/Text/${documentId}`,
       {
         signal,
@@ -367,6 +374,7 @@ const fetchDecisionContent = async (
           ...COMMON_HEADERS,
           Cookie: session.cookies,
         },
+        timeoutMs: ADAPTER_TIMEOUT.REQUEST,
       },
     );
 
@@ -465,7 +473,7 @@ const fetchDetailMetadata = async (
   const empty = EMPTY_DETAIL;
 
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${BASE_URL}/DokumentDetail/Index/${documentId}`,
       {
         signal,
@@ -473,6 +481,7 @@ const fetchDetailMetadata = async (
           ...COMMON_HEADERS,
           Cookie: session.cookies,
         },
+        timeoutMs: ADAPTER_TIMEOUT.REQUEST,
       },
     );
     if (!response.ok) {
@@ -584,10 +593,11 @@ let cachedSession: {
 } | null = null;
 
 const initSession = async (signal: AbortSignal): Promise<SessionState> => {
-  const response = await fetch(BASE_URL, {
+  const response = await fetchWithTimeout(BASE_URL, {
     signal,
     redirect: "follow",
     headers: COMMON_HEADERS,
+    timeoutMs: ADAPTER_TIMEOUT.REQUEST,
   });
 
   if (!response.ok) {
@@ -664,7 +674,7 @@ const executeSearch = async (
   formData.set(DATE_FROM_FIELD, czDate);
   formData.set(DATE_TO_FIELD, czDate);
 
-  const response = await fetch(`${BASE_URL}/Home/Index`, {
+  const response = await fetchWithTimeout(`${BASE_URL}/Home/Index`, {
     method: "POST",
     signal,
     headers: {
@@ -675,6 +685,7 @@ const executeSearch = async (
     },
     body: formData.toString(),
     redirect: "follow",
+    timeoutMs: ADAPTER_TIMEOUT.REQUEST,
   });
 
   if (!response.ok) {
@@ -716,7 +727,7 @@ const fetchResultPage = async (
   formData.set("currParams", currParams);
   formData.set("page", String(page));
 
-  const response = await fetch(`${BASE_URL}/Home/MyResTRowsCont`, {
+  const response = await fetchWithTimeout(`${BASE_URL}/Home/MyResTRowsCont`, {
     method: "POST",
     signal,
     headers: {
@@ -727,6 +738,7 @@ const fetchResultPage = async (
       "X-Requested-With": "XMLHttpRequest",
     },
     body: formData.toString(),
+    timeoutMs: ADAPTER_TIMEOUT.REQUEST,
   });
 
   if (!response.ok) {
@@ -786,7 +798,7 @@ export const czNssAdapter: SourceAdapter = {
       }
       formData.set("__RequestVerificationToken", session.token);
 
-      const response = await fetch(`${BASE_URL}/Home/Index`, {
+      const response = await fetchWithTimeout(`${BASE_URL}/Home/Index`, {
         method: "POST",
         signal,
         headers: {
@@ -797,6 +809,7 @@ export const czNssAdapter: SourceAdapter = {
         },
         body: formData.toString(),
         redirect: "follow",
+        timeoutMs: ADAPTER_TIMEOUT.REQUEST,
       });
 
       if (!response.ok) {

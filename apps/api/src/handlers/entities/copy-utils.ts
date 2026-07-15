@@ -1,7 +1,7 @@
 import { panic, TaggedError } from "better-result";
 import { and, eq, isNull, like } from "drizzle-orm";
 
-import type { Transaction } from "@/api/db";
+import type { Transaction } from "@/api/db/root";
 import { entities, entityVersions, fields, workspaces } from "@/api/db/schema";
 import type { EntityKind, FieldContent } from "@/api/db/schema-validators";
 import {
@@ -18,6 +18,7 @@ import type { AuditRecorder } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
 import type { SafeId } from "@/api/lib/branded-types";
 import { allocateEntityStamp } from "@/api/lib/document-counter";
+import { lockWorkspacesForEntityCap } from "@/api/lib/entity-cap-lock";
 import { escapeLike } from "@/api/lib/escape-like";
 import { LIMITS } from "@/api/lib/limits";
 import { getS3 } from "@/api/lib/s3";
@@ -114,21 +115,22 @@ export const collectFileCopySources = ({
       continue;
     }
     for (const field of entity.currentVersion.fields) {
-      if (field.content.type === "file" && field.content.id) {
-        const { mimeType } = field.content;
-        sources.push({
-          sourceEntityId: entity.id,
-          sourceFileId: field.content.id,
-          sourcePropertyId: field.propertyId,
-          mimeType,
-          sourceKey: createFileKey({
-            organizationId,
-            workspaceId: sourceWorkspaceId,
-            fileId: field.content.id,
-            mimeType,
-          }),
-        });
+      if (field.content.type !== "file" || !field.content.id) {
+        continue;
       }
+      const { mimeType, id: fileId } = field.content;
+      sources.push({
+        sourceEntityId: entity.id,
+        sourceFileId: fileId,
+        sourcePropertyId: field.propertyId,
+        mimeType,
+        sourceKey: createFileKey({
+          organizationId,
+          workspaceId: sourceWorkspaceId,
+          fileId,
+          mimeType,
+        }),
+      });
     }
   }
 
@@ -435,7 +437,11 @@ export const getFolderSubtree = (
 
   for (const entity of queue) {
     subtree.push(entity);
-    for (const child of childrenByParentId.get(entity.id) ?? []) {
+    const children = childrenByParentId.get(entity.id);
+    if (!children) {
+      continue;
+    }
+    for (const child of children) {
       queue.push(child);
     }
   }
@@ -479,6 +485,13 @@ type CopyEntitiesProps = {
   sourceEntities: WritableEntitySnapshot[];
   /** Source workspace ID for audit log (cross-workspace only). */
   sourceWorkspaceId?: SafeId<"workspace">;
+  /**
+   * Whether the caller will delete the source rows in the same
+   * transaction (a move) as opposed to leaving them untouched (a
+   * copy). Only a move mutates the source workspace, so only a move
+   * needs the source row locked — see the lock-set comment below.
+   */
+  deleteSource: boolean;
 };
 
 /**
@@ -494,7 +507,26 @@ export const copyEntities = async ({
   sourceEntityId,
   sourceEntities,
   sourceWorkspaceId,
+  deleteSource,
 }: CopyEntitiesProps): Promise<CopyEntitiesResult> => {
+  // Same-workspace duplicate and cross-workspace copy both lock the
+  // target only: a pure copy never mutates the source workspace's
+  // rows or its cap, so locking the source would only add unrelated
+  // contention (blocking uploads/tasks/clips there) for no
+  // correctness benefit. Only a cross-workspace MOVE
+  // (`deleteSource`) also locks the source, since the caller deletes
+  // source rows in the same transaction and that must serialize with
+  // concurrent source-side inserts. Both ids go through
+  // `lockWorkspacesForEntityCap`, which sorts them ascending before
+  // locking — see that function for why this closes the
+  // cross-workspace ABBA between an A->B and a concurrent B->A move.
+  await lockWorkspacesForEntityCap(
+    tx,
+    sourceWorkspaceId && deleteSource
+      ? [sourceWorkspaceId, targetWorkspaceId]
+      : [targetWorkspaceId],
+  );
+
   const entityCount = await tx.$count(
     entities,
     eq(entities.workspaceId, targetWorkspaceId),
@@ -561,17 +593,6 @@ export const copyEntities = async ({
     const newParentId =
       source.id === sourceEntityId ? targetParentId : mappedParentId;
 
-    const copyName =
-      source.id === sourceEntityId
-        ? // oxlint-disable-next-line no-await-in-loop -- copy steps depend on prior-created parent IDs in idMap; iterations must run sequentially in order
-          await resolveEntityName({
-            tx,
-            workspaceId: targetWorkspaceId,
-            parentId: newParentId ?? null,
-            name: source.name,
-          })
-        : source.name;
-
     if (source.id !== sourceEntityId && newParentId === undefined) {
       return {
         ok: false,
@@ -580,13 +601,24 @@ export const copyEntities = async ({
       };
     }
 
+    const copyName =
+      source.id === sourceEntityId
+        ? // oxlint-disable-next-line no-await-in-loop -- sequential by design: copy steps depend on prior-created parent IDs in idMap; iterations must run sequentially in order
+          await resolveEntityName({
+            tx,
+            workspaceId: targetWorkspaceId,
+            parentId: newParentId ?? null,
+            name: source.name,
+          })
+        : source.name;
+
     const entityStamp =
       source.kind === "document"
         ? // oxlint-disable-next-line no-await-in-loop -- stamp allocation is a sequential per-workspace counter; must run in order within the transaction
           await allocateEntityStamp(tx, targetWorkspaceId)
         : null;
 
-    // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential inserts; children reference parent IDs created in earlier iterations
+    // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential by design: same DB transaction client; children reference parent IDs created in earlier iterations, and the version insert/currentVersionId update just below depend on this row
     await tx.insert(entities).values({
       id: newEntityId,
       workspaceId: targetWorkspaceId,

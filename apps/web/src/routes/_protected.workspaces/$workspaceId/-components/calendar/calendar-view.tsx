@@ -1,4 +1,4 @@
-import { useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { UIEvent } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -7,9 +7,11 @@ import { useLocale, useTranslations } from "use-intl";
 
 import { stellaToast } from "@stll/ui/components/toast";
 
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { getFirstWeekday, getWeekendDays } from "@/i18n/week";
 import { api } from "@/lib/api";
-import { toAPIError } from "@/lib/errors";
+import { normalizeOptionalArray } from "@/lib/arrays";
+import { toAPIError } from "@/lib/errors/api";
 import { toSafeId } from "@/lib/safe-id";
 import type { EntityKind, WorkspaceView } from "@/lib/types";
 import { EmptyState } from "@/routes/_protected.workspaces/$workspaceId/-components/empty-state";
@@ -22,7 +24,6 @@ import {
 import { entitiesKeys } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
 
 import { CalendarDayCell } from "./calendar-day-cell";
-import { TASK_STATUS_DOT_COLORS } from "./calendar-entity-chip";
 import { CalendarHeader } from "./calendar-header";
 import {
   addUTCMonths,
@@ -42,6 +43,7 @@ import {
   isInternalDateProperty,
   isTaskDateProperty,
   TASK_DATE_IDS,
+  TASK_STATUS_DOT_COLORS,
 } from "./calendar-utils";
 import {
   getCalendarQueryRange,
@@ -148,8 +150,9 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
     getCenteredMonthWindowStart(new Date()),
   );
   const monthScrollRef = useRef<HTMLDivElement>(null);
-  const monthAnchorRefs = useRef(new Map<string, HTMLElement>());
-  const getCurrentViewDate = useEffectEvent(() => viewDate);
+  const monthAnchorRefs = useRef<Map<string, HTMLElement> | null>(null);
+  monthAnchorRefs.current ??= new Map();
+  const getCurrentViewDate = useLatestCallback(() => viewDate);
   const pendingScrollMonthKey = useRef<string | null>(null);
   const pendingScrollAdjustment = useRef<{
     key: string;
@@ -225,6 +228,10 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
     datePropertyId,
     endDatePropertyId,
   });
+  const entriesForDate = (date: string) => {
+    const entries = entitiesByDate.get(date);
+    return normalizeOptionalArray(entries);
+  };
 
   const navigatePrev = () => {
     if (mode === "month") {
@@ -281,7 +288,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
       null;
 
     for (const anchor of monthAnchors) {
-      const element = monthAnchorRefs.current.get(anchor.key);
+      const element = monthAnchorRefs.current?.get(anchor.key);
       if (!element) {
         continue;
       }
@@ -351,7 +358,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
       getMonthWindowStartContaining(start, target),
     );
 
-    const element = monthAnchorRefs.current.get(targetKey);
+    const element = monthAnchorRefs.current?.get(targetKey);
     if (element) {
       element.scrollIntoView({ block: "start" });
       pendingScrollMonthKey.current = null;
@@ -370,7 +377,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
     setMonthWindowStart((start) =>
       getMonthWindowStartContaining(start, target),
     );
-  }, [mode]);
+  }, [mode, getCurrentViewDate]);
 
   useLayoutEffect(() => {
     const container = monthScrollRef.current;
@@ -380,7 +387,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
 
     const adjustment = pendingScrollAdjustment.current;
     if (adjustment) {
-      const element = monthAnchorRefs.current.get(adjustment.key);
+      const element = monthAnchorRefs.current?.get(adjustment.key);
       if (element) {
         container.scrollTop +=
           element.getBoundingClientRect().top - adjustment.top;
@@ -394,7 +401,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
       return;
     }
 
-    const element = monthAnchorRefs.current.get(scrollKey);
+    const element = monthAnchorRefs.current?.get(scrollKey);
     if (!element) {
       return;
     }
@@ -589,10 +596,10 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
                         key={anchor.key}
                         ref={(element) => {
                           if (element) {
-                            monthAnchorRefs.current.set(anchor.key, element);
+                            monthAnchorRefs.current?.set(anchor.key, element);
                             return;
                           }
-                          monthAnchorRefs.current.delete(anchor.key);
+                          monthAnchorRefs.current?.delete(anchor.key);
                         }}
                       >
                         <div
@@ -609,7 +616,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
                       {week.days.map((day) => (
                         <CalendarDayCell
                           day={day}
-                          entries={entitiesByDate.get(day.date) ?? []}
+                          entries={entriesForDate(day.date)}
                           isEditable={isEditable}
                           key={day.date}
                           mode="month"
@@ -643,7 +650,7 @@ export const CalendarView = ({ view, workspaceId }: CalendarViewProps) => {
               {days.map((day) => (
                 <CalendarDayCell
                   day={day}
-                  entries={entitiesByDate.get(day.date) ?? []}
+                  entries={entriesForDate(day.date)}
                   isEditable={isEditable}
                   key={day.date}
                   mode={mode}

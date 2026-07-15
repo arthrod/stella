@@ -17,7 +17,13 @@ import type { ChatAnonRestoration } from "@/components/chat/chat-ui-tools";
 // Skip interactive containers (the anon pill is tooltip-capable)
 // plus block-level code (`pre` wraps fenced code blocks) and
 // non-prose containers.
-const SKIP_PARENT_TAGS = new Set(["a", "button", "pre", "script", "style"]);
+const SKIP_PARENT_TAGS: ReadonlySet<string> = new Set([
+  "a",
+  "button",
+  "pre",
+  "script",
+  "style",
+]);
 
 const REGEX_SPECIALS = /[\\^$.*+?()[\]{}|]/gu;
 
@@ -49,7 +55,7 @@ export function rehypeAnonSpans(
 
   // Sort by descending length so a placeholder that's a prefix of
   // another (rare but cheap insurance) doesn't get shadowed.
-  const sorted = [...pairs].sort(
+  const sorted = pairs.toSorted(
     (a, b) => b.original.length - a.original.length,
   );
   const lookup = new Map(

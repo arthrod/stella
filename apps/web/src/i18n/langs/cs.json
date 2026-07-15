@@ -213,7 +213,6 @@
       "tableNamePlaceholder": "např. Standard 2025"
     },
     "revertToDraft": "Vrátit do konceptu",
-    "running": "Běží",
     "selectMatter": "Vyberte spis...",
     "selectMatterToStart": "Vyberte spis pro spuštění měření",
     "selectedCount": "{count, plural, one {# vybrán} few {# vybrány} other {# vybráno}}",
@@ -895,6 +894,7 @@
     "retry": "Spustit znovu",
     "role": "Role",
     "run": "Spustit",
+    "running": "Běží",
     "save": "Uložit",
     "saveAsPdf": "Uložit jako PDF",
     "saveChanges": "Uložit změny",
@@ -1198,6 +1198,8 @@
     "uploadFailed": "Nahrávání selhalo"
   },
   "feedback": {
+    "discord": "Komunita na Discordu",
+    "github": "Hlášení na GitHubu",
     "trigger": "Zpětná vazba"
   },
   "fileDetail": {
@@ -2395,6 +2397,8 @@
     "confirmDelete": "Tímto trvale smažete vzor.",
     "createDocument": "Vytvořit dokument",
     "createDocumentAnyway": "Přesto vytvořit",
+    "createFromStyles": "Začít se styly dokumentu",
+    "createFromStylesHint": "Vytvoří prázdný vzor se styly ze souboru DOCX. Obsah zdrojového dokumentu se nekopíruje.",
     "createInStudio": "Vytvořit ve stella",
     "createInStudioHint": "Vzor napište přímo v editoru a na místa, kam patří hodnoty, vložte '{{pole}}'.",
     "dateChipFirstOfNextMonth": "První den příštího měsíce",
@@ -3103,9 +3107,12 @@
       "int": "Celé číslo",
       "keepEmpty": "Ponechat prázdné",
       "manualColumn": "Manuální sloupec",
+      "markAllAsLocked": "Uzamknout všechny buňky",
       "markAllAsReviewed": "Označit vše jako zkontrolováno",
-      "markThisGroupAsReviewed": "Mark this group as reviewed",
-      "markedAsReviewed": "{count, plural, one {# cell marked as reviewed} other {# cells marked as reviewed}}",
+      "markThisGroupAsLocked": "Uzamknout tuto skupinu",
+      "markThisGroupAsReviewed": "Označit tuto skupinu jako zkontrolovanou",
+      "markedAsLocked": "{count, plural, one {Uzamčena # buňka} few {Uzamčeny # buňky} other {Uzamčeno # buněk}}",
+      "markedAsReviewed": "{count, plural, one {# buňka označena jako zkontrolovaná} few {# buňky označeny jako zkontrolované} other {# buněk označeno jako zkontrolované}}",
       "multiSelect": "Vícenásobný výběr",
       "nameProperty": "Vlastnost názvu",
       "newColumn": "Nový sloupec",
@@ -3218,6 +3225,8 @@
       "copySuffix": "{name} (kopie)",
       "deleteView": "Smazat zobrazení",
       "exportCsv": "Exportovat CSV",
+      "exportDocxPlain": "Exportovat DOCX (prostá tabulka)",
+      "exportDocxTemplate": "Exportovat DOCX ze vzoru…",
       "exportFailed": "Export selhal",
       "exportTable": "Exportovat tabulku",
       "exportXlsx": "Exportovat XLSX",

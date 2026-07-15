@@ -13,6 +13,7 @@ import type {
   InspectorViewRenderProps,
 } from "@/components/inspector/view-registry";
 import { SIDE_RAIL_TAB_ICON_SIZE_PX, TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import { catalogueOptions } from "@/routes/_protected.knowledge/-queries/catalogue";
 
 import { CatalogueDetailPanel } from "./catalogue-detail-panel";
@@ -40,7 +41,7 @@ import { useUninstallEntry } from "./use-uninstall-entry";
  * or native tool (e.g. `web-search`). Carry the kind so the panel
  * resolves to the right row instead of the first slug match.
  */
-type ToolDetailKind = "skill" | "mcp" | "native-tool";
+export type ToolDetailKind = "skill" | "mcp" | "native-tool";
 
 export type ToolDetailPayload = {
   kind: ToolDetailKind;
@@ -156,10 +157,7 @@ const ToolDetailContent = ({
       },
       onError: (error) => {
         stellaToast.add({
-          title:
-            error instanceof Error
-              ? error.message
-              : t("catalogue.installFailed"),
+          title: userErrorFromThrown(error, t("catalogue.installFailed")),
           type: "error",
         });
       },
@@ -189,12 +187,3 @@ export const ToolDetailRailIcon = ({
     slug={tab.payload.slug}
   />
 );
-
-/**
- * Build the inspector tab id for a given catalogue entry. The kind
- * is part of the id because (kind, slug) is the catalogue's actual
- * uniqueness key; using slug alone would collapse an MCP and a skill
- * sharing the same slug onto the same tab.
- */
-export const toolDetailTabId = (kind: ToolDetailKind, slug: string): string =>
-  `tool-detail:${kind}:${slug}`;

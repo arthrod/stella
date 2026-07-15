@@ -21,7 +21,7 @@ import {
 import { pdfDerivativeStateForFile } from "@/api/handlers/files/gotenberg";
 import { thumbnailDerivativeStateForFile } from "@/api/handlers/files/image-derivative";
 import { createFileKey } from "@/api/handlers/files/utils";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
@@ -150,9 +150,9 @@ export default createSafeHandler(
     }
 
     if (scanResult.value.verdict === "reject") {
-      const reasons = scanResult.value.findings
-        .filter((finding) => finding.severity === "reject")
-        .map((finding) => finding.message);
+      const reasons = scanResult.value.findings.flatMap((finding) =>
+        finding.severity === "reject" ? [finding.message] : [],
+      );
       return Result.err(
         new HandlerError({
           status: 422,

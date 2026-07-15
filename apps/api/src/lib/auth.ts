@@ -1,5 +1,4 @@
 import { oauthProvider } from "@better-auth/oauth-provider";
-import type { BetterAuthPlugin } from "better-auth";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware } from "better-auth/api";
@@ -18,13 +17,16 @@ import Elysia, { t } from "elysia";
 import { ac, roles } from "@stll/permissions";
 import type { PermissionInput } from "@stll/permissions";
 
-import { createMembershipSafeDb, createMembershipScopedDb } from "@/api/db";
 import { authSchema, member } from "@/api/db/auth-schema";
 import { rootDb, rlsDb } from "@/api/db/root";
 import { workspaceMembers, workspaces } from "@/api/db/schema";
+import {
+  createMembershipSafeDb,
+  createMembershipScopedDb,
+} from "@/api/db/scoped";
 import { env } from "@/api/env";
 import { loadOrgSettingsForAuth } from "@/api/lib/ai-config-loader";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createAuditRecorder } from "@/api/lib/audit-log";
 import { revokeOrganizationMemberAuthArtifacts } from "@/api/lib/auth-artifacts";
 import { toSafeId } from "@/api/lib/branded-types";
@@ -37,7 +39,7 @@ import {
   sendNewDeviceLoginEmail,
   sendOrganizationInvitation,
   sendOTPEmail,
-} from "@/api/lib/email";
+} from "@/api/lib/email/email";
 import {
   AUTH_RATE_LIMIT_MAX_WINDOW,
   AUTH_RATE_LIMITS,
@@ -59,6 +61,7 @@ import {
   isSelfhostLocalPasswordAuthEnabled,
   shouldHandleSelfhostBootstrapPath,
 } from "@/api/lib/selfhost-auth";
+import { includes } from "@/api/lib/type-guards";
 import {
   getMcpResourceUrl,
   MCP_ALL_RESOURCE_SCOPES,
@@ -219,7 +222,30 @@ const readInitialWorkspaceId = (
 const isMcpResourceScope = (
   scope: string,
 ): scope is (typeof MCP_ALL_RESOURCE_SCOPES)[number] =>
-  (MCP_ALL_RESOURCE_SCOPES as readonly string[]).includes(scope);
+  includes(MCP_ALL_RESOURCE_SCOPES, scope);
+
+// Building an `Intl.DateTimeFormat` re-parses its options every call; cache
+// one per language instead of rebuilding it for every new-device-login email.
+const newDeviceLoginDateTimeFormatCache = new Map<
+  string,
+  Intl.DateTimeFormat
+>();
+const getNewDeviceLoginDateTimeFormat = (lang: string): Intl.DateTimeFormat => {
+  let formatter = newDeviceLoginDateTimeFormatCache.get(lang);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(lang, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: "UTC",
+      timeZoneName: "short",
+    });
+    newDeviceLoginDateTimeFormatCache.set(lang, formatter);
+  }
+  return formatter;
+};
 
 // Lazy singleton: `betterAuth()` eagerly resolves the
 // database adapter, which accesses `rootDb`. Deferring to
@@ -469,7 +495,7 @@ const createAuth = () => {
         silenceWarnings: {
           oauthAuthServerConfig: true,
         },
-      }) as BetterAuthPlugin,
+      }),
     ],
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
@@ -517,19 +543,18 @@ const createAuth = () => {
             return;
           }
 
-          const knownIPs = new Set(
-            previousSessions
-              .map((previous) => previous.ipAddress)
-              .filter(Boolean),
-          );
-          const knownDevices = new Set(
-            previousSessions
-              .map((previous) => {
-                const previousDevice = parseUserAgent(previous.userAgent);
-                return `${previousDevice.browser}|${previousDevice.os}`;
-              })
-              .filter((device) => device !== "null|null"),
-          );
+          const knownIPs = new Set<string>();
+          const knownDevices = new Set<string>();
+          for (const previous of previousSessions) {
+            if (previous.ipAddress) {
+              knownIPs.add(previous.ipAddress);
+            }
+            const previousDevice = parseUserAgent(previous.userAgent);
+            const deviceKey = `${previousDevice.browser}|${previousDevice.os}`;
+            if (deviceKey !== "null|null") {
+              knownDevices.add(deviceKey);
+            }
+          }
 
           const currentDevice = parseUserAgent(session.userAgent);
           const deviceKey = `${currentDevice.browser}|${currentDevice.os}`;
@@ -550,15 +575,9 @@ const createAuth = () => {
               ? `${currentDevice.browser} on ${currentDevice.os}`
               : (currentDevice.browser ?? currentDevice.os ?? "Unknown");
           const lang = extractLangFromRequest(ctx.request);
-          const formattedTime = new Intl.DateTimeFormat(lang, {
-            year: "numeric",
-            month: "short",
-            day: "numeric",
-            hour: "numeric",
-            minute: "2-digit",
-            timeZone: "UTC",
-            timeZoneName: "short",
-          }).format(session.createdAt);
+          const formattedTime = getNewDeviceLoginDateTimeFormat(lang).format(
+            session.createdAt,
+          );
 
           ctx.context.runInBackground(
             sendNewDeviceLoginEmail({
@@ -895,9 +914,15 @@ const resolveValidateAuth = async (
 
   let activeWorkspaceIdsPromise: Promise<SafeId<"workspace">[]> | null = null;
   const getActiveWorkspaceIds = async (): Promise<SafeId<"workspace">[]> => {
-    activeWorkspaceIdsPromise ??= getAccessibleWorkspaces().then((items) =>
-      items.filter((item) => item.status !== "deleting").map((item) => item.id),
-    );
+    activeWorkspaceIdsPromise ??= getAccessibleWorkspaces().then((items) => {
+      const activeWorkspaceIds: SafeId<"workspace">[] = [];
+      for (const item of items) {
+        if (item.status !== "deleting") {
+          activeWorkspaceIds.push(item.id);
+        }
+      }
+      return activeWorkspaceIds;
+    });
     return await activeWorkspaceIdsPromise;
   };
 

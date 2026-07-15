@@ -2,9 +2,10 @@ import { deepEquals } from "bun";
 
 import type { ConditionNode } from "@stll/conditions";
 
-import type { Transaction } from "@/api/db";
+import type { Transaction } from "@/api/db/root";
 import { properties, propertyDependencies } from "@/api/db/schema";
 import { lockWorkspacePropertyWrites } from "@/api/handlers/properties/property-lock";
+import { arrayOrEmpty } from "@/api/lib/array";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import type { SafeId } from "@/api/lib/branded-types";
@@ -71,7 +72,8 @@ export const collectTemplateProperties = ({
     if (parsed.status === "invalid") {
       continue;
     }
-    const list = dependenciesByPropertyId.get(dep.propertyId) ?? [];
+    const storedDependencies = dependenciesByPropertyId.get(dep.propertyId);
+    const list = arrayOrEmpty(storedDependencies);
     list.push({
       dependsOnSourceId: dep.dependsOnPropertyId,
       condition: parsed.condition,
@@ -83,36 +85,41 @@ export const collectTemplateProperties = ({
     ...visiblePropertyIds,
   ]);
   addDependencySourceIds(creatablePropertyIds, dependenciesByPropertyId);
+  const hiddenPropertyIds = new Set(layout.hiddenProperties);
 
-  return workspaceProperties
-    .filter((property) => !property.system)
-    .filter(
-      (property) =>
-        creatablePropertyIds.has(property.id) ||
-        layout.hiddenProperties.includes(property.id),
-    )
-    .map((property): ViewTemplateProperty => {
-      const propertyDeps = dependenciesByPropertyId.get(property.id);
-      const result: ViewTemplateProperty = {
-        version: 1,
-        sourceId: property.id,
-        name: property.name,
-        content: property.content,
-        // A view template can carry ai-model or manual-input columns only; a
-        // playbook verdict column exports as a plain single-select (manual)
-        // column, since its verdict computation is tied to a playbook run.
-        tool:
-          property.tool.type === "playbook-verdict"
-            ? { version: 1, type: "manual-input" }
-            : property.tool,
-        role: resolveTemplateExportRole(property, workspaceProperties),
-        createIfMissing: creatablePropertyIds.has(property.id),
-      };
-      if (propertyDeps && propertyDeps.length > 0) {
-        result.dependencies = propertyDeps;
-      }
-      return result;
-    });
+  const templateProperties: ViewTemplateProperty[] = [];
+  for (const property of workspaceProperties) {
+    if (property.system) {
+      continue;
+    }
+    if (
+      !creatablePropertyIds.has(property.id) &&
+      !hiddenPropertyIds.has(property.id)
+    ) {
+      continue;
+    }
+    const propertyDeps = dependenciesByPropertyId.get(property.id);
+    const templateProperty: ViewTemplateProperty = {
+      version: 1,
+      sourceId: property.id,
+      name: property.name,
+      content: property.content,
+      // A view template can carry ai-model or manual-input columns only; a
+      // playbook verdict column exports as a plain single-select (manual)
+      // column, since its verdict computation is tied to a playbook run.
+      tool:
+        property.tool.type === "playbook-verdict"
+          ? { version: 1, type: "manual-input" }
+          : property.tool,
+      role: resolveTemplateExportRole(property, workspaceProperties),
+      createIfMissing: creatablePropertyIds.has(property.id),
+    };
+    if (propertyDeps && propertyDeps.length > 0) {
+      templateProperty.dependencies = propertyDeps;
+    }
+    templateProperties.push(templateProperty);
+  }
+  return templateProperties;
 };
 
 const resolveTemplateExportRole = (
@@ -155,7 +162,9 @@ const addDependencySourceIds = (
   const queue = [...creatablePropertyIds];
 
   for (const propertyId of queue) {
-    for (const dependency of dependenciesByPropertyId.get(propertyId) ?? []) {
+    const storedDependencies = dependenciesByPropertyId.get(propertyId);
+    const dependencies = arrayOrEmpty(storedDependencies);
+    for (const dependency of dependencies) {
       if (creatablePropertyIds.has(dependency.dependsOnSourceId)) {
         continue;
       }
@@ -207,6 +216,12 @@ export const resolveTemplateProperties = async ({
     existingDependencyEdges.map((edge) => edge.propertyId),
   );
   const nextPropertyIds = existingProperties.map((property) => property.id);
+  // Keyed as plain string: lookups use templateProperty.sourceId, which is
+  // unbranded (the original .find compared the branded id against it).
+  const existingPropertyById = new Map<
+    string,
+    (typeof existingProperties)[number]
+  >(existingProperties.map((property) => [property.id, property]));
   const propertyIdBySourceId = new Map<string, string>();
   const createdPropertySourceIds = new Set<string>();
   const consumedExistingPropertyIds = new Set<string>();
@@ -214,9 +229,7 @@ export const resolveTemplateProperties = async ({
   let projectedPropertyCount = nextPropertyIds.length;
 
   for (const templateProperty of templateProperties) {
-    const existingById = existingProperties.find(
-      (property) => property.id === templateProperty.sourceId,
-    );
+    const existingById = existingPropertyById.get(templateProperty.sourceId);
     if (
       existingById &&
       canReusePropertyByExactId({
@@ -455,33 +468,32 @@ const recreateTemplateDependencies = async ({
       return [];
     }
 
-    const resolvedEdges = (templateProperty.dependencies ?? []).flatMap(
-      (dep) => {
-        // Remaps the edge and the gate condition together (so neither is
-        // forgotten); null when the edge endpoint did not remap — the workflow
-        // planner then treats the property as having no inputs.
-        const refs = remapDependencyRefs(
-          {
-            dependsOnPropertyId: dep.dependsOnSourceId,
-            condition: dep.condition,
-          },
-          (id) => propertyIdBySourceId.get(id),
-        );
-        if (!refs || refs.dependsOnPropertyId === propertyId) {
-          return [];
-        }
-        return [
-          {
-            workspaceId,
-            propertyId: brandPersistedPropertyId(propertyId),
-            dependsOnPropertyId: brandPersistedPropertyId(
-              refs.dependsOnPropertyId,
-            ),
-            condition: refs.condition,
-          },
-        ];
-      },
-    );
+    const templateDependencies = templateProperty.dependencies;
+    const resolvedEdges = arrayOrEmpty(templateDependencies).flatMap((dep) => {
+      // Remaps the edge and the gate condition together (so neither is
+      // forgotten); null when the edge endpoint did not remap — the workflow
+      // planner then treats the property as having no inputs.
+      const refs = remapDependencyRefs(
+        {
+          dependsOnPropertyId: dep.dependsOnSourceId,
+          condition: dep.condition,
+        },
+        (id) => propertyIdBySourceId.get(id),
+      );
+      if (!refs || refs.dependsOnPropertyId === propertyId) {
+        return [];
+      }
+      return [
+        {
+          workspaceId,
+          propertyId: brandPersistedPropertyId(propertyId),
+          dependsOnPropertyId: brandPersistedPropertyId(
+            refs.dependsOnPropertyId,
+          ),
+          condition: refs.condition,
+        },
+      ];
+    });
 
     // Templates strip the workspace-specific Documents id, so an AI
     // column whose only dependency pointed at Documents loses every
@@ -585,7 +597,9 @@ const hasTemplateDependencyCycle = ({
     }
 
     visiting.add(sourceId);
-    for (const dependencySourceId of graph.get(sourceId) ?? []) {
+    const storedDependencyIds = graph.get(sourceId);
+    const dependencyIds = arrayOrEmpty(storedDependencyIds);
+    for (const dependencySourceId of dependencyIds) {
       if (visit(dependencySourceId)) {
         return true;
       }
@@ -943,10 +957,11 @@ const collectVisibleTemplatePropertyIds = ({
   layout: ViewLayout;
   properties: readonly WorkspacePropertyTemplateSource[];
 }): Set<string> => {
+  const hiddenPropertyIds = new Set(layout.hiddenProperties);
   const ids = new Set<string>();
 
   for (const property of workspaceProperties) {
-    if (!layout.hiddenProperties.includes(property.id)) {
+    if (!hiddenPropertyIds.has(property.id)) {
       ids.add(property.id);
     }
   }
@@ -995,7 +1010,8 @@ const collectLayoutPropertyIds = (layout: ViewLayout): Set<string> => {
     if (layout.endDatePropertyId) {
       add(layout.endDatePropertyId);
     }
-    for (const id of layout.additionalDatePropertyIds ?? []) {
+    const additionalDatePropertyIds = layout.additionalDatePropertyIds;
+    for (const id of arrayOrEmpty(additionalDatePropertyIds)) {
       add(id);
     }
   }

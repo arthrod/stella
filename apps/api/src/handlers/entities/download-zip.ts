@@ -1,8 +1,8 @@
-import { Result } from "better-result";
+import { panic, Result } from "better-result";
 import { makeZip } from "client-zip";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
-import type { SafeDb } from "@/api/db";
+import type { SafeDb } from "@/api/db/safe-db";
 import { entities, entityVersions, fields } from "@/api/db/schema";
 import {
   buildArchivePaths,
@@ -12,7 +12,7 @@ import {
 } from "@/api/handlers/entities/zip-archive";
 import type { ArchiveNode } from "@/api/handlers/entities/zip-archive";
 import { createFileKey } from "@/api/handlers/files/utils";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import type { AuditRecorder } from "@/api/lib/audit-log";
@@ -25,6 +25,7 @@ import {
   FetchBoundaryError,
   HandlerError,
 } from "@/api/lib/errors/tagged-errors";
+import { fetchWithTimeout } from "@/api/lib/fetch";
 import { getS3 } from "@/api/lib/s3";
 import { brandPersistedEntityId } from "@/api/lib/safe-id-boundaries";
 import { sanitizeFilename } from "@/api/lib/sanitize-filename";
@@ -178,7 +179,8 @@ const downloadZipHandler = async function* ({
     for (const row of fieldRows) {
       if (row.content.type === "file") {
         const entityFileContents =
-          fileContentsByEntityId.get(String(row.entityId)) ?? [];
+          fileContentsByEntityId.get(String(row.entityId)) ??
+          panic("File contents missing for downloadable entity");
         entityFileContents.push({
           fileId: row.content.id,
           fileName: row.content.fileName,
@@ -253,8 +255,8 @@ const downloadZipHandler = async function* ({
     });
     const redactedUrl = redactedPresignedUrl(presignedUrl);
     const fetched = await Result.tryPromise(async () => {
-      const response = await fetch(presignedUrl, {
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      const response = await fetchWithTimeout(presignedUrl, {
+        timeoutMs: FETCH_TIMEOUT_MS,
       });
       if (!response.ok) {
         throw new FetchBoundaryError({

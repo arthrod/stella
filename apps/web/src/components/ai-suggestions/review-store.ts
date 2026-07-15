@@ -16,7 +16,12 @@ import type {
   FolioAIEditOperation,
   FolioAIEditSeverity,
   FolioAIEditSnapshot,
+  DocxEditorRef,
 } from "@stll/folio-react";
+
+type DocumentOperationUndoHandle = NonNullable<
+  ReturnType<DocxEditorRef["applyDocumentOperations"]>["undoHandle"]
+>;
 
 export const REVIEW_UNSPECIFIED_AREA = "Unspecified";
 export type ReviewSeverityKey = FolioAIEditSeverity | "unspecified";
@@ -129,10 +134,12 @@ export type ReviewSuggestion = {
    * together.
    */
   revisionIds: readonly number[] | null;
+  /** Transactional handle for reversing the committed operation batch. */
+  undoHandle: DocumentOperationUndoHandle | null;
   /**
    * The editor-shaped operation, kept on the suggestion for the
    * lifetime of the session. The panel feeds this to
-   * `editor.applyAIEditOperations` when the user accepts. Retained
+   * `editor.applyDocumentOperations` when the user accepts. Retained
    * after Accept / Reject so a later "Revert" can put the
    * suggestion back into the pending queue without losing the
    * original op spec.
@@ -277,7 +284,12 @@ export const useReviewStore = create<ReviewState & ReviewActions>()((set) => ({
       return;
     }
     set((state) => {
-      const existing = state.sessions[entityId] ?? [];
+      const existing = state.sessions[entityId];
+      if (!existing) {
+        return {
+          sessions: { ...state.sessions, [entityId]: items },
+        };
+      }
       const existingIds = new Set(existing.map((s) => s.id));
       const fresh = items.filter((item) => !existingIds.has(item.id));
       if (fresh.length === 0) {

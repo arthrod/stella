@@ -1,5 +1,27 @@
 import type { OptionColor } from "@stll/api/types";
 
+import type { CreatableContentType } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/composer-primitives";
+import type { SortHint } from "@/routes/_protected.workspaces/$workspaceId/-components/properties/sort-property";
+
+export const isCreatableContentType = (t: string): t is CreatableContentType =>
+  t === "text" ||
+  t === "single-select" ||
+  t === "multi-select" ||
+  t === "date" ||
+  t === "int";
+
+/** Map a property content type to a sort hint. */
+export const toSortHint = (contentType: string): SortHint => {
+  switch (contentType) {
+    case "date":
+      return "date";
+    case "int":
+      return "number";
+    default:
+      return "text";
+  }
+};
+
 export type ColorVariants = {
   background: string;
   foreground: string;
@@ -63,17 +85,12 @@ export const emptyColor: ColorVariants = optionVar("empty");
 
 /** Resolve any OptionColor (named or hex) to CSS color variants. */
 export const resolveOptionColor = (color: OptionColor): ColorVariants => {
-  const named = (namedColorsMap as Record<string, ColorVariants | undefined>)[
-    color
-  ];
-  if (named !== undefined) {
-    return named;
+  const namedColor = NAMED_COLORS.find((candidate) => candidate === color);
+  if (namedColor !== undefined) {
+    return namedColorsMap[namedColor];
   }
   return hexVar(color);
 };
-
-/** Backward compat: keyed by named colors only. Use resolveOptionColor for hex support. */
-export const optionColorsMap = namedColorsMap as Record<string, ColorVariants>;
 
 /** The 16 named preset color keys. */
 export const optionColors: readonly OptionColor[] = NAMED_COLORS;

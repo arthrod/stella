@@ -51,8 +51,10 @@ void mock.module("@/api/lib/tanstack-ai-models", () => ({
 }));
 
 const {
+  generateTanStackTextForRole,
   generateTanStackObjectForRole,
   mergeGenerationOptions,
+  streamTanStackTextForRole,
   streamTanStackObjectForRole,
 } = await import("@/api/lib/tanstack-ai-generate");
 
@@ -214,6 +216,40 @@ describe("TanStack AI structured output generation", () => {
     expect(options).toEqual({ max_tokens: 1000 });
   });
 
+  test("enables OpenAI prompt caching without sending a model-specific retention value", () => {
+    // SAFETY: mergeGenerationOptions only reads provider/modelOptions/modelId.
+    // The adapter is irrelevant for this pure option-merge regression test.
+    // eslint-disable-next-line typescript/no-unsafe-type-assertion -- focused pure helper test
+    const model = {
+      adapter: {},
+      keySource: "instance",
+      modelId: "gpt-5.4-mini",
+      modelOptions: {},
+      provider: "openai",
+    } as ResolvedTanStackTextModel;
+
+    const options = mergeGenerationOptions({
+      caching: {
+        enabled: true,
+        scopeKey: "organization:contract-probe",
+        ttl: "5m",
+      },
+      maxOutputTokens: 1000,
+      model,
+      serviceTier: "standard",
+      temperature: 0,
+    });
+
+    expect(options).toEqual({
+      max_output_tokens: 1000,
+      prompt_cache_key:
+        "106a444562569784437b331c30f0edcfa70367d5e744cdba050d7234d6ee197c",
+      service_tier: "default",
+      temperature: 0,
+    });
+    expect(options).not.toHaveProperty("prompt_cache_retention");
+  });
+
   test("forwards deferred service tiers to Gemini requests", () => {
     // SAFETY: mergeGenerationOptions only reads provider/modelOptions/modelId.
     // The adapter is irrelevant for this pure option-merge test.
@@ -347,6 +383,82 @@ describe("TanStack AI structured output generation", () => {
   });
 });
 
+describe("TanStack AI text generation", () => {
+  test("collects text through the error-aware streaming boundary", async () => {
+    capturedChatOptions.length = 0;
+    nextChatResult = createTextStream(["hello", " world"]);
+
+    const output = await generateTanStackTextForRole({
+      caching: noCaching,
+      organizationId: null,
+      orgAIConfig: null,
+      prompt: "Say hello.",
+      role: "chat",
+      serviceTier: "standard",
+    });
+
+    expect(output).toBe("hello world");
+    expect(getOnlyCapturedChatOptions().stream).toBeUndefined();
+  });
+
+  test("propagates provider run errors from collected text", async () => {
+    capturedChatOptions.length = 0;
+    nextChatResult = createRunErrorStream({
+      code: "invalid_request_error",
+      message: "OpenAI rejected the request.",
+    });
+
+    const caught = await generateTanStackTextForRole({
+      caching: noCaching,
+      organizationId: null,
+      orgAIConfig: null,
+      prompt: "Say hello.",
+      role: "chat",
+      serviceTier: "standard",
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(caught).toMatchObject({
+      code: "invalid_request_error",
+      message: "OpenAI rejected the request.",
+      status: 502,
+    });
+  });
+
+  test("propagates provider run errors from streaming text", async () => {
+    capturedChatOptions.length = 0;
+    nextChatResult = createRunErrorStream({
+      code: "rate_limit_exceeded",
+      message: "OpenAI rate limit exceeded.",
+    });
+
+    const consume = async (): Promise<void> => {
+      for await (const _delta of streamTanStackTextForRole({
+        caching: noCaching,
+        organizationId: null,
+        orgAIConfig: null,
+        prompt: "Say hello.",
+        role: "chat",
+        serviceTier: "standard",
+      })) {
+        // Consume the full stream so terminal provider events are observed.
+      }
+    };
+    const caught = await consume().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(caught).toMatchObject({
+      code: "rate_limit_exceeded",
+      message: "OpenAI rate limit exceeded.",
+      status: 502,
+    });
+  });
+});
+
 const captureChatOptions = (options: unknown): CapturedChatOptions => {
   if (!isRecord(options)) {
     throw new TypeError("Expected TanStack chat options object.");
@@ -398,6 +510,29 @@ const createStructuredOutputStream = async function* ({
     name: "structured-output.complete",
     type: realTanStackAI.EventType.CUSTOM,
     value: { object, raw },
+  };
+};
+
+const createTextStream = async function* (deltas: string[]) {
+  for (const delta of deltas) {
+    yield {
+      delta,
+      type: realTanStackAI.EventType.TEXT_MESSAGE_CONTENT,
+    };
+  }
+};
+
+const createRunErrorStream = async function* ({
+  code,
+  message,
+}: {
+  code: string;
+  message: string;
+}) {
+  yield {
+    code,
+    message,
+    type: realTanStackAI.EventType.RUN_ERROR,
   };
 };
 

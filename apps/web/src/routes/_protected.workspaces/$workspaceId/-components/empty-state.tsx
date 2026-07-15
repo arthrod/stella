@@ -6,10 +6,8 @@ import { useTranslations } from "use-intl";
 
 import { Button } from "@stll/ui/components/button";
 
-import {
-  EMPTY_SCREEN_MATTERS_VIDEO,
-  EmptyScreen,
-} from "@/components/empty-screen";
+import { EmptyScreen } from "@/components/empty-screen";
+import { EMPTY_SCREEN_MATTERS_VIDEO } from "@/components/empty-screen-media";
 import { useCreateFileEntities } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-create-file-entities";
 
 type EmptyStateProps = {
@@ -121,7 +119,7 @@ const WorkspaceUploadEmptyScreen = ({
         className="sr-only"
         multiple
         onChange={(e) => {
-          const files = [...(e.currentTarget.files ?? [])];
+          const files = e.currentTarget.files ? [...e.currentTarget.files] : [];
           if (files.length > 0) {
             createFileEntities({ files, parentId: null });
           }

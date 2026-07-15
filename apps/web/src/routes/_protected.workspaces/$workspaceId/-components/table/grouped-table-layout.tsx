@@ -53,12 +53,12 @@ import {
 } from "@/routes/_protected.workspaces/$workspaceId/-components/table/workspace-grid";
 import { getOrderedColumns } from "@/routes/_protected.workspaces/$workspaceId/-components/table/workspace-grid-order";
 import { WorkspaceTable } from "@/routes/_protected.workspaces/$workspaceId/-components/table/workspace-table";
+import type { WorkspaceGridStyle } from "@/routes/_protected.workspaces/$workspaceId/-components/table/workspace-table/internals";
 import {
   addPropertyColId,
   getScrollableAncestor,
   getWorkspaceGridTemplateColumns,
-} from "@/routes/_protected.workspaces/$workspaceId/-components/table/workspace-table/internals";
-import type { WorkspaceGridStyle } from "@/routes/_protected.workspaces/$workspaceId/-components/table/workspace-table/internals";
+} from "@/routes/_protected.workspaces/$workspaceId/-components/table/workspace-table/internals-helpers";
 import { useTableStore } from "@/routes/_protected.workspaces/$workspaceId/-hooks/table-store";
 import { useSyncJustificationChunks } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-sync-justifications";
 import { useSyncSelectedEntities } from "@/routes/_protected.workspaces/$workspaceId/-hooks/use-sync-selected-entities";
@@ -87,6 +87,11 @@ const GROUP_EAGER_LOAD_COUNT = 3;
 // group-counts) stay in sync.
 const GROUPED_TABLE_EXCLUDED_KINDS: EntityKind[] = ["folder", "task"];
 
+// Status grouping is rejected before a document table resolves its group
+// options, so it never needs status labels; shared so the empty object isn't
+// rebuilt every render.
+const EMPTY_STATUS_LABELS: Record<string, string> = {};
+
 // Stable key for a group. The null (uncategorized) bucket and real string values
 // live in disjoint namespaces so an option literally named "uncategorized"
 // can't collide with the null bucket.
@@ -109,10 +114,6 @@ const getEagerGroupValues = (
   }
   return values;
 };
-
-// Stable empty gate map for groupings other than the "Document Type" classifier,
-// where every section shares the full column set (no per-section filtering).
-const EMPTY_DOC_TYPE_GATE = new Map<string, Set<string>>();
 
 type GroupedTableLayoutProps = {
   workspaceId: string;
@@ -187,7 +188,7 @@ export const GroupedTableLayout = ({
             properties,
             classifierPropertyId,
           })
-        : EMPTY_DOC_TYPE_GATE,
+        : new Map<string, Set<string>>(),
     [classifierPropertyId, properties],
   );
   // The whole-view "+ new document" row carries the common (ungated) columns: a
@@ -225,8 +226,10 @@ export const GroupedTableLayout = ({
   });
   const countByValue = useMemo(() => {
     const map = new Map<string | null, number>();
-    for (const entry of groupCounts.data ?? []) {
-      map.set(entry.value, entry.count);
+    if (groupCounts.data) {
+      for (const entry of groupCounts.data) {
+        map.set(entry.value, entry.count);
+      }
     }
     return map;
   }, [groupCounts.data]);
@@ -293,7 +296,7 @@ export const GroupedTableLayout = ({
 
   // Status grouping is rejected above (isUnsupportedGrouping), so a document
   // table never needs status labels.
-  const statusLabels = {};
+  const statusLabels = EMPTY_STATUS_LABELS;
   const entityKindLabels = {
     document: t("common.document"),
     folder: t("search.kinds.folder"),
@@ -381,9 +384,9 @@ const useGroupGridGeometry = (
   });
 
   const orderedColumns = getOrderedColumns({
-    leftColumns: table.getLeftLeafColumns(),
+    startColumns: table.getStartLeafColumns(),
     centerColumns: table.getCenterLeafColumns(),
-    rightColumns: table.getRightLeafColumns(),
+    endColumns: table.getEndLeafColumns(),
   }).filter((column) => column.getIsVisible());
   const renderColumns = orderedColumns.filter(
     (column) => column.id !== addPropertyColId,
@@ -569,11 +572,12 @@ const GroupSection = ({
   // query is disabled, but React Query can still hold cached pages for this key.
   // Drop them when the group has no rows so stale rows aren't published to the
   // selection union or rendered.
-  const entities = useMemo(
-    () =>
-      hasRows ? (query.data?.pages.flatMap((page) => page.entities) ?? []) : [],
-    [hasRows, query.data],
-  );
+  const entities = useMemo(() => {
+    if (!hasRows || !query.data) {
+      return [];
+    }
+    return query.data.pages.flatMap((page) => page.entities);
+  }, [hasRows, query.data]);
   const loadedCount = entities.length;
 
   const treeData = useMemo(() => toTableEntities(entities), [entities]);
@@ -588,13 +592,14 @@ const GroupSection = ({
 
   // AI cells read justifications from the workspace store; sync each loaded page
   // so the source hover card and citation highlights work in grouped views too.
-  const justificationEntityIdChunks = useMemo(
-    () =>
-      query.data?.pages.map((page) =>
-        page.entities.map((entity) => entity.entityId),
-      ) ?? [],
-    [query.data],
-  );
+  const justificationEntityIdChunks = useMemo(() => {
+    if (!query.data) {
+      return [];
+    }
+    return query.data.pages.map((page) =>
+      page.entities.map((entity) => entity.entityId),
+    );
+  }, [query.data]);
   useSyncJustificationChunks({
     workspaceId,
     entityIdChunks: justificationEntityIdChunks,

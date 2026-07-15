@@ -1,13 +1,5 @@
 import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { lazy, Suspense, useCallback, useMemo, useRef, useState } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { LucideIcon } from "lucide-react";
@@ -69,13 +61,16 @@ import { cn } from "@stll/ui/lib/utils";
 import { useInspectorStore } from "@/components/inspector/inspector-store";
 import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
 import type { TranslationKey } from "@/i18n/types";
+import { getAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
+import { optionalArray } from "@/lib/arrays";
+import { BoundedMap } from "@/lib/bounded-set";
 import { DOCX_MIME } from "@/lib/consts";
-import { userErrorMessage } from "@/lib/errors";
+import { userErrorMessage } from "@/lib/errors/user-safe";
 import { toSafeId } from "@/lib/safe-id";
 import { inputTypeValueKind, VALUE_TYPE_META } from "@/lib/value-types";
 import { TemplateStudioChat } from "@/routes/_protected.knowledge/-components/template-studio-chat";
-import { reusableConditions } from "@/routes/_protected.knowledge/-components/template-studio-conditions";
+import { reusableConditions } from "@/routes/_protected.knowledge/-components/template-studio-condition-source";
 import "@/routes/_protected.knowledge/-components/template-studio-inspector";
 import {
   protectedRouteApi,
@@ -377,8 +372,10 @@ const slashRowCount = (
 /** Session-lived answers for the selection popover, keyed by exact selection
  *  + surrounding context + the known-paths list; bounded FIFO so it cannot
  *  grow unchecked. */
-const gestureEnrichmentCache = new Map<string, GestureEnrichment>();
 const GESTURE_ENRICHMENT_CACHE_MAX = 100;
+const gestureEnrichmentCache = new BoundedMap<string, GestureEnrichment>(
+  GESTURE_ENRICHMENT_CACHE_MAX,
+);
 
 /** Progressive AI proposal for the popover's AI row. `fieldPath` carries the
  *  model's claim that the selection is another occurrence of an existing
@@ -420,6 +417,61 @@ const enrichmentKnownPaths = (fields: readonly StudioField[]): string[] => {
     paths.push(field.path);
   }
   return paths;
+};
+
+// True when the caret sits inside an `{{#each}}…{{/each}}` body, paired by
+// walking sorted directives with a stack. An `each` opener encloses the
+// caret when `opener.to <= head` and its matching `endeach.from >= head`.
+const caretInEachBlock = (state: EditorState): boolean => {
+  const head = state.selection.from;
+  const directives = getTemplateDirectives(state).toSorted(
+    (a, b) => a.from - b.from,
+  );
+  const stack: DirectiveRange[] = [];
+  for (const d of directives) {
+    if (d.kind === "each") {
+      stack.push(d);
+    } else if (d.kind === "endeach") {
+      const open = stack.pop();
+      if (open !== undefined && open.to <= head && d.from >= head) {
+        return true;
+      }
+    }
+  }
+  return false;
+};
+
+// The innermost opener/closer pair (e.g. `{{#if}}`/`{{/if}}` or
+// `{{#each}}`/`{{/each}}`) that encloses this field's marker, paired by
+// walking the sorted directives like buildOutline does. Returns null when the
+// marker is not inside any matching block.
+const enclosingDirectivePair = (
+  state: EditorState,
+  path: string,
+  openKind: DirectiveKind,
+  closeKind: DirectiveKind,
+): { opener: DirectiveRange; closer: DirectiveRange } | null => {
+  const directives = getTemplateDirectives(state).toSorted(
+    (a, b) => a.from - b.from,
+  );
+  const marker = directives.find(
+    (d) => d.kind === "placeholder" && d.expr === path,
+  );
+  if (marker === undefined) {
+    return null;
+  }
+  const stack: DirectiveRange[] = [];
+  for (const d of directives) {
+    if (d.kind === openKind) {
+      stack.push(d);
+    } else if (d.kind === closeKind) {
+      const open = stack.pop();
+      if (open !== undefined && open.to <= marker.from && d.from >= marker.to) {
+        return { opener: open, closer: d };
+      }
+    }
+  }
+  return null;
 };
 
 /**
@@ -604,13 +656,12 @@ export const TemplateStudioPage = ({
     templateDocxBufferOptions(activeOrganizationId, templateId, presignedUrl),
   );
   const [docBuffer, setDocBuffer] = useState<ArrayBuffer | null>(null);
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- latches the docx buffer from the query once and freezes it so a later refetch can't re-initialize the editor mid-edit; driven by async query state, not a single setter call-site, so it cannot move into a handler
-  useEffect(() => {
-    if (loadedBuffer && docBuffer === null) {
-      // eslint-disable-next-line react/react-compiler -- deliberate one-time latch of the async query buffer into frozen state; the `docBuffer === null` guard makes it fire once and cannot cascade
-      setDocBuffer(loadedBuffer);
-    }
-  }, [loadedBuffer, docBuffer]);
+  // Freeze the first buffer so a later query refetch cannot re-initialize the
+  // editor mid-edit. Guarded render-time adjustment makes that async arrival a
+  // single transition without an intermediate empty commit.
+  if (loadedBuffer && docBuffer === null) {
+    setDocBuffer(loadedBuffer);
+  }
 
   // Seed the shared session from the manifest and open the Fields/Clauses/
   // History tab in the global inspector; tear both down when the page unmounts
@@ -1038,9 +1089,9 @@ export const TemplateStudioPage = ({
     const seed = base === "" ? "clause" : base;
     const taken = new Set([
       ...(view
-        ? getTemplateDirectives(view.state)
-            .filter((d) => d.kind === "clause")
-            .map((d) => d.expr)
+        ? getTemplateDirectives(view.state).flatMap((d) =>
+            d.kind === "clause" ? [d.expr] : [],
+          )
         : []),
       ...useTemplateStudioStore
         .getState()
@@ -1243,12 +1294,11 @@ export const TemplateStudioPage = ({
     requestAnimationFrame(read);
   }, GESTURE_SHOW_DELAY_MS);
 
-  const fetchGestureSuggestion = async (sel: GestureSelection) => {
+  const fetchGestureSuggestion = async (sel: GestureSelection, seq: number) => {
     const view = editorViewRef.current;
     if (!view) {
       return;
     }
-    const seq = ++enrichSeqRef.current;
     const contextText = paragraphsAroundSelection(view.state, sel.from);
     const knownPaths = enrichmentKnownPaths(
       useTemplateStudioStore.getState().fields,
@@ -1298,12 +1348,6 @@ export const TemplateStudioPage = ({
       aiPrompt: match.aiPrompt,
       fieldPath: match.fieldPath,
     };
-    if (gestureEnrichmentCache.size >= GESTURE_ENRICHMENT_CACHE_MAX) {
-      const oldest = gestureEnrichmentCache.keys().next().value;
-      if (oldest !== undefined) {
-        gestureEnrichmentCache.delete(oldest);
-      }
-    }
     gestureEnrichmentCache.set(cacheKey, ready);
     setEnrichment(ready);
   };
@@ -1313,7 +1357,15 @@ export const TemplateStudioPage = ({
     if (shown === null || shown.from !== sel.from || shown.to !== sel.to) {
       return;
     }
-    void fetchGestureSuggestion(sel);
+    const seq = ++enrichSeqRef.current;
+    fetchGestureSuggestion(sel, seq).catch((error: unknown) => {
+      if (seq !== enrichSeqRef.current) {
+        return;
+      }
+      getAnalytics().captureError(error);
+      setEnrichment({ status: "idle" });
+      stellaToast.add({ title: t("errors.actionFailed"), type: "error" });
+    });
   }, GESTURE_ENRICH_DELAY_MS);
 
   const onGestureSelectionChange = (sel: GestureSelection) => {
@@ -1451,11 +1503,16 @@ export const TemplateStudioPage = ({
     };
     const dismiss = () => hideGesture();
     window.addEventListener("keydown", onKeyDown);
-    host?.addEventListener("scroll", dismiss, { capture: true });
+    host?.addEventListener("scroll", dismiss, {
+      capture: true,
+      passive: true,
+    });
     host?.addEventListener("contextmenu", dismiss, { capture: true });
     return () => {
       window.removeEventListener("keydown", onKeyDown);
-      host?.removeEventListener("scroll", dismiss, { capture: true });
+      host?.removeEventListener("scroll", dismiss, {
+        capture: true,
+      });
       host?.removeEventListener("contextmenu", dismiss, { capture: true });
     };
   }, [gestureShown, hideGesture]);
@@ -2040,7 +2097,7 @@ export const TemplateStudioPage = ({
           // after markSaved() would leave the pending steps stranded with the
           // Save affordance (gated on isDirty) gone.
           try {
-            // eslint-disable-next-line no-await-in-loop -- sequencing is the point: steps must replay in recorded order so each rename lands against the state the prior steps produced, respecting the unique-slot constraint.
+            // oxlint-disable-next-line no-await-in-loop -- sequential by design: steps must replay in recorded order so each rename lands against the state the prior steps produced, respecting the unique-slot constraint.
             const patched = await api
               .templates({ templateId: toSafeId<"template">(templateId) })
               .clauses({ linkId: toSafeId<"templateClause">(step.linkId) })
@@ -2217,65 +2274,6 @@ export const TemplateStudioPage = ({
       actionsRef.current?.focusPosition(reopened.from);
     }
     return true;
-  };
-
-  // True when the caret sits inside an `{{#each}}…{{/each}}` body, paired by
-  // walking sorted directives with a stack. An `each` opener encloses the
-  // caret when `opener.to <= head` and its matching `endeach.from >= head`.
-  const caretInEachBlock = (state: EditorState): boolean => {
-    const head = state.selection.from;
-    const directives = getTemplateDirectives(state).toSorted(
-      (a, b) => a.from - b.from,
-    );
-    const stack: DirectiveRange[] = [];
-    for (const d of directives) {
-      if (d.kind === "each") {
-        stack.push(d);
-      } else if (d.kind === "endeach") {
-        const open = stack.pop();
-        if (open !== undefined && open.to <= head && d.from >= head) {
-          return true;
-        }
-      }
-    }
-    return false;
-  };
-
-  // The innermost opener/closer pair (e.g. `{{#if}}`/`{{/if}}` or
-  // `{{#each}}`/`{{/each}}`) that encloses this field's marker, paired by
-  // walking the sorted directives like buildOutline does. Returns null when the
-  // marker is not inside any matching block.
-  const enclosingDirectivePair = (
-    state: EditorState,
-    path: string,
-    openKind: DirectiveKind,
-    closeKind: DirectiveKind,
-  ): { opener: DirectiveRange; closer: DirectiveRange } | null => {
-    const directives = getTemplateDirectives(state).toSorted(
-      (a, b) => a.from - b.from,
-    );
-    const marker = directives.find(
-      (d) => d.kind === "placeholder" && d.expr === path,
-    );
-    if (marker === undefined) {
-      return null;
-    }
-    const stack: DirectiveRange[] = [];
-    for (const d of directives) {
-      if (d.kind === openKind) {
-        stack.push(d);
-      } else if (d.kind === closeKind) {
-        const open = stack.pop();
-        if (
-          open !== undefined &&
-          open.to <= marker.from &&
-          d.from >= marker.to
-        ) {
-          return { opener: open, closer: d };
-        }
-      }
-    }
-    return null;
   };
 
   // Delete the innermost opener/closer paragraphs enclosing this field's marker,
@@ -2534,9 +2532,10 @@ export const TemplateStudioPage = ({
       const renamed = useTemplateStudioStore
         .getState()
         .fields.find((f) => f.path === oldPath);
+      const renamedFormats = optionalArray(renamed?.lookup?.formats);
       const literals: { literal: string; replacement: string }[] = [
         { literal: `{{${oldPath}}}`, replacement: `{{${trimmed}}}` },
-        ...(renamed?.lookup?.formats ?? []).map((format) => ({
+        ...renamedFormats.map((format) => ({
           literal: `{{${oldPath}.${format.key}}}`,
           replacement: `{{${trimmed}.${format.key}}}`,
         })),

@@ -2,7 +2,7 @@ import { Result } from "better-result";
 import { and, eq } from "drizzle-orm";
 import { status } from "elysia";
 
-import type { ScopedDb } from "@/api/db";
+import type { ScopedDb } from "@/api/db/safe-db";
 import { entities, entityVersions, fields } from "@/api/db/schema";
 import { env } from "@/api/env";
 import {
@@ -15,13 +15,14 @@ import {
   isNativelyRenderableMimeType,
 } from "@/api/handlers/files/gotenberg";
 import { createFileKey } from "@/api/handlers/files/utils";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import { AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import { auditedPresignDownload } from "@/api/lib/audited-download";
 import type { SafeId } from "@/api/lib/branded-types";
 import { contentDisposition } from "@/api/lib/content-disposition";
 import { injectStamp, isStampableDocx } from "@/api/lib/docx-stamp";
+import { fetchWithTimeout } from "@/api/lib/fetch";
 import { getS3 } from "@/api/lib/s3";
 import { presignDownloadUrl } from "@/api/lib/s3-presign";
 import { PDF_MIME_TYPE } from "@/api/mime-types";
@@ -299,10 +300,10 @@ const inlineContentDisposition = (fileName: string): string =>
 const fetchStoredFileResponse = async (
   key: string,
 ): Promise<Response | null> => {
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     getS3().presign(key, { expiresIn: FILE_READ_URL_EXPIRY_SECONDS }),
     {
-      signal: AbortSignal.timeout(30_000),
+      timeoutMs: 30_000,
     },
   ).catch(() => null);
 
@@ -461,8 +462,8 @@ export const stampedDownloadHandler = async ({
   const presignedUrl = getS3().presign(fileKey, {
     expiresIn: FILE_READ_URL_EXPIRY_SECONDS,
   });
-  const response = await fetch(presignedUrl, {
-    signal: AbortSignal.timeout(30_000),
+  const response = await fetchWithTimeout(presignedUrl, {
+    timeoutMs: 30_000,
   });
 
   if (!response.ok) {

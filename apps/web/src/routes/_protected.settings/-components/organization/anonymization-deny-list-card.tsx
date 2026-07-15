@@ -23,7 +23,9 @@ import { stellaToast } from "@stll/ui/components/toast";
 import type { TranslationKey } from "@/i18n/types";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
-import { toAPIError } from "@/lib/errors";
+import { normalizeOptionalArray } from "@/lib/arrays";
+import { toAPIError } from "@/lib/errors/api";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import {
   organizationAnonymizationBlacklistKeys,
   organizationAnonymizationBlacklistOptions,
@@ -92,7 +94,7 @@ const LABEL_TRANSLATION_KEY = {
 } as const satisfies Record<LabelOption, TranslationKey>;
 
 const isKnownLabel = (label: string): label is LabelOption =>
-  (LABEL_OPTIONS as readonly string[]).includes(label);
+  LABEL_OPTIONS.some((option) => option === label);
 
 /**
  * Best-effort parse of an uploaded deny list. Supports:
@@ -116,6 +118,17 @@ const readField = (value: unknown, key: string): unknown => {
   return Reflect.get(value, key);
 };
 
+const trimNonEmpty = (values: readonly string[]): string[] => {
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      result.push(trimmed);
+    }
+  }
+  return result;
+};
+
 const parseJsonItem = (
   item: unknown,
   defaultLabel: LabelOption,
@@ -136,7 +149,7 @@ const parseJsonItem = (
       : defaultLabel;
   const rawVariants = readField(item, "variants");
   const variants = isStringArray(rawVariants)
-    ? rawVariants.map((v) => v.trim()).filter((v) => v.length > 0)
+    ? trimNonEmpty(rawVariants)
     : undefined;
   return {
     canonical,
@@ -222,9 +235,14 @@ const parseImport = (
   const isCsv =
     lower.endsWith(".csv") || first.includes(",") || first.includes(";");
   if (!isCsv) {
-    return lines
-      .map((line) => ({ canonical: line.trim(), label: defaultLabel }))
-      .filter((entry) => entry.canonical.length > 0);
+    const txtRows: OrgAnonymizationBlacklistEntry[] = [];
+    for (const line of lines) {
+      const canonical = line.trim();
+      if (canonical.length > 0) {
+        txtRows.push({ canonical, label: defaultLabel });
+      }
+    }
+    return txtRows;
   }
 
   // CSV: drop an optional header row (`canonical,...`).
@@ -305,7 +323,7 @@ export const AnonymizationDenyListCard = () => {
   const [pendingLabel, setPendingLabel] = useState<LabelOption>(DEFAULT_LABEL);
 
   const entries = blacklistQuery.data?.entries;
-  const renderedEntries = entries ?? [];
+  const renderedEntries = normalizeOptionalArray(entries);
 
   const submitTerm = async () => {
     const canonical = pendingCanonical.trim();
@@ -333,7 +351,7 @@ export const AnonymizationDenyListCard = () => {
       });
     } catch (error) {
       stellaToast.add({
-        title: error instanceof Error ? error.message : String(error),
+        title: userErrorFromThrown(error, t("errors.actionFailed")),
         type: "error",
       });
     }
@@ -344,20 +362,23 @@ export const AnonymizationDenyListCard = () => {
       return;
     }
 
-    const next = entries
-      .filter((entry) => entry.canonical !== canonical)
-      .map((entry) => ({
-        canonical: entry.canonical,
-        label: entry.label,
-        variants: entry.variants,
-        enabled: entry.enabled,
-      }));
+    const next: OrgAnonymizationBlacklistEntry[] = [];
+    for (const entry of entries) {
+      if (entry.canonical !== canonical) {
+        next.push({
+          canonical: entry.canonical,
+          label: entry.label,
+          variants: entry.variants,
+          enabled: entry.enabled,
+        });
+      }
+    }
     updateMutation.mutate(
       { entries: next },
       {
         onError: (error) => {
           stellaToast.add({
-            title: error instanceof Error ? error.message : String(error),
+            title: userErrorFromThrown(error, t("errors.actionFailed")),
             type: "error",
           });
         },
@@ -366,11 +387,11 @@ export const AnonymizationDenyListCard = () => {
   };
 
   const handleImportFile = async (file: File) => {
-    const text = await file.text();
     if (entries === undefined) {
       return;
     }
 
+    const text = await file.text();
     const parsed = parseImport(text, file.name, pendingLabel);
     if (!parsed || parsed.length === 0) {
       stellaToast.add({
@@ -401,7 +422,7 @@ export const AnonymizationDenyListCard = () => {
         },
         onError: (error) => {
           stellaToast.add({
-            title: error instanceof Error ? error.message : String(error),
+            title: userErrorFromThrown(error, t("errors.actionFailed")),
             type: "error",
           });
         },

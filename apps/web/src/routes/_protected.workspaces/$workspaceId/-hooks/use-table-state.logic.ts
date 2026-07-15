@@ -9,9 +9,12 @@ import { getInternalColId } from "@/routes/_protected.workspaces/$workspaceId/-u
 
 const selectColId = getInternalColId("select");
 const addPropertyColId = getInternalColId("add-property");
-const utilityColumnIds = new Set<string>([selectColId, addPropertyColId]);
+const utilityColumnIds: readonly string[] = Object.freeze([
+  selectColId,
+  addPropertyColId,
+]);
 
-const isPersistableColumnId = (id: string) => !utilityColumnIds.has(id);
+const isPersistableColumnId = (id: string) => !utilityColumnIds.includes(id);
 
 export const omitUtilityColumnSizing = (
   sizing: ColumnSizingState,
@@ -30,13 +33,13 @@ export const omitUtilityColumnSizing = (
 export const createColumnPinningState = (
   pinnedColumnIds: readonly string[],
 ): ColumnPinningState => ({
-  left: [selectColId, ...pinnedColumnIds.filter(isPersistableColumnId)],
-  right: [],
+  start: [selectColId, ...pinnedColumnIds.filter(isPersistableColumnId)],
+  end: [],
 });
 
 export const getPersistedColumnPinning = (
   pinning: ColumnPinningState,
-): string[] => pinning.left.filter(isPersistableColumnId);
+): string[] => pinning.start.filter(isPersistableColumnId);
 
 export const createColumnOrderState = (
   orderedColumnIds: readonly string[],
@@ -64,8 +67,12 @@ export const createColumnVisibilityState = (
 
 export const getPersistedHiddenColumnIds = (
   visibility: ColumnVisibilityState,
-): string[] =>
-  Object.entries(visibility)
-    .filter(([, visible]) => !visible)
-    .map(([id]) => id)
-    .filter(isPersistableColumnId);
+): string[] => {
+  const hiddenIds: string[] = [];
+  for (const [id, visible] of Object.entries(visibility)) {
+    if (!visible && isPersistableColumnId(id)) {
+      hiddenIds.push(id);
+    }
+  }
+  return hiddenIds;
+};

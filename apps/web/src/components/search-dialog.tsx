@@ -56,6 +56,7 @@ import type {
   SearchFilters,
   TimeFilter,
 } from "@/components/search-filters.logic";
+import Tooltip from "@/components/tooltip";
 import { UserAvatar } from "@/components/user-avatar";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { usePermissions } from "@/hooks/use-permissions";
@@ -69,7 +70,7 @@ import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { createCaseLawDecisionRouteParams } from "@/lib/case-law-route";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
 import { toSafeId } from "@/lib/safe-id";
 import {
   searchFacetOptions,
@@ -92,7 +93,6 @@ import type {
   RecentSearch,
   SearchRecentsScope,
 } from "@/lib/search-recents";
-import { stripUndefined } from "@/lib/utils";
 import { DocumentIcon } from "@/routes/_protected.workspaces/$workspaceId/-components/document-icon";
 
 type SearchSummaryCitation = {
@@ -245,9 +245,9 @@ const mergeSelectedBuckets = (
   getLabel: (value: string) => string,
 ): { value: string; label?: string; count: number }[] => {
   const present = new Set(buckets.map((bucket) => bucket.value));
-  const missing = selected
-    .filter((value) => !present.has(value))
-    .map((value) => ({ value, label: getLabel(value), count: 0 }));
+  const missing = selected.flatMap((value) =>
+    present.has(value) ? [] : [{ value, label: getLabel(value), count: 0 }],
+  );
   return [...buckets, ...missing];
 };
 
@@ -340,10 +340,12 @@ export const SearchDialog = ({
     }),
   );
 
-  const allHits = useMemo(
-    () => data?.pages.flatMap((page) => page.hits) ?? [],
-    [data?.pages],
-  );
+  const allHits = useMemo(() => {
+    if (!data) {
+      return EMPTY_SEARCH_HITS;
+    }
+    return data.pages.flatMap((page) => page.hits);
+  }, [data]);
   const getHitVirtualKey = (index: number) => allHits.at(index)?.id ?? index;
 
   // Counts and facets are computed only on the first page (see backend);
@@ -351,6 +353,10 @@ export const SearchDialog = ({
   // doesn't leave stale numbers in the sidebar.
   const firstPage = searchQuery.length > 0 ? data?.pages.at(0) : undefined;
   const facets = firstPage?.facets;
+  const typeBuckets = facets ? facets.type : EMPTY_FACET_BUCKETS;
+  const mimeTypeBuckets = facets ? facets.mimeType : EMPTY_FACET_BUCKETS;
+  const editorBuckets = facets ? facets.editor : EMPTY_FACET_BUCKETS;
+  const workspaceBuckets = facets ? facets.workspace : EMPTY_FACET_BUCKETS;
   const totalCount = firstPage?.totalCount ?? 0;
   const filterTypesKey = filters.types.join("|");
   const filterMimeTypesKey = filters.mimeTypes.join("|");
@@ -411,22 +417,22 @@ export const SearchDialog = ({
 
   const summarizeSearchMutation = useMutation({
     mutationFn: async (params: SearchAISummaryParams) => {
-      const response = await api.search.summary.post(
-        stripUndefined({
-          query: params.query,
-          locale: params.locale,
+      const response = await api.search.summary.post({
+        query: params.query,
+        locale: params.locale,
+        ...(params.originalQuery !== undefined && {
           originalQuery: params.originalQuery,
-          workspaceIds: params.workspaceIds.map((id) =>
-            toSafeId<"workspace">(id),
-          ),
-          types: params.types,
-          editedByUserIds: params.editedByUserIds,
-          mimeTypes: params.mimeTypes,
-          updatedFrom: params.updatedFrom,
-          updatedTo: params.updatedTo,
-          limit: params.limit,
         }),
-      );
+        workspaceIds: params.workspaceIds.map((id) =>
+          toSafeId<"workspace">(id),
+        ),
+        types: params.types,
+        editedByUserIds: params.editedByUserIds,
+        mimeTypes: params.mimeTypes,
+        ...(params.updatedFrom ? { updatedFrom: params.updatedFrom } : {}),
+        ...(params.updatedTo ? { updatedTo: params.updatedTo } : {}),
+        ...(params.limit !== undefined ? { limit: params.limit } : {}),
+      });
 
       if (response.error) {
         throw toAPIError(response.error);
@@ -459,26 +465,24 @@ export const SearchDialog = ({
 
   const createSummaryChatMutation = useMutation({
     mutationFn: async (vars: CreateSearchSummaryChatVars) => {
-      const response = await api.search.summary.chat.post(
-        stripUndefined({
-          query: vars.query,
-          title: vars.title,
-          summary: vars.summary,
-          citations: vars.citations.map((citation) => ({
-            number: citation.number,
-          })),
+      const response = await api.search.summary.chat.post({
+        query: vars.query,
+        title: vars.title,
+        summary: vars.summary,
+        citations: vars.citations.map((citation) => ({
+          number: citation.number,
+        })),
+        ...(vars.originalQuery !== undefined && {
           originalQuery: vars.originalQuery,
-          workspaceIds: vars.workspaceIds.map((id) =>
-            toSafeId<"workspace">(id),
-          ),
-          types: vars.types,
-          editedByUserIds: vars.editedByUserIds,
-          mimeTypes: vars.mimeTypes,
-          updatedFrom: vars.updatedFrom,
-          updatedTo: vars.updatedTo,
-          limit: vars.limit,
         }),
-      );
+        workspaceIds: vars.workspaceIds.map((id) => toSafeId<"workspace">(id)),
+        types: vars.types,
+        editedByUserIds: vars.editedByUserIds,
+        mimeTypes: vars.mimeTypes,
+        ...(vars.updatedFrom ? { updatedFrom: vars.updatedFrom } : {}),
+        ...(vars.updatedTo ? { updatedTo: vars.updatedTo } : {}),
+        ...(vars.limit !== undefined ? { limit: vars.limit } : {}),
+      });
 
       if (response.error) {
         throw toAPIError(response.error);
@@ -723,6 +727,13 @@ export const SearchDialog = ({
     });
   };
 
+  const openSearchResult = (hit: GlobalSearchHit): void => {
+    handleResultClick(hit).catch((error: unknown) => {
+      analytics.captureError(error);
+      stellaToast.add({ title: t("common.somethingWentWrong"), type: "error" });
+    });
+  };
+
   const handleCommandInputKeyDownCapture = (
     e: React.KeyboardEvent<HTMLInputElement>,
   ) => {
@@ -880,7 +891,7 @@ export const SearchDialog = ({
                     <div className="mt-4">
                       <FacetGroup
                         buckets={mergeSelectedBuckets(
-                          (facets?.type ?? []).flatMap((bucket) => {
+                          typeBuckets.flatMap((bucket) => {
                             if (!isSearchKindOption(bucket.value)) {
                               return [];
                             }
@@ -919,7 +930,7 @@ export const SearchDialog = ({
 
                   <div className="mt-4">
                     <SearchableFacetGroup
-                      defaultBuckets={facets?.mimeType ?? []}
+                      defaultBuckets={mimeTypeBuckets}
                       facet="mimeType"
                       formatLabel={(bucket) =>
                         formatMimeTypeLabel(bucket.value)
@@ -933,7 +944,7 @@ export const SearchDialog = ({
 
                   <div className="mt-4">
                     <SearchableFacetGroup
-                      defaultBuckets={facets?.editor ?? []}
+                      defaultBuckets={editorBuckets}
                       facet="editor"
                       onChange={toggleEditorFilter}
                       searchParams={facetSearchParams}
@@ -944,7 +955,7 @@ export const SearchDialog = ({
 
                   <div className="mt-4">
                     <SearchableFacetGroup
-                      defaultBuckets={facets?.workspace ?? []}
+                      defaultBuckets={workspaceBuckets}
                       facet="workspace"
                       onChange={toggleWorkspaceFilter}
                       searchParams={facetSearchParams}
@@ -1007,7 +1018,7 @@ export const SearchDialog = ({
                           (item) => item.id === citationId,
                         );
                         if (hit) {
-                          void handleResultClick(hit);
+                          openSearchResult(hit);
                         }
                       }}
                       onClick={() => {
@@ -1042,7 +1053,7 @@ export const SearchDialog = ({
                             hit={hit}
                             index={virtualHit.index}
                             onClick={(selectedHit) => {
-                              void handleResultClick(selectedHit);
+                              openSearchResult(selectedHit);
                             }}
                             resultNumber={virtualHit.index + 1}
                           />
@@ -1199,18 +1210,22 @@ const SummaryBody = ({
 
     if (citation) {
       parts.push(
-        <button
-          className="text-foreground hover:bg-muted mx-0.5 rounded px-1 font-medium"
+        <Tooltip
+          content={`${citation.title}\n${citation.reason}`}
           key={`${citation.id}-${start}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onCitationClick(citation.id);
-          }}
-          title={`${citation.title}\n${citation.reason}`}
-          type="button"
-        >
-          [{citation.number}]
-        </button>,
+          render={
+            <button
+              className="text-foreground hover:bg-muted mx-0.5 rounded px-1 font-medium"
+              onClick={(event) => {
+                event.stopPropagation();
+                onCitationClick(citation.id);
+              }}
+              type="button"
+            >
+              [{citation.number}]
+            </button>
+          }
+        />,
       );
     } else {
       parts.push(match[0]);
@@ -1223,7 +1238,7 @@ const SummaryBody = ({
     parts.push(text.slice(cursor));
   }
 
-  return <>{parts}</>;
+  return parts;
 };
 
 type SearchRecentsProps = {
@@ -1477,6 +1492,9 @@ const FacetGroup = ({
 
 type FacetBucket = { value: string; label?: string; count: number };
 
+const EMPTY_FACET_BUCKETS: readonly FacetBucket[] = [];
+const EMPTY_SEARCH_HITS: readonly GlobalSearchHit[] = [];
+
 type FacetBucketListProps = {
   buckets: FacetBucket[];
   selected: string[];
@@ -1518,7 +1536,7 @@ const FACET_SEARCH_LIMIT = 20;
 type SearchableFacetGroupProps = {
   facet: SearchableFacet;
   title: string;
-  defaultBuckets: FacetBucket[];
+  defaultBuckets: readonly FacetBucket[];
   selected: string[];
   onChange: (value: string) => void;
   searchParams: {
@@ -1573,8 +1591,10 @@ const SearchableFacetGroup = ({
   for (const bucket of defaultBuckets) {
     labelCacheRef.current[bucket.value] = resolveLabel(bucket);
   }
-  for (const bucket of searchData?.buckets ?? []) {
-    labelCacheRef.current[bucket.value] = resolveLabel(bucket);
+  if (searchData) {
+    for (const bucket of searchData.buckets) {
+      labelCacheRef.current[bucket.value] = resolveLabel(bucket);
+    }
   }
   /* eslint-enable react/react-compiler */
 
@@ -1587,14 +1607,12 @@ const SearchableFacetGroup = ({
     label: resolveLabel(bucket),
   }));
   const present = new Set(visible.map((bucket) => bucket.value));
-  const missingSelected: FacetBucket[] = selected
-    .filter((id) => !present.has(id))
-    // eslint-disable-next-line react/react-compiler -- reads the deliberate render-time label cache mutated above; ref reads don't affect render correctness here
-    .map((id) => ({
-      value: id,
-      label: labelCacheRef.current[id] ?? id,
-      count: 0,
-    }));
+  // eslint-disable-next-line react/react-compiler -- reads the deliberate render-time label cache mutated above; ref reads don't affect render correctness here
+  const missingSelected: FacetBucket[] = selected.flatMap((id) =>
+    present.has(id)
+      ? []
+      : [{ value: id, label: labelCacheRef.current[id] ?? id, count: 0 }],
+  );
   const buckets: FacetBucket[] = [...visible, ...missingSelected];
 
   if (buckets.length === 0 && !isSearching && searchData === undefined) {

@@ -13,7 +13,7 @@
  * actions, and "download anonymized" land in follow-up commits.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -50,15 +50,17 @@ import { AnonymizationContextMenu } from "@/components/inspector/anonymization-c
 import {
   useAnonymizationMatches,
   useAnonymizationMatchesReady,
-  useDocumentTextSelection,
   useInspectorStore,
 } from "@/components/inspector/inspector-store";
+import Tooltip from "@/components/tooltip";
 import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import type { TranslationKey } from "@/i18n/types";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { compareByLocale } from "@/lib/collation";
-import { toAPIError } from "@/lib/errors";
+import { toAPIError } from "@/lib/errors/api";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import { toSafeId } from "@/lib/safe-id";
 import {
   anonymizationAllowlistKeys,
@@ -80,6 +82,8 @@ type AllowlistScope = "document" | "workspace";
  * the chat anonymizer's default entity labels (`misc` is now
  * supported end-to-end in `@stll/anonymize-wasm`).
  */
+const EMPTY_ANONYMIZATION_ENTRIES = Object.freeze([]);
+
 const LABEL_OPTIONS = [
   "misc",
   "organization",
@@ -345,17 +349,28 @@ export const AnonymizationFacet = ({
   // wraps `view.dispatch` and publishes the latest
   // selected text here on every selection-bearing
   // transaction.
-  const folioSelection = useDocumentTextSelection(activeFieldId);
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- prefill relayed from a selection the folio editor publishes into a store from its own dispatch wrapper (a different module); there's no in-component setter call-site to host this, and setPendingValue is shared with other paths, so kept
-  useEffect(() => {
-    if (folioSelection === null) {
+  const lastConsumedSelectionRef = useRef<unknown>(null);
+  const consumeFolioSelection = useLatestCallback(() => {
+    if (activeFieldId === null) {
       return;
     }
-    // eslint-disable-next-line react/react-compiler -- external subscription: relays a selection the folio editor publishes into a store from its own dispatch wrapper (a different module); no in-component setter call-site can host it
-    setPendingValue(folioSelection.text);
-    // `seq` is part of the dep array so re-selecting the
-    // same string still re-fires the prefill.
-  }, [folioSelection]);
+    const selection =
+      useInspectorStore.getState().documentTextSelectionByFieldId[
+        activeFieldId
+      ];
+    if (
+      selection === undefined ||
+      selection === lastConsumedSelectionRef.current
+    ) {
+      return;
+    }
+    lastConsumedSelectionRef.current = selection;
+    setPendingValue(selection.text);
+  });
+  useExternalSyncEffect(() => {
+    consumeFolioSelection();
+    return useInspectorStore.subscribe(consumeFolioSelection);
+  }, [activeFieldId, consumeFolioSelection]);
 
   const addTerm = async (canonical: string, label: LabelOption) => {
     const trimmed = canonical.trim();
@@ -377,7 +392,7 @@ export const AnonymizationFacet = ({
       });
     } catch (error) {
       stellaToast.add({
-        title: error instanceof Error ? error.message : String(error),
+        title: userErrorFromThrown(error, t("errors.actionFailed")),
         type: "error",
       });
     }
@@ -463,14 +478,16 @@ export const AnonymizationFacet = ({
   // while `!matchesReady`: detection hasn't published yet, so
   // filtering would collapse the list to "0 matches" and look
   // identical to "actually nothing matches".
+  const catalogEntries = allEntries ?? EMPTY_ANONYMIZATION_ENTRIES;
+  const activeAllowlistEntries =
+    allowlistEntries ?? EMPTY_ANONYMIZATION_ENTRIES;
   const entries = (() => {
-    const sourceEntries = allEntries ?? [];
     if (activeFieldId && matchesReady) {
-      return sourceEntries.filter((entry) =>
+      return catalogEntries.filter((entry) =>
         matchSnapshot.countByCanonical.has(entry.canonical),
       );
     }
-    return sourceEntries;
+    return catalogEntries;
   })();
   const noOpenDocument = activeFieldId === null;
 
@@ -482,7 +499,7 @@ export const AnonymizationFacet = ({
   // before Folio sees them), so re-merge them from the
   // exclusions store with their remembered label.
   const workspaceCanonicals = new Set(
-    (allEntries ?? []).map((entry) => entry.canonical),
+    catalogEntries.map((entry) => entry.canonical),
   );
   // Index allowlist entries by canonical (case-insensitive) so the
   // UI knows which detected rows are currently overridden, plus
@@ -490,7 +507,7 @@ export const AnonymizationFacet = ({
   type AllowlistRow = NonNullable<typeof allowlistEntries>[number];
   const allowlistByCanonical = (() => {
     const map = new Map<string, AllowlistRow[]>();
-    for (const entry of allowlistEntries ?? []) {
+    for (const entry of activeAllowlistEntries) {
       const key = entry.canonical.toLocaleLowerCase();
       const list = map.get(key);
       if (list) {
@@ -538,7 +555,7 @@ export const AnonymizationFacet = ({
     // Allowlist entries that no longer show up in the live match
     // snapshot (pipeline already dropped them) still need a row so
     // the user can restore them.
-    for (const entry of allowlistEntries ?? []) {
+    for (const entry of activeAllowlistEntries) {
       push(entry.label, entry.canonical, 0, true);
     }
     const compareText = compareByLocale(locale);
@@ -593,8 +610,7 @@ export const AnonymizationFacet = ({
       ? s.anonymizationSelection.seq
       : 0,
   );
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- two-pass reaction to a doc-selection store bump: first commit expands the target group (setExpandedGroups, shared with toggleGroup), the re-run then scrolls + flashes the row via DOM imperatives; the expand-then-measure dependency on expandedGroups can't move into render, so kept
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!docSelectionCanonical) {
       return;
     }
@@ -795,19 +811,24 @@ export const AnonymizationFacet = ({
               </button>
               <div className="flex items-center gap-1">
                 {hitCount !== undefined && hitCount > 0 && (
-                  <span
-                    className="bg-muted text-muted-foreground rounded-full px-2 py-0.5 text-xs tabular-nums"
-                    aria-label={t(
+                  <Tooltip
+                    content={t(
                       "inspector.anonymization.termMatchCountAriaLabel",
                       { count: String(hitCount) },
                     )}
-                    title={t(
-                      "inspector.anonymization.termMatchCountAriaLabel",
-                      { count: String(hitCount) },
-                    )}
+                    render={
+                      <span
+                        className="bg-muted text-muted-foreground rounded-full px-2 py-0.5 text-xs tabular-nums"
+                        aria-label={t(
+                          "inspector.anonymization.termMatchCountAriaLabel",
+                          { count: String(hitCount) },
+                        )}
+                        role="group"
+                      />
+                    }
                   >
                     {format.number(hitCount)}
-                  </span>
+                  </Tooltip>
                 )}
                 <Button
                   disabled={deleteMutation.isPending}
@@ -885,19 +906,24 @@ export const AnonymizationFacet = ({
                         </button>
                         <div className="flex items-center gap-1">
                           {!row.isExcluded && row.count > 0 && (
-                            <span
-                              aria-label={t(
+                            <Tooltip
+                              content={t(
                                 "inspector.anonymization.termMatchCountAriaLabel",
                                 { count: String(row.count) },
                               )}
-                              className="bg-muted text-muted-foreground rounded-full px-2 py-0.5 text-xs tabular-nums"
-                              title={t(
-                                "inspector.anonymization.termMatchCountAriaLabel",
-                                { count: String(row.count) },
-                              )}
+                              render={
+                                <span
+                                  aria-label={t(
+                                    "inspector.anonymization.termMatchCountAriaLabel",
+                                    { count: String(row.count) },
+                                  )}
+                                  className="bg-muted text-muted-foreground rounded-full px-2 py-0.5 text-xs tabular-nums"
+                                  role="group"
+                                />
+                              }
                             >
                               {format.number(row.count)}
-                            </span>
+                            </Tooltip>
                           )}
                           {row.isExcluded ? (
                             <Button

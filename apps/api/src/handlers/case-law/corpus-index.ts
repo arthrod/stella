@@ -1,7 +1,7 @@
 import { Result } from "better-result";
 import { and, asc, eq, isNull, or, sql } from "drizzle-orm";
 
-import type { ScopedDb } from "@/api/db";
+import type { ScopedDb } from "@/api/db/safe-db";
 import {
   caseLawDecisions,
   caseLawIndexJobs,
@@ -9,7 +9,7 @@ import {
 } from "@/api/db/schema";
 import { readCorpusText } from "@/api/handlers/case-law/corpus-storage";
 import { redistributableCaseLawSource } from "@/api/handlers/case-law/redistribution";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import type { SafeId } from "@/api/lib/branded-types";
 import {
   getCorpusIndexClient,
@@ -422,7 +422,7 @@ export const backfillCorpusIndex = async (
       continue;
     }
 
-    const casMissed: SafeId<"caseLawDecision">[] = [];
+    const casMissed = new Set<SafeId<"caseLawDecision">>();
     // oxlint-disable-next-line no-await-in-loop -- one CAS transaction per group; sequential to keep index writes and audit rows consistent
     await scopedDb(async (tx) => {
       // audit: skip — search index maintenance; rebuilds derived state
@@ -449,10 +449,10 @@ export const backfillCorpusIndex = async (
           )
           .returning({ id: caseLawDecisions.id });
         if (marked.length === 0) {
-          casMissed.push(row.id);
+          casMissed.add(row.id);
         }
       }
-      const markedRows = group.filter(({ row }) => !casMissed.includes(row.id));
+      const markedRows = group.filter(({ row }) => !casMissed.has(row.id));
       if (markedRows.length > 0) {
         await tx.insert(caseLawIndexJobs).values(
           markedRows.map(({ row }) => ({
@@ -470,7 +470,7 @@ export const backfillCorpusIndex = async (
     // so delete the unrecorded copy now; the refreshed row is re-indexed
     // by a later cycle.
     for (const missedId of casMissed) {
-      // oxlint-disable-next-line no-await-in-loop -- sequential cleanup deletes of the unrecorded copies
+      // oxlint-disable-next-line no-await-in-loop -- sequential cleanup deletes of the unrecorded copies; matches this file's established sequential-vs-search-backend design (see ensureIndex/ingestBatch above)
       const removed = await removeDecisionFromCorpusIndex(
         missedId,
         scopedDb,
@@ -480,7 +480,7 @@ export const backfillCorpusIndex = async (
         firstError ??= removed.error;
       }
     }
-    indexed += group.length - casMissed.length;
+    indexed += group.length - casMissed.size;
   }
 
   // Surface a failure so the daemon retries the un-indexed groups.

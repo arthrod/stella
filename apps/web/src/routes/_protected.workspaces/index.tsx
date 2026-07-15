@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useEffectEvent, useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
@@ -36,11 +36,10 @@ import {
 } from "@stll/ui/components/table";
 import { cn } from "@stll/ui/lib/utils";
 
-import {
-  EMPTY_SCREEN_MATTERS_VIDEO,
-  EmptyScreen,
-} from "@/components/empty-screen";
-import { useExternalSyncEffect } from "@/hooks/use-effect";
+import { EmptyScreen } from "@/components/empty-screen";
+import { EMPTY_SCREEN_MATTERS_VIDEO } from "@/components/empty-screen-media";
+import { useExternalSyncEffect, useMountEffect } from "@/hooks/use-effect";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { usePermissions } from "@/hooks/use-permissions";
 import { TOOLBAR_ROW_HEIGHT } from "@/lib/consts";
 import { pageTitle } from "@/lib/page-title";
@@ -98,12 +97,39 @@ export const Route = createFileRoute("/_protected/workspaces/")({
 const FOCUS_FLASH_MS = 1500;
 
 function RouteComponent() {
-  const t = useTranslations();
-  const locale = useLocale();
-  const queryClient = useQueryClient();
   const activeOrganizationId = Route.useRouteContext({
     select: (ctx) => ctx.user.activeOrganizationId,
   });
+  const [organizationMount, setOrganizationMount] = useState({
+    activeOrganizationId,
+    resetExternalState: false,
+  });
+  if (organizationMount.activeOrganizationId !== activeOrganizationId) {
+    setOrganizationMount({
+      activeOrganizationId,
+      resetExternalState: true,
+    });
+  }
+
+  return (
+    <MattersContent
+      activeOrganizationId={activeOrganizationId}
+      key={activeOrganizationId}
+      resetExternalState={organizationMount.resetExternalState}
+    />
+  );
+}
+
+const MattersContent = ({
+  activeOrganizationId,
+  resetExternalState,
+}: {
+  activeOrganizationId: string;
+  resetExternalState: boolean;
+}) => {
+  const t = useTranslations();
+  const locale = useLocale();
+  const queryClient = useQueryClient();
   const { data, isFetching } = useSuspenseQuery(
     workspacesRouteOptions(activeOrganizationId),
   );
@@ -129,26 +155,16 @@ function RouteComponent() {
   const [focusIndex, setFocusIndex] = useState(-1);
   const searchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const previousOrganizationIdRef = useRef(activeOrganizationId);
 
-  // On org change this resets local search AND mutates the config store
-  // (resetMatterVisibilityState) and invalidates the workspaces query. A `key`
-  // remount would only reset local state, not the store reset or invalidation,
-  // and this is a router-owned route component with no parent to key, so it
-  // stays an effect.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- org-change reset performs a zustand store reset + query invalidation alongside local state; lift-to-key cannot replicate the store/cache side effects
-  useEffect(() => {
-    if (previousOrganizationIdRef.current === activeOrganizationId) {
+  useMountEffect(() => {
+    if (!resetExternalState) {
       return;
     }
-
-    previousOrganizationIdRef.current = activeOrganizationId;
-    setSearch("");
     resetMatterVisibilityState(getMatterOrganizationResetPatch());
     void queryClient.invalidateQueries({
       queryKey: workspacesKeys.list(activeOrganizationId),
     });
-  }, [activeOrganizationId, queryClient, resetMatterVisibilityState]);
+  });
 
   const workspaces = data.workspaces;
   const canOpenCreateMatter =
@@ -209,7 +225,7 @@ function RouteComponent() {
     return () => document.removeEventListener("keydown", handler);
   }, [displayed]);
 
-  const focusOnClient = useEffectEvent((clientId: string) => {
+  const focusOnClient = useLatestCallback((clientId: string) => {
     if (collapsedSet.has(clientId)) {
       toggleGroupCollapsed(clientId);
     }
@@ -241,7 +257,7 @@ function RouteComponent() {
     if (focusClient) {
       focusOnClient(focusClient);
     }
-  }, [focusClient]);
+  }, [focusClient, focusOnClient]);
 
   return (
     <MattersPageContextMenu canCreateMatter={canOpenCreateMatter}>
@@ -312,7 +328,7 @@ function RouteComponent() {
       </div>
     </MattersPageContextMenu>
   );
-}
+};
 
 const SKELETON_TABLE_ROW_KEYS = [
   "a",
@@ -432,13 +448,12 @@ const MattersTableSkeleton = () => {
   );
 
   const hiddenColumnSet = new Set(hiddenColumns);
-  const columns: SkeletonColumn[] = [
-    { id: "name" },
-    ...ALL_COLUMNS.filter((id) => !hiddenColumnSet.has(id)).map((id) => ({
-      id,
-      width: SKELETON_COLUMN_WIDTHS[id],
-    })),
-  ];
+  const columns: SkeletonColumn[] = [{ id: "name" }];
+  for (const id of ALL_COLUMNS) {
+    if (!hiddenColumnSet.has(id)) {
+      columns.push({ id, width: SKELETON_COLUMN_WIDTHS[id] });
+    }
+  }
 
   const headerLabel = (id: SkeletonColumn["id"]): string =>
     id === "name" ? sortLabels.name : columnLabels[id];

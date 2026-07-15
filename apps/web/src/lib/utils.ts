@@ -1,36 +1,4 @@
-/**
- * Strip entries whose value is `undefined` so the result
- * satisfies `exactOptionalPropertyTypes`. Eden-generated
- * query types use `prop?: T` (without `| undefined`); this
- * helper bridges our types (which include `| undefined`)
- * to Eden's stricter shape.
- *
- * At runtime, keys with `undefined` values are deleted so
- * the object is structurally identical to one where those
- * keys were never set.
- */
-// SAFETY: the mapped type below mirrors the input but
-// strips `| undefined` from each value. At runtime every
-// undefined-valued key is physically removed, so the cast
-// is sound. This is the canonical boundary between our
-// internal types (`prop?: T | undefined`) and Eden's
-// inferred types (`prop?: T`).
-export const stripUndefined = <T extends Record<string, unknown>>(
-  obj: T,
-): {
-  [K in keyof T]: Exclude<T[K], undefined>;
-} => {
-  const result: Record<string, unknown> = {};
-  for (const key of Object.keys(obj)) {
-    if (obj[key] !== undefined) {
-      result[key] = obj[key];
-    }
-  }
-  // SAFETY: result mirrors input with undefined-valued keys
-  // removed; the mapped return type reflects this invariant.
-  // eslint-disable-next-line typescript/no-unsafe-type-assertion -- mapped type the checker cannot infer from the loop
-  return result as { [K in keyof T]: Exclude<T[K], undefined> };
-};
+import type * as React from "react";
 
 /**
  * Type-narrowing `.includes()` that avoids
@@ -41,7 +9,52 @@ export const stripUndefined = <T extends Record<string, unknown>>(
 export const includesValue = <T extends string>(
   arr: readonly T[],
   value: string,
-): value is T => (arr as readonly string[]).includes(value);
+): value is T => arr.some((candidate) => candidate === value);
+
+/**
+ * Compose multiple refs into a single ref callback.
+ * Adapted from `@radix-ui/react-compose-refs` (MIT).
+ *
+ * Collects cleanup functions returned by React 19 ref
+ * callbacks and returns a combined cleanup so React can
+ * invoke it on unmount instead of re-calling with `null`.
+ */
+export const composeRefs =
+  <T>(
+    ...refs: (React.Ref<T> | undefined)[]
+  ): ((node: T | null) => (() => void) | undefined) =>
+  (node) => {
+    const cleanups: (() => void)[] = [];
+    for (const ref of refs) {
+      if (typeof ref === "function") {
+        const cleanup = ref(node);
+        if (typeof cleanup === "function") {
+          cleanups.push(() => {
+            void cleanup();
+          });
+        } else if (node !== null) {
+          cleanups.push(() => {
+            void ref(null);
+          });
+        }
+      } else if (ref !== undefined && ref !== null) {
+        ref.current = node;
+        if (node !== null) {
+          cleanups.push(() => {
+            ref.current = null;
+          });
+        }
+      }
+    }
+    if (cleanups.length > 0) {
+      return () => {
+        for (const cleanup of cleanups) {
+          cleanup();
+        }
+      };
+    }
+    return undefined;
+  };
 
 export const shuffleArray = <T>(originalArray: readonly T[]): T[] => {
   const array = [...originalArray];
@@ -49,12 +62,11 @@ export const shuffleArray = <T>(originalArray: readonly T[]): T[] => {
   for (let i = array.length - 1; i > 0; i--) {
     const randomIndex = Math.floor(Math.random() * (i + 1));
 
-    // SAFETY: i is in [1, array.length-1] and randomIndex
-    // is in [0, i]; both always in bounds.
-    // eslint-disable-next-line typescript/no-unsafe-type-assertion -- in-bounds index, noUncheckedIndexedAccess widens to T | undefined
-    const a = array[i] as T;
-    // eslint-disable-next-line typescript/no-unsafe-type-assertion -- in-bounds index, noUncheckedIndexedAccess widens to T | undefined
-    const b = array[randomIndex] as T;
+    const a = array[i];
+    const b = array[randomIndex];
+    if (a === undefined || b === undefined) {
+      continue;
+    }
     array[randomIndex] = a;
     array[i] = b;
   }

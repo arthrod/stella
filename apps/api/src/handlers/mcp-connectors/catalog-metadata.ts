@@ -35,6 +35,13 @@ const isRecommendedJurisdictionCode = (
 ): jurisdiction is RecommendedJurisdictionCode =>
   jurisdiction === "EU" || isCountryCode(jurisdiction);
 
+const mutableArrayOrEmpty = <T>(value: T[] | undefined): T[] => {
+  if (value === undefined) {
+    return [];
+  }
+  return value;
+};
+
 /**
  * Native-tool catalogue sourced from `@stll/catalogue`. Recommendation
  * lives in `packages/catalogue/entries/recommended.json` (maintainer-
@@ -51,7 +58,7 @@ const NATIVE_TOOL_CATALOG: readonly NativeToolCatalogItem[] = (() => {
       continue;
     }
     for (const slug of slugs) {
-      const list = jurisdictionsBySlug.get(slug) ?? [];
+      const list = mutableArrayOrEmpty(jurisdictionsBySlug.get(slug));
       list.push(jurisdiction);
       jurisdictionsBySlug.set(slug, list);
     }
@@ -64,14 +71,20 @@ const NATIVE_TOOL_CATALOG: readonly NativeToolCatalogItem[] = (() => {
     url: entry.url ?? entry.homepage ?? "",
     documentationUrl: entry.documentationUrl ?? null,
     iconUrl: entry.iconUrl ?? null,
-    recommendedJurisdictions: jurisdictionsBySlug.get(entry.slug) ?? [],
+    recommendedJurisdictions: (() => {
+      const storedJurisdictions = jurisdictionsBySlug.get(entry.slug);
+      if (storedJurisdictions === undefined) {
+        return [];
+      }
+      return storedJurisdictions;
+    })(),
   }));
 })();
 
 /** Authoritative slug list — independent of jurisdiction filtering. */
-export const NATIVE_TOOL_SLUGS: readonly string[] = NATIVE_TOOL_CATALOG.filter(
-  (tool) => isToggleableNativeToolBackendSlug(tool.slug),
-).map((tool) => tool.slug);
+export const NATIVE_TOOL_SLUGS: readonly string[] = NATIVE_TOOL_CATALOG.flatMap(
+  (tool) => (isToggleableNativeToolBackendSlug(tool.slug) ? [tool.slug] : []),
+);
 
 const toPracticeCountryCodeSet = (
   practiceJurisdictions: readonly PracticeJurisdiction[],
@@ -170,15 +183,16 @@ export const getDisabledNativeToolSlugs = ({
 }): readonly string[] => {
   const practiceCountryCodes = toPracticeCountryCodeSet(practiceJurisdictions);
   const implementedSlugs = new Set(NATIVE_TOOL_SLUGS);
-  return NATIVE_TOOL_CATALOG.filter(
-    (tool) =>
-      implementedSlugs.has(tool.slug) &&
-      !isNativeToolEnabledForCodes(
-        tool.slug,
-        practiceCountryCodes,
-        nativeToolOverrides,
-      ),
-  ).map((tool) => tool.slug);
+  return NATIVE_TOOL_CATALOG.flatMap((tool) =>
+    implementedSlugs.has(tool.slug) &&
+    !isNativeToolEnabledForCodes(
+      tool.slug,
+      practiceCountryCodes,
+      nativeToolOverrides,
+    )
+      ? [tool.slug]
+      : [],
+  );
 };
 
 /**
@@ -196,9 +210,18 @@ export const getDisabledNativeToolSlugsFromSettingsRow = (
     | undefined,
 ): readonly string[] =>
   getDisabledNativeToolSlugs({
-    practiceJurisdictions: row?.practiceJurisdictions ?? [],
+    practiceJurisdictions: arrayOrEmpty(row?.practiceJurisdictions),
     nativeToolOverrides: row?.nativeToolOverrides ?? {},
   });
+
+const arrayOrEmpty = <T>(
+  value: readonly T[] | null | undefined,
+): readonly T[] => {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  return value;
+};
 
 export const mcpConnectorCatalogMetadata = (
   _connector: McpConnectorCatalogSource,
@@ -237,18 +260,23 @@ export const getNativeToolCatalog = ({
   // toggle list — the PATCH endpoint would 404 on them.
   const toggleable = new Set(NATIVE_TOOL_SLUGS);
 
-  return NATIVE_TOOL_CATALOG.filter(
-    (tool) => toggleable.has(tool.slug) && nativeToolDeployAvailable(tool.slug),
-  ).map((tool) => ({
-    description: tool.description,
-    displayName: tool.displayName,
-    documentationUrl: tool.documentationUrl,
-    iconUrl: tool.iconUrl,
-    isRecommended: tool.recommendedJurisdictions.some((countryCode) =>
-      matchesPracticeCountryCode(countryCode, practiceCountryCodes),
-    ),
-    recommendedJurisdictions: tool.recommendedJurisdictions,
-    slug: tool.slug,
-    url: tool.url,
-  }));
+  return NATIVE_TOOL_CATALOG.flatMap((tool) => {
+    if (!toggleable.has(tool.slug) || !nativeToolDeployAvailable(tool.slug)) {
+      return [];
+    }
+    return [
+      {
+        description: tool.description,
+        displayName: tool.displayName,
+        documentationUrl: tool.documentationUrl,
+        iconUrl: tool.iconUrl,
+        isRecommended: tool.recommendedJurisdictions.some((countryCode) =>
+          matchesPracticeCountryCode(countryCode, practiceCountryCodes),
+        ),
+        recommendedJurisdictions: tool.recommendedJurisdictions,
+        slug: tool.slug,
+        url: tool.url,
+      },
+    ];
+  });
 };

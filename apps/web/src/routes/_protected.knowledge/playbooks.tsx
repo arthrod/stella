@@ -10,7 +10,7 @@ import { stellaToast } from "@stll/ui/components/toast";
 
 import { playbooksRouteAvailable } from "@/hooks/use-playbooks-preview";
 import { api } from "@/lib/api";
-import { userErrorMessage } from "@/lib/errors";
+import { userErrorMessage } from "@/lib/errors/user-safe";
 import { PlaybookEditor } from "@/routes/_protected.knowledge/-components/playbook-editor";
 import { PlaybookList } from "@/routes/_protected.knowledge/-components/playbook-list";
 import { PlaybookStarterGallerySheet } from "@/routes/_protected.knowledge/-components/playbook-starter-gallery-sheet";
@@ -118,6 +118,7 @@ function RouteComponent() {
 
     // Result.tryPromise instead of try/finally: the try/finally form trips the
     // React Compiler bailout guard, and the request can throw on abort.
+
     const result = await Result.tryPromise(
       async () =>
         await api.playbooks.get({

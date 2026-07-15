@@ -9,7 +9,7 @@ import {
   RECAP_RECENT_MESSAGE_LIMIT,
 } from "@/api/handlers/chat/thread-recap-window";
 import { resolveCaching } from "@/api/lib/ai-config";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createTanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
 import {
   assertUsageAvailableForHandler,
@@ -159,6 +159,7 @@ const getSuggestedPrompts = createSafeRootHandler(
           orderBy: { createdAt: "asc" },
           limit: 1,
         });
+
         const recentMessagesDesc = await tx.query.chatMessages.findMany({
           where: {
             threadId: { eq: threadId },

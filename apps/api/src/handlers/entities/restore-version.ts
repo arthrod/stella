@@ -135,6 +135,7 @@ export default createSafeHandler(
         }
 
         // Point entity to the new version
+
         await tx
           .update(entities)
           .set({

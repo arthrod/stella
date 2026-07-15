@@ -7,7 +7,7 @@ import {
 } from "@stll/anonymize-chat";
 import type { ChatSendMode } from "@stll/anonymize-chat";
 
-import type { SafeDb, SafeDbError } from "@/api/db";
+import type { SafeDb, SafeDbError } from "@/api/db/safe-db";
 import { userFiles } from "@/api/db/schema";
 import {
   CHAT_MAX_FILE_BYTES,
@@ -30,7 +30,7 @@ import {
 } from "@/api/handlers/files/image-derivative";
 import { createUserFileKey, deleteS3Keys } from "@/api/handlers/files/utils";
 import { isUserFileUrl, toUserFileUrl } from "@/api/handlers/user-files/types";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
 import type { AuditRecorder } from "@/api/lib/audit-log";
 import { createSafeId } from "@/api/lib/branded-types";
@@ -343,8 +343,10 @@ export const hydrateFilePart = async ({
           const extracted = await extractText(bytes);
 
           return extracted.paragraphs
-            .map((paragraph) => paragraph.text.trim())
-            .filter(Boolean)
+            .flatMap((paragraph) => {
+              const trimmed = paragraph.text.trim();
+              return trimmed ? [trimmed] : [];
+            })
             .join("\n")
             .slice(0, LIMITS.chatContextFileMaxChars);
         },

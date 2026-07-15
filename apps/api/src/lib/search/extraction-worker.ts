@@ -70,8 +70,10 @@ const extractPdfPlaintext = async (pdfBytes: Uint8Array): Promise<string> => {
   for (const page of pages) {
     const result = page.extractText();
     const pageText = result.lines
-      .map((line) => line.text.trim())
-      .filter(Boolean)
+      .flatMap((line) => {
+        const trimmed = line.text.trim();
+        return trimmed ? [trimmed] : [];
+      })
       .join("\n");
     if (pageText) {
       parts.push(pageText);

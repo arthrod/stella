@@ -236,6 +236,7 @@ export const createCollabServer = async ({
 
     const refresh = (async () => {
       const token = state.token;
+
       const refreshed = await postJson({
         apiUrl,
         body: {

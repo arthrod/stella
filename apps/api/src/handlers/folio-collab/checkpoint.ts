@@ -4,7 +4,7 @@ import { t } from "elysia";
 
 import { folioCollabSessions } from "@/api/db/schema";
 import { createFileKey } from "@/api/handlers/files/utils";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import type { TokenHandlerConfig } from "@/api/lib/api-handlers";
 import { createSafeTokenHandler } from "@/api/lib/api-handlers";
 import {
@@ -116,9 +116,12 @@ const checkpointFolioCollabSession = createSafeTokenHandler(
     }
 
     if (scanResult.value.verdict === "reject") {
-      const reasons = scanResult.value.findings
-        .filter((finding) => finding.severity === "reject")
-        .map((finding) => finding.message);
+      const reasons: string[] = [];
+      for (const finding of scanResult.value.findings) {
+        if (finding.severity === "reject") {
+          reasons.push(finding.message);
+        }
+      }
 
       return Result.err(
         new HandlerError({
@@ -128,12 +131,15 @@ const checkpointFolioCollabSession = createSafeTokenHandler(
       );
     }
 
-    const scanWarnings =
-      scanResult.value.verdict === "warn"
-        ? scanResult.value.findings
-            .filter((finding) => finding.severity === "warn")
-            .map((finding) => finding.message)
-        : null;
+    let scanWarnings: string[] | null = null;
+    if (scanResult.value.verdict === "warn") {
+      scanWarnings = [];
+      for (const finding of scanResult.value.findings) {
+        if (finding.severity === "warn") {
+          scanWarnings.push(finding.message);
+        }
+      }
+    }
 
     const recordAuditEvent = createAuditRecorder({
       organizationId,

@@ -30,6 +30,7 @@ function RootRedirect() {
     void (async () => {
       // loadAuthContext swallows its own errors (returns a null session), so
       // this never rejects; a failed session simply routes to /auth below.
+
       const authContext = await loadAuthContext(queryClient);
       if (run.cancelled) {
         return;

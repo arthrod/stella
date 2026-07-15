@@ -10,6 +10,7 @@ export const destroyPDFDocument = async (data: {
   await Promise.all([
     data.loadingTask.destroy(),
     // oxlint requires promise-returning functions to be async (promise-function-async).
+
     ...data.attachmentLoadingTasks.map(async (task) => await task.destroy()),
   ]);
 };

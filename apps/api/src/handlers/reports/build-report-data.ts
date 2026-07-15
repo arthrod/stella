@@ -19,7 +19,7 @@
 
 import { Result } from "better-result";
 
-import type { SafeDb } from "@/api/db";
+import type { SafeDb } from "@/api/db/safe-db";
 import type { JustificationContent, PropertyRole } from "@/api/db/schema";
 import type { PropertyContent, PropertyTool } from "@/api/db/schema-validators";
 import type { QueryEntityResult } from "@/api/handlers/entities/query-entities";
@@ -407,13 +407,15 @@ const buildReviewGrid = (
   return { columns, rows };
 };
 
+const generatedAtFormatter = new Intl.DateTimeFormat(REPORT_LOCALE, {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+  timeZone: "UTC",
+});
+
 const formatGeneratedAt = (now: Date): string =>
-  new Intl.DateTimeFormat(REPORT_LOCALE, {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    timeZone: "UTC",
-  }).format(now);
+  generatedAtFormatter.format(now);
 
 /** The workspace "Document Type" classifier property id, or null when absent. */
 export const findDocTypePropertyId = (
@@ -503,9 +505,12 @@ export const buildReportData = async ({
     if (docTypePropertyId) {
       loadedPropertyIds.add(docTypePropertyId);
     }
-    const fieldIds = properties
-      .filter((property) => loadedPropertyIds.has(property.id))
-      .map((property) => toSafeId<"property">(property.id));
+    const fieldIds: SafeId<"property">[] = [];
+    for (const property of properties) {
+      if (loadedPropertyIds.has(property.id)) {
+        fieldIds.push(toSafeId<"property">(property.id));
+      }
+    }
 
     const queryResult = yield* Result.await(
       queryEntities({

@@ -22,8 +22,10 @@ import { stellaToast } from "@stll/ui/components/toast";
 import { BreadcrumbLink } from "@/components/breadcrumbs/shared";
 import { MatterIcon } from "@/components/matter-icon";
 import { MatterNumberHint } from "@/components/matter-number-hint";
+import Tooltip from "@/components/tooltip";
 import { useInlineRename } from "@/hooks/use-inline-rename";
-import { APIError } from "@/lib/errors";
+import { APIError } from "@/lib/errors/api";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 import { getMatterPickerColor, toStoredMatterColor } from "@/lib/matter-colors";
 import { useUpdateWorkspace } from "@/routes/_protected.workspaces/-mutations";
 import { workspaceOptions } from "@/routes/_protected.workspaces/-queries";
@@ -69,10 +71,10 @@ export const WorkspaceBreadcrumb = ({
               return;
             }
 
-            const message =
-              APIError.is(error) && error.status < 500
-                ? error.message
-                : t("errors.actionFailed");
+            const message = userErrorFromThrown(
+              error,
+              t("errors.actionFailed"),
+            );
             stellaToast.add({ title: message, type: "error" });
           },
         },
@@ -118,17 +120,21 @@ export const WorkspaceBreadcrumb = ({
       onSelect={handleColorChange}
       value={activeSwatch}
     >
-      <button
-        aria-label={changeColorLabel}
-        className="hover:bg-muted cursor-pointer rounded p-0.5 transition-colors"
-        title={changeColorLabel}
-        type="button"
-      >
-        <MatterIcon
-          className="size-3.5 shrink-0"
-          matter={{ id: workspaceId, color: workspace.color }}
-        />
-      </button>
+      <Tooltip
+        content={changeColorLabel}
+        render={
+          <button
+            aria-label={changeColorLabel}
+            className="hover:bg-muted cursor-pointer rounded p-0.5 transition-colors"
+            type="button"
+          >
+            <MatterIcon
+              className="size-3.5 shrink-0"
+              matter={{ id: workspaceId, color: workspace.color }}
+            />
+          </button>
+        }
+      />
     </ColorPicker>
   ) : (
     <MatterIcon

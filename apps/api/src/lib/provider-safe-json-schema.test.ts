@@ -7,9 +7,11 @@ import { propertyConfig } from "@stll/property-testing";
 
 import { toTanStackToolSchema } from "@/api/handlers/chat/tools/tanstack-tool-schema";
 import {
+  providerSafeJsonSchemaOptionsForTanStackProvider,
   projectToProviderSafeJsonSchema,
   PROVIDER_SAFE_JSON_SCHEMA_KEYWORDS,
 } from "@/api/lib/provider-safe-json-schema";
+import { projectSchemaInputJsonSchema } from "@/api/lib/tanstack-ai-schema";
 
 const PROVIDER_SAFE_KEYWORDS = new Set<string>(
   PROVIDER_SAFE_JSON_SCHEMA_KEYWORDS,
@@ -117,6 +119,23 @@ const schemaWithComposition = fc.oneof(
 );
 
 describe("projectToProviderSafeJsonSchema", () => {
+  test("selects explicit schema dialects for provider adapters", () => {
+    expect(providerSafeJsonSchemaOptionsForTanStackProvider("google")).toEqual({
+      enumValueStrategy: "string-only",
+      nullUnionStrategy: "openapi",
+    });
+    expect(
+      providerSafeJsonSchemaOptionsForTanStackProvider("openrouter"),
+    ).toEqual({
+      enumValueStrategy: "string-only",
+      nullUnionStrategy: "json-schema",
+    });
+    expect(providerSafeJsonSchemaOptionsForTanStackProvider("openai")).toEqual({
+      enumValueStrategy: "json-schema",
+      nullUnionStrategy: "json-schema",
+    });
+  });
+
   test("drops propertyNames from the fill_template repro while keeping additionalProperties", () => {
     const input = {
       type: "object",
@@ -168,14 +187,39 @@ describe("projectToProviderSafeJsonSchema", () => {
     expect(droppedKeywords).toEqual([]);
   });
 
-  test("drops const constraints that cannot be lowered to provider-safe enums", () => {
+  test("preserves the inferred boolean type when dropping a const constraint", () => {
     const { schema, droppedKeywords } = projectToProviderSafeJsonSchema({
-      type: "boolean",
       const: true,
     });
 
     expect(schema).toEqual({ type: "boolean" });
     expect(droppedKeywords).toEqual(["const"]);
+  });
+
+  test("projects numeric literals without weakening local tool validation", async () => {
+    const sourceInputSchema = toTanStackToolSchema(
+      v.strictObject({ count: v.literal(7) }),
+    );
+    const inputSchema = projectSchemaInputJsonSchema(sourceInputSchema, {
+      nullUnionStrategy: "openapi",
+    });
+
+    expect(inputSchema).toHaveProperty(
+      "~standard.validate",
+      sourceInputSchema["~standard"].validate,
+    );
+    const invalidResult = await sourceInputSchema["~standard"].validate({
+      count: 8,
+    });
+    expect(invalidResult.issues).toBeDefined();
+    expect(convertSchemaToJsonSchema(inputSchema)).toEqual({
+      type: "object",
+      properties: {
+        count: { type: "number" },
+      },
+      required: ["count"],
+      additionalProperties: false,
+    });
   });
 
   test("records const when enum already carries the allowed values", () => {
@@ -209,8 +253,24 @@ describe("projectToProviderSafeJsonSchema", () => {
       { nullUnionStrategy: "openapi" },
     );
 
-    expect(schema).toEqual({ enum: ["ready", 1], nullable: true });
-    expect(droppedKeywords).toEqual(["enum[1]"]);
+    expect(schema).toEqual({ enum: ["ready"], nullable: true });
+    expect(droppedKeywords).toEqual(["enum[1]", "enum[3]"]);
+  });
+
+  test("applies string-only enums independently of the null dialect", () => {
+    const { schema, droppedKeywords } = projectToProviderSafeJsonSchema(
+      {
+        type: "number",
+        enum: [7],
+      },
+      {
+        enumValueStrategy: "string-only",
+        nullUnionStrategy: "json-schema",
+      },
+    );
+
+    expect(schema).toEqual({ type: "number" });
+    expect(droppedKeywords).toEqual(["enum[0]"]);
   });
 
   test("lowers oneOf to anyOf and recurses into branches", () => {
@@ -337,7 +397,7 @@ describe("projectToProviderSafeJsonSchema", () => {
     expect(schema).toEqual({
       type: "object",
       properties: {
-        kind: { enum: ["lookup"] },
+        kind: { type: "string", enum: ["lookup"] },
         mode: { enum: ["auto"], nullable: true },
       },
       required: ["kind"],
@@ -728,7 +788,12 @@ describe("projectToProviderSafeJsonSchema", () => {
           );
 
           expect(schema["nullable"]).toBe(true);
-          expect(schema["enum"]).toEqual(values);
+          const stringValues = values.filter(
+            (value): value is string => typeof value === "string",
+          );
+          expect(schema["enum"]).toEqual(
+            stringValues.length === 0 ? undefined : stringValues,
+          );
         },
       ),
       propertyConfig({ numRuns: 200 }),

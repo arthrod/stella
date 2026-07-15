@@ -20,7 +20,7 @@ import {
   authorizeUploadPurpose,
   uploadRoutePermission,
 } from "@/api/handlers/uploads/permissions";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createSafeHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { tSafeId } from "@/api/lib/custom-schema";
@@ -142,7 +142,7 @@ const abortUpload = createSafeHandler(
       uploadId,
       workspaceId,
     })) {
-      // oxlint-disable-next-line no-await-in-loop -- sequential S3 tmp-object cleanup after multipart abort
+      // oxlint-disable-next-line no-await-in-loop -- sequential by design: S3 cleanup loop, not parallelized per rate-limit guidance
       await getS3()
         .delete(key)
         .catch((error: unknown) =>

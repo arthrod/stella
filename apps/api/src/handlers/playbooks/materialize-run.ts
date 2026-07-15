@@ -3,7 +3,7 @@ import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { ConditionNode } from "@stll/conditions";
 
-import type { Transaction } from "@/api/db";
+import type { Transaction } from "@/api/db/root";
 import { properties, propertyDependencies } from "@/api/db/schema";
 import type {
   PlaybookVerdictTool,
@@ -302,6 +302,7 @@ export const materializePlaybookRun = async ({
   // dependency inputs (generate-batch resolves documents from `batch.inputs`),
   // so every AI ASK column must depend on the workspace's file column to
   // actually read the document.
+
   const systemFileProperty = await tx.query.properties.findFirst({
     where: {
       workspaceId: { eq: workspaceId },

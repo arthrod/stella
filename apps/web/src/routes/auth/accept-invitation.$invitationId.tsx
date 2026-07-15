@@ -9,7 +9,8 @@ import {
 } from "@tanstack/react-router";
 import { useTranslations } from "use-intl";
 
-import { Button, buttonVariants } from "@stll/ui/components/button";
+import { Button } from "@stll/ui/components/button";
+import { buttonVariants } from "@stll/ui/components/button-variants";
 import {
   Frame,
   FrameDescription,
@@ -23,7 +24,8 @@ import { cn } from "@stll/ui/lib/utils";
 import { useInvalidateSession } from "@/hooks/use-invalidate-session";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { authClient } from "@/lib/auth";
-import { toAuthClientError } from "@/lib/errors";
+import { toAuthClientError } from "@/lib/errors/auth";
+import { userErrorFromThrown } from "@/lib/errors/user-safe";
 
 export const Route = createFileRoute("/auth/accept-invitation/$invitationId")({
   beforeLoad: ({ context, location }) => {
@@ -70,7 +72,10 @@ function AcceptInvitation() {
 
       if (error) {
         stellaToast.add({
-          title: error.message ?? t("errors.actionFailed"),
+          title: userErrorFromThrown(
+            toAuthClientError(error),
+            t("errors.actionFailed"),
+          ),
           type: "error",
         });
         throw toAuthClientError(error);
@@ -84,7 +89,10 @@ function AcceptInvitation() {
 
       if (setActiveError) {
         stellaToast.add({
-          title: setActiveError.message ?? t("errors.actionFailed"),
+          title: userErrorFromThrown(
+            toAuthClientError(setActiveError),
+            t("errors.actionFailed"),
+          ),
           type: "error",
         });
         throw toAuthClientError(setActiveError);
@@ -106,7 +114,10 @@ function AcceptInvitation() {
 
       if (error) {
         stellaToast.add({
-          title: error.message ?? t("errors.actionFailed"),
+          title: userErrorFromThrown(
+            toAuthClientError(error),
+            t("errors.actionFailed"),
+          ),
           type: "error",
         });
         throw toAuthClientError(error);

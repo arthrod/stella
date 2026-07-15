@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 import { rootDb } from "@/api/db/root";
 import type { LinkMetadata, searchDocuments } from "@/api/db/schema";
 import type { FieldContent } from "@/api/db/schema-validators";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import type { SafeId } from "@/api/lib/branded-types";
 import { compareCodepoint } from "@/api/lib/collation";
 import { decryptContent } from "@/api/lib/content-encryption";
@@ -111,14 +111,9 @@ const buildSearchDocument = async (
     const text = extractFieldText(field.content);
     if (text) {
       // Use file name or first text value as title fallback
-      if (
-        !title &&
-        (field.content.type === "file" || field.content.type === "text")
-      ) {
-        title =
-          field.content.type === "file"
-            ? field.content.fileName
-            : text.slice(0, 256);
+      const content = field.content;
+      if (!title && (content.type === "file" || content.type === "text")) {
+        title = content.type === "file" ? content.fileName : text.slice(0, 256);
       }
       fieldTexts.push(text);
     }

@@ -44,6 +44,7 @@ const readContactById = createSafeRootHandler(
 
         // Not merged with clientMatters below: this counts matters across
         // all statuses, while clientMatters is scoped to active only.
+
         const clientMatterCount = await tx.$count(
           workspaces,
           and(
@@ -71,6 +72,7 @@ const readContactById = createSafeRootHandler(
         // GROUP BY and before LIMIT/ORDER BY apply, so the page's
         // LIMIT.workspaceContactsCount cap does not affect it. This replaces
         // a separate countDistinct query that reran the same join/predicate.
+
         const partyMatterRows = await tx
           .select({
             color: workspaces.color,

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { CodeIcon, PenLineIcon } from "lucide-react";
 import { useDebouncedCallback } from "use-debounce";
@@ -18,7 +18,7 @@ import {
 } from "@/components/docx-preview-zoom";
 import { DocxEditor } from "@/components/docx/app-docx-editor";
 import type { DocxEditorRef } from "@/components/docx/app-docx-editor";
-import { composeRefs } from "@/lib/slot";
+import { composeRefs } from "@/lib/utils";
 
 // Flatten Word constructs markdown can't carry so the emitted markdown stays
 // clean: drop comments/annotations, flatten tracked changes, inline links,
@@ -90,8 +90,7 @@ export function MarkdownFolioEditor({
   // must happen only when `baseline` actually changes (a new seed), not on every
   // render — a render-time assignment would clobber a pending edit value and
   // un-dedupe the next identical onChange. So this stays a deps-gated effect.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- re-seed dedup ref only when the render-computed baseline changes; a plain render-time ref-assign would clobber the edit value emitIfChanged stores between renders
-  useEffect(() => {
+  useLayoutEffect(() => {
     lastEmittedRef.current = baseline;
   }, [baseline]);
 

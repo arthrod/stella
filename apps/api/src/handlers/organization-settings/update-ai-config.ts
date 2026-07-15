@@ -21,7 +21,7 @@ import {
 } from "@/api/lib/ai-config-response";
 import { probeProvider } from "@/api/lib/ai-provider-probe";
 import type { ProviderProbeResult } from "@/api/lib/ai-provider-probe";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createSafeRootHandler } from "@/api/lib/api-handlers";
 import type { HandlerConfig } from "@/api/lib/api-handlers";
 import { AUDIT_ACTION, AUDIT_RESOURCE_TYPE } from "@/api/lib/audit-log";
@@ -136,11 +136,12 @@ const updateAIConfig = createSafeRootHandler(
       );
     }
 
-    const newKeyProviders = new Set<BYOKProvider>(
-      body.providers
-        .filter((provider) => provider.apiKey)
-        .map((provider) => provider.provider),
-    );
+    const newKeyProviders = new Set<BYOKProvider>();
+    for (const provider of body.providers) {
+      if (provider.apiKey) {
+        newKeyProviders.add(provider.provider);
+      }
+    }
 
     const providersToValidate = providerResult.providers.filter(
       (providerConfig) =>
@@ -256,6 +257,17 @@ const resolveProviderConfigs = (
 ): ProviderConfigResult => {
   const resolvedProviders: TanStackBYOKProviderConfig[] = [];
   const seenProviders = new Set<BYOKProvider>();
+  const existingProvidersByProvider = new Map<
+    OrgAIConfig["providers"][number]["provider"],
+    OrgAIConfig["providers"][number]
+  >();
+  // Conditional, not `?? []`: an org without prior AI config is a real
+  // boundary state, and the empty map expresses it without a fallback array.
+  if (existingConfig) {
+    for (const candidate of existingConfig.providers) {
+      existingProvidersByProvider.set(candidate.provider, candidate);
+    }
+  }
 
   for (const providerInput of providers) {
     if (seenProviders.has(providerInput.provider)) {
@@ -266,8 +278,8 @@ const resolveProviderConfigs = (
     }
     seenProviders.add(providerInput.provider);
 
-    const existingProvider = existingConfig?.providers.find(
-      (candidate) => candidate.provider === providerInput.provider,
+    const existingProvider = existingProvidersByProvider.get(
+      providerInput.provider,
     );
     const apiKey = providerInput.apiKey?.trim() || existingProvider?.apiKey;
 

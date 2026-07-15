@@ -34,6 +34,7 @@ export const listDecisionFacetsHandler = async (
       .groupBy(caseLawDecisions.country)
       .orderBy(desc(sql`count(*)`), desc(caseLawDecisions.country))
       .limit(LIMITS.caseLawFacetLimit);
+
     const courts = await tx
       .select({
         value: caseLawDecisions.court,

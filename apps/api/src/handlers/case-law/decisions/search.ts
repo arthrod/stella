@@ -6,6 +6,7 @@ import type { Static } from "elysia";
 import { caseLawDecisions, caseLawSources } from "@/api/db/schema";
 import { envBase } from "@/api/env-base";
 import { courtWeightSql } from "@/api/handlers/case-law/citation-score";
+import { loadCourtWeightEntriesForSql } from "@/api/handlers/case-law/court-weights";
 import { validCaseLawLanguageAlternateCountSql } from "@/api/handlers/case-law/decisions/language";
 import type { searchDecisionsBodySchema } from "@/api/handlers/case-law/decisions/search-schema";
 import {
@@ -17,6 +18,7 @@ import {
   redistributableCaseLawSource,
   redistributableCaseLawSourceSqlFor,
 } from "@/api/handlers/case-law/redistribution";
+import { arrayOrEmpty } from "@/api/lib/array";
 // eslint-disable-next-line no-restricted-imports -- search boundary: brands document ids returned by the corpus index before re-hydrating from Postgres
 import { toSafeId } from "@/api/lib/branded-types";
 import type { CaseLawPublicReadDb } from "@/api/lib/case-law-public-read-db";
@@ -148,7 +150,11 @@ const searchPostgresDecisions = async (
     ${languageFilter}
   `;
 
-  const courtWeightExpr = courtWeightSql("citing_d.court");
+  // DB-seeded weights (case_law_court_weights, 60s cache) cover every
+  // jurisdiction; courtWeightSql falls back to the legacy CZ/SK-only
+  // tiers only when the table has not been seeded yet.
+  const courtWeightEntries = await loadCourtWeightEntriesForSql();
+  const courtWeightExpr = courtWeightSql("citing_d.court", courtWeightEntries);
 
   const citationBoost = sql.raw(`
     LATERAL (
@@ -300,11 +306,11 @@ const searchPostgresDecisions = async (
     languageResultRaw,
   ] = await Promise.all(queries);
 
-  const hitsResult = hitsResultRaw ?? [];
-  const countResult = countResultRaw ?? [];
-  const courtResult = courtResultRaw ?? [];
-  const countryResult = countryResultRaw ?? [];
-  const languageResult = languageResultRaw ?? [];
+  const hitsResult = arrayOrEmpty(hitsResultRaw);
+  const countResult = arrayOrEmpty(countResultRaw);
+  const courtResult = arrayOrEmpty(courtResultRaw);
+  const countryResult = arrayOrEmpty(countryResultRaw);
+  const languageResult = arrayOrEmpty(languageResultRaw);
 
   const hasMore = hitsResult.length > limit;
   const resultRows = hasMore ? hitsResult.slice(0, limit) : hitsResult;

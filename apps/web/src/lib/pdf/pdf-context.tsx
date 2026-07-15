@@ -38,7 +38,7 @@ import type { PDFPageFallback } from "@/lib/pdf/pdf-page";
 import { renderPage } from "@/lib/pdf/pdf-renderer";
 import type { PageViewport, PDFPageProxy } from "@/lib/pdf/pdfjs-loader";
 import type { ScrollAnchor } from "@/lib/pdf/utils";
-import { captureScrollAnchor, getPageId } from "@/lib/pdf/utils";
+import { captureScrollAnchor } from "@/lib/pdf/utils";
 
 // ── Types ──────────────────────────────────────────
 
@@ -103,21 +103,6 @@ type PDFActions = {
 };
 
 type PDFStore = PDFState & PDFActions;
-
-type GetPDFPageIdByNumberArgs = {
-  fieldId: string;
-  pages: Map<string, PageInfo>;
-  pageNumber: number;
-};
-
-export const getPDFPageIdByNumber = ({
-  fieldId,
-  pages,
-  pageNumber,
-}: GetPDFPageIdByNumberArgs): string | undefined => {
-  const pageId = getPageId(fieldId, pageNumber);
-  return pages.has(pageId) ? pageId : undefined;
-};
 
 // ── Store factory ──────────────────────────────────
 
@@ -578,6 +563,14 @@ const createPDFStore = ({
 type PDFStoreApi = ReturnType<typeof createPDFStore>["store"];
 
 const PDFStoreContext = createContext<PDFStoreApi | null>(null);
+
+export const usePDFStoreApi = (): PDFStoreApi => {
+  const store = use(PDFStoreContext);
+  if (!store) {
+    panic("usePDFStoreApi must be used within PDFProvider");
+  }
+  return store;
+};
 
 export const usePDFStore = <T,>(selector: (state: PDFStore) => T): T => {
   const store = use(PDFStoreContext);

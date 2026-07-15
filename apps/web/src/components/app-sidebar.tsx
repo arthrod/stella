@@ -1,16 +1,12 @@
 import type * as React from "react";
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
 import {
   draggable,
   dropTargetForElements,
 } from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
-import {
-  formatForDisplay,
-  useHotkey,
-  useKeyHold,
-} from "@tanstack/react-hotkeys";
+import { formatForDisplay, useHotkey } from "@tanstack/react-hotkeys";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import {
   getRouteApi,
@@ -87,6 +83,7 @@ import {
 import { useChromeQuery, useHasMounted } from "@/hooks/use-chrome-query";
 import { useExternalSyncEffect } from "@/hooks/use-effect";
 import { useInlineRename } from "@/hooks/use-inline-rename";
+import { useLatestCallback } from "@/hooks/use-latest-callback";
 import { usePermissions } from "@/hooks/use-permissions";
 import { usePlaybooksPreviewEnabled } from "@/hooks/use-playbooks-preview";
 import { usePublicLawPreviewEnabled } from "@/hooks/use-public-law-preview";
@@ -283,7 +280,6 @@ export function AppSidebar(props: AppSidebarProps) {
   };
 
   // Hold-to-reveal nav badges (Control on Mac, Alt on Win/Linux)
-  const isNavKeyHeld = useKeyHold(NAV_KEY);
   const [showNavBadges, setShowNavBadges] = useState(false);
 
   const showBadges = useDebouncedCallback(
@@ -291,16 +287,38 @@ export function AppSidebar(props: AppSidebarProps) {
     HOLD_DELAY_MS,
   );
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reacts to the useKeyHold(NAV_KEY) hook output to drive a debounced badge reveal; the trigger is a hook return value with no setter call-site to relay into, so it stays an effect
-  useEffect(() => {
-    if (isNavKeyHeld) {
-      showBadges();
-    } else {
+  useExternalSyncEffect(() => {
+    const hideBadges = () => {
       showBadges.cancel();
-      // eslint-disable-next-line react/react-compiler -- effect reacts to the useKeyHold hook output and drives a debounced badge reveal side effect; not derivable in render
       setShowNavBadges(false);
-    }
-  }, [isNavKeyHeld, showBadges]);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === NAV_KEY && !event.repeat) {
+        showBadges();
+      }
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === NAV_KEY) {
+        hideBadges();
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        hideBadges();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", hideBadges);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", hideBadges);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      showBadges.cancel();
+    };
+  }, [showBadges]);
 
   type NavTarget = {
     action: () => void;
@@ -330,6 +348,28 @@ export function AppSidebar(props: AppSidebarProps) {
   const openChat = () => {
     void navigate({ to: "/chat" });
   };
+
+  const knowledgeRecents: ContextAction[] = [];
+  for (const s of knowledgeSections) {
+    if (s.key !== "playbooks" || playbooksPreviewEnabled) {
+      const Icon = s.icon;
+      knowledgeRecents.push({
+        id: s.key,
+        label: t(s.titleKey),
+        icon: <Icon />,
+        onClick: () => {
+          if (s.to) {
+            void navigate({ to: s.to });
+            return;
+          }
+          stellaToast.add({
+            title: t("common.comingSoon"),
+            type: "neutral",
+          });
+        },
+      });
+    }
+  }
 
   const fixedNavTargetsById = {
     search: {
@@ -379,26 +419,7 @@ export function AppSidebar(props: AppSidebarProps) {
         void navigate({ to: "/knowledge" });
       },
       contextMenu: {
-        recents: knowledgeSections
-          .filter((s) => s.key !== "playbooks" || playbooksPreviewEnabled)
-          .map((s) => {
-            const Icon = s.icon;
-            return {
-              id: s.key,
-              label: t(s.titleKey),
-              icon: <Icon />,
-              onClick: () => {
-                if (s.to) {
-                  void navigate({ to: s.to });
-                  return;
-                }
-                stellaToast.add({
-                  title: t("common.comingSoon"),
-                  type: "neutral",
-                });
-              },
-            };
-          }),
+        recents: knowledgeRecents,
       },
     },
     contacts: {
@@ -436,7 +457,7 @@ export function AppSidebar(props: AppSidebarProps) {
     ),
   ];
 
-  const runNavTarget = useEffectEvent((index: number): boolean => {
+  const runNavTarget = useLatestCallback((index: number): boolean => {
     const navTarget = navTargets.at(index);
     if (!navTarget) {
       return false;
@@ -470,7 +491,7 @@ export function AppSidebar(props: AppSidebarProps) {
 
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [showNavBadges]);
+  }, [showNavBadges, runNavTarget]);
 
   return (
     <Sidebar
@@ -651,11 +672,6 @@ export function AppSidebar(props: AppSidebarProps) {
               </SidebarGroupContent>
             </SidebarGroup>
           )}
-
-          <RecentGlobalChatsGroup
-            showSeparator={pinned.length > 0 || recents.length > 0}
-            threads={groupedChatThreads.global}
-          />
         </SidebarContextArea>
       </SidebarContent>
 
@@ -687,7 +703,6 @@ export function AppSidebar(props: AppSidebarProps) {
 }
 
 const RECENTS_LIMIT = 5;
-const RECENT_GLOBAL_CHATS_LIMIT = 5;
 const HOLD_DELAY_MS = 500;
 
 type MatterExpansion =
@@ -945,15 +960,17 @@ const MatterItem = ({
   const canDrag = isPinned && !!onReorder;
   const isCollapsed = state === "collapsed" && !isMobile;
 
-  const handleReorder = useEffectEvent(
+  const handleReorder = useLatestCallback(
     (draggedId: string, targetId: string) => {
       onReorder?.(draggedId, targetId);
     },
   );
 
-  const handleEntityDrop = useEffectEvent((entities: CopyToMatterEntity[]) => {
-    onEntityDrop?.(ws.id, entities);
-  });
+  const handleEntityDrop = useLatestCallback(
+    (entities: CopyToMatterEntity[]) => {
+      onEntityDrop?.(ws.id, entities);
+    },
+  );
 
   // Entity drops (files from the open matter's table) are accepted on every
   // matter row; the pinned-reorder draggable + drop target only attaches to
@@ -1026,7 +1043,7 @@ const MatterItem = ({
         }),
       }),
     );
-  }, [ws.id, canDrag]);
+  }, [ws.id, canDrag, handleReorder, handleEntityDrop]);
 
   const relTime = formatRelativeTime(ws.lastActivityAt);
 
@@ -1117,9 +1134,9 @@ const MatterItem = ({
               aria-label={
                 isExpanded ? t("common.showLess") : t("common.showMore")
               }
-              className="text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground absolute start-1 top-1 z-10 flex size-6 items-center justify-center rounded-md outline-hidden group-data-[collapsible=icon]:hidden focus-visible:ring-2"
+              className="text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground absolute start-1 top-1 z-10 border-0 group-data-[collapsible=icon]:hidden before:hidden focus-visible:ring-1 focus-visible:ring-offset-0"
               onClick={onExpandedChange}
-              size="icon"
+              size="icon-xs"
               type="button"
               variant="ghost"
             />
@@ -1158,9 +1175,11 @@ const MatterItem = ({
               <BidiText as="span" className="truncate">
                 {ws.name}
               </BidiText>
-              <span
-                className="text-muted-foreground truncate text-[0.625rem] leading-tight opacity-60 transition-opacity duration-200 group-hover/sidebar-menu-button:opacity-100"
-                title={formatFullTimestamp(ws.lastActivityAt)}
+              <Tooltip
+                content={formatFullTimestamp(ws.lastActivityAt)}
+                render={
+                  <span className="text-muted-foreground truncate text-[0.625rem] leading-tight opacity-60 transition-opacity duration-200 group-hover/sidebar-menu-button:opacity-100" />
+                }
               >
                 <BidiText>
                   {ws.client
@@ -1168,7 +1187,7 @@ const MatterItem = ({
                     : t("workspaces.parties.personalLabel")}
                 </BidiText>
                 {relTime ? ` · ${relTime}` : ""}
-              </span>
+              </Tooltip>
             </span>
           </Link>
         </SidebarMenuButton>
@@ -1179,18 +1198,23 @@ const MatterItem = ({
             className="absolute end-1 top-1.5 flex items-center gap-0.5 opacity-0 group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100 group-data-[collapsible=icon]:hidden data-[pinned]:opacity-100"
             data-pinned={isPinned || undefined}
           >
-            <button
-              className="text-sidebar-foreground ring-sidebar-ring hover:bg-sidebar-accent flex size-5 items-center justify-center rounded-md outline-hidden"
-              onClick={() => onTogglePin(ws.id)}
-              title={isPinned ? t("common.unpin") : t("common.pin")}
-              type="button"
+            <Tooltip
+              content={isPinned ? t("common.unpin") : t("common.pin")}
+              render={
+                <button
+                  aria-label={isPinned ? t("common.unpin") : t("common.pin")}
+                  className="text-sidebar-foreground ring-sidebar-ring hover:bg-sidebar-accent flex size-5 items-center justify-center rounded-md outline-hidden"
+                  onClick={() => onTogglePin(ws.id)}
+                  type="button"
+                />
+              }
             >
               {isPinned ? (
                 <PinOffIcon className="size-3.5" />
               ) : (
                 <PinIcon className="size-3.5" />
               )}
-            </button>
+            </Tooltip>
             <Menu
               onOpenChange={(open) => {
                 setMenuOpen(open);
@@ -1362,7 +1386,9 @@ const MatterActivityList = ({
             ) : (
               <EntityKindIcon
                 className="text-muted-foreground size-3.5 shrink-0"
+                fileName={item.fileName}
                 kind={item.entityKind}
+                mimeType={item.mimeType}
                 status={item.status}
               />
             )}
@@ -1370,12 +1396,14 @@ const MatterActivityList = ({
               {title}
             </BidiText>
             {relativeTime ? (
-              <span
-                className="text-muted-foreground shrink-0 tabular-nums"
-                title={formatFullTimestamp(item.activityAt)}
+              <Tooltip
+                content={formatFullTimestamp(item.activityAt)}
+                render={
+                  <span className="text-muted-foreground shrink-0 tabular-nums" />
+                }
               >
                 {relativeTime}
-              </span>
+              </Tooltip>
             ) : null}
           </>
         );
@@ -1425,55 +1453,6 @@ const MatterActivityList = ({
         </SidebarMenuSubItem>
       ) : null}
     </SidebarMenuSub>
-  );
-};
-
-const RecentGlobalChatsGroup = ({
-  showSeparator,
-  threads,
-}: {
-  showSeparator: boolean;
-  threads: ReturnType<typeof mergeGroupedChatThreadPages>["global"];
-}) => {
-  const t = useTranslations();
-  const recentThreads = threads.slice(0, RECENT_GLOBAL_CHATS_LIMIT);
-
-  if (recentThreads.length === 0) {
-    return null;
-  }
-
-  return (
-    <>
-      {showSeparator ? <SidebarSeparator /> : null}
-      <SidebarGroup className="min-h-0">
-        <SidebarGroupLabel>{t("chat.landing.recentChats")}</SidebarGroupLabel>
-        <SidebarGroupContent className={SCROLLABLE_GROUP_CONTENT}>
-          <SidebarMenu>
-            {recentThreads.map((thread) => {
-              const title = isPlaceholderThreadTitle(thread.title)
-                ? t("chat.newChat")
-                : thread.title;
-              return (
-                <SidebarMenuItem key={thread.id}>
-                  <SidebarMenuButton asChild tooltip={title}>
-                    <Link
-                      activeProps={{ "data-active": true }}
-                      params={{ threadId: thread.id }}
-                      to="/chat/$threadId"
-                    >
-                      <MessageSquareIcon />
-                      <BidiText as="span" className="truncate">
-                        {title}
-                      </BidiText>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              );
-            })}
-          </SidebarMenu>
-        </SidebarGroupContent>
-      </SidebarGroup>
-    </>
   );
 };
 

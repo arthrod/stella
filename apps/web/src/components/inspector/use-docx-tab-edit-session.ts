@@ -30,6 +30,7 @@ export const useDocxTabEditSession = ({
   const flashDocxEditTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+
   const docxActionsRef = useRef(new Map<string, DocxBrowserEditorActions>());
   const [docxScrollTopByTab, setDocxScrollTopByTab] = useState<
     Map<string, number>

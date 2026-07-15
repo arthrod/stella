@@ -1,6 +1,8 @@
 import { EventType, chat, parsePartialJSON } from "@tanstack/ai";
 import type {
   ModelMessage,
+  RunErrorEvent,
+  StreamChunk,
   StructuredOutputPart,
   SystemPrompt,
 } from "@tanstack/ai";
@@ -18,7 +20,7 @@ import type {
 import type { TanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
 import type { SafeId } from "@/api/lib/branded-types";
 import { HandlerError } from "@/api/lib/errors/tagged-errors";
-import { nullUnionStrategyForTanStackProvider } from "@/api/lib/provider-safe-json-schema";
+import { providerSafeJsonSchemaOptionsForTanStackProvider } from "@/api/lib/provider-safe-json-schema";
 import { tanStackCacheControl } from "@/api/lib/tanstack-ai-caching";
 import {
   getTanStackTextModelById,
@@ -97,33 +99,23 @@ export const generateTanStackTextForRole = async (
   const abortController = options.abortSignal
     ? abortControllerFromSignal(options.abortSignal)
     : undefined;
+  let output = "";
 
-  return await withStandardServiceTierFallback({
+  for await (const delta of streamTanStackTextDeltas({
+    abortController,
+    analytics: options.analytics,
+    caching: options.caching,
+    maxOutputTokens: options.maxOutputTokens,
+    messages: requestMessages,
     model,
     serviceTier: options.serviceTier,
-    run: async (serviceTier) =>
-      await chat({
-        adapter: model.adapter,
-        messages: requestMessages,
-        stream: false,
-        ...systemPromptsPatch({
-          caching: options.caching,
-          model,
-          system: options.system,
-        }),
-        modelOptions: mergeGenerationOptions({
-          caching: options.caching,
-          model,
-          maxOutputTokens: options.maxOutputTokens,
-          serviceTier,
-          temperature: options.temperature,
-        }),
-        ...(options.analytics
-          ? { middleware: [options.analytics.middleware] }
-          : {}),
-        ...(abortController ? { abortController } : {}),
-      }),
-  });
+    system: options.system,
+    temperature: options.temperature,
+  })) {
+    output += delta;
+  }
+
+  return output;
 };
 
 export const streamTanStackTextForRole = (
@@ -221,7 +213,10 @@ const withStandardServiceTierFallback = async <TResult>({
   }
 };
 
-type StandardServiceTierStreamFallbackOptions<TChunk, TResult> = {
+type StandardServiceTierStreamFallbackOptions<
+  TChunk extends StreamChunk,
+  TResult,
+> = {
   model: ResolvedTanStackTextModel;
   serviceTier: AIRequestServiceTier;
   stream: (serviceTier: AIRequestServiceTier) => AsyncIterable<TChunk>;
@@ -229,7 +224,7 @@ type StandardServiceTierStreamFallbackOptions<TChunk, TResult> = {
 };
 
 const iterateWithStandardServiceTierFallback = async function* <
-  TChunk,
+  TChunk extends StreamChunk,
   TResult,
 >({
   model,
@@ -244,6 +239,7 @@ const iterateWithStandardServiceTierFallback = async function* <
 
   try {
     for await (const chunk of stream(serviceTier)) {
+      throwIfTanStackRunError(chunk);
       const result = onChunk(chunk);
       if (result === undefined) {
         continue;
@@ -262,12 +258,29 @@ const iterateWithStandardServiceTierFallback = async function* <
   }
 
   for await (const chunk of stream("standard")) {
+    throwIfTanStackRunError(chunk);
     const result = onChunk(chunk);
     if (result !== undefined) {
       yield result;
     }
   }
 };
+
+const throwIfTanStackRunError = (chunk: StreamChunk): void => {
+  if (chunk.type !== EventType.RUN_ERROR) {
+    return;
+  }
+
+  throw tanStackRunError(chunk);
+};
+
+const tanStackRunError = (chunk: RunErrorEvent): HandlerError =>
+  new HandlerError({
+    status: 502,
+    message: chunk.message,
+    ...(chunk.code ? { code: chunk.code } : {}),
+    ...(chunk.rawEvent === undefined ? {} : { cause: chunk.rawEvent }),
+  });
 
 const shouldRetryWithStandardServiceTier = ({
   error,
@@ -333,9 +346,10 @@ export const generateTanStackObjectForRole = async <
   const abortController = options.abortSignal
     ? abortControllerFromSignal(options.abortSignal)
     : undefined;
-  const tanStackOutputSchema = toTanStackValibotSchema(outputSchema, {
-    nullUnionStrategy: nullUnionStrategyForTanStackProvider(model.provider),
-  });
+  const tanStackOutputSchema = toTanStackValibotSchema(
+    outputSchema,
+    providerSafeJsonSchemaOptionsForTanStackProvider(model.provider),
+  );
 
   const output = await withStandardServiceTierFallback({
     model,
@@ -420,9 +434,10 @@ const streamTanStackStructuredOutput = async function* <
 }): AsyncIterable<TanStackStructuredOutputEvent<v.InferOutput<TSchema>>> {
   let completed = false;
   let rawJson = "";
-  const tanStackOutputSchema = toTanStackValibotSchema(outputSchema, {
-    nullUnionStrategy: nullUnionStrategyForTanStackProvider(model.provider),
-  });
+  const tanStackOutputSchema = toTanStackValibotSchema(
+    outputSchema,
+    providerSafeJsonSchemaOptionsForTanStackProvider(model.provider),
+  );
 
   const stream = iterateWithStandardServiceTierFallback({
     model,
@@ -513,12 +528,16 @@ const parseStructuredOutputPartial = <TOutput>(
     return undefined;
   }
 
-  // SAFETY: TanStack derives StructuredOutputPart<T>.partial the same way:
-  // parse the accumulated JSON prefix and expose it as DeepPartial<T> until
-  // the final structured-output.complete event validates the complete object.
-  // eslint-disable-next-line typescript/no-unsafe-type-assertion
-  return parsed as TanStackStructuredOutputPartial<TOutput>;
+  if (!isStructuredOutputPartial<TOutput>(parsed)) {
+    return undefined;
+  }
+  return parsed;
 };
+
+const isStructuredOutputPartial = <TOutput>(
+  value: unknown,
+): value is TanStackStructuredOutputPartial<TOutput> =>
+  typeof value === "object" && value !== null;
 
 export const resolveTanStackTextModel = ({
   modelId,
@@ -674,17 +693,22 @@ export const mergeGenerationOptions = ({
 const isDeferredServiceTier = (serviceTier: AIRequestServiceTier): boolean =>
   serviceTier === "flex" || serviceTier === "batch";
 
+// `prompt_cache_retention` is omitted because no explicit value is valid across
+// this catalogue: gpt-5.5 accepts only "24h", while OpenAI's extended-retention
+// model list does not include gpt-5.4-mini or gpt-5.4-nano, so "24h" is not
+// portable either. Omission takes the provider default, which also adapts to
+// the org's data-retention posture: "24h" without ZDR, "in_memory" with it.
+// Retention is a per-model capability (gpt-5.6+ replaces this field with
+// `prompt_cache_options.ttl`), so a retention policy belongs in the model
+// catalogue, not here.
 const openAICacheOptions = (
   caching: CachingDecision,
-): Partial<
-  Pick<OpenAITextProviderOptions, "prompt_cache_key" | "prompt_cache_retention">
-> => {
+): Partial<Pick<OpenAITextProviderOptions, "prompt_cache_key">> => {
   if (!caching.enabled || caching.scopeKey === null) {
     return {};
   }
   return {
     prompt_cache_key: hashCacheScopeKey(caching.scopeKey),
-    prompt_cache_retention: "in-memory",
   };
 };
 

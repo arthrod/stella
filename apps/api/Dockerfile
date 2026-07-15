@@ -9,7 +9,9 @@ FROM base AS install-inputs
 COPY . .
 RUN mkdir -p /json && \
     cp bun.lock package.json /json/ && \
-    for f in bunfig.toml .npmrc; do [ ! -e "$f" ] || cp "$f" /json/; done && \
+    for input in bunfig.toml .npmrc patches; do \
+      [ ! -e "$input" ] || cp -a "$input" /json/; \
+    done && \
     find apps packages -mindepth 2 -maxdepth 2 -name package.json \
       -not -path '*/node_modules/*' \
       -exec cp --parents -t /json/ {} +
@@ -42,7 +44,7 @@ RUN bun build \
     --compile \
     --target bun \
     --outfile /app/server \
-    apps/api/src/index.ts
+    apps/api/src/server.ts
 # One-off maintenance tool: assigns public slugs to legacy case-law rows that
 # predate slug-at-ingest. Bundled to a single JS file (like the workers above,
 # not --compile) so it reuses the container's Bun runtime instead of embedding
@@ -53,6 +55,14 @@ RUN bun build \
     --target bun \
     --outfile /app/backfill.js \
     apps/api/src/scripts/backfill-case-law-slugs.ts
+# Bundle the migration entrypoint so its full transitive @/api import graph is
+# resolved at build time. Keep the output at the same directory depth as the
+# source so its `import.meta.dir`-relative migrationsFolder lookup resolves to
+# /app/apps/api/drizzle in the runtime image.
+RUN bun build \
+    --target bun \
+    --outfile /app/apps/api/src/db/migrate.js \
+    apps/api/src/db/migrate.ts
 RUN mkdir -p /app/runtime-workers && \
     bun build \
       --target bun \
@@ -88,12 +98,10 @@ RUN groupadd --system --gid 1001 stella && \
 COPY --chown=stella:stella --from=builder /app/server /app/server
 COPY --chown=stella:stella --from=builder /app/backfill.js /app/backfill.js
 COPY --chown=stella:stella --from=builder /app/apps/legal-atlas-runner/dist/index.js /app/legal-atlas.js
-# Loose files for the one-off migrate task (the API itself is the compiled
-# /app/server binary). migrate.ts runs the drizzle migrator over Bun's SQL
-# client; it imports db-url.ts and reads the drizzle/ migration folder.
-COPY --chown=stella:stella --from=builder /app/apps/api/drizzle.config.ts /app/apps/api/drizzle.config.ts
-COPY --chown=stella:stella --from=builder /app/apps/api/src/db-url.ts /app/apps/api/src/db-url.ts
-COPY --chown=stella:stella --from=builder /app/apps/api/src/db/migrate.ts /app/apps/api/src/db/migrate.ts
+# Bundled migration task entrypoint:
+#   ["bun", "/app/apps/api/src/db/migrate.js"]
+COPY --chown=stella:stella --from=builder /app/apps/api/src/db/migrate.js /app/apps/api/src/db/migrate.js
+# The bundled entrypoint reads migration SQL from this external folder.
 COPY --chown=stella:stella --from=builder /app/apps/api/drizzle /app/apps/api/drizzle
 RUN mkdir -p '/$bunfs/root'
 COPY --chown=stella:stella --from=builder /app/runtime-workers /\$bunfs/root/workers

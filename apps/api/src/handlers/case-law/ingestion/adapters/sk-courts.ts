@@ -18,6 +18,7 @@ import {
   parseCeDate,
   toOptionalValue,
 } from "@/api/handlers/case-law/ingestion/adapters/utils";
+import { fetchWithTimeout } from "@/api/lib/fetch";
 import { sanitizeUrl } from "@/api/lib/sanitize-url";
 import { isRecord } from "@/api/lib/type-guards";
 
@@ -38,6 +39,13 @@ const BASE_URL =
 const PAGE_SIZE = 100;
 const LEGACY_PAGE_SIZE = 100;
 const ITEM_CONCURRENCY = 10;
+
+const arrayOrEmpty = <T>(value: T[] | null | undefined): T[] => {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  return value;
+};
 
 type SkSud = {
   registreGuid?: string | null;
@@ -176,10 +184,9 @@ const fetchDetail = async (
   signal?: AbortSignal,
 ): Promise<SkDetailItem | null> => {
   const url = `${BASE_URL}/${encodeURIComponent(guid)}`;
-  const response = await fetch(url, {
-    signal: signal
-      ? AbortSignal.any([signal, AbortSignal.timeout(ADAPTER_TIMEOUT.REQUEST)])
-      : AbortSignal.timeout(ADAPTER_TIMEOUT.REQUEST),
+  const response = await fetchWithTimeout(url, {
+    signal,
+    timeoutMs: ADAPTER_TIMEOUT.REQUEST,
     headers: { Accept: "application/json" },
   });
 
@@ -327,7 +334,7 @@ export const skCourtsAdapter: SourceAdapter = {
     },
 
     extractItems: (data) => ({
-      items: data.rozhodnutieList ?? [],
+      items: arrayOrEmpty(data.rozhodnutieList),
       total: toOptionalValue(data.numFound),
     }),
 

@@ -224,12 +224,13 @@ const resolveArrayField = async ({
   }
 
   const count = rows.length;
-  const pending = rows
-    .map((row, index) => ({ row, index }))
-    .filter(({ row }) => {
-      const existing = resolvePath(remainder, row);
-      return existing === undefined || existing === "";
-    });
+  const pending: { row: Record<string, unknown>; index: number }[] = [];
+  for (const [index, row] of rows.entries()) {
+    const existing = resolvePath(remainder, row);
+    if (existing === undefined || existing === "") {
+      pending.push({ row, index });
+    }
+  }
   if (pending.length === 0) {
     return;
   }

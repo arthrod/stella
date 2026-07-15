@@ -111,6 +111,7 @@ export default defineConfig({
     "tagged-error-requires-message/tagged-error-requires-message": "error",
     "require-custom-jsonb-column/require-custom-jsonb-column": "error",
     "no-spread-input-in-query-key/no-spread-input-in-query-key": "error",
+    "no-facade-imports/no-facade-imports": "error",
     "no-unsafe-inner-html/no-unsafe-inner-html": "error",
     "no-static-devtools-import/no-static-devtools-import": "error",
     "no-static-catalogue-route-import/no-static-catalogue-route-import": [
@@ -144,30 +145,6 @@ export default defineConfig({
     "public-case-law-db-boundary/public-case-law-db-boundary": "off",
     "require-contained-handler/require-contained-handler": "error",
     "no-void": ["error", { allowAsStatement: true }],
-
-    "sonarjs/array-callback-without-return": "error",
-    "sonarjs/anchor-precedence": "error",
-    "sonarjs/code-eval": "error",
-    "sonarjs/no-array-delete": "error",
-    "sonarjs/no-alphabetical-sort": "error",
-    "sonarjs/confidential-information-logging": "error",
-    "sonarjs/cognitive-complexity": ["error", 30],
-    "sonarjs/existing-groups": "error",
-    "sonarjs/no-hardcoded-secrets": "error",
-    "sonarjs/no-collection-size-mischeck": "error",
-    "sonarjs/no-element-overwrite": "error",
-    "sonarjs/no-empty-collection": "error",
-    "sonarjs/no-exclusive-tests": "error",
-    "sonarjs/no-identical-conditions": "error",
-    "sonarjs/no-identical-functions": "error",
-    "sonarjs/no-inverted-boolean-check": "error",
-    "sonarjs/no-unthrown-error": "error",
-    "sonarjs/no-useless-increment": "error",
-    "sonarjs/non-existent-operator": "error",
-    "sonarjs/regex-complexity": ["error", { threshold: 30 }],
-    "sonarjs/slow-regex": "error",
-    "sonarjs/stateful-regex": "error",
-    "sonarjs/updated-loop-counter": "error",
 
     // --- Disabled ultracite defaults ---
     "sort-keys": "off",
@@ -295,6 +272,22 @@ export default defineConfig({
     ],
     "typescript/return-await": ["error", "error-handling-correctness-only"],
     "typescript/non-nullable-type-assertion-style": "off",
+
+    // Ultracite 7.9.3 removed its slow JS-plugin rules from the default
+    // presets. These native-rule exceptions remain Stella-specific.
+    "unicorn/prefer-export-from": "off",
+    "unicorn/prefer-number-coercion": "off",
+    "unicorn/prefer-single-call": "off",
+    "prefer-named-capture-group": "off",
+    "react/jsx-curly-brace-presence": "off",
+    "react/no-unescaped-entities": "off",
+    // Fires on any method named setState; no class components exist here.
+    "react/no-set-state": "off",
+    "react/display-name": "off",
+
+    // React Compiler memoizes context values in apps/web; the remaining
+    // hits are genuinely reactive values with no static part to hoist.
+    "react/jsx-no-constructed-context-values": "off",
   },
   ignorePatterns: [
     ...libraryIgnorePatterns,
@@ -306,6 +299,8 @@ export default defineConfig({
     // Static browser assets (e.g. the CSP-strict dark-mode bootstrap) are
     // untyped JS; type-aware rules flag their DOM globals as `error`.
     "apps/web/public/**",
+    // Declaration files carry no runtime code; skip product-code rules.
+    "**/*.d.ts",
   ],
 
   jsPlugins: [
@@ -313,7 +308,6 @@ export default defineConfig({
     "@tanstack/eslint-plugin-query",
     "@tanstack/eslint-plugin-router",
     "eslint-plugin-drizzle",
-    "eslint-plugin-sonarjs",
     "@stll/oxlint-config/no-raw-colors",
     "./.oxlint-plugins/no-raw-date-input.ts",
     "./.oxlint-plugins/no-raw-date-parsing.ts",
@@ -351,6 +345,7 @@ export default defineConfig({
     "./.oxlint-plugins/stella-toast.ts",
     "./.oxlint-plugins/no-untranslated-jsx-literal.ts",
     "./.oxlint-plugins/forbid-process-env-outside-env-ts.ts",
+    "./.oxlint-plugins/no-facade-imports.ts",
     "./.oxlint-plugins/no-secret-in-log-sink.ts",
     "./.oxlint-plugins/no-raw-api-url.ts",
     "./.oxlint-plugins/require-eden-error-check.ts",
@@ -527,10 +522,6 @@ export default defineConfig({
         "typescript/no-unsafe-argument": "off",
         "typescript/strict-boolean-expressions": "off",
         "typescript/no-redundant-type-constituents": "off",
-        // Existing scripts are operational glue with argument parsing,
-        // process orchestration, and one-off reporting branches. Keep a
-        // looser legacy budget while new app/library code starts at 30.
-        "sonarjs/cognitive-complexity": ["error", 80],
       },
     },
     {
@@ -626,28 +617,6 @@ export default defineConfig({
       // identical to main and disable the rule for this single-regex file.
       files: ["packages/template-conditions/src/index.ts"],
       rules: { "prefer-named-capture-group": "off" },
-    },
-    {
-      // Case-law ingestion parsers/adapters intentionally encode many source
-      // quirks. Tighten this after parser-specific refactors.
-      files: ["apps/api/src/handlers/case-law/ingestion/**/*.ts"],
-      rules: { "sonarjs/cognitive-complexity": ["error", 80] },
-    },
-    {
-      // DOCX handlers include document traversal and XML transformation
-      // routines. Tighten after splitting the largest transforms.
-      files: ["apps/api/src/handlers/docx/**/*.ts"],
-      rules: { "sonarjs/cognitive-complexity": ["error", 100] },
-    },
-    {
-      // PDF anonymization/redaction parsing is complex today; keep the global
-      // rule for the rest of web while this area gets a focused cleanup.
-      files: ["apps/web/src/lib/anonymize/**/*.ts"],
-      rules: { "sonarjs/cognitive-complexity": ["error", 80] },
-    },
-    {
-      files: ["packages/template-conditions/src/**/*.ts"],
-      rules: { "sonarjs/cognitive-complexity": ["error", 40] },
     },
     {
       files: ["apps/web/src/**/*.{ts,tsx}", "packages/ui/src/**/*.{ts,tsx}"],
@@ -948,8 +917,6 @@ export default defineConfig({
         "require-router-select/require-router-select": "error",
         "require-matter-affordance/require-matter-affordance": "error",
         "security-guards/no-unsanitized-href": "error",
-        "sonarjs/jsx-no-leaked-render": "error",
-        "sonarjs/no-hook-setter-in-body": "error",
         "stella-toast/stella-toast": "error",
       },
     },
@@ -1140,7 +1107,13 @@ export default defineConfig({
       rules: { "no-raw-colors/no-raw-colors": "off" },
     },
     {
-      files: ["packages/ui/src/**/button.tsx"],
+      // button-variants.ts(x) holds the variant styles that used to live
+      // in button.tsx (moved for only-export-components); the exemption
+      // follows the code.
+      files: [
+        "packages/ui/src/**/button.tsx",
+        "packages/ui/src/**/button-variants.tsx",
+      ],
       rules: {
         "no-raw-colors/no-raw-colors": "off",
         "no-inline-style-colors/no-inline-style-colors": "off",
@@ -1259,12 +1232,6 @@ export default defineConfig({
     {
       files: ["apps/**/*.{ts,tsx}", "packages/**/*.{ts,tsx}"],
       rules: {
-        "sonarjs/no-all-duplicated-branches": "error",
-        "sonarjs/no-duplicated-branches": "error",
-        "sonarjs/no-gratuitous-expressions": "error",
-        "sonarjs/no-identical-expressions": "error",
-        "sonarjs/no-ignored-return": "error",
-        "sonarjs/no-use-of-empty-return-value": "error",
         "require-fetch-timeout/require-fetch-timeout": "error",
         "require-escape-like/require-escape-like": "error",
       },
@@ -1280,7 +1247,7 @@ export default defineConfig({
               "apps/api/src/handlers/case-law/ingestion/adapters/sk-us.ts",
               "apps/api/src/handlers/case-law/ingestion/adapters/utils.ts",
               "apps/api/src/handlers/health/routes.ts",
-              "apps/api/src/index.ts",
+              "apps/api/src/server.ts",
               "apps/api/src/lib/analytics/posthog.ts",
               // dispatch.ts is imported transitively by the chat tool
               // catalogue from contexts that do not run full env
@@ -1603,8 +1570,9 @@ export default defineConfig({
               },
               {
                 name: "@/api/db/root",
+                importNames: ["rootDb", "rlsDb"],
                 message:
-                  "Handlers must not import the root db module. Use ctx.scopedDb, or move owner-level DB access into a narrow lib helper.",
+                  "Handlers must not import owner-level DB values. Use ctx.scopedDb, or move owner-level DB access into a narrow lib helper.",
               },
             ],
           },

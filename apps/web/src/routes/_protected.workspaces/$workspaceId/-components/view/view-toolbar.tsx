@@ -47,11 +47,10 @@ import type { TranslationKey } from "@/i18n/types";
 import { useAnalytics } from "@/lib/analytics/provider";
 import { api } from "@/lib/api";
 import { apiUrl } from "@/lib/api-url";
-import {
-  ClientOperationError,
-  toAPIError,
-  userErrorMessage,
-} from "@/lib/errors";
+import { normalizeOptionalArray } from "@/lib/arrays";
+import { toAPIError } from "@/lib/errors/api";
+import { ClientOperationError } from "@/lib/errors/client";
+import { userErrorMessage } from "@/lib/errors/user-safe";
 import { fetchWithTimeout } from "@/lib/fetch";
 import { toSafeId } from "@/lib/safe-id";
 import type {
@@ -93,6 +92,16 @@ import {
 
 const protectedRouteApi = getRouteApi("/_protected");
 
+// Generic helper preserves the union discriminant. A bare
+// `{ ...layout, ...partial }` would collapse to an invalid union.
+const mergeLayout = <L extends ViewLayout>(
+  layout: L,
+  changes: Partial<L>,
+): L => ({
+  ...layout,
+  ...changes,
+});
+
 type ViewToolbarProps = {
   view: WorkspaceView;
   workspaceId: string;
@@ -106,15 +115,6 @@ export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
   const toggleAllFolders = useWorkspaceStore((s) => s.toggleAllFolders);
   const selectedEntities = useTableStore((s) => s.selectedEntities[view.id]);
 
-  // Generic helper preserves the union discriminant. A bare
-  // `{ ...layout, ...partial }` would collapse to an invalid union.
-  const mergeLayout = <L extends ViewLayout>(
-    layout: L,
-    changes: Partial<L>,
-  ): L => ({
-    ...layout,
-    ...changes,
-  });
   const handleUpdate = (changes: Partial<ViewLayout>) => {
     updateView.mutate({
       viewId: view.id,
@@ -178,9 +178,9 @@ export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
             properties={properties}
           />
           <AdditionalDatesControl
-            additionalDatePropertyIds={
-              view.layout.additionalDatePropertyIds ?? []
-            }
+            additionalDatePropertyIds={normalizeOptionalArray(
+              view.layout.additionalDatePropertyIds,
+            )}
             onChange={(additionalDatePropertyIds) =>
               handleUpdate({ additionalDatePropertyIds })
             }
@@ -245,7 +245,6 @@ export const ViewToolbar = ({ view, workspaceId }: ViewToolbarProps) => {
           />
           <TableContentModeControl viewId={view.id} />
           <TableExportMenu view={view} workspaceId={workspaceId} />
-          <ExportReportControl view={view} workspaceId={workspaceId} />
           <RunPlaybookControl workspaceId={workspaceId} />
           <BulkAddColumns triggerVariant="labelled" workspaceId={workspaceId} />
         </>
@@ -341,7 +340,7 @@ const TableContentModeControl = ({ viewId }: TableContentModeControlProps) => {
   );
 };
 
-type TableExportFormat = "csv" | "xlsx";
+type TableExportFormat = "csv" | "xlsx" | "docx";
 
 type TableExportMenuProps = {
   view: Pick<WorkspaceView, "id" | "name">;
@@ -354,6 +353,7 @@ const TableExportMenu = ({ view, workspaceId }: TableExportMenuProps) => {
   const analytics = useAnalytics();
   const [exportingFormat, setExportingFormat] =
     useState<TableExportFormat | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
 
   const handleExport = async (format: TableExportFormat) => {
     setExportingFormat(format);
@@ -400,39 +400,60 @@ const TableExportMenu = ({ view, workspaceId }: TableExportMenuProps) => {
   };
 
   return (
-    <Menu>
-      <MenuTrigger
-        render={
-          <Button
-            aria-label={t("workspaces.views.exportTable")}
+    <>
+      <Menu>
+        <MenuTrigger
+          render={
+            <Button
+              aria-label={t("workspaces.views.exportTable")}
+              disabled={exportingFormat !== null}
+              size="icon-xs"
+              title={t("workspaces.views.exportTable")}
+              variant="ghost"
+            />
+          }
+        >
+          <DownloadIcon className="size-3.5" />
+        </MenuTrigger>
+        <MenuPopup>
+          <MenuItem
             disabled={exportingFormat !== null}
-            size="icon-xs"
-            title={t("workspaces.views.exportTable")}
-            variant="ghost"
-          />
-        }
-      >
-        <DownloadIcon className="size-3.5" />
-      </MenuTrigger>
-      <MenuPopup>
-        <MenuItem
-          disabled={exportingFormat !== null}
-          onClick={() => {
-            void handleExport("csv");
-          }}
-        >
-          {t("workspaces.views.exportCsv")}
-        </MenuItem>
-        <MenuItem
-          disabled={exportingFormat !== null}
-          onClick={() => {
-            void handleExport("xlsx");
-          }}
-        >
-          {t("workspaces.views.exportXlsx")}
-        </MenuItem>
-      </MenuPopup>
-    </Menu>
+            onClick={() => {
+              void handleExport("csv");
+            }}
+          >
+            {t("workspaces.views.exportCsv")}
+          </MenuItem>
+          <MenuItem
+            disabled={exportingFormat !== null}
+            onClick={() => {
+              void handleExport("xlsx");
+            }}
+          >
+            {t("workspaces.views.exportXlsx")}
+          </MenuItem>
+          <MenuSeparator />
+          <MenuItem
+            disabled={exportingFormat !== null}
+            onClick={() => {
+              void handleExport("docx");
+            }}
+          >
+            {t("workspaces.views.exportDocxPlain")}
+          </MenuItem>
+          <MenuItem onClick={() => setReportOpen(true)}>
+            {t("workspaces.views.exportDocxTemplate")}
+          </MenuItem>
+        </MenuPopup>
+      </Menu>
+      <ExportReportControl
+        initialMode="download"
+        onOpenChange={setReportOpen}
+        open={reportOpen}
+        view={view}
+        workspaceId={workspaceId}
+      />
+    </>
   );
 };
 
@@ -690,9 +711,9 @@ const FilesystemOrganizerAction = ({
   // useSuspenseQuery) keeps a cache miss from suspending the toolbar
   // chrome — the action button just stays disabled until the data resolves.
   const { data: foldersData } = useQuery(workspaceFoldersOptions(workspaceId));
-  const allFolders = foldersData ?? [];
+  const allFolders = normalizeOptionalArray(foldersData);
   const { data: filesData } = useQuery(workspaceFilesOptions(workspaceId));
-  const allFiles = filesData ?? [];
+  const allFiles = normalizeOptionalArray(filesData);
 
   const existingFolders = (() => {
     const folderById = new Map(
@@ -1158,12 +1179,12 @@ const AdditionalDatesControl = ({
   // Eligible: internal date options + custom date properties,
   // excluding the primary one (already shown separately)
   const eligible = [
-    ...INTERNAL_DATE_OPTIONS.filter((o) => o.id !== primaryDatePropertyId).map(
-      (o) => ({ id: o.id, name: t(o.labelKey) }),
+    ...INTERNAL_DATE_OPTIONS.flatMap((o) =>
+      o.id !== primaryDatePropertyId ? [{ id: o.id, name: t(o.labelKey) }] : [],
     ),
-    ...dateProperties
-      .filter((p) => p.id !== primaryDatePropertyId)
-      .map((p) => ({ id: p.id, name: p.name })),
+    ...dateProperties.flatMap((p) =>
+      p.id !== primaryDatePropertyId ? [{ id: p.id, name: p.name }] : [],
+    ),
   ];
 
   if (eligible.length === 0) {

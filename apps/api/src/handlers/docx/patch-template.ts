@@ -57,18 +57,22 @@ const fillTemplateWithValues = async (
     (name) => name === "word/document.xml" || HEADER_FOOTER_RE.test(name),
   );
 
-  for (const partName of partNames) {
-    const entry = zip.file(partName);
-    if (!entry) {
-      continue;
-    }
-    // oxlint-disable-next-line no-await-in-loop -- mutates the shared zip in place; bounded memory while streaming docx parts
-    const xml = await entry.async("string");
-    const patched = patchXmlPart(xml, values);
-    if (patched.changed) {
-      zip.file(partName, patched.xml);
-    }
-  }
+  // Each part is read, patched, and written back independently — `values` is
+  // read-only and `patchXmlPart` carries no cross-part counter (unlike the
+  // occurrence-indexed patcher), so the parts can be processed concurrently.
+  await Promise.all(
+    partNames.map(async (partName) => {
+      const entry = zip.file(partName);
+      if (!entry) {
+        return;
+      }
+      const xml = await entry.async("string");
+      const patched = patchXmlPart(xml, values);
+      if (patched.changed) {
+        zip.file(partName, patched.xml);
+      }
+    }),
+  );
 
   const result = await zip.generateAsync({
     type: "nodebuffer",

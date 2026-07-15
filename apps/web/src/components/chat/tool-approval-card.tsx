@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { panic } from "better-result";
@@ -25,7 +25,6 @@ import {
   isNonPersistentGrantChatToolName,
   isPublicOfficialChatToolName,
   isRegistryWriteSummaryToolName,
-  isToolApprovedByGrant,
 } from "@/components/chat/chat-ui-tools";
 import type {
   ApprovalToolName,
@@ -33,11 +32,13 @@ import type {
   ChatUITools,
 } from "@/components/chat/chat-ui-tools";
 import { SpawnSubagentsSubtaskList } from "@/components/chat/spawn-subagents-card";
+import { hasAutomaticApproval } from "@/components/chat/tool-approval-card.logic";
 import {
   buildRegistryWriteSummaryRows,
   getReadableInputRows,
   humanizeIdentifier,
 } from "@/components/chat/tool-approval-summary";
+import { useMountEffect } from "@/hooks/use-effect";
 import { sanitizeHref } from "@/lib/sanitize-href";
 import type { WorkspaceProperty } from "@/lib/types";
 import { mcpConnectorsOptions } from "@/routes/_protected.knowledge/-queries";
@@ -161,6 +162,14 @@ type ActiveDocxEditSummaryProps = {
   input: ActiveDocxEditInput;
 };
 
+/** The block an operation anchors to; range ops carry it on the handle. */
+const docxOperationAnchorBlockId = (
+  operation: ActiveDocxEditInput["operations"][number],
+): string =>
+  operation.type === "replaceRange" || operation.type === "commentOnRange"
+    ? operation.range.blockId
+    : operation.blockId;
+
 const ActiveDocxEditSummary = ({ input }: ActiveDocxEditSummaryProps) => {
   const t = useTranslations("chat.tool");
   const previewOperations = input.operations.slice(0, 3);
@@ -178,6 +187,17 @@ const ActiveDocxEditSummary = ({ input }: ActiveDocxEditSummaryProps) => {
       case "replaceBlock":
         return t("docxReplaceBlockSummary", {
           blockId: operation.blockId,
+        });
+      // Range-addressed ops reuse the block-level summaries: the range
+      // handle anchors to one block, and the card only needs to say
+      // which block is touched.
+      case "replaceRange":
+        return t("docxReplaceBlockSummary", {
+          blockId: operation.range.blockId,
+        });
+      case "commentOnRange":
+        return t("docxCommentSummary", {
+          blockId: operation.range.blockId,
         });
       case "insertAfterBlock":
         return t("docxInsertAfterSummary", {
@@ -214,7 +234,7 @@ const ActiveDocxEditSummary = ({ input }: ActiveDocxEditSummaryProps) => {
         <div
           className="text-foreground-strong-muted truncate"
           // eslint-disable-next-line react/no-array-index-key -- previewOperations is a read-only summary of an immutable AI tool-call input; never edited/reordered by the user.
-          key={`${operation.blockId}-${operation.type}-${index}`}
+          key={`${docxOperationAnchorBlockId(operation)}-${operation.type}-${index}`}
         >
           {renderOperationSummary(operation)}
         </div>
@@ -235,6 +255,14 @@ type ToolApprovalCardProps = {
   workspaceId?: string | undefined;
 };
 
+const AutomaticApprovalResponse = ({ respond }: { respond: () => void }) => {
+  useMountEffect(() => {
+    respond();
+  });
+
+  return null;
+};
+
 export const ToolApprovalCard = ({
   part,
   workspaceId,
@@ -251,8 +279,6 @@ export const ToolApprovalCard = ({
   } = useChatApproval();
   const t = useTranslations();
   const name = getApprovalToolName(part);
-  const autoApproveRef = useRef(false);
-  const autoDenyRef = useRef(false);
   const submittedApprovalIdRef = useRef<string | null>(null);
   const [responded, setResponded] = useState(false);
 
@@ -294,72 +320,43 @@ export const ToolApprovalCard = ({
     ...mcpConnectorsOptions(activeOrganizationId),
     enabled: externalMcpConnectorSlug !== null,
   });
+  const availableConnectors = mcpConnectorsData
+    ? mcpConnectorsData.connectors
+    : [];
   const mcpIconHref =
     externalMcpConnectorSlug === null
       ? undefined
       : findMcpConnectorIconHref({
           connectorSlug: externalMcpConnectorSlug,
-          connectors: mcpConnectorsData?.connectors ?? [],
+          connectors: availableConnectors,
         });
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- auto-deny once a blocked tool's approval request arrives. The trigger is the incoming `part` prop transitioning to approval-requested (plus the blocked set from context), not a local setter, so there is no call site to fold this into. Keep.
-  useEffect(() => {
-    if (!isApprovalRequested || !isBlocked || autoDenyRef.current) {
-      return;
-    }
-    const id = getApprovalId(part);
-    if (!id) {
-      return;
-    }
-    autoDenyRef.current = true;
-    // eslint-disable-next-line react/react-compiler -- auto-deny effect reacts to the incoming approval-request prop transition and fires the onDeny callback side effect; not derivable in render
-    setResponded(true);
-    onDeny(id);
-  }, [isApprovalRequested, isBlocked, part, onDeny]);
-
-  // Auto-approve if the tool was allowed for this conversation,
-  // always allowed, OR if this is a DOCX edit batch (review happens
-  // per item in the side panel; the chat-level gate would just be
-  // friction).
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- auto-approve once the incoming `part` prop reaches approval-requested and a prior grant/allow (from context) covers it. The trigger is an external prop/context transition, not a local setter, so there is no call site to fold this into. Keep.
-  useEffect(() => {
-    if (
-      // Delegation must be reviewed each call: never let a stored grant
-      // auto-approve it, even if one somehow exists (the grant buttons are
-      // also hidden for this tool — belt and suspenders).
-      isNonPersistentGrantChatToolName(name) ||
-      !isApprovalRequested ||
-      isBlocked ||
-      autoApproveRef.current ||
-      (!isDocxEditBatch &&
-        !isPublicOfficialApproval &&
-        !isToolApprovedByGrant(conversationApprovedTools, name) &&
-        (!canAlwaysAllow || !isToolApprovedByGrant(alwaysApprovedTools, name)))
-    ) {
-      return;
-    }
-    const id = getApprovalId(part);
-    if (!id) {
-      return;
-    }
-    autoApproveRef.current = true;
-    // eslint-disable-next-line react/react-compiler -- auto-approve effect reacts to the incoming approval-request prop/context transition and fires the onApprove callback side effect; not derivable in render
-    setResponded(true);
-    onApprove(id, name);
-  }, [
-    isApprovalRequested,
-    isBlocked,
-    alwaysApprovedTools,
-    conversationApprovedTools,
-    canAlwaysAllow,
-    isDocxEditBatch,
-    isPublicOfficialApproval,
-    name,
-    part,
-    onApprove,
-  ]);
-
   const approvalId = isApprovalRequested ? getApprovalId(part) : null;
+  const shouldAutoApprove =
+    !isBlocked &&
+    hasAutomaticApproval({
+      alwaysApprovedTools,
+      canAlwaysAllow,
+      conversationApprovedTools,
+      isDocxEditBatch,
+      isPublicOfficialApproval,
+      name,
+    });
+  const automaticResponse =
+    approvalId === null
+      ? null
+      : {
+          key: `${approvalId}:${isBlocked ? "deny" : "approve"}`,
+          respond: () => {
+            setResponded(true);
+            if (isBlocked) {
+              onDeny(approvalId);
+            } else if (shouldAutoApprove) {
+              onApprove(approvalId, name);
+            }
+          },
+          shouldRespond: isBlocked || shouldAutoApprove,
+        };
   const beginManualResponse = (id: string): boolean => {
     if (submittedApprovalIdRef.current === id) {
       return false;
@@ -434,6 +431,12 @@ export const ToolApprovalCard = ({
       role={handleOpenReviewPanel ? "button" : undefined}
       tabIndex={handleOpenReviewPanel ? 0 : undefined}
     >
+      {automaticResponse?.shouldRespond && (
+        <AutomaticApprovalResponse
+          key={automaticResponse.key}
+          respond={automaticResponse.respond}
+        />
+      )}
       {/* Header: icon + label + status */}
       <div className="flex items-center gap-2 px-3 py-2">
         <ToolApprovalLeadingIcon iconHref={mcpIconHref} toolName={name} />

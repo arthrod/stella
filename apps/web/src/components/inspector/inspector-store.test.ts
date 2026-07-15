@@ -53,7 +53,7 @@ afterEach(() => {
 });
 
 class FakeBroadcastChannel {
-  static channels = new Map<string, Set<FakeBroadcastChannel>>();
+  static readonly channels = new Map<string, Set<FakeBroadcastChannel>>();
 
   readonly name: string;
 
@@ -621,6 +621,11 @@ describe("revive suggestion", () => {
       navigationPolicy: "close-on-route-leave",
       railIcon: () => null,
       render: () => null,
+      validate: (value): value is { templateId: string } =>
+        typeof value === "object" &&
+        value !== null &&
+        "templateId" in value &&
+        typeof value.templateId === "string",
     });
     useInspectorStore.getState().openView({
       type: "test-bound-view",

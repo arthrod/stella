@@ -24,7 +24,7 @@ import { envBase } from "@/api/env-base";
 import { recomputeCitationAuthorityForAll } from "@/api/handlers/case-law/citation-authority";
 import { ADAPTER_KEYS, MAX_CYCLE_MS } from "@/api/handlers/case-law/consts";
 import { backfillCorpusIndex } from "@/api/handlers/case-law/corpus-index";
-import { getAdapter } from "@/api/handlers/case-law/ingestion/adapters";
+import { getAdapter } from "@/api/handlers/case-law/ingestion/adapters/adapter-registry";
 import { runIngestionPipeline } from "@/api/handlers/case-law/ingestion/pipeline";
 import { backfillSearchIndex } from "@/api/handlers/case-law/search-index";
 import { backfillLegislationCorpusIndex } from "@/api/handlers/legislation/corpus-index";
@@ -46,6 +46,7 @@ import {
   createCaseLawSource,
   findCaseLawSource,
   ingestionDb,
+  loadCourtWeightEntries,
 } from "../db";
 import { LEGAL_ATLAS_RUNNER_ENV } from "../env";
 
@@ -349,10 +350,10 @@ const runWithHardDeadline = async <T>(
 // Adapters to skip. Set DISABLED_ADAPTERS env var to a
 // comma-separated list of adapter keys (e.g. "sk-courts,pl-courts").
 const DISABLED_ADAPTER_KEYS = new Set(
-  LEGAL_ATLAS_RUNNER_ENV.disabledAdapters
-    .split(",")
-    .map((k) => k.trim())
-    .filter(Boolean),
+  LEGAL_ATLAS_RUNNER_ENV.disabledAdapters.split(",").flatMap((k) => {
+    const trimmed = k.trim();
+    return trimmed ? [trimmed] : [];
+  }),
 );
 
 // AT_COURTS excluded: adapter exists but has not been
@@ -555,7 +556,7 @@ const runOneCycle = async (
  * Independent loop for a single adapter. Runs forever,
  * catching all errors so it never crashes.
  */
-// eslint-disable-next-line sonarjs/cognitive-complexity -- preserves the daemon's existing retry, alert, and idle-backoff state machine.
+
 const runAdapterLoop = async ({ adapterKey, name }: SourceDef) => {
   /**
    * Consecutive cycles with no forward progress — a hard failure OR a timeout
@@ -735,8 +736,10 @@ export const runCaseLawIngest = async (
       );
       return 1;
     }
-    await refreshS3();
-    await refreshCorpusS3();
+    // Independent: separate S3 clients (distinct module-level vars in
+    // apps/api/src/lib/s3.ts), no shared state. runOneCycle depends on
+    // both completing first, so it stays sequential after.
+    await Promise.all([refreshS3(), refreshCorpusS3()]);
     const { outcome } = await runOneCycle(match.adapterKey, match.name, {
       maxPages,
       maxDecisions,
@@ -823,8 +826,12 @@ export const runCaseLawIngest = async (
       await Bun.sleep(CITATION_AUTHORITY_INTERVAL_MS);
       try {
         // oxlint-disable-next-line no-await-in-loop -- one full recompute per interval; the next poll only runs after this recompute completes
+        const courtWeightEntries = await loadCourtWeightEntries();
+        // oxlint-disable-next-line no-await-in-loop -- one full recompute per interval; the next poll only runs after this recompute completes
         const updated = await ingestionDb(async (tx) => {
-          const count = await recomputeCitationAuthorityForAll(tx);
+          const count = await recomputeCitationAuthorityForAll(tx, {
+            courtWeightEntries,
+          });
           return count;
         });
         logInfo(`[citation-authority] Recomputed (${updated} cited decisions)`);

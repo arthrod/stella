@@ -143,6 +143,7 @@ const buildConditionMapFromRanges = (
       const expr = frame.currentBranchExpr;
       // Wrap in parens if the expression contains `or`
       // to preserve correct precedence when joined
+
       const wrapped = expr.includes(" or ") ? `(${expr})` : expr;
       result = result ? `${result} and ${wrapped}` : wrapped;
     }
@@ -173,6 +174,7 @@ const buildConditionMapFromRanges = (
       }
       // Wrap the elseif expression in parens if it
       // contains `or` to preserve precedence when joined
+
       const exprPart = d.expression.includes(" or ")
         ? `(${d.expression})`
         : d.expression;

@@ -24,7 +24,7 @@ import {
 } from "@stll/anonymize-chat";
 import type { ChatSendMode } from "@stll/anonymize-chat";
 
-import type { SafeDb, SafeDbError } from "@/api/db";
+import type { SafeDb, SafeDbError } from "@/api/db/safe-db";
 import {
   getUserFileIdFromAttachmentPart,
   isChatPart,
@@ -70,7 +70,7 @@ import type { OrgAIConfig } from "@/api/lib/ai-config";
 import { getTemperatureForRole, resolveCaching } from "@/api/lib/ai-config";
 import { classifyAIError } from "@/api/lib/ai-error";
 import type { AIErrorKind } from "@/api/lib/ai-error";
-import { captureError } from "@/api/lib/analytics";
+import { captureError } from "@/api/lib/analytics/capture";
 import { createTanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
 import type { TanStackAIAnalyticsCallbacks } from "@/api/lib/analytics/tanstack-ai";
 import { createSafeId } from "@/api/lib/branded-types";
@@ -80,7 +80,7 @@ import {
   ChatLoopDetectedError,
   HandlerError,
 } from "@/api/lib/errors/tagged-errors";
-import { nullUnionStrategyForTanStackProvider } from "@/api/lib/provider-safe-json-schema";
+import { providerSafeJsonSchemaOptionsForTanStackProvider } from "@/api/lib/provider-safe-json-schema";
 import {
   abortControllerFromSignal,
   mergeGenerationOptions,
@@ -368,9 +368,8 @@ export const projectChatToolSchemasForProvider = ({
   modelTools: ReturnType<typeof chatToolMapToArray>;
   provider: string;
 }): ReturnType<typeof chatToolMapToArray> => {
-  const projectionOptions = {
-    nullUnionStrategy: nullUnionStrategyForTanStackProvider(provider),
-  };
+  const projectionOptions =
+    providerSafeJsonSchemaOptionsForTanStackProvider(provider);
   const projectedTools: ReturnType<typeof chatToolMapToArray> = [];
   for (const tool of modelTools) {
     const projectedTool = { ...tool };
@@ -404,9 +403,8 @@ const projectServerToolsForProvider = ({
   provider: string;
   serverTools: readonly ServerTool[];
 }): ServerTool[] => {
-  const projectionOptions = {
-    nullUnionStrategy: nullUnionStrategyForTanStackProvider(provider),
-  };
+  const projectionOptions =
+    providerSafeJsonSchemaOptionsForTanStackProvider(provider);
   const projectedTools: ServerTool[] = [];
   for (const tool of serverTools) {
     const projectedTool = { ...tool };
@@ -1728,7 +1726,8 @@ const transformToolResultContent = ({
 
 const parseToolResultContent = (content: string): ParsedToolResultContent => {
   try {
-    return { type: "json", value: JSON.parse(content) as unknown };
+    const value: unknown = JSON.parse(content);
+    return { type: "json", value };
   } catch {
     return { type: "text", value: content };
   }

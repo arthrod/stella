@@ -1,7 +1,7 @@
 import {
   Suspense,
   useCallback,
-  useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -226,14 +226,19 @@ export const InspectorPanel = ({ workspaceId }: InspectorPanelProps) => {
       // eslint-disable-next-line react/react-compiler -- docxActionsRef.current read at call time in a load-bearing callback (compiler-bailout component). react-compiler and react-hooks/exhaustive-deps disagree on this ref: exhaustive-deps requires it in the dep array (kept), the compiler flags it as unlistable — suppress the compiler side.
       const action = docxActionsRef.current.get(tabId);
       if (editingDocxTabId === tabId && action) {
-        void action.cancel().finally(() => {
-          docxActionsRef.current.delete(tabId);
-          setEditingDocxTabId((current) =>
-            current === tabId ? null : current,
-          );
-          clearAnonymization(tabId);
-          closeTab(tabId, { suggestRevive: true });
-        });
+        action
+          .cancel()
+          .finally(() => {
+            docxActionsRef.current.delete(tabId);
+            setEditingDocxTabId((current) =>
+              current === tabId ? null : current,
+            );
+            clearAnonymization(tabId);
+            closeTab(tabId, { suggestRevive: true });
+          })
+          .catch((error: unknown) => {
+            getAnalytics().captureError(error);
+          });
         return;
       }
 
@@ -401,8 +406,7 @@ export const InspectorPanel = ({ workspaceId }: InspectorPanelProps) => {
   // Commit the latest recency snapshot after the render commits so
   // discarded renders (Strict Mode, Concurrent) don't pollute the
   // ref — only the set actually shown to the user is recorded.
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- deliberate commit-phase ref write: recording recency during render would capture discarded concurrent/Strict-Mode renders, which is exactly what the commit-only timing prevents, so kept
-  useEffect(() => {
+  useLayoutEffect(() => {
     pdfRecencyRef.current = Array.from(mountedPdfIds);
   }, [mountedPdfIds]);
 
@@ -591,7 +595,9 @@ export const InspectorPanel = ({ workspaceId }: InspectorPanelProps) => {
 
 const CurrentFileFieldSync = ({ tab }: { tab: FileTab }) => {
   const replaceFileFieldId = useInspectorStore((s) => s.replaceFileFieldId);
-  const currentFileFieldIdsByPropertyRef = useRef(new Map<string, string>());
+  const [currentFileFieldIdsByProperty] = useState(
+    () => new Map<string, string>(),
+  );
   const { data: entity } = useQuery(
     entityOptions(tab.workspaceId, tab.entityId),
   );
@@ -611,28 +617,22 @@ const CurrentFileFieldSync = ({ tab }: { tab: FileTab }) => {
             field.content.type === "file",
         );
 
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- commit-phase ref bookkeeping that the relay effect below reads in the same commit; the two are order-coupled, so moving this into render would change their relative timing, hence kept
-  useEffect(() => {
-    if (activeFileField === undefined) {
-      return;
+  useLayoutEffect(() => {
+    if (activeFileField !== undefined) {
+      currentFileFieldIdsByProperty.set(
+        activeFileField.propertyId,
+        activeFileField.id,
+      );
     }
 
-    currentFileFieldIdsByPropertyRef.current.set(
-      activeFileField.propertyId,
-      activeFileField.id,
-    );
-  }, [activeFileField]);
-
-  // eslint-disable-next-line no-raw-use-effect/no-raw-use-effect -- reacts to entity query data (latestFileFieldForProperty) refetching, which has no single setter call-site to move into; fires the replaceFileFieldId store action when a newer file version lands, so kept
-  useEffect(() => {
     if (
       latestFileFieldForProperty === undefined ||
-      latestFileFieldForProperty.id === tab.id
+      latestFileFieldForProperty.id === tab.id ||
+      latestFileFieldForProperty.content.type !== "file"
     ) {
       return;
     }
-
-    const previousCurrentFieldId = currentFileFieldIdsByPropertyRef.current.get(
+    const previousCurrentFieldId = currentFileFieldIdsByProperty.get(
       latestFileFieldForProperty.propertyId,
     );
     if (previousCurrentFieldId !== tab.id) {
@@ -640,11 +640,7 @@ const CurrentFileFieldSync = ({ tab }: { tab: FileTab }) => {
     }
 
     const latestFileContent = latestFileFieldForProperty.content;
-    if (latestFileContent.type !== "file") {
-      return;
-    }
-
-    currentFileFieldIdsByPropertyRef.current.set(
+    currentFileFieldIdsByProperty.set(
       latestFileFieldForProperty.propertyId,
       latestFileFieldForProperty.id,
     );
@@ -656,7 +652,13 @@ const CurrentFileFieldSync = ({ tab }: { tab: FileTab }) => {
       pdfFileId: latestFileContent.pdfFileId,
       propertyId: latestFileFieldForProperty.propertyId,
     });
-  }, [latestFileFieldForProperty, replaceFileFieldId, tab.id]);
+  }, [
+    activeFileField,
+    currentFileFieldIdsByProperty,
+    latestFileFieldForProperty,
+    replaceFileFieldId,
+    tab.id,
+  ]);
 
   return null;
 };

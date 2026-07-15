@@ -30,6 +30,7 @@
     "i18n:check": "turbo run i18n:check --",
     "i18n:sync": "turbo run i18n:sync --",
     "check:model-catalog": "bun packages/scripts/src/model-catalog-upstream.ts",
+    "canary:ai-provider": "bun --cwd apps/api canary:ai-provider",
     "check:railway-template-draft": "bun scripts/check-railway-template-draft.ts",
     "check:railway-template": "bun scripts/check-railway-template-shape.ts",
     "check:railway-template-source-runtime": "bun scripts/sync-railway-template-source.ts --check-rendered-credentials",
@@ -58,10 +59,9 @@
     "@typescript/native": "npm:typescript@7.0.2",
     "eslint": "catalog:",
     "eslint-plugin-drizzle": "catalog:",
-    "eslint-plugin-sonarjs": "catalog:",
     "i18n-unused": "^0.19.0",
-    "knip": "^6.24.0",
-    "lefthook": "^2.1.9",
+    "knip": "^6.25.0",
+    "lefthook": "^2.1.10",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "^0.24.0",
@@ -76,8 +76,10 @@
   "resolutions": {
     "@emnapi/core": "1.9.1",
     "@emnapi/runtime": "1.9.1",
-    "@stll/folio-core": "0.3.1",
-    "prosemirror-model": "1.25.9",
+    "@stll/docx-core": "0.3.0",
+    "@stll/folio-core": "0.9.0",
+    "lucide-react": "1.24.0",
+    "prosemirror-model": "1.25.10",
     "prosemirror-transform": "1.12.0",
     "prosemirror-view": "1.42.0"
   },
@@ -109,25 +111,24 @@
     "better-auth": "1.6.23",
     "better-result": "2.9.2",
     "diff": "9.0.0",
-    "drizzle-kit": "1.0.0-rc.1",
-    "drizzle-orm": "1.0.0-rc.1",
+    "drizzle-kit": "1.0.0-rc.4",
+    "drizzle-orm": "1.0.0-rc.4",
     "elysia": "1.4.29",
     "eslint": "10.6.0",
     "eslint-plugin-drizzle": "0.2.3",
-    "eslint-plugin-sonarjs": "4.1.0",
-    "fast-check": "^4.8.0",
+    "fast-check": "^4.9.0",
     "jszip": "3.10.1",
     "lucide-react": "1.23.0",
     "oxfmt": "0.58.0",
-    "oxlint": "1.71.0",
+    "oxlint": "1.73.0",
     "sherif": "1.13.0",
     "tailwindcss": "4.3.2",
-    "tsdown": "0.22.3",
+    "tsdown": "0.22.4",
     "typescript": "6.0.3",
-    "ultracite": "7.8.3",
+    "ultracite": "7.9.3",
     "use-intl": "4.13.1",
     "valibot": "1.4.2",
-    "vite": "8.0.16",
+    "vite": "8.1.4",
     "zod": "4.4.3"
   },
   "catalogs": {
@@ -137,5 +138,10 @@
       "react": "^19.2.7",
       "react-dom": "^19.2.7"
     }
+  },
+  "patchedDependencies": {
+    "@tanstack/openai-base@0.9.7": "patches/@tanstack%2Fopenai-base@0.9.7.patch",
+    "@tanstack/ai-anthropic@0.16.1": "patches/@tanstack%2Fai-anthropic@0.16.1.patch",
+    "@tanstack/ai-openrouter@0.15.8": "patches/@tanstack%2Fai-openrouter@0.15.8.patch"
   }
 }

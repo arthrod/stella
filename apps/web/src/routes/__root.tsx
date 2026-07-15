@@ -78,6 +78,7 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
     <html lang="en" dir="ltr" suppressHydrationWarning>
       <head>
         <HeadContent />
+
         <script src="/dark-mode-init.js" />
       </head>
       <body>

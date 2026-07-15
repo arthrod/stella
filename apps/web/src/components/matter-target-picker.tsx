@@ -12,6 +12,7 @@ import { ScrollArea } from "@stll/ui/components/scroll-area";
 import { cn } from "@stll/ui/lib/utils";
 
 import { MatterIcon } from "@/components/matter-icon";
+import Tooltip from "@/components/tooltip";
 import { useAuthenticatedUser } from "@/lib/authenticated-user-context";
 import { workspaceFoldersOptions } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
 import type { WorkspaceFolder } from "@/routes/_protected.workspaces/$workspaceId/-queries/entities";
@@ -52,9 +53,9 @@ export const MatterTargetPicker = ({
 
   // The endpoint returns matters ordered by most recent activity; keep that
   // order so the matter the user just touched is on top.
-  const matters = (data?.workspaces ?? []).filter(
-    (w) => w.id !== excludeWorkspaceId,
-  );
+  const matters = data
+    ? data.workspaces.filter((w) => w.id !== excludeWorkspaceId)
+    : [];
 
   const query = search.trim().toLowerCase();
   const visibleMatters =
@@ -191,7 +192,7 @@ const FolderPicker = ({
     );
   }
 
-  const rootFolders = folders?.filter((f) => f.parentId === null) ?? [];
+  const rootFolders = folders ? folders.filter((f) => f.parentId === null) : [];
 
   const toggleExpand = (folderId: string) => {
     setExpandedFolders((prev) => {
@@ -218,16 +219,20 @@ const FolderPicker = ({
           style={{ paddingLeft: `${depth * 16 + 8}px` }}
         >
           {hasChildren ? (
-            <button
-              className="hover:bg-muted rounded p-0.5"
-              aria-expanded={isExpanded}
-              aria-label={folder.name}
-              title={folder.name}
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleExpand(folder.entityId);
-              }}
-              type="button"
+            <Tooltip
+              content={folder.name}
+              render={
+                <button
+                  className="hover:bg-muted rounded p-0.5"
+                  aria-expanded={isExpanded}
+                  aria-label={folder.name}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleExpand(folder.entityId);
+                  }}
+                  type="button"
+                />
+              }
             >
               <DirectionalIcon
                 className={cn(
@@ -237,7 +242,7 @@ const FolderPicker = ({
                 flip={!isExpanded}
                 icon={ChevronRightIcon}
               />
-            </button>
+            </Tooltip>
           ) : (
             <span className="w-4" />
           )}

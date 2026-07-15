@@ -1,7 +1,7 @@
 import { Result } from "better-result";
 import { count, desc, gte, sql } from "drizzle-orm";
 
-import type { ScopedDb } from "@/api/db";
+import type { ScopedDb } from "@/api/db/safe-db";
 import {
   caseLawDecisions,
   caseLawIngestionEvents,
@@ -62,7 +62,7 @@ export const getIngestionStatus = async (
     const sourceStatuses: SourceStatus[] = [];
 
     for (const source of sources) {
-      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential per-source aggregation reads on a single scoped connection
+      // oxlint-disable-next-line no-db-await-in-loop/no-db-await-in-loop, no-await-in-loop -- sequential by design: single scoped-db transaction client, must not be parallelized
       const [totalRow] = await db
         .select({ total: count() })
         .from(caseLawDecisions)

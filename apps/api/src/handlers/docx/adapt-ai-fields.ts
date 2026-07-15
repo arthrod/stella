@@ -20,6 +20,8 @@ import JSZip from "jszip";
 
 import { placeholderPattern, resolvePath } from "@stll/template-conditions";
 
+import { arrayOrEmpty } from "@/api/lib/array";
+
 import { HEADER_FOOTER_RE } from "./ooxml";
 import { partParagraphTexts, patchXmlPartPerOccurrence } from "./rich-patch";
 import type { FieldMeta } from "./types";
@@ -94,22 +96,28 @@ export const adaptAiFields = async ({
       (name) => name === "word/document.xml" || HEADER_FOOTER_RE.test(name),
     )
     .sort();
-  const parts: { name: string; xml: string }[] = [];
-  for (const name of partNames) {
-    const entry = zip.file(name);
-    if (!entry) {
-      continue;
-    }
-    // oxlint-disable-next-line no-await-in-loop -- sequential: builds `parts` in the sorted part order the patch pass relies on so occurrence indices line up
-    parts.push({ name, xml: await entry.async("string") });
-  }
+  // Each part is read independently; `Promise.all(map(...))` preserves the
+  // sorted `partNames` order in the result regardless of completion order, so
+  // the patch pass below still sees `parts` in the same order extraction used.
+  const parts = (
+    await Promise.all(
+      partNames.map(async (name) => {
+        const entry = zip.file(name);
+        if (!entry) {
+          return undefined;
+        }
+        return { name, xml: await entry.async("string") };
+      }),
+    )
+  ).filter((part): part is { name: string; xml: string } => part !== undefined);
 
   const targetPaths = new Set(targets.map((target) => target.field.path));
   const occurrencesByPath = collectOccurrences(parts, targetPaths);
 
   const renderingsByPath = new Map<string, readonly string[]>();
   for (const { field, stub } of targets) {
-    const occurrences = occurrencesByPath.get(field.path) ?? [];
+    const storedOccurrences = occurrencesByPath.get(field.path);
+    const occurrences = arrayOrEmpty(storedOccurrences);
     if (occurrences.length === 0) {
       continue;
     }
@@ -176,7 +184,8 @@ const collectOccurrences = (
           Math.max(0, start - CONTEXT_RADIUS),
           Math.min(joined.length, end + CONTEXT_RADIUS),
         );
-        const occurrences = result.get(key) ?? [];
+        const storedOccurrences = result.get(key);
+        const occurrences = arrayOrEmpty(storedOccurrences);
         occurrences.push({ context });
         result.set(key, occurrences);
       }
