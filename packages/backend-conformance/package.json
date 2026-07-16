@@ -1,5 +1,5 @@
 {
-  "name": "@stll/errors",
+  "name": "@stll/backend-conformance",
   "version": "0.0.0",
   "private": true,
   "license": "Apache-2.0",
@@ -12,15 +12,20 @@
     "clean": "git clean -xdf .cache .turbo node_modules",
     "test": "bun test src",
     "typecheck": "bun ../../packages/scripts/src/tsc-native.ts --noEmit",
-    "lint": "cd ../.. && bun --bun oxlint -c oxlint.config.ts --report-unused-disable-directives-severity=error --deny-warnings --type-aware packages/errors",
-    "lint:fix": "cd ../.. && bun --bun oxlint -c oxlint.config.ts --type-aware --fix packages/errors",
+    "lint": "cd ../.. && bun --bun oxlint -c oxlint.config.ts --report-unused-disable-directives-severity=error --deny-warnings --type-aware packages/backend-conformance",
+    "lint:fix": "cd ../.. && bun --bun oxlint -c oxlint.config.ts --type-aware --fix packages/backend-conformance",
     "format": "oxfmt ."
   },
   "dependencies": {
+    "@stll/errors": "workspace:*",
+    "@stll/tenancy": "workspace:*",
     "better-result": "catalog:"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.3",
+    "@stll/storage": "workspace:*",
     "@stll/typescript-config": "workspace:*",
+    "@stll/webhook-kit": "workspace:*",
     "@types/bun": "catalog:"
   }
 }
