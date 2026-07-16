@@ -9658,6 +9658,80 @@ export const generatedRouteMap: RouteNode = {
             schemaTruncated: false,
           },
         },
+        "create-blank-document": {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["entities", "create-blank-document"],
+            capabilityId: "entities.create-blank-document",
+            access: "write",
+            flags: [
+              {
+                flag: "--workspace",
+                prop: "workspace",
+                kind: "string",
+                required: true,
+                repeatable: false,
+                part: "params",
+                partPath: "workspaceId",
+              },
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--name",
+                prop: "name",
+                required: true,
+                part: "body",
+                partPath: "name",
+              },
+            ],
+            inputOnly: ["body.parentId"],
+            paginated: false,
+            destructive: false,
+            scope: "documents_write",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                body: {
+                  type: "object",
+                  required: ["name"],
+                  properties: {
+                    name: {
+                      minLength: 1,
+                      maxLength: 256,
+                      type: "string",
+                    },
+                    parentId: {
+                      nullable: true,
+                      anyOf: [
+                        {
+                          minLength: 36,
+                          maxLength: 36,
+                          pattern:
+                            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                          type: "string",
+                        },
+                        {
+                          type: "null",
+                        },
+                      ],
+                    },
+                  },
+                },
+                params: {
+                  type: "object",
+                  properties: {
+                    workspaceId: {
+                      type: "string",
+                    },
+                  },
+                  required: ["workspaceId"],
+                },
+              },
+            },
+            schemaTruncated: false,
+          },
+        },
         "create-from-legal-source": {
           kind: "capability-leaf",
           spec: {
@@ -47971,6 +48045,1158 @@ export const generatedRouteMap: RouteNode = {
         },
       },
     },
+    "style-sets": {
+      kind: "route",
+      children: {
+        "create-from-editor": {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["style-sets", "create-from-editor"],
+            capabilityId: "style-sets.create-from-editor",
+            access: "write",
+            flags: [
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--name",
+                prop: "name",
+                required: true,
+                part: "body",
+                partPath: "name",
+              },
+            ],
+            inputOnly: ["body.settings"],
+            paginated: false,
+            destructive: false,
+            scope: "templates",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                body: {
+                  type: "object",
+                  required: ["name", "settings"],
+                  properties: {
+                    name: {
+                      minLength: 1,
+                      maxLength: 256,
+                      type: "string",
+                    },
+                    settings: {
+                      type: "object",
+                      required: [
+                        "body",
+                        "title",
+                        "level1",
+                        "level2",
+                        "level3",
+                        "numbering",
+                        "page",
+                      ],
+                      properties: {
+                        body: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "alignment",
+                            "lineSpacing",
+                            "spaceAfterPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            lineSpacing: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "single",
+                                "onePoint15",
+                                "onePoint5",
+                                "double",
+                              ],
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        title: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "bold",
+                            "alignment",
+                            "spaceBeforePt",
+                            "spaceAfterPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            bold: {
+                              type: "boolean",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            spaceBeforePt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        level1: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "bold",
+                            "alignment",
+                            "spaceBeforePt",
+                            "spaceAfterPt",
+                            "numberingFormat",
+                            "indentLeftPt",
+                            "hangingPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            bold: {
+                              type: "boolean",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            spaceBeforePt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            numberingFormat: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "decimal",
+                                "hierarchicalDecimal",
+                                "lowerLetterParenthetical",
+                                "lowerRomanParenthetical",
+                                "upperLetterParenthetical",
+                                "upperRoman",
+                              ],
+                            },
+                            indentLeftPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            hangingPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        level2: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "bold",
+                            "alignment",
+                            "spaceBeforePt",
+                            "spaceAfterPt",
+                            "numberingFormat",
+                            "indentLeftPt",
+                            "hangingPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            bold: {
+                              type: "boolean",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            spaceBeforePt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            numberingFormat: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "decimal",
+                                "hierarchicalDecimal",
+                                "lowerLetterParenthetical",
+                                "lowerRomanParenthetical",
+                                "upperLetterParenthetical",
+                                "upperRoman",
+                              ],
+                            },
+                            indentLeftPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            hangingPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        level3: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "bold",
+                            "alignment",
+                            "spaceBeforePt",
+                            "spaceAfterPt",
+                            "numberingFormat",
+                            "indentLeftPt",
+                            "hangingPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            bold: {
+                              type: "boolean",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            spaceBeforePt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            numberingFormat: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "decimal",
+                                "hierarchicalDecimal",
+                                "lowerLetterParenthetical",
+                                "lowerRomanParenthetical",
+                                "upperLetterParenthetical",
+                                "upperRoman",
+                              ],
+                            },
+                            indentLeftPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            hangingPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        numbering: {
+                          type: "object",
+                          required: ["enabled"],
+                          properties: {
+                            enabled: {
+                              type: "boolean",
+                            },
+                          },
+                        },
+                        page: {
+                          type: "object",
+                          required: [
+                            "paperSize",
+                            "orientation",
+                            "marginTopPt",
+                            "marginBottomPt",
+                            "marginLeftPt",
+                            "marginRightPt",
+                          ],
+                          properties: {
+                            paperSize: {
+                              default: "preserve",
+                              type: "string",
+                              enum: ["preserve", "a4", "letter", "legal"],
+                            },
+                            orientation: {
+                              default: "portrait",
+                              type: "string",
+                              enum: ["portrait", "landscape"],
+                            },
+                            marginTopPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            marginBottomPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            marginLeftPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            marginRightPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            schemaTruncated: false,
+          },
+        },
+        delete: {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["style-sets", "delete"],
+            capabilityId: "style-sets.delete",
+            access: "write",
+            flags: [
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--style-set-id",
+                prop: "styleSetId",
+                required: true,
+                part: "params",
+                partPath: "styleSetId",
+              },
+            ],
+            inputOnly: [],
+            paginated: false,
+            destructive: true,
+            scope: "templates",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                params: {
+                  type: "object",
+                  required: ["styleSetId"],
+                  properties: {
+                    styleSetId: {
+                      minLength: 36,
+                      maxLength: 36,
+                      pattern:
+                        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                      type: "string",
+                    },
+                  },
+                },
+              },
+            },
+            schemaTruncated: false,
+          },
+        },
+        download: {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["style-sets", "download"],
+            capabilityId: "style-sets.download",
+            access: "read",
+            flags: [
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--style-set-id",
+                prop: "styleSetId",
+                required: true,
+                part: "params",
+                partPath: "styleSetId",
+              },
+            ],
+            inputOnly: [],
+            paginated: false,
+            destructive: false,
+            scope: "templates",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                params: {
+                  type: "object",
+                  required: ["styleSetId"],
+                  properties: {
+                    styleSetId: {
+                      minLength: 36,
+                      maxLength: 36,
+                      pattern:
+                        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                      type: "string",
+                    },
+                  },
+                },
+              },
+            },
+            schemaTruncated: false,
+          },
+        },
+        list: {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["style-sets", "list"],
+            capabilityId: "style-sets.list",
+            access: "read",
+            flags: [],
+            inputOnly: [],
+            paginated: true,
+            paginationPart: "query",
+            itemsKey: "items",
+            destructive: false,
+            scope: "templates",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                query: {
+                  type: "object",
+                  properties: {
+                    limit: {
+                      minimum: 1,
+                      maximum: 100,
+                      anyOf: [
+                        {
+                          format: "integer",
+                          default: 0,
+                          type: "string",
+                        },
+                        {
+                          minimum: 1,
+                          maximum: 100,
+                          type: "integer",
+                        },
+                      ],
+                    },
+                    cursor: {
+                      maxLength: 512,
+                      type: "string",
+                    },
+                  },
+                },
+              },
+            },
+            schemaTruncated: false,
+          },
+        },
+        "read-editor": {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["style-sets", "read-editor"],
+            capabilityId: "style-sets.read-editor",
+            access: "read",
+            flags: [
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--style-set-id",
+                prop: "styleSetId",
+                required: true,
+                part: "params",
+                partPath: "styleSetId",
+              },
+            ],
+            inputOnly: [],
+            paginated: false,
+            destructive: false,
+            scope: "templates",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                params: {
+                  type: "object",
+                  required: ["styleSetId"],
+                  properties: {
+                    styleSetId: {
+                      minLength: 36,
+                      maxLength: 36,
+                      pattern:
+                        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                      type: "string",
+                    },
+                  },
+                },
+              },
+            },
+            schemaTruncated: false,
+          },
+        },
+        "read-stella-editor": {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["style-sets", "read-stella-editor"],
+            capabilityId: "style-sets.read-stella-editor",
+            access: "read",
+            flags: [],
+            inputOnly: [],
+            paginated: false,
+            destructive: false,
+            scope: "templates",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {},
+            },
+            schemaTruncated: false,
+          },
+        },
+        update: {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["style-sets", "update"],
+            capabilityId: "style-sets.update",
+            access: "write",
+            flags: [
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--style-set-id",
+                prop: "styleSetId",
+                required: true,
+                part: "params",
+                partPath: "styleSetId",
+              },
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--name",
+                prop: "name",
+                required: true,
+                part: "body",
+                partPath: "name",
+              },
+            ],
+            inputOnly: [],
+            paginated: false,
+            destructive: false,
+            scope: "templates",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                body: {
+                  type: "object",
+                  required: ["name"],
+                  properties: {
+                    name: {
+                      minLength: 1,
+                      maxLength: 256,
+                      type: "string",
+                    },
+                  },
+                },
+                params: {
+                  type: "object",
+                  required: ["styleSetId"],
+                  properties: {
+                    styleSetId: {
+                      minLength: 36,
+                      maxLength: 36,
+                      pattern:
+                        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                      type: "string",
+                    },
+                  },
+                },
+              },
+            },
+            schemaTruncated: false,
+          },
+        },
+        "update-from-editor": {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["style-sets", "update-from-editor"],
+            capabilityId: "style-sets.update-from-editor",
+            access: "write",
+            flags: [
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--style-set-id",
+                prop: "styleSetId",
+                required: true,
+                part: "params",
+                partPath: "styleSetId",
+              },
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--name",
+                prop: "name",
+                required: true,
+                part: "body",
+                partPath: "name",
+              },
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--expected-updated-at",
+                prop: "expectedUpdatedAt",
+                required: true,
+                part: "body",
+                partPath: "expectedUpdatedAt",
+              },
+            ],
+            inputOnly: ["body.settings"],
+            paginated: false,
+            destructive: false,
+            scope: "templates",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                body: {
+                  type: "object",
+                  required: ["name", "expectedUpdatedAt", "settings"],
+                  properties: {
+                    name: {
+                      minLength: 1,
+                      maxLength: 256,
+                      type: "string",
+                    },
+                    expectedUpdatedAt: {
+                      format: "date-time",
+                      type: "string",
+                    },
+                    settings: {
+                      type: "object",
+                      required: [
+                        "body",
+                        "title",
+                        "level1",
+                        "level2",
+                        "level3",
+                        "numbering",
+                        "page",
+                      ],
+                      properties: {
+                        body: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "alignment",
+                            "lineSpacing",
+                            "spaceAfterPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            lineSpacing: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "single",
+                                "onePoint15",
+                                "onePoint5",
+                                "double",
+                              ],
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        title: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "bold",
+                            "alignment",
+                            "spaceBeforePt",
+                            "spaceAfterPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            bold: {
+                              type: "boolean",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            spaceBeforePt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        level1: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "bold",
+                            "alignment",
+                            "spaceBeforePt",
+                            "spaceAfterPt",
+                            "numberingFormat",
+                            "indentLeftPt",
+                            "hangingPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            bold: {
+                              type: "boolean",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            spaceBeforePt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            numberingFormat: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "decimal",
+                                "hierarchicalDecimal",
+                                "lowerLetterParenthetical",
+                                "lowerRomanParenthetical",
+                                "upperLetterParenthetical",
+                                "upperRoman",
+                              ],
+                            },
+                            indentLeftPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            hangingPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        level2: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "bold",
+                            "alignment",
+                            "spaceBeforePt",
+                            "spaceAfterPt",
+                            "numberingFormat",
+                            "indentLeftPt",
+                            "hangingPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            bold: {
+                              type: "boolean",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            spaceBeforePt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            numberingFormat: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "decimal",
+                                "hierarchicalDecimal",
+                                "lowerLetterParenthetical",
+                                "lowerRomanParenthetical",
+                                "upperLetterParenthetical",
+                                "upperRoman",
+                              ],
+                            },
+                            indentLeftPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            hangingPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        level3: {
+                          type: "object",
+                          required: [
+                            "fontFamily",
+                            "fontSizePt",
+                            "bold",
+                            "alignment",
+                            "spaceBeforePt",
+                            "spaceAfterPt",
+                            "numberingFormat",
+                            "indentLeftPt",
+                            "hangingPt",
+                          ],
+                          properties: {
+                            fontFamily: {
+                              minLength: 1,
+                              maxLength: 128,
+                              type: "string",
+                            },
+                            fontSizePt: {
+                              minimum: 1,
+                              maximum: 400,
+                              multipleOf: 0.5,
+                              type: "number",
+                            },
+                            bold: {
+                              type: "boolean",
+                            },
+                            alignment: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "left",
+                                "center",
+                                "right",
+                                "both",
+                              ],
+                            },
+                            spaceBeforePt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            spaceAfterPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            numberingFormat: {
+                              default: "preserve",
+                              type: "string",
+                              enum: [
+                                "preserve",
+                                "decimal",
+                                "hierarchicalDecimal",
+                                "lowerLetterParenthetical",
+                                "lowerRomanParenthetical",
+                                "upperLetterParenthetical",
+                                "upperRoman",
+                              ],
+                            },
+                            indentLeftPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            hangingPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                        numbering: {
+                          type: "object",
+                          required: ["enabled"],
+                          properties: {
+                            enabled: {
+                              type: "boolean",
+                            },
+                          },
+                        },
+                        page: {
+                          type: "object",
+                          required: [
+                            "paperSize",
+                            "orientation",
+                            "marginTopPt",
+                            "marginBottomPt",
+                            "marginLeftPt",
+                            "marginRightPt",
+                          ],
+                          properties: {
+                            paperSize: {
+                              default: "preserve",
+                              type: "string",
+                              enum: ["preserve", "a4", "letter", "legal"],
+                            },
+                            orientation: {
+                              default: "portrait",
+                              type: "string",
+                              enum: ["portrait", "landscape"],
+                            },
+                            marginTopPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            marginBottomPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            marginLeftPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                            marginRightPt: {
+                              minimum: 0,
+                              maximum: 1440,
+                              type: "number",
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+                params: {
+                  type: "object",
+                  required: ["styleSetId"],
+                  properties: {
+                    styleSetId: {
+                      minLength: 36,
+                      maxLength: 36,
+                      pattern:
+                        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                      type: "string",
+                    },
+                  },
+                },
+              },
+            },
+            schemaTruncated: false,
+          },
+        },
+      },
+    },
     tasks: {
       kind: "route",
       children: {
@@ -53280,6 +54506,79 @@ export const generatedRouteMap: RouteNode = {
                     name: {
                       minLength: 1,
                       maxLength: 256,
+                      type: "string",
+                    },
+                    categoryId: {
+                      minLength: 36,
+                      maxLength: 36,
+                      pattern:
+                        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                      type: "string",
+                    },
+                  },
+                },
+              },
+            },
+            schemaTruncated: false,
+          },
+        },
+        "create-from-style-set": {
+          kind: "capability-leaf",
+          spec: {
+            commandPath: ["templates", "create-from-style-set"],
+            capabilityId: "templates.create-from-style-set",
+            access: "write",
+            flags: [
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--name",
+                prop: "name",
+                required: true,
+                part: "body",
+                partPath: "name",
+              },
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--style-set-id",
+                prop: "styleSetId",
+                required: true,
+                part: "body",
+                partPath: "styleSetId",
+              },
+              {
+                kind: "string",
+                repeatable: false,
+                flag: "--category-id",
+                prop: "categoryId",
+                required: false,
+                part: "body",
+                partPath: "categoryId",
+              },
+            ],
+            inputOnly: [],
+            paginated: false,
+            destructive: false,
+            scope: "templates",
+            inputSchema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                body: {
+                  type: "object",
+                  required: ["name", "styleSetId"],
+                  properties: {
+                    name: {
+                      minLength: 1,
+                      maxLength: 256,
+                      type: "string",
+                    },
+                    styleSetId: {
+                      minLength: 36,
+                      maxLength: 36,
+                      pattern:
+                        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
                       type: "string",
                     },
                     categoryId: {

@@ -51,6 +51,8 @@ import { reportsRoute } from "@/api/handlers/reports/routes";
 import { searchRoute } from "@/api/handlers/search/routes";
 import { skillsRoute } from "@/api/handlers/skills/routes";
 import { smokeRoute } from "@/api/handlers/smoke/routes";
+import { styleSetsRoute } from "@/api/handlers/style-sets/routes";
+import { isStyleSetUploadRateLimitedRequest } from "@/api/handlers/style-sets/upload-rate-limit";
 import { myTasksRoute } from "@/api/handlers/tasks/my-tasks-route";
 import { tasksRoute } from "@/api/handlers/tasks/routes";
 import { templateRecipesRoute } from "@/api/handlers/template-recipes/routes";
@@ -86,6 +88,7 @@ import {
 } from "@/api/lib/errors/utils";
 import { initFileDerivativeWorker } from "@/api/lib/file-derivative-queue";
 import { API_RATE_LIMITS } from "@/api/lib/limits";
+import { FORMATTING_LOCALE_HEADER } from "@/api/lib/locale";
 import { logger } from "@/api/lib/observability/logger";
 import {
   getRequestContext,
@@ -104,6 +107,7 @@ import {
   refreshS3,
 } from "@/api/lib/s3";
 import { setSecurityHeaders } from "@/api/lib/security-headers";
+import { initStyleSetPackageCleanupWorker } from "@/api/lib/style-set-package-cleanup-queue";
 import { initWorkflowWorker } from "@/api/lib/workflow-queue";
 
 const HEALTH_PATH = "/health";
@@ -272,6 +276,7 @@ const api = new Elysia()
         "Content-Type",
         "Authorization",
         "MCP-Protocol-Version",
+        FORMATTING_LOCALE_HEADER,
         SESSION_ID_HEADER,
       ],
       exposeHeaders: [
@@ -411,7 +416,8 @@ const api = new Elysia()
             const { pathname } = new URL(req.url);
             return (
               isUploadRateLimitedPath(pathname) ||
-              isFolioCollabRateLimitedPath(pathname)
+              isFolioCollabRateLimitedPath(pathname) ||
+              isStyleSetUploadRateLimitedRequest(req)
             );
           },
         }),
@@ -447,6 +453,7 @@ const api = new Elysia()
       .use(entitiesRoute)
       .use(fieldsRoute)
       .use(templatesRoute)
+      .use(styleSetsRoute)
       .use(templateCategoriesRoute)
       .use(templateRecipesRoute)
       .use(timeEntriesRoute)
@@ -529,6 +536,9 @@ const startServer = async (): Promise<void> => {
   // BullMQ worker for durable account-deletion storage cleanup.
   const accountDeletionCleanupWorker = initAccountDeletionCleanupWorker();
 
+  // BullMQ worker for style set packages retained past download URL expiry.
+  const styleSetPackageCleanupWorker = initStyleSetPackageCleanupWorker();
+
   // BullMQ worker for queued view→report exports.
   const reportExportWorker = initReportExportWorker();
 
@@ -559,6 +569,7 @@ const startServer = async (): Promise<void> => {
         workflowWorker.close(),
         fileDerivativeWorker.close(),
         accountDeletionCleanupWorker.close(),
+        styleSetPackageCleanupWorker.close(),
         reportExportWorker.close(),
       ]),
       Bun.sleep(WORKER_SHUTDOWN_TIMEOUT_MS),

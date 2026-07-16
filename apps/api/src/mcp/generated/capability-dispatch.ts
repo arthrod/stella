@@ -189,6 +189,10 @@ export const CAPABILITY_DISPATCH = {
   "entities.create": {
     load: async () => await import("@/api/handlers/entities/create"),
   },
+  "entities.create-blank-document": {
+    load: async () =>
+      await import("@/api/handlers/entities/create-blank-document"),
+  },
   "entities.create-from-legal-source": {
     load: async () =>
       await import("@/api/handlers/entities/create-from-legal-source"),
@@ -523,6 +527,39 @@ export const CAPABILITY_DISPATCH = {
   "skills.upload": {
     load: async () => await import("@/api/handlers/skills/upload"),
   },
+  "style-sets.create": {
+    load: async () => await import("@/api/handlers/style-sets/create"),
+  },
+  "style-sets.create-from-editor": {
+    load: async () =>
+      await import("@/api/handlers/style-sets/create-from-editor"),
+  },
+  "style-sets.delete": {
+    load: async () => await import("@/api/handlers/style-sets/delete"),
+  },
+  "style-sets.download": {
+    load: async () => await import("@/api/handlers/style-sets/download"),
+  },
+  "style-sets.list": {
+    load: async () => await import("@/api/handlers/style-sets/list"),
+  },
+  "style-sets.read-editor": {
+    load: async () => await import("@/api/handlers/style-sets/read-editor"),
+  },
+  "style-sets.read-stella-editor": {
+    load: async () =>
+      await import("@/api/handlers/style-sets/read-stella-editor"),
+  },
+  "style-sets.replace": {
+    load: async () => await import("@/api/handlers/style-sets/replace"),
+  },
+  "style-sets.update": {
+    load: async () => await import("@/api/handlers/style-sets/update"),
+  },
+  "style-sets.update-from-editor": {
+    load: async () =>
+      await import("@/api/handlers/style-sets/update-from-editor"),
+  },
   "tasks.assignees-add": {
     load: async () => await import("@/api/handlers/tasks/assignees-add"),
   },
@@ -604,6 +641,10 @@ export const CAPABILITY_DISPATCH = {
   },
   "templates.create-blank": {
     load: async () => await import("@/api/handlers/templates/create-blank"),
+  },
+  "templates.create-from-style-set": {
+    load: async () =>
+      await import("@/api/handlers/templates/create-from-style-set"),
   },
   "templates.create-from-styles": {
     load: async () =>
