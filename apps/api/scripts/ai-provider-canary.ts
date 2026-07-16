@@ -19,27 +19,20 @@ import {
   mergeGenerationOptions,
   resolveTanStackTextModel,
 } from "@/api/lib/tanstack-ai-generate";
-import type { TanStackTextProvider } from "@/api/lib/tanstack-ai-models";
 import { projectSchemaInputJsonSchema } from "@/api/lib/tanstack-ai-schema";
 
-import { modelRoleMaxOutputTokens } from "./ai-provider-canary-config";
-
-const CANARY_PROVIDERS = [
-  "google",
-  "openrouter",
-  "openai",
-  "anthropic",
-  "bedrock",
-  "mistral",
-] as const satisfies readonly TanStackTextProvider[];
-
-type CanaryProvider = (typeof CANARY_PROVIDERS)[number];
+import {
+  CANARY_PROVIDERS,
+  modelRoleMaxOutputTokens,
+} from "./ai-provider-canary-config";
+import type { CanaryProvider } from "./ai-provider-canary-config";
 
 const CAPABILITY_ROLE = "fast" satisfies ModelRole;
 const TOOL_CALL_ROLE = "chat" satisfies ModelRole;
 const MAX_OUTPUT_TOKENS = 64;
 const CAPABILITY_PROBE_TIMEOUT_MS = 20_000;
 const MODEL_ROLE_PROBE_TIMEOUT_MS = 30_000;
+const TOOL_ROUND_TRIP_PROBE_TIMEOUT_MS = 45_000;
 const SYNTHETIC_PROMPT = "Reply with exactly OK.";
 const TOOL_SCHEMA_PROMPT = "Do not call any tool. Reply with exactly OK.";
 const TOOL_ROUND_TRIP_NAME = "canary_round_trip";
@@ -224,7 +217,7 @@ const capabilityProbes = [
   {
     type: "capability",
     name: "tool-call-round-trip",
-    timeoutMs: CAPABILITY_PROBE_TIMEOUT_MS,
+    timeoutMs: TOOL_ROUND_TRIP_PROBE_TIMEOUT_MS,
     run: async (context, signal) => {
       await runToolCallRoundTripProbe({ context, signal });
     },
