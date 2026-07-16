@@ -177,3 +177,60 @@ describe("resolveSessionContext", () => {
     ).toEqual({ ok: false, reason: "no-active-organization" });
   });
 });
+
+describe("createPlatformAuth (shared model factory)", () => {
+  test("returns one model id + role vocabulary + wired provisioning hook", async () => {
+    const { createPlatformAuth } = await import("./platform-auth");
+    const rolledBack: string[] = [];
+    const model = createPlatformAuth({
+      provisioning: {
+        tenantStore: { provision: () => Promise.resolve(Result.ok(undefined)) },
+        rollback: (id) => {
+          rolledBack.push(id);
+          return Promise.resolve();
+        },
+      },
+      productPlugins: [{ name: "polar" }],
+    });
+    expect(model.modelId).toBe("stll-auth-kit/v1");
+    expect(model.roleVocabulary).toContain("owner");
+    expect(model.roleVocabulary).toContain("intern");
+    expect(model.organizationDefaults.teamsEnabled).toBe(true);
+    expect(model.roles.hasOrgOwnerOrAdmin("admin,sale")).toBe(true);
+    expect(model.productPlugins).toEqual([{ name: "polar" }]);
+    await model.organizationDefaults.afterCreate({
+      organization: { id: "org_x", slug: "x" },
+    });
+    expect(rolledBack).toEqual([]);
+  });
+
+  test("provision failure rolls back via the shared afterCreate hook", async () => {
+    const { createPlatformAuth } = await import("./platform-auth");
+    const rolledBack: string[] = [];
+    const model = createPlatformAuth({
+      provisioning: {
+        tenantStore: {
+          provision: () =>
+            Promise.resolve(
+              Result.err(
+                new ProvisionError({
+                  message: "fork failed",
+                  organizationId: "org_y",
+                }),
+              ),
+            ),
+        },
+        rollback: (id) => {
+          rolledBack.push(id);
+          return Promise.resolve();
+        },
+      },
+    });
+    await expect(
+      model.organizationDefaults.afterCreate({
+        organization: { id: "org_y", slug: "y" },
+      }),
+    ).rejects.toBeInstanceOf(OrganizationProvisioningError);
+    expect(rolledBack).toEqual(["org_y"]);
+  });
+});
